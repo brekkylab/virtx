@@ -384,9 +384,11 @@ whose mode differs from what the passthrough assumes get a stream, which is 27
 of them for Alpine 3.24.2.
 
 One more thing the passthrough cannot absorb: the rootfs path it is handed goes
-through to `NtCreateFile`, which — unlike Win32 — rejects a forward slash with
-`ERROR_INVALID_NAME`. `win_hello` normalises the separators before the path
-reaches libkrun.
+straight to `NtCreateFile`, which — unlike Win32 — has no working directory and
+no notion of a forward slash. A relative root aborts the VM and
+`data/rootfs/alpine` is `ERROR_INVALID_NAME`, so `win_hello` puts the path
+through `std::path::absolute` first. Not `canonicalize`: that returns a `\\?\`
+path, which `NtCreateFile` rejects in turn.
 
 ### libkrun — `patches/libkrun-85bed71-windows-virtiofs.patch`
 

@@ -27,19 +27,18 @@ use krun::{
 const ROOTFS_TAG: &str = "/dev/root";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The virtio-fs passthrough hands its root through to `NtCreateFile`,
-    // which -- unlike Win32 -- rejects a path containing a forward slash with
-    // ERROR_INVALID_NAME. So the separators have to be Windows ones before the
-    // path reaches libkrun, whether it came from the command line or from
-    // joining a literal below.
     let rootfs = match std::env::args().nth(1) {
-        Some(path) => PathBuf::from(path.replace('/', "\\")),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("data")
-            .join("rootfs")
-            .join("alpine"),
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rootfs/alpine"),
     };
-    if !rootfs.join("bin").join("busybox").exists() {
+    // The virtio-fs passthrough hands its root straight to `NtCreateFile`,
+    // which -- unlike Win32 -- has no working directory and no notion of a
+    // forward slash: a relative root aborts the VM, and `data/rootfs/alpine`
+    // is ERROR_INVALID_NAME. `absolute` fixes both, and unlike `canonicalize`
+    // it does not return a `\\?\` path, which `NtCreateFile` would reject in
+    // turn.
+    let rootfs = std::path::absolute(rootfs)?;
+    if !rootfs.join("bin/busybox").exists() {
         return Err(format!(
             "no rootfs at {}; run .\\scripts\\fetch-alpine-rootfs.ps1 first",
             rootfs.display()

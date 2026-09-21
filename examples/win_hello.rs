@@ -1,14 +1,14 @@
 //! Boot a libkrun microVM on Windows (WHP) and run a command in it.
 //!
-//!   scripts\fetch-alpine-rootfs.sh       # under Git Bash; needs an x86_64 host
+//!   .\scripts\fetch-alpine-rootfs.ps1
 //!   cargo run --example win_hello
 //!
-//! This is [`hello.rs`](hello.rs) with the two differences the Windows port
-//! forces. The public API is `std::os::fd` everywhere else, so on Windows
+//! This is [`hello.rs`](hello.rs) with the differences the Windows port forces.
+//! The public API is `std::os::fd` everywhere else, so on Windows
 //! `ConsoleBuilder` takes `BorrowedHandle` and the console handles come from
 //! `AsHandle` rather than `AsFd`. libkrun also resolves the guest kernel as
-//! `libkrunfw.dll` here, which has to be on the DLL search path -- next to the
-//! executable, or on `PATH`.
+//! `libkrunfw.dll` here; `scripts/windows-run.ps1`, registered as the cargo
+//! runner, puts `data/krunfw/` on `PATH` so `LoadLibrary` finds it.
 //!
 //! Requires the *Windows Hypervisor Platform* optional feature. WHP is x86_64
 //! only, so this will not run on Windows on ARM.
@@ -27,16 +27,35 @@ use krun::{
 const ROOTFS_TAG: &str = "/dev/root";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The virtio-fs passthrough hands its root through to `NtCreateFile`,
+    // which -- unlike Win32 -- rejects a path containing a forward slash with
+    // ERROR_INVALID_NAME. So the separators have to be Windows ones before the
+    // path reaches libkrun, whether it came from the command line or from
+    // joining a literal below.
     let rootfs = match std::env::args().nth(1) {
-        Some(path) => PathBuf::from(path),
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rootfs/alpine"),
+        Some(path) => PathBuf::from(path.replace('/', "\\")),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("rootfs")
+            .join("alpine"),
     };
-    if !rootfs.join("bin/busybox").exists() {
+    if !rootfs.join("bin").join("busybox").exists() {
         return Err(format!(
-            "no rootfs at {}; run ./scripts/fetch-alpine-rootfs.sh first",
+            "no rootfs at {}; run .\\scripts\\fetch-alpine-rootfs.ps1 first",
             rootfs.display()
         )
         .into());
+    }
+
+    // KRUN_LOG=debug (or trace) turns on libkrun's own logging.
+    if let Ok(level) = std::env::var("KRUN_LOG") {
+        let level = match level.as_str() {
+            "trace" => krun::LogLevel::Trace,
+            "debug" => krun::LogLevel::Debug,
+            "info" => krun::LogLevel::Info,
+            _ => krun::LogLevel::Warn,
+        };
+        krun::init_log(None, level, krun::LogStyle::Auto, krun::LogOptions::empty())?;
     }
 
     // Borrowed by the console device for as long as the VM runs, so these have

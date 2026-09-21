@@ -1,0 +1,50 @@
+diff --git a/src/devices/src/virtio/fs/windows/passthrough.rs b/src/devices/src/virtio/fs/windows/passthrough.rs
+index 17687d12..6a255102 100644
+--- a/src/devices/src/virtio/fs/windows/passthrough.rs
++++ b/src/devices/src/virtio/fs/windows/passthrough.rs
+@@ -64,6 +64,8 @@ const SYNCHRONIZE: u32 = 0x0010_0000;
+ const DELETE: u32 = 0x0001_0000;
+ const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+ const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
++/// Size of the version field an LX symlink's reparse data starts with.
++const LX_SYMLINK_VERSION_LEN: usize = 4;
+ 
+ const S_ISUID: u32 = 0o04_000;
+ const S_IXGRP: u32 = 0o00_010;
+@@ -524,15 +526,16 @@ fn read_lx_symlink_by_handle(handle: HANDLE) -> io::Result<Vec<u8>> {
+     }
+ 
+     let data_len = u16::from_le_bytes(buffer[4..6].try_into().unwrap()) as usize;
+-    if bytes_returned < (8 + data_len) as u32 {
++    if bytes_returned < (8 + data_len) as u32 || data_len < LX_SYMLINK_VERSION_LEN {
+         return Err(io::Error::new(
+             io::ErrorKind::InvalidData,
+             "Truncated LX_SYMLINK payload",
+         ));
+     }
+ 
+-    // Target UTF-8 bytes start at offset 8
+-    Ok(buffer[8..8 + data_len].to_vec())
++    // The reparse data at offset 8 opens with a 4-byte version field; the
++    // UTF-8 target, unterminated, follows it.
++    Ok(buffer[8 + LX_SYMLINK_VERSION_LEN..8 + data_len].to_vec())
+ }
+ 
+ // ADS-backed override_stat helpers  (uid:gid:0mode)
+@@ -2618,10 +2621,12 @@ impl FileSystem for PassthroughFs {
+             return Err(enosys());
+         }
+ 
+-        // Prevent the guest from reading them directly.
+-        // The guest should only see these values through standard stat calls, not raw getxattr queries
+-        let attr_name = name.to_bytes();
+-        if attr_name == b"user.containers.override_stat" || attr_name == b"security.capability" {
++        // Prevent the guest from reading this one directly. The guest should
++        // only see these values through standard stat calls, not raw getxattr
++        // queries. `security.capability` is deliberately not hidden: the guest
++        // kernel reads it on every execve, and an error other than ENODATA
++        // there fails the exec.
++        if name.to_bytes() == b"user.containers.override_stat" {
+             return Err(io::Error::from_raw_os_error(linux_errno_raw(libc::EACCES)));
+         }
+ 

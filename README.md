@@ -12,9 +12,9 @@ depends on the `libkrun` crate directly.
 
 ## Requirements
 
-macOS on Apple Silicon (Linux hosts are untested here). Windows support is
-upstream in the pinned submodule; it builds there but has never been booted
-— see [Windows (WHP)](#windows-whp).
+macOS on Apple Silicon (Linux hosts are untested here). x86_64 Windows boots
+too, over the Windows Hypervisor Platform, with its own setup — see
+[Windows (WHP)](#windows-whp). The rest of this section is macOS.
 
 ```sh
 brew install lld meson ninja
@@ -47,6 +47,9 @@ cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
 ```
 
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
+
+On Windows the example is `win_hello` and the setup is different throughout; see
+[Windows (WHP)](#windows-whp).
 
 `cargo run` goes through `scripts/macos-run.sh`, registered as the cargo runner
 for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
@@ -276,28 +279,33 @@ the CPU — a silent fallback would agree exactly.
 
 ## Windows (WHP)
 
-`cargo check --example win_hello` passes on an x86_64 Windows host. Nothing has
-been *booted* there — that still needs a `libkrunfw.dll` nobody ships (see
-below). Everything libkrun needs is now upstream: the Windows port merged as
-[libkrun#858](https://github.com/libkrun/libkrun/pull/858) on 2026-09-21, and
-the submodule is pinned past it, so this repository carries no Windows patch any
-more.
+An x86_64 Windows host boots a microVM over the Windows Hypervisor Platform:
 
-libkrun's Windows port goes through the Windows Hypervisor Platform — the `whp`
-crate, the x86_64 Windows arch backend, the WHP IOAPIC and MMIO device managers,
-Windows paths through virtio console/fs/blk/balloon/vsock/net, an IOCP-backed
-epoll and an Event-backed eventfd in `utils`, and, from #858, the `Vm`/`Vcpu`
-pair on WHP in `src/libkrun/src/vmm/windows/vstate.rs`, the Windows arms through
-`vmm/mod.rs` and `vmm/builder.rs`, `KRUNFW_NAME = "libkrunfw.dll"`, and a clang
-cross-linker for the guest init on Windows hosts.
+```
+> cargo run --example win_hello
+hello from Linux 6.12.109 x86_64
+```
 
-The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` now
-takes `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
+Everything libkrun needs is upstream — the Windows port merged as
+[libkrun#858](https://github.com/libkrun/libkrun/pull/858) on 2026-09-21 and the
+submodule is pinned past it — but upstream has no Windows CI job, and the pieces
+that turn a Linux rootfs into something NTFS can serve are not upstream's
+problem at all. Both gaps are carried here.
+
+libkrun's Windows port covers the `whp` crate, the x86_64 Windows arch backend,
+the WHP IOAPIC and MMIO device managers, Windows paths through virtio
+console/fs/blk/balloon/vsock/net, an IOCP-backed epoll and an Event-backed
+eventfd in `utils`, the `Vm`/`Vcpu` pair on WHP in
+`src/libkrun/src/vmm/windows/vstate.rs`, `KRUNFW_NAME = "libkrunfw.dll"`, and a
+clang cross-linker for the guest init.
+
+The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
+`BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
 [`examples/win_hello.rs`](examples/win_hello.rs) differs from
 [`examples/hello.rs`](examples/hello.rs) by little more than `AsFd` →
 `AsHandle`.
 
-### What a Windows host would still need
+### Requirements
 
 - **x86_64.** The WHP backend is written against `WHvX64Register*` and reads
   `CPUID`/`RDTSC` directly, so Windows on ARM is not a target.
@@ -307,28 +315,101 @@ takes `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
   `detect_tsc_frequency` calls `core::arch::x86_64::__cpuid` from safe code, and
   those intrinsics only became safe in
   [1.94](https://github.com/rust-lang/stdarch/pull/1935). On 1.93 and earlier
-  the `krun-whp` crate does not compile, and upstream has no Windows CI job to
-  catch it.
+  the `krun-whp` crate does not compile.
 - MSVC build tools — `bzip2-sys` and `zstd-sys` compile C on x86_64 — plus
   clang and lld, which the guest init is linked with, and
   `rustup target add x86_64-unknown-linux-musl`.
-- **`libkrunfw.dll`, built by hand.** libkrunfw gained a Windows target in
-  [libkrunfw#122](https://github.com/containers/libkrunfw/pull/122) (merged),
-  but releases ship no DLL, and `make OS=Windows` cross-compiles from a *Linux*
-  host with MinGW-w64. It uses its own kernel config: Hyper-V enlightenments on,
-  and the kernel bundle aligned to 4 KiB rather than 64 KiB to match WHP's page
-  granularity. The DLL has to be on the search path — next to the executable, or
-  on `PATH`.
-- An x86_64 Alpine rootfs. [`scripts/fetch-alpine-rootfs.sh`](scripts/fetch-alpine-rootfs.sh)
-  is a POSIX shell script that picks its architecture from `uname -m`, so it
-  needs Git Bash on Windows — where `uname -m` reports `x86_64` and the right
-  rootfs comes down.
+- **Docker**, in Linux-container mode, to build `libkrunfw.dll`.
+- **WSL**, to unpack the rootfs. Both reasons are below.
+
+One host setting is worth checking before anything else: **Smart App Control**
+blocks unsigned executables, which is every build script cargo compiles and
+every binary it produces. With it on, `cargo build` fails with `os error 4551`
+before it gets anywhere near libkrun. Turning it off is a one-way door — it
+cannot be re-enabled without reinstalling Windows.
+
+### Setup
+
+```powershell
+git submodule update --init
+sh scripts/apply-patches.sh             # Git Bash; patches the submodules
+sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
+.\scripts\fetch-alpine-rootfs.ps1       # guest rootfs -> data/rootfs/alpine
+cargo run --example win_hello
+```
+
+`cargo run` goes through [`scripts/windows-run.ps1`](scripts/windows-run.ps1),
+registered as the cargo runner for `x86_64-pc-windows-msvc`. It puts
+`data/krunfw/` on `PATH`, because libkrun resolves the guest kernel with
+`LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly
+fails with `Error: FileNotFound`.
+
+### `libkrunfw.dll` has to be cross-compiled from Linux
+
+libkrunfw gained a Windows target in
+[libkrunfw#122](https://github.com/containers/libkrunfw/pull/122), but its
+releases ship no DLL and `make OS=Windows` cross-compiles from a *Linux* host
+with MinGW-w64: it configures and builds a Linux kernel, then wraps `vmlinux`
+in a DLL. It uses its own kernel config — Hyper-V enlightenments on, and the
+kernel bundle aligned to 4 KiB rather than 64 KiB to match WHP's page
+granularity.
+
+None of that runs on Windows, so
+[`scripts/build-libkrunfw-windows.sh`](scripts/build-libkrunfw-windows.sh) does
+it in a throwaway `ubuntu:24.04` container and copies the DLL back into
+`data/krunfw/`. It pins libkrunfw to a tag for the same reason the submodules
+are pinned. Expect 10–20 minutes on the first run; it is a full kernel build.
+
+### The rootfs needs NTFS to carry things NTFS has no idea about
+
+[`scripts/fetch-alpine-rootfs.ps1`](scripts/fetch-alpine-rootfs.ps1) replaces the
+POSIX script on Windows. Unpacking the tarball is the easy part; two properties
+of a Linux rootfs have no native NTFS equivalent, and libkrun's Windows
+passthrough reads each from a specific place.
+
+**Symlinks** come from `IO_REPARSE_TAG_LX_SYMLINK` reparse points — the WSL
+representation, which stores the target verbatim as a Linux path. A native
+Windows symlink cannot hold `/bin/busybox`: Windows resolves it against the
+current drive, and creating one needs administrator rights or Developer Mode
+besides. So the tarball is unpacked from inside WSL, whose drvfs creates LX
+symlinks, and no elevation is needed.
+
+**Mode bits** have no NTFS equivalent at all. `file_info_to_stat64` reports
+0o644 for every regular file and 0o755 for every directory, and only an
+alternate data stream named `user.containers.override_stat` — holding
+`uid:gid:0mode` — overrides that. Without it `/bin/busybox` is not executable
+and init dies with `EACCES`. The modes are read back out of the tarball, not off
+disk, because drvfs synthesises a mode for every file it shows; only entries
+whose mode differs from what the passthrough assumes get a stream, which is 27
+of them for Alpine 3.24.2.
+
+One more thing the passthrough cannot absorb: the rootfs path it is handed goes
+through to `NtCreateFile`, which — unlike Win32 — rejects a forward slash with
+`ERROR_INVALID_NAME`. `win_hello` normalises the separators before the path
+reaches libkrun.
+
+### libkrun — `patches/libkrun-85bed71-windows-virtiofs.patch`
+
+Two bugs in the Windows virtio-fs passthrough, both on the path every `execve`
+takes, and both invisible to a CI job that never boots a guest.
+
+- **`read_lx_symlink_by_handle` returned the reparse data from offset 8**, but
+  an LX symlink's data opens with a 4-byte version field and the target follows
+  it. `readlink("/bin/sh")` answered `\x02\x00\x00\x00/bin/busybox`, the guest
+  kernel looked that up, and the host rejected the name — surfacing in the guest
+  as the unmapped Windows error 123 wearing the Linux errno of the same number,
+  `ENOMEDIUM`.
+- **`getxattr` answered `EACCES` for `security.capability`**, to stop the guest
+  reading the attributes that back the emulation. But the guest kernel reads
+  that attribute itself on every `execve`, and anything other than `ENODATA`
+  there fails the exec. The macOS backend hides only its own mode-encoding
+  xattr, which is what this now does too.
 
 There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-Treat this as a configuration that compiles, not one that is known to run.
+The `gpu` feature is macOS-only and untried here.
 
 ## Layout
 
@@ -337,7 +418,7 @@ guest/                      sources compiled and run inside the VM
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
-patches/                    see "The gpu feature"
+patches/                    see "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner
 examples/
 data/                       untracked: rootfs, models, build outputs

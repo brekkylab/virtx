@@ -1,6 +1,16 @@
 [target.aarch64-apple-darwin]
 runner = "scripts/macos-run.sh"
 
+[target.x86_64-pc-windows-msvc]
+runner = [
+    "powershell",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "scripts/windows-run.ps1",
+]
+
 [env]
 # virglrenderer built by scripts/build-virglrenderer.sh, needed by the `gpu`
 # feature. Not forced, so an existing PKG_CONFIG_PATH in the environment wins.

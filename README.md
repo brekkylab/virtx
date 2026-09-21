@@ -41,6 +41,7 @@ git submodule update --init
 cargo run --example hello               # boots a microVM, runs a command in it
 cargo run --example macos_gpu -- 'uname -a'          # adds TSI networking
 cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
+./scripts/run-ncnn-squeezenet.sh                     # a CNN on the guest GPU
 ```
 
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
@@ -195,6 +196,82 @@ live in an exported copy the way virglrenderer's does — `scripts/apply-patches
 applies them to the submodule working trees, and both submodules are marked
 `ignore = dirty` in `.gitmodules`. Running the script twice is a no-op.
 
+## Inference on the guest GPU
+
+`scripts/run-ncnn-squeezenet.sh` runs SqueezeNet v1.1 on the guest GPU with
+[ncnn](https://github.com/Tencent/ncnn)'s Vulkan backend, and checks the result
+against ncnn's CPU backend in the same process:
+
+```
+$ ./scripts/run-ncnn-squeezenet.sh
+[0 Virtio-GPU Venus (Apple M3 Pro)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Virtio-GPU Venus (Apple M3 Pro)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+device        : Virtio-GPU Venus (Apple M3 Pro)
+device api    : 1.2.0
+image         : /mnt/inference/assets/dog.jpg (1546x1213)
+model         : squeezenet_v1.1 (1000 classes)
+cpu           : 1.6 ms/iter
+vulkan        : 3.7 ms/iter
+
+top-5 on vulkan:
+   82.57%  n02111889 Samoyed, Samoyede
+    5.28%  n02112018 Pomeranian
+    ...
+
+cpu/vulkan top-1 : match
+max score diff   : 7.32e-03
+```
+
+ncnn's own probe lines restate what the sections above worked out: fp16 all the
+way through, no cooperative matrix, bf16 storage but no bf16 arithmetic.
+
+### Why ncnn
+
+ncnn's floor is Vulkan 1.0 plus `VK_KHR_get_physical_device_properties2`;
+everything past that — fp16, int8, cooperative matrix — is probed at runtime
+and has a fallback path. That is the only requirement the 1.2 ceiling above
+leaves comfortable room under. The alternatives do not fit as well:
+
+- Alpine's `onnxruntime` is built with no GPU execution provider, and upstream
+  ONNX Runtime has no Vulkan one at all.
+- `llama.cpp-vulkan` is packaged for aarch64 and would run here (it needs
+  instance 1.2 and treats maintenance4, coopmat and bf16 as optional, and never
+  touches `KHR_synchronization2`), but it only runs GGUF language models.
+- wonnx and Burn/wgpu are the Rust-native options; wonnx has been dormant since
+  2023 with thin operator coverage, and wgpu brings its own feature demands.
+
+ONNX models go in through ncnn's `onnx2ncnn`/`pnnx` converters on the host.
+
+### The build
+
+ncnn is compiled inside the VM, so `macos_inference` differs from `macos_gpu`
+in two ways: up to 8 vcpus and 6 GiB of RAM (`KRUN_VCPUS`, `KRUN_RAM_MIB`), and a
+second virtiofs share, `data/inference/` mounted at `/mnt/inference`, holding
+the checkout, the build trees and the model. The first run takes around 13
+minutes; after that the script only recompiles `guest/ncnn_squeezenet.cpp`.
+
+The build uses Alpine's glslang rather than ncnn's submodule, which is what
+keeps the clone shallow. That needs `spirv-tools-dev` as well as `glslang-dev`:
+`glslang-config.cmake` does a `find_dependency(SPIRV-Tools-opt)`, and without
+it `find_package(glslang)` fails quietly, `NCNN_SYSTEM_GLSLANG` switches itself
+off, and the build dies asking for the submodule. `cmake` also needs
+`-DCMAKE_POLICY_VERSION_MINIMUM=3.5`, since ncnn still declares a 2.8.12 floor
+that cmake 4 rejects.
+
+### On the timings
+
+The GPU is slower than the CPU here, and that is the expected result.
+SqueezeNet v1.1 is 75 layers over a 227x227 input — very little arithmetic per
+dispatch, and every dispatch crosses the guest/host boundary into virglrenderer
+and then MoltenVK. At this size the per-dispatch overhead is the measurement.
+This checks that the stack computes the right answer, not that it is fast.
+
+The right answer is the part worth trusting: ncnn falls back to its CPU
+implementation per layer, silently, for any layer whose Vulkan path is missing,
+so a passing run needs more than a plausible number. The reported max score
+difference is 7.32e-03 and not zero, which is fp16 on the GPU against fp32 on
+the CPU — a silent fallback would agree exactly.
+
 ## Layout
 
 ```
@@ -205,7 +282,7 @@ virglrenderer/   submodule: upstream virglrenderer, pinned to 1.3.0
 patches/         see "The gpu feature"
 scripts/         build and provisioning helpers, plus the cargo runner
 examples/
-data/            untracked: rootfs, build outputs
+data/            untracked: rootfs, models, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the

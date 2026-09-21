@@ -30,3 +30,10 @@ krun_init = { path = "krun/init/init-blob", package = "krun-init-blob", features
 
 # Needed to hand libkrun a display backend for the virtio-gpu device.
 krun_display = { path = "krun/src/display", package = "krun-display", optional = true }
+
+# rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
+# 2026-09-02) and routes macOS to a stub backend that panics at runtime.
+# Track the repo until a release carries it.
+[patch.crates-io]
+rutabaga_gfx = { path = "rutabaga" }
+magma-gpu = { path = "rutabaga/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }

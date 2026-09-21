@@ -30,6 +30,7 @@ brew install libkrunfw
 
 ```sh
 git submodule update --init
+./scripts/apply-patches.sh              # patches the krun and rutabaga submodules
 ./scripts/fetch-alpine-rootfs.sh        # guest rootfs -> data/rootfs/alpine
 ./scripts/build-virglrenderer.sh        # only for the `gpu` feature
 ```
@@ -38,8 +39,11 @@ git submodule update --init
 
 ```sh
 cargo run --example hello               # boots a microVM, runs a command in it
-cargo run --features gpu --example hello
+cargo run --example macos_gpu -- 'uname -a'          # adds TSI networking
+cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
 ```
+
+`KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
 
 `cargo run` goes through `scripts/macos-run.sh`, registered as the cargo runner
 for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
@@ -55,40 +59,95 @@ Running the built binary directly, without the runner, will fail on both counts.
 
 ## The `gpu` feature
 
-Guest Vulkan goes through virtio-gpu with [venus](https://docs.mesa3d.org/drivers/venus.html),
-which the host serves with virglrenderer on top of MoltenVK. Getting that to
-build on macOS needs a patched virglrenderer, for three reasons that are easy
-to forget:
+Guest Vulkan goes through virtio-gpu with [venus](https://docs.mesa3d.org/drivers/venus.html):
+the guest runs Mesa's venus driver, virglrenderer serves it on the host, and
+MoltenVK turns that into Metal. Working end to end:
 
-- **rutabaga_gfx requires virglrenderer ≥ 1.3.0.** The version check in its
-  `build.rs` is hardcoded, so the 0.10.4-based fork that krunkit uses is not an
-  option for libkrun 2.0.
-- **Upstream 1.3.0 forces the render server on whenever venus is enabled**
-  (`with_render_server = with_venus`, with no option to override). That server
-  is a separate executable built against epoll and seccomp, so it cannot build
-  on macOS. `patches/virglrenderer-1.3.0-macos-venus.patch` ports Sergio
-  Lopez's in-process venus context — the same work krunkit's fork carries —
-  onto upstream 1.3.0, and adds back the `render-server` meson option.
-- **`vulkan-dload` defaults to true**, which makes virglrenderer resolve Vulkan
-  with `dlopen` instead of linking it. The in-process venus context calls
-  `vkMapMemory`/`vkUnmapMemory` directly, so the build must pass
-  `-Dvulkan-dload=false` and link MoltenVK.
+```
+$ cargo run --features gpu --example macos_gpu
+GPU0:
+        deviceName = Virtio-GPU Venus (Apple M3 Pro)
+        driverID   = DRIVER_ID_MESA_VENUS
+        driverInfo = Mesa 26.1.6
+```
+
+Install the guest side once, which needs networking and so the TSI vsock that
+`macos_gpu` already sets up:
+
+```sh
+cargo run --example macos_gpu -- 'apk add --no-cache mesa-vulkan-virtio vulkan-loader vulkan-tools'
+```
+
+Nothing upstream supports this combination yet, so three dependencies are
+patched. Each patch is small and self-contained; the reasoning is worth keeping
+because none of it is obvious from the symptoms.
+
+### virglrenderer — `patches/virglrenderer-1.3.0-macos-venus.patch`
+
+- **rutabaga_gfx hardcodes a virglrenderer >= 1.3.0 check**, so the 0.10.4-based
+  fork that krunkit uses is not an option for libkrun 2.0.
+- **Upstream 1.3.0 forces the out-of-process render server on whenever venus is
+  enabled** (`with_render_server = with_venus`, no override), and that server is
+  built against epoll and seccomp. The patch ports Sergio Lopez's in-process
+  venus context onto 1.3.0 and restores the `render-server` option. It also
+  brings `VIRGL_RENDERER_BLOB_FD_TYPE_APPLE` and
+  `virgl_renderer_resource_get_map_ptr()`: MoltenVK cannot export
+  `VkDeviceMemory` as a descriptor, so a blob is handed over as a host pointer.
+- **`vulkan-dload` defaults to true**, which resolves Vulkan with `dlopen`
+  instead of linking it. The in-process venus context calls `vkMapMemory`
+  directly, so the build needs `-Dvulkan-dload=false` and a linked MoltenVK.
 
 `scripts/build-virglrenderer.sh` handles all of it. It exports the pinned
 submodule tree with `git archive` and patches the copy under `data/`, so the
-`virglrenderer` submodule itself stays pristine and `git status` stays clean.
-It also synthesises a `vulkan.pc` pointing at MoltenVK, since MoltenVK ships
-no pkg-config file, and installs it next to the built library so consumers need
-a single `PKG_CONFIG_PATH` entry. That entry is set in `.cargo/config.toml`,
-without `force`, so an existing `PKG_CONFIG_PATH` in your environment wins — if
-you set one, add `data/virglrenderer/lib/pkgconfig` to it yourself.
+`virglrenderer` submodule stays pristine. It also synthesises a `vulkan.pc`
+pointing at MoltenVK, which ships none, and installs it next to the built
+library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
+`.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
+environment wins — if you set one, add `data/virglrenderer/lib/pkgconfig` to it.
+
+### rutabaga_gfx — `patches/rutabaga-8cb133e-macos-virgl-renderer.patch`
+
+Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
+soon as anything asks for a descriptor. A Darwin backend built on Mach ports
+landed upstream on 2026-09-02 but has not been released, so `[patch.crates-io]`
+points at the submodule instead.
+
+That backend widened `RawDescriptor` to `i64`, and `virgl_renderer.rs` was not
+updated with it — it is behind an optional feature that the new macOS CI does
+not build. The patch fixes those three type errors, stops `export_blob` from
+wrapping the `-1` the Apple path returns, and makes `map()` fall back to
+`virgl_renderer_resource_get_map_ptr()`, since the in-process venus context has
+no `resource_map` hook and the transient-dmabuf fallback is Linux-only.
+
+### libkrun — `patches/libkrun-e6cdb55-macos-gpu.patch`
+
+- `resource_map_blob` on macOS called `export_blob` purely as a validity gate
+  and required a dmabuf handle, which no macOS blob can ever have. The mapping
+  only ever consumes `map_ptr`, so the gate is dropped. This is the same
+  reasoning as [libkrun#740](https://github.com/libkrun/libkrun/pull/740),
+  rewritten against the current rutabaga API — that PR predates the migration to
+  the upstream crate and no longer applies.
+- `needs_worker` was unconditionally false on aarch64, so the VMM worker thread
+  never started and its receiver was dropped. The GPU device sends
+  `WorkerMessage::GpuAddMapping` to that thread because only it can call into
+  the hypervisor, so the send panicked the gpu worker.
+- Hypervisor.framework maps in host pages, 16 KiB on Apple Silicon, while blob
+  resources are sized in 4 KiB guest pages. A 132 KiB blob was rejected outright.
+  Lengths are now rounded up, symmetrically in `add_mapping` and
+  `remove_mapping`.
+
+These two are Rust crates that cargo resolves by path, so their patches cannot
+live in an exported copy the way virglrenderer's does — `scripts/apply-patches.sh`
+applies them to the submodule working trees, and both submodules are marked
+`ignore = dirty` in `.gitmodules`. Running the script twice is a no-op.
 
 ## Layout
 
 ```
 krun/            submodule: libkrun, pinned
+rutabaga/        submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 virglrenderer/   submodule: upstream virglrenderer, pinned to 1.3.0
-patches/         applied to the exported submodule tree at build time
+patches/         see "The gpu feature"
 scripts/         build and provisioning helpers, plus the cargo runner
 examples/
 data/            untracked: rootfs, build outputs

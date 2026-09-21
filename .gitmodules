@@ -1,6 +1,15 @@
 [submodule "krun"]
 	path = krun
+	# scripts/apply-patches.sh patches this tree in place; cargo needs the real
+	# path, so the patch cannot live in an exported copy.
+	ignore = dirty
 	url = https://github.com/libkrun/libkrun.git
 [submodule "virglrenderer"]
 	path = virglrenderer
 	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
+[submodule "rutabaga"]
+	path = rutabaga
+	# scripts/apply-patches.sh patches this tree in place; cargo needs the real
+	# path, so the patch cannot live in an exported copy.
+	ignore = dirty
+	url = https://github.com/magma-gpu/rutabaga_gfx.git

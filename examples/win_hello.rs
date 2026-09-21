@@ -8,12 +8,13 @@
 //! `ConsoleBuilder` takes `BorrowedHandle` and the console handles come from
 //! `AsHandle` rather than `AsFd`. libkrun also resolves the guest kernel as
 //! `libkrunfw.dll` here; `scripts/windows-run.ps1`, registered as the cargo
-//! runner, puts `data/krunfw/` on `PATH` so `LoadLibrary` finds it.
+//! runner, puts `data/krunfw/` on `PATH` so `LoadLibrary` finds it. The
+//! console also gets no stdin, for the reason noted below.
 //!
 //! Requires the *Windows Hypervisor Platform* optional feature. WHP is x86_64
 //! only, so this will not run on Windows on ARM.
 
-use std::io::{stderr, stdin, stdout};
+use std::io::{stderr, stdout};
 use std::os::windows::io::AsHandle;
 use std::path::PathBuf;
 
@@ -59,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Borrowed by the console device for as long as the VM runs, so these have
     // to outlive everything below.
-    let (stdin, stdout, stderr) = (stdin(), stdout(), stderr());
+    let (stdout, stderr) = (stdout(), stderr());
 
     // Guest kernel, bundled as a shared library that libkrun LoadLibrary()s.
     let mut payload = Payload::load_krunfw()?;
@@ -78,11 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut devices = MmioDeviceManager::new();
 
     let mut console = ConsoleDevice::builder();
-    console.add_default_console(
-        Some(stdin.as_handle()),
-        Some(stdout.as_handle()),
-        Some(stderr.as_handle()),
-    )?;
+    // No stdin: nothing here reads it, and a tty stdin would cost the process
+    // its exit. libkrun's Windows console parks its input thread in a
+    // blocking `ReadFile`, and the VMM joins that thread on the way out.
+    // stdout is still a tty, so the console keeps its window size.
+    console.add_default_console(None, Some(stdout.as_handle()), Some(stderr.as_handle()))?;
     devices.add(console.build()?);
 
     let mut root = FsDevice::new(ROOTFS_TAG, &rootfs.to_string_lossy())?;

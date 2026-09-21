@@ -305,6 +305,14 @@ The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` take
 [`examples/hello.rs`](examples/hello.rs) by little more than `AsFd` →
 `AsHandle`.
 
+It also hands the console no stdin. libkrun's Windows console parks its input
+thread in a blocking `ReadFile`, and the VMM joins that thread before it exits
+— so a tty stdin means the process runs the command, prints, and then hangs
+forever. Ctrl-C does not help: raw mode clears `ENABLE_PROCESSED_INPUT`, so it
+arrives as a byte rather than a signal. Nothing here needs guest stdin, and
+leaving it out avoids the code path entirely; an interactive console on Windows
+would need the bug fixed upstream.
+
 ### Requirements
 
 - **x86_64.** The WHP backend is written against `WHvX64Register*` and reads

@@ -12,7 +12,7 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SUBMODULE="$ROOT/virglrenderer"
+SUBMODULE="$ROOT/3rdparty/virglrenderer"
 SRC="$ROOT/data/virglrenderer-src"
 PREFIX="$ROOT/data/virglrenderer"
 PATCH="$ROOT/patches/virglrenderer-1.3.0-macos-venus.patch"
@@ -20,7 +20,7 @@ VENV="$ROOT/data/meson-venv"
 
 if [ ! -f "$SUBMODULE/meson.build" ]; then
     echo "virglrenderer submodule is not checked out." >&2
-    echo "Run: git submodule update --init virglrenderer" >&2
+    echo "Run: git submodule update --init 3rdparty/virglrenderer" >&2
     exit 1
 fi
 

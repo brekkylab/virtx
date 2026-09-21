@@ -6,10 +6,10 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 
 [workspace]
-# `krun/` is the vendored libkrun submodule, which is its own cargo workspace.
-# Without this, cargo would auto-adopt the path dependencies as members and
-# collide with that workspace.
-exclude = ["krun"]
+# `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
+# workspace. Without this, cargo would auto-adopt the path dependencies as
+# members and collide with that workspace.
+exclude = ["3rdparty/libkrun"]
 resolver = "3"
 
 [features]
@@ -18,22 +18,22 @@ resolver = "3"
 gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]
-# libkrun 2.0-dev, pinned via the `krun` submodule.
+# libkrun 2.0-dev, pinned via the `3rdparty/libkrun` submodule.
 # The package is named `libkrun`; its lib target is `krun`.
-krun = { path = "krun/src/libkrun", package = "libkrun" }
+krun = { path = "3rdparty/libkrun/src/libkrun", package = "libkrun" }
 
 # Guest init binary + config builder, split out of libkrun in 2.0.
 # `direct` links libkrun as an rlib instead of going through its C ABI.
-krun_init = { path = "krun/init/init-blob", package = "krun-init-blob", features = [
+krun_init = { path = "3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = [
     "direct",
 ] }
 
 # Needed to hand libkrun a display backend for the virtio-gpu device.
-krun_display = { path = "krun/src/display", package = "krun-display", optional = true }
+krun_display = { path = "3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
 # rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
 # 2026-09-02) and routes macOS to a stub backend that panics at runtime.
 # Track the repo until a release carries it.
 [patch.crates-io]
-rutabaga_gfx = { path = "rutabaga" }
-magma-gpu = { path = "rutabaga/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }
+rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
+magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Apply the macOS GPU patches to the krun and rutabaga submodules, in place.
+# Apply the macOS GPU patches to the libkrun and rutabaga_gfx submodules, in
+# place.
 #
 # These two are Rust crates that cargo resolves by path, so unlike the
 # virglrenderer patch (see build-virglrenderer.sh) they cannot be applied to an
@@ -15,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 apply_patch() {
     submodule="$1"
     patch_file="$2"
-    dir="$ROOT/$submodule"
+    dir="$ROOT/3rdparty/$submodule"
 
     if [ ! -d "$dir/.git" ] && [ ! -f "$dir/.git" ]; then
         echo "$submodule is not checked out; run: git submodule update --init" >&2
@@ -38,5 +39,5 @@ apply_patch() {
 }
 
 echo "applying patches"
-apply_patch krun "$ROOT/patches/libkrun-e6cdb55-macos-gpu.patch"
-apply_patch rutabaga "$ROOT/patches/rutabaga-8cb133e-macos-virgl-renderer.patch"
+apply_patch libkrun "$ROOT/patches/libkrun-e6cdb55-macos-gpu.patch"
+apply_patch rutabaga_gfx "$ROOT/patches/rutabaga_gfx-8cb133e-macos-virgl-renderer.patch"

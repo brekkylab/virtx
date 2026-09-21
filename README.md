@@ -7,7 +7,7 @@ libkrun is vendored as a submodule and linked as an rlib, so there is no
 depends on the `libkrun` crate directly.
 
 > libkrun 2.0 is still under active development and its API is not stable. The
-> `krun` submodule is pinned to a specific commit for that reason; bump it
+> `libkrun` submodule is pinned to a specific commit for that reason; bump it
 > deliberately, not automatically.
 
 ## Requirements
@@ -30,7 +30,7 @@ brew install libkrunfw
 
 ```sh
 git submodule update --init
-./scripts/apply-patches.sh              # patches the krun and rutabaga submodules
+./scripts/apply-patches.sh              # patches the libkrun and rutabaga_gfx submodules
 ./scripts/fetch-alpine-rootfs.sh        # guest rootfs -> data/rootfs/alpine
 ./scripts/build-virglrenderer.sh        # only for the `gpu` feature
 ```
@@ -160,7 +160,7 @@ library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
 environment wins — if you set one, add `data/virglrenderer/lib/pkgconfig` to it.
 
-### rutabaga_gfx — `patches/rutabaga-8cb133e-macos-virgl-renderer.patch`
+### rutabaga_gfx — `patches/rutabaga_gfx-8cb133e-macos-virgl-renderer.patch`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
 soon as anything asks for a descriptor. A Darwin backend built on Mach ports
@@ -275,14 +275,14 @@ the CPU — a silent fallback would agree exactly.
 ## Layout
 
 ```
-guest/             sources compiled and run inside the VM
-krun/            submodule: libkrun, pinned
-rutabaga/        submodule: rutabaga_gfx, pinned (via [patch.crates-io])
-virglrenderer/   submodule: upstream virglrenderer, pinned to 1.3.0
-patches/         see "The gpu feature"
-scripts/         build and provisioning helpers, plus the cargo runner
+guest/                      sources compiled and run inside the VM
+3rdparty/libkrun/           submodule: libkrun, pinned
+3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
+3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
+patches/                    see "The gpu feature"
+scripts/                    build and provisioning helpers, plus the cargo runner
 examples/
-data/            untracked: rootfs, models, build outputs
+data/                       untracked: rootfs, models, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the

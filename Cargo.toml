@@ -1,0 +1,18 @@
+[package]
+name = "cortex-krun"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace]
+# `krun/` is the vendored libkrun submodule, which is its own cargo workspace.
+# Without this, cargo would auto-adopt the path dependency as a member and
+# collide with that workspace.
+exclude = ["krun"]
+resolver = "3"
+
+[dependencies]
+# libkrun 2.0-dev, pinned via the `krun` submodule.
+# The package is named `libkrun`; its lib target is `krun`.
+krun = { path = "krun/src/libkrun", package = "libkrun" }

@@ -92,8 +92,45 @@ memory type   : 1 (16384 bytes)
 fill 4096 words : OK
 ```
 
-The device caps out at Vulkan 1.2 even though MoltenVK reports 1.4.357 for the
-same GPU on the host, so the ceiling comes from venus rather than from MoltenVK.
+### Why the guest device reports Vulkan 1.2
+
+MoltenVK reports 1.4.357 for the same GPU on the host, so the ceiling is venus.
+`vn_physical_device_init_properties()` starts from `MIN3(host device version,
+VN_MAX_API_VERSION, capset vk_xml_version)`, which is 1.4 here, and then:
+
+```c
+if (!supported_extensions.KHR_synchronization2)
+    ver = MIN2(VK_API_VERSION_1_2, ver);
+```
+
+`KHR_synchronization2` is off because venus ties it to sync-fd semaphore import
+when built with a WSI platform:
+
+```c
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(VN_USE_WSI_PLATFORM)
+   const bool can_sync2 = physical_dev->renderer_sync_fd.semaphore_importable;
+#else
+   static const bool can_sync2 = true;
+#endif
+```
+
+A sync fd is a Linux sync file, which MoltenVK cannot provide, and Alpine's
+`mesa-vulkan-virtio` is built with WSI (it pulls in libx11 and wayland). Mesa
+notes the coupling is for "code simplicity", so a headless Mesa build
+(`-Dplatforms= -Dvulkan-drivers=virtio`) would take the compile-time `true`
+branch and lift the cap to 1.3. Nothing here needs it so far.
+
+### bfloat16 is not available, and the version is not why
+
+`VK_KHR_shader_bfloat16` is an extension that depends only on Vulkan 1.1, so
+the 1.2 cap above is irrelevant to it. The guest is ready — Mesa venus passes
+it through — but **MoltenVK does not implement it**, and neither does
+SPIRV-Cross, which would have to translate the SPIR-V types to MSL first.
+Metal itself has had bfloat since MSL 3.1. Both upstream issues
+([MoltenVK#2507](https://github.com/KhronosGroup/MoltenVK/issues/2507),
+[SPIRV-Cross#2478](https://github.com/KhronosGroup/SPIRV-Cross/issues/2478))
+have been idle since May 2025. `VK_KHR_cooperative_matrix` is missing for the
+same reason; `VK_KHR_shader_float16_int8` (fp16) is available.
 
 Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping

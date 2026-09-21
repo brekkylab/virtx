@@ -78,6 +78,23 @@ Install the guest side once, which needs networking and so the TSI vsock that
 cargo run --example macos_gpu -- 'apk add --no-cache mesa-vulkan-virtio vulkan-loader vulkan-tools'
 ```
 
+`vulkaninfo` only enumerates. `scripts/run-vk-smoke.sh` compiles
+`guest/vk_smoke.c` inside the VM and runs a real round-trip -- create a device,
+allocate host-visible memory, submit `vkCmdFillBuffer`, wait on a fence, read
+the result back:
+
+```
+instance      : 1.4.347
+device        : Virtio-GPU Venus (Apple M3 Pro)
+device api    : 1.2.0
+queue family  : 0
+memory type   : 1 (16384 bytes)
+fill 4096 words : OK
+```
+
+The device caps out at Vulkan 1.2 even though MoltenVK reports 1.4.357 for the
+same GPU on the host, so the ceiling comes from venus rather than from MoltenVK.
+
 Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping
 because none of it is obvious from the symptoms.
@@ -144,6 +161,7 @@ applies them to the submodule working trees, and both submodules are marked
 ## Layout
 
 ```
+guest/             sources compiled and run inside the VM
 krun/            submodule: libkrun, pinned
 rutabaga/        submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 virglrenderer/   submodule: upstream virglrenderer, pinned to 1.3.0

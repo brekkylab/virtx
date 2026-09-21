@@ -13,8 +13,8 @@ depends on the `libkrun` crate directly.
 ## Requirements
 
 macOS on Apple Silicon (Linux hosts are untested here). Windows support is
-carried as a patch and has never been built or booted here — see
-[Windows (WHP)](#windows-whp).
+upstream in the pinned submodule; it builds there but has never been booted
+— see [Windows (WHP)](#windows-whp).
 
 ```sh
 brew install lld meson ninja
@@ -176,7 +176,7 @@ wrapping the `-1` the Apple path returns, and makes `map()` fall back to
 `virgl_renderer_resource_get_map_ptr()`, since the in-process venus context has
 no `resource_map` hook and the transient-dmabuf fallback is Linux-only.
 
-### libkrun — `patches/libkrun-e6cdb55-macos-gpu.patch`
+### libkrun — `patches/libkrun-85bed71-macos-gpu.patch`
 
 - `resource_map_blob` on macOS called `export_blob` purely as a validity gate
   and required a dmabuf handle, which no macOS blob can ever have. The mapping
@@ -276,62 +276,26 @@ the CPU — a silent fallback would agree exactly.
 
 ## Windows (WHP)
 
-Nothing here has been built or booted on Windows — there is no x86_64 Windows
-host to try it on. What the repository carries is the upstream work needed to
-get there, pinned the same way everything else is.
+`cargo check --example win_hello` passes on an x86_64 Windows host. Nothing has
+been *booted* there — that still needs a `libkrunfw.dll` nobody ships (see
+below). Everything libkrun needs is now upstream: the Windows port merged as
+[libkrun#858](https://github.com/libkrun/libkrun/pull/858) on 2026-09-21, and
+the submodule is pinned past it, so this repository carries no Windows patch any
+more.
 
-libkrun's Windows port goes through the Windows Hypervisor Platform. Most of it
-is already in the pinned submodule (the `whp` crate, the x86_64 Windows arch
-backend, the WHP IOAPIC and MMIO device managers, Windows paths through virtio
-console/fs/blk/balloon/vsock/net, an IOCP-backed epoll and an Event-backed
-eventfd in `utils`). What that tree is missing is the part that turns those into
-a running VM, and that is
-[libkrun#858](https://github.com/libkrun/libkrun/pull/858), still open:
+libkrun's Windows port goes through the Windows Hypervisor Platform — the `whp`
+crate, the x86_64 Windows arch backend, the WHP IOAPIC and MMIO device managers,
+Windows paths through virtio console/fs/blk/balloon/vsock/net, an IOCP-backed
+epoll and an Event-backed eventfd in `utils`, and, from #858, the `Vm`/`Vcpu`
+pair on WHP in `src/libkrun/src/vmm/windows/vstate.rs`, the Windows arms through
+`vmm/mod.rs` and `vmm/builder.rs`, `KRUNFW_NAME = "libkrunfw.dll"`, and a clang
+cross-linker for the guest init on Windows hosts.
 
-- `src/libkrun/src/vmm/windows/vstate.rs`, 619 new lines — the `Vm`/`Vcpu` pair
-  on WHP. Without it `vmm/mod.rs` has no `vstate` module to import on Windows.
-- Windows arms through `vmm/mod.rs` and `vmm/builder.rs`.
-- The 2.0 public Rust API, which was `std::os::fd` only. `ConsoleBuilder` now
-  takes `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so an example
-  differs from [`examples/hello.rs`](examples/hello.rs) by little more than
-  `AsFd` → `AsHandle`.
-- `KRUNFW_NAME = "libkrunfw.dll"`, and a clang cross-linker for the guest init
-  on Windows hosts.
-
-`patches/libkrun-e6cdb55-windows-whp.patch` is that PR as of `8ae3455`,
-which is based on the exact commit the submodule is pinned to, so it is a plain
-`git diff`. Refresh it with:
-
-```sh
-git -C 3rdparty/libkrun fetch origin refs/pull/858/head:pr858
-git -C 3rdparty/libkrun diff e6cdb55 pr858 -- . ':(exclude)Cargo.lock' \
-    ':(exclude)tests/Cargo.lock' > patches/libkrun-e6cdb55-windows-whp.patch
-```
-
-The two `Cargo.lock` exclusions matter. `init-blob`'s build script runs a nested
-cargo inside the libkrun workspace to cross-compile the guest init, and that
-rewrites the workspace's `Cargo.lock` whenever the patch changes a dependency.
-A lock hunk in the patch would therefore stop reverse-applying after the first
-build, and `apply-patches.sh` would report a patch that no longer applies when
-nothing is actually wrong.
-
-### Why it is applied on macOS too
-
-`apply-patches.sh` applies this patch on every host. Outside `src/whp/` and the
-`windows/` directories, every hunk is either cfg-gated or cosmetic: a
-Windows-only constant removed from `arch/x86_64/layout.rs`, two x86_64 arms in
-`vmm/worker.rs` narrowed to `not(windows)`, a Windows-only kernel cmdline (WHP
-emulates the PIT, PIC and IOAPIC in userspace, so the guest needs
-`no_timer_check`), and a re-export reshuffle in `api/mod.rs`. The one hunk with
-reach beyond Windows narrows `cpuid`'s crate-level `cfg` from `x86_64` to
-`all(x86_64, linux)`, which this repository never compiles.
-
-`cargo check --example hello` and `cargo check --features gpu --example
-macos_gpu` both pass with the patch applied, and both libkrun patches
-reverse-apply cleanly on a tree carrying both. Keeping one canonical submodule
-state is what makes `apply --check` a useful signal: a stale patch surfaces the
-next time the submodule moves, not on whichever day someone first builds for
-Windows.
+The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` now
+takes `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
+[`examples/win_hello.rs`](examples/win_hello.rs) differs from
+[`examples/hello.rs`](examples/hello.rs) by little more than `AsFd` →
+`AsHandle`.
 
 ### What a Windows host would still need
 
@@ -339,6 +303,12 @@ Windows.
   `CPUID`/`RDTSC` directly, so Windows on ARM is not a target.
 - The *Windows Hypervisor Platform* optional feature, and firmware
   virtualization enabled.
+- **Rust 1.94 or newer**, above this package's declared `rust-version`. `whp`'s
+  `detect_tsc_frequency` calls `core::arch::x86_64::__cpuid` from safe code, and
+  those intrinsics only became safe in
+  [1.94](https://github.com/rust-lang/stdarch/pull/1935). On 1.93 and earlier
+  the `krun-whp` crate does not compile, and upstream has no Windows CI job to
+  catch it.
 - MSVC build tools — `bzip2-sys` and `zstd-sys` compile C on x86_64 — plus
   clang and lld, which the guest init is linked with, and
   `rustup target add x86_64-unknown-linux-musl`.
@@ -347,20 +317,18 @@ Windows.
   but releases ship no DLL, and `make OS=Windows` cross-compiles from a *Linux*
   host with MinGW-w64. It uses its own kernel config: Hyper-V enlightenments on,
   and the kernel bundle aligned to 4 KiB rather than 64 KiB to match WHP's page
-  granularity.
+  granularity. The DLL has to be on the search path — next to the executable, or
+  on `PATH`.
 - An x86_64 Alpine rootfs. [`scripts/fetch-alpine-rootfs.sh`](scripts/fetch-alpine-rootfs.sh)
-  picks its architecture from `uname -m` and is a POSIX shell script, so it does
-  not run on Windows as it stands.
+  is a POSIX shell script that picks its architecture from `uname -m`, so it
+  needs Git Bash on Windows — where `uname -m` reports `x86_64` and the right
+  rootfs comes down.
 
-The patch keeps #858's tip commit, which the author marks as to-be-dropped
-before merging: it moves `linux-loader` under `cfg(unix)` and disables the
-external-kernel payload on Windows. Dropping it would require a `linux-loader`
-release that builds for Windows, and nothing here needs that path — the guest
-kernel comes from `libkrunfw.dll`.
+There is no external-kernel payload on Windows: `linux-loader` is under
+`cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
+guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-Upstream has no Windows CI job; #858's green checks are all Linux and macOS, and
-it has no reviews yet. Treat the patch as a starting point that compiles
-somewhere else, not as a supported configuration.
+Treat this as a configuration that compiles, not one that is known to run.
 
 ## Layout
 
@@ -369,7 +337,7 @@ guest/                      sources compiled and run inside the VM
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
-patches/                    see "The gpu feature" and "Windows (WHP)"
+patches/                    see "The gpu feature"
 scripts/                    build and provisioning helpers, plus the cargo runner
 examples/
 data/                       untracked: rootfs, models, build outputs

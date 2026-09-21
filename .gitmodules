@@ -1,3 +1,6 @@
 [submodule "krun"]
 	path = krun
 	url = https://github.com/libkrun/libkrun.git
+[submodule "virglrenderer"]
+	path = virglrenderer
+	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git

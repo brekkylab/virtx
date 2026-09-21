@@ -7,12 +7,26 @@ rust-version = "1.85"
 
 [workspace]
 # `krun/` is the vendored libkrun submodule, which is its own cargo workspace.
-# Without this, cargo would auto-adopt the path dependency as a member and
+# Without this, cargo would auto-adopt the path dependencies as members and
 # collide with that workspace.
 exclude = ["krun"]
 resolver = "3"
+
+[features]
+# Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus
+# support -- run scripts/build-virglrenderer.sh first.
+gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]
 # libkrun 2.0-dev, pinned via the `krun` submodule.
 # The package is named `libkrun`; its lib target is `krun`.
 krun = { path = "krun/src/libkrun", package = "libkrun" }
+
+# Guest init binary + config builder, split out of libkrun in 2.0.
+# `direct` links libkrun as an rlib instead of going through its C ABI.
+krun_init = { path = "krun/init/init-blob", package = "krun-init-blob", features = [
+    "direct",
+] }
+
+# Needed to hand libkrun a display backend for the virtio-gpu device.
+krun_display = { path = "krun/src/display", package = "krun-display", optional = true }

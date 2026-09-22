@@ -165,7 +165,7 @@ library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
 environment wins — if you set one, add `data/virglrenderer/lib/pkgconfig` to it.
 
-### rutabaga_gfx — `patches/rutabaga_gfx-8cb133e-macos-virgl-renderer.patch`
+### rutabaga_gfx — `patches/rutabaga_gfx-8cb133e-virgl-renderer.patch`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
 soon as anything asks for a descriptor. A Darwin backend built on Mach ports
@@ -179,7 +179,19 @@ wrapping the `-1` the Apple path returns, and makes `map()` fall back to
 `virgl_renderer_resource_get_map_ptr()`, since the in-process venus context has
 no `resource_map` hook and the transient-dmabuf fallback is Linux-only.
 
-### libkrun — `patches/libkrun-85bed71-macos-gpu.patch`
+The same file needs the same kind of work for Windows, and it is in this patch
+rather than a second one: two patches on one file break `apply-patches.sh`'s
+"already patched" check, because the first one's context stops matching once
+the second is in. `virgl_renderer.rs` opens a DRM render node, folds stderr
+into stdout with `dup2`, and turns exported `int` fds into descriptors — none
+of which exist on Windows, and all of which are now `cfg`-gated. `export_blob`
+reports `Unsupported` there for the same reason it does on macOS: a
+`RawDescriptor` is a `HANDLE`, which does not fit in the `int` virglrenderer
+exports blobs through, so the mapping has to come from `map_ptr`.
+
+### libkrun — `patches/libkrun-85bed71-gpu.patch`
+
+One patch for both hosts, because they share the files. The macOS half:
 
 - `resource_map_blob` on macOS called `export_blob` purely as a validity gate
   and required a dmabuf handle, which no macOS blob can ever have. The mapping
@@ -195,6 +207,36 @@ no `resource_map` hook and the transient-dmabuf fallback is Linux-only.
   resources are sized in 4 KiB guest pages. A 132 KiB blob was rejected outright.
   Lengths are now rounded up, symmetrically in `add_mapping` and
   `remove_mapping`.
+
+The Windows half is mostly the same code, reached: upstream gates the whole
+blob-mapping path on `target_os = "macos"` — `map_sender`, the `WorkerMessage`
+variants, the `Vmm::add_mapping` wrappers, `resource_map_blob` and
+`resource_unmap_blob`, and the `AttachContext` that carries the channel — and
+every one of those is about handing the hypervisor a host pointer, not about
+macOS. They now read `any(target_os = "macos", target_os = "windows")`. What
+had to be written rather than widened:
+
+- **`WhpVm::unmap_memory`**, wrapping `WHvUnmapGpaRange`. The `whp` crate had
+  only `map_memory`, so there was no way to replace a blob mapping.
+- **`Vm::add_mapping`/`remove_mapping` on WHP**, the counterparts of the macOS
+  ones. No rounding: WHP asks for 4 KiB, which is what a blob is already sized
+  in, so the host-page arithmetic Apple Silicon needs has no equivalent here.
+- **`needs_worker`** on x86_64 followed `split_irqchip` alone, so the thread the
+  GPU device sends its mappings to never started. This is the same bug the
+  macOS half fixed on aarch64, in the other arm of the same expression.
+- `gpu/worker.rs` cleared `O_NONBLOCK` off the control eventfd with `nix`,
+  which is not a dependency on Windows. It still has to be cleared, though:
+  that `read()` is what parks the worker between kicks, and the Windows
+  `EventFd` keeps its own non-blocking flag, so the loop spun at full tilt
+  logging `WouldBlock`. The flag moved into an `AtomicBool` behind a
+  `set_nonblocking`, which reaches every clone — exactly as `O_NONBLOCK` does,
+  living on the open file description that `dup` shares.
+- `crossbeam-channel` was a `cfg(unix)` dependency of `krun-utils`, which
+  `WorkerMessage` now needs everywhere.
+- The one pre-existing `#[cfg(windows)]` block in the GPU device, in
+  `resource_flush`, matched `RutabagaError::Unsupported` — a variant that does
+  not exist and never did. Unsupported arrives wrapped, as
+  `RutabagaError::MagmaGpuError(RutabagaUnsupported)`.
 
 These two are Rust crates that cargo resolves by path, so their patches cannot
 live in an exported copy the way virglrenderer's does — `scripts/apply-patches.sh`
@@ -343,7 +385,9 @@ git submodule update --init
 sh scripts/apply-patches.sh             # Git Bash; patches the submodules
 sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
 .\scripts\fetch-alpine-rootfs.ps1       # guest rootfs -> data/rootfs/alpine
+.\scripts\build-virglrenderer-windows.ps1   # only for the `gpu` feature
 cargo run --example win_hello
+cargo run --features gpu --example win_gpu   # vulkaninfo over venus
 ```
 
 `cargo run` goes through [`scripts/windows-run.ps1`](scripts/windows-run.ps1),
@@ -400,8 +444,8 @@ path, which `NtCreateFile` rejects in turn.
 
 ### libkrun — `patches/libkrun-85bed71-windows-virtiofs.patch`
 
-Two bugs in the Windows virtio-fs passthrough, both on the path every `execve`
-takes, and both invisible to a CI job that never boots a guest.
+Four bugs in the Windows virtio-fs passthrough, all invisible to a CI job that
+never boots a guest. The first two are on the path every `execve` takes.
 
 - **`read_lx_symlink_by_handle` returned the reparse data from offset 8**, but
   an LX symlink's data opens with a 4-byte version field and the target follows
@@ -414,12 +458,331 @@ takes, and both invisible to a CI job that never boots a guest.
   that attribute itself on every `execve`, and anything other than `ENODATA`
   there fails the exec. The macOS backend hides only its own mode-encoding
   xattr, which is what this now does too.
+- **`symlink()` created a native NT symlink**, through
+  `std::os::windows::fs::symlink_file`. That needs
+  `SeCreateSymbolicLinkPrivilege`, so every guest `symlink(2)` failed with
+  `ERROR_PRIVILEGE_NOT_HELD` unless the VMM ran elevated — `apk add mesa` lost
+  21 files that way, every one of them an `.so.N` — and even with the privilege
+  a native symlink cannot hold `/bin/busybox`, since Windows resolves it
+  against the current drive. It now writes an `IO_REPARSE_TAG_LX_SYMLINK`
+  reparse point: no privilege, target stored verbatim, and the same
+  representation `read_lx_symlink_by_handle` already read and
+  `fetch-alpine-rootfs.ps1` already writes. `write_override_stat` grew a
+  no-follow path with it, because the mode bits of a link belong on the link
+  and nothing on the host can resolve an LX reparse tag — a plain `fs::write`
+  to the stream fails with `ERROR_CANT_ACCESS_FILE`.
+
+- **`rename` moved the file and left every cached inode pointing at the old
+  path.** An inode's stored path is how `getattr`, `open` and `setattr` reach
+  the file, so an inode the guest already held went on naming something that
+  was no longer there: `mv a b` followed by `stat b` answered ENOENT, while
+  `cat b` — which looks the name up afresh — read it fine. `do_lookup` already
+  repairs a path when it sees one, and `InodeData::update_path_if_changed`
+  exists for exactly this, with no caller that makes it happen on a rename.
+  Now the rename updates the moved inode and, for a directory, its whole
+  subtree. `apk` renames every file it unpacks into place, so this is on the
+  path of every package install; `MultikeyBTreeMap` gained a `values()` to
+  walk the subtree with.
+
+`setattr` still follows a symlink when it touches the emulation's streams, so
+`lchown` on one fails and `apk` reports `failed to preserve <file>: owner`.
+Ownership is uniformly root here and the install completes, so it is a wart
+rather than a blocker.
+
+### libkrun — `patches/libkrun-85bed71-windows-vsock.patch`
+
+Three stalls in TSI, all of them credit mistaken for something else, and all of
+them made permanent by the same property of this epoll: it is
+`WSAEventSelect`-backed, so re-arming interest does not re-announce bytes that
+landed while the interest was off.
+
+- **UDP carried nothing, so nothing resolved.** `recv_to_pkt` for datagrams
+  honoured the peer's credit, found none, and answered `WaitForCredit`; the
+  muxer then parked the socket on an empty polling interest and asked the guest
+  for credit that never came, so every DNS reply was dropped rather than merely
+  delayed. The unix side disables UDP credit accounting outright — "until is
+  fixed in the kernel" — and this now does the same. `recv()` on a bound,
+  unconnected UDP socket turned out to be fine on Windows; that was the other
+  suspect.
+- **UDP then failed at random, roughly one lookup in several.** With the credit
+  test gone, the datagram read loop ended the only way it can — `WSAEWOULDBLOCK`
+  from a drained socket — and that was still being reported as `WaitForCredit`.
+  So every *successful* read disarmed the socket and asked for credit, and the
+  next reply arrived to an interest that was off. The unix side answers `Error`
+  for `EWOULDBLOCK`, which stops the loop and leaves the socket armed; this now
+  does too.
+- **TCP stopped for good whenever the guest fell behind.** A stream proxy that
+  runs out of guest credit parks its polling interest and asks for more; when
+  the credit update comes back, `update_peer_credit` re-arms interest — and on
+  Windows that is not enough. This epoll is IOCP-backed and reports only what
+  arrives *after* a registration, so the bytes that stranded the proxy, which
+  arrived while its interest was empty, are never announced, and a sender with
+  nothing left to send never produces another edge. The code knows this: it
+  pulls data directly to "bypass the missed Windows edge-trigger" — but only
+  behind `status == WaitingCreditUpdate && peer_avail_credit() > 0`. A credit
+  update that arrives before the guest has actually freed space fails that
+  test, takes the quiet path, and waits forever. The drain is now
+  unconditional. Symptom: `wget -O - … | tar -xz` onto virtiofs stops about a
+  third of the way through a large file, with the guest still running, every
+  device idle, and nothing in the log but the guest kernel asking for entropy.
 
 There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-The `gpu` feature is macOS-only and untried here.
+### Guest Vulkan
+
+```
+> cargo run --features gpu --example win_gpu
+GPU0:
+        apiVersion   = 1.2.0
+        deviceName   = Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
+        driverID     = DRIVER_ID_MESA_VENUS
+        driverInfo   = Mesa 26.1.6
+```
+
+The guest reaches the host GPU the same way it does on macOS — Mesa's venus
+driver over virtio-gpu, served by virglrenderer — except that virglrenderer
+talks to the native Vulkan driver here rather than to MoltenVK. The 1.2 cap has
+the same cause as on macOS, described above: no sync-fd import, so no
+`KHR_synchronization2`.
+
+Setup is [virglrenderer on Windows](#virglrenderer-on-windows), then the guest
+side once:
+
+```powershell
+cargo run --example win_gpu -- 'apk add --no-cache mesa-vulkan-virtio vulkan-loader vulkan-tools'
+```
+
+`vulkaninfo` only enumerates. `scripts/run-vk-smoke.ps1` compiles
+`guest/vk_smoke.c` inside the VM and runs the same round-trip the POSIX script
+does — create a device, allocate host-visible memory, submit `vkCmdFillBuffer`,
+wait on a fence, read the result back — which is what puts the blob mapping
+above under load:
+
+```
+instance      : 1.4.347
+device        : Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
+device api    : 1.2.0
+queue family  : 0
+memory type   : 2 (16384 bytes)
+fill 4096 words : OK
+```
+
+`scripts/run-ncnn-squeezenet.ps1` is the counterpart of the POSIX script
+described under [Inference on the guest GPU](#inference-on-the-guest-gpu), over
+[`examples/win_inference.rs`](examples/win_inference.rs):
+
+```
+[0 Virtio-GPU Venus (NVIDIA GeForce RTX 5090)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/1
+[0 Virtio-GPU Venus (NVIDIA GeForce RTX 5090)]  fp16-cm=16x16x16/16x8x16/16x8x8  int8-cm=16x16x32/16x8x32  bf16-cm=16x16x16  fp8-cm=16x16x32
+device        : Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
+device api    : 1.2.0
+cpu           : 3.2 ms/iter
+vulkan        : 2.2 ms/iter
+
+top-5 on vulkan:
+   82.47%  n02111889 Samoyed, Samoyede
+    5.36%  n02112018 Pomeranian
+    ...
+
+cpu/vulkan top-1 : match
+max score diff   : 2.80e-03
+```
+
+### The same stack, and the answers the macOS sections could not give
+
+ncnn's probe lines are the two hosts' capabilities side by side, from the same
+Mesa and the same venus:
+
+| | macOS / MoltenVK | Windows / NVIDIA |
+|---|---|---|
+| bf16 storage / arithmetic | `1/0` | `1/1` |
+| cooperative matrix | `fp16-cm=0 int8-cm=0 bf16-cm=0 fp8-cm=0` | `16x16x16` / `16x16x32` / `16x16x16` / `16x16x32` |
+| SqueezeNet, cpu vs vulkan | 1.6 vs 3.7 ms | 3.2 vs 2.2 ms |
+
+So [bfloat16 is not available, and the version is not why](#bfloat16-is-not-available-and-the-version-is-not-why)
+was right about the cause and can now be said plainly: the missing piece was
+MoltenVK, not venus and not the 1.2 cap, which is still 1.2 here for the
+unrelated sync-fd reason. Cooperative matrix arrives with it.
+
+The GPU also stops being the slower of the two. [On the
+timings](#on-the-timings) puts that down to per-dispatch overhead dominating a
+75-layer, 227x227 model rather than to the GPU — same model, same code, and
+here it comes out ahead.
+
+What has not changed is what makes the run worth trusting: ncnn falls back to
+its CPU implementation per layer, silently, for any layer whose Vulkan path is
+missing, so the score difference being 2.80e-03 rather than zero is the
+evidence that the work really happened on the GPU, in fp16.
+
+### A guest command is an argument, and arguments do not survive the trip
+
+`cargo run --example win_gpu -- '<script>'` reaches the binary through
+`powershell -File scripts/windows-run.ps1`, and PowerShell's `-File` argument
+parsing does not carry a multi-line shell script intact. Indented lines vanish
+outright — an `if` body or a function body comes out empty, leaving syntax that
+still parses. A double-quoted run of words loses everything after its first
+space. A backslash line continuation loses every line but the first. `!`
+arrives as `'\!'`. None of it is reported.
+
+Short single-line commands are fine, which is what every example in this README
+passes. Anything longer belongs in a file: `run-ncnn-squeezenet.ps1` writes its
+script into the share the guest already mounts and passes
+`sh /mnt/inference/run.sh`. Write it with LF line endings — `Set-Content` gives
+CRLF, and `sh` takes the carriage return as part of each command.
+
+**The blob mapping is what the design rests on.** Guest Vulkan puts host memory
+in the guest's shm window: venus
+allocates and maps a `VkDeviceMemory` on the host, and the hypervisor aliases
+that pointer into guest physical address space. On macOS that is
+`hv_vm_map`; here it is `WHvMapGpaRange`, which Microsoft documents as taking
+memory in the *calling process's* address space — memory a GPU driver mapped
+need not qualify, and host-visible VRAM behind the PCI BAR least of all.
+
+A standalone probe settled it before any of this was built: a WHP partition, a
+Vulkan allocation, `WHvMapGpaRange` over the pointer, and a real mode vCPU that
+reads two marker bytes back out over an I/O port and writes one of its own —
+because `S_OK` from the mapping call says nothing about what the guest sees at
+that GPA. On an RTX 5090 every case passed:
+
+| | |
+|---|---|
+| `VirtualAlloc`, as a control | pass |
+| `vkMapMemory`, host-visible system RAM | pass |
+| `vkMapMemory`, `DEVICE_LOCAL` — ReBAR | pass |
+| `VK_EXT_external_memory_host`, imported host pointer | pass |
+| `VK_KHR_external_memory_win32`, exported section | pass |
+
+Two of those are worth keeping in mind. ReBAR memory — 32 GiB of host-visible
+`DEVICE_LOCAL` on this card — is coherent through EPT, so blob resources need
+not be confined to system RAM. And an `OPAQUE_WIN32` export is a real section
+object that `MapViewOfFile` accepts, which macOS could not offer: the
+descriptor route stays open here, and `export_blob` need not stay
+`Unsupported` forever.
+
+[`examples/win_gpu.rs`](examples/win_gpu.rs) is `win_hello` plus a TSI vsock,
+and — under `--features gpu` — the virtio-gpu device, the same division of
+labour `macos_gpu` has.
+
+Getting the guest packages in took three of the patches below. Every `.so.N`
+symlink failed to extract, `stat` on a freshly renamed file answered ENOENT,
+and a download into a slow consumer — `apk` unpacking a 190 MiB library while
+still fetching it — stopped dead about a third of the way in.
+
+`bindgen` builds `krun_display` for the `gpu` feature and looks for
+`libclang.dll`, which is not what `clang.exe` on `PATH` provides. Point
+`LIBCLANG_PATH` at an LLVM `bin` directory that has one.
+
+The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
+`CONFIG_DRM_VIRTIO_GPU=y` and `CONFIG_DRM_VIRTIO_GPU_KMS=y`.
+
+### virglrenderer on Windows
+
+```powershell
+.\scripts\build-virglrenderer-windows.ps1
+```
+
+produces `data/virglrenderer/bin/virglrenderer-1.dll`, linked against
+`vulkan-1.dll` and `epoxy-0.dll`, exporting the 48 `virgl_renderer_*` entry
+points — `virgl_renderer_resource_get_map_ptr` among them, which is the one the
+blob mapping above is built on.
+
+Four things decided the shape of that script, and none of them are obvious from
+the symptoms.
+
+**clang-cl, not cl.** This is mesa-derived C, written against GCC builtins,
+function attributes and VLAs. Configure under `cl` answers NO to every
+`cc.has_function` and every `cc.has_function_attribute` in the list, and sets
+`__STDC_NO_VLA__`. clang-cl keeps the MSVC ABI, so the DLL still links with the
+msvc Rust toolchain, and the porting work drops to what is genuinely missing
+rather than what GCC merely spells differently.
+
+**libepoxy is not optional, so it is vendored.** `src/meson.build` does
+`virgl_sources += vrend_sources` with no guard and lists `epoxy_dep` in that
+target's dependencies, so even a venus-only build compiles the GL renderer and
+links epoxy. Upstream has no switch for it. `3rdparty/libepoxy` is pinned to
+1.5.10 and built first; Windows gets the WGL half only, which is why no GL
+winsys backend ends up in virglrenderer.
+
+**Both patches, in order.** `virglrenderer-1.3.0-macos-venus.patch` carries the
+in-process venus context, which any host without the out-of-process render
+server needs — that server is `fork`, `epoll` and seccomp — so Windows needs it
+too, name notwithstanding. `virglrenderer-1.3.0-windows.patch` is cut against a
+tree that already has it.
+
+**`meson` runs from a venv under `data/`.** It needs `pyyaml` for gallium's
+codegen, which is this build's business and not the system Python's. Two traps
+follow from that: meson resolves `python3` off `PATH` — a native-file
+`[binaries] python3` entry does *not* steer the python module — and a Windows
+venv never creates that name, so the script makes one.
+
+### virglrenderer — `patches/virglrenderer-1.3.0-windows.patch`
+
+27 files. Most of it is the POSIX surface venus and vrend assume and Windows
+does not have — `unistd.h`, `sys/mman.h`, `dlfcn.h`, `sys/resource.h`,
+`poll.h`, `close`, `lseek`, `getpagesize`, `strtok_r`, `clock_gettime`,
+`nanosleep` — gathered behind `src/win32_compat.h` and `.c` rather than
+scattered. `src/mman_win32.c` was already in the tree and already added to the
+Windows build; it just had no `getpagesize` and nothing included its header.
+
+Five are worth calling out, because they are wrong answers rather than missing
+ones:
+
+- **`-imacros config.h` is not a flag an MSVC-style driver has**, and neither
+  `cl` nor `clang-cl` errors on it — it is warned about, ignored, and then
+  `config.h` is taken for a source file. The build dies much later, in
+  `u_endian.h`, with both `UTIL_ARCH_*_ENDIAN` unset. `/FI` is the equivalent.
+- **`VIRGL_EXPORT` was `__attribute__((visibility("default")))`**, which means
+  nothing to the MSVC ABI. The library built, linked and installed while
+  exporting not one symbol, and the DLL depended on neither Vulkan nor epoxy,
+  because with nothing exported there was nothing to keep. It is now
+  `__declspec(dllexport)` behind a `VIRGL_RENDERER_BUILD` the build defines.
+- **The `__APPLE__` guards the macOS patch introduced are about blobs, not
+  about Apple.** Twelve of the thirteen mark the path where a host-visible blob
+  is handed over as a mapped host pointer instead of an exportable descriptor,
+  which is exactly what the probe above says Windows should do, so they now
+  read `defined(__APPLE__) || defined(_WIN32)`. The thirteenth is `nanosleep`
+  versus `clock_nanosleep` and stays as it was.
+- **`thrd_current()` is disabled in mesa's C11 threads shim for Windows**, with
+  a comment saying why: `GetCurrentThread()` returns a pseudo-handle that
+  cannot be compared with the handle `thrd_create()` gave out. `vkr_ring_stop`
+  asks "am I the ring thread?" that way, so on Windows it compares thread ids
+  instead.
+- **`struct blit_prog_key` stopped fitting in the `uint64_t` it is hashed as.**
+  The MSVC ABI starts a new allocation unit whenever a bitfield's declared type
+  differs from its predecessor's, and that struct alternates `bool`, `enum` and
+  `uint8_t`: five bytes under the Itanium ABI, fifteen here. The fields keep
+  their order and widths and are now all spelled `uint32_t`.
+
+And one that is a plain bug rather than a portability gap, which only a host
+without dmabufs reaches. `virgl_renderer_resource_map` checks whether the
+context has a `resource_map` hook and, finding none, tries to export a
+transient dmabuf instead — then falls into a `switch` arm that calls the hook
+it just found missing:
+
+```c
+if (!ctx->resource_map) {
+   /* Create a transient dmabuf. */
+   export_fd_type = virgl_resource_export_fd(res, &fd);
+}
+...
+case VIRGL_RESOURCE_OPAQUE_HANDLE:
+   map = ctx->resource_map(ctx, res, NULL, PROT_WRITE | PROT_READ, MAP_SHARED);
+```
+
+When the export cannot be made either — always, here — `export_fd_type` stays
+`OPAQUE_HANDLE` and the null call takes the process with it. macOS never sees
+this because it can still hand back an shm descriptor. Leaving `map` NULL
+instead turns it into the `-EINVAL` the function already returns below, and
+rutabaga falls back to `virgl_renderer_resource_get_map_ptr()`, which is where
+the mapping was always going to come from.
+
+`src/drm/drm-uapi/drm.h` gained a `_WIN32` branch for the same reason its
+`#else` says "one of the BSDs": it reaches for `sys/ioccom.h` to spell ioctl
+numbers. Nothing here issues a DRM ioctl — the header is pulled in for the
+capset enums in `virtgpu_drm.h` — so the branch supplies the typedefs and lets
+the `DRM_IOCTL_*` definitions evaluate to zero.
 
 ## Layout
 
@@ -428,6 +791,7 @@ guest/                      sources compiled and run inside the VM
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
+3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 patches/                    see "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner
 examples/

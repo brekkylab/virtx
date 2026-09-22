@@ -8,11 +8,15 @@
 # therefore carry the patches in their working trees and are marked
 # `ignore = dirty` in .gitmodules.
 #
-# All of them are applied on every host. The Windows one only touches
-# `virtio/fs/windows/`, which no other host compiles, and applying it
+# All of them are applied on every host. The host-specific ones either touch
+# code no other host compiles or are `cfg`-gated to it, and applying them
 # everywhere keeps the submodule in a single canonical state -- so the
 # `apply --check` below reports a stale patch as soon as the submodule moves,
-# rather than on whichever day someone next builds for Windows.
+# rather than on whichever day someone next builds for that host.
+#
+# One patch per file, even where a file needs work for two different hosts:
+# stacking two patches on one file breaks the `apply --reverse --check` above,
+# because the first one's context no longer matches once the second is in.
 #
 # Running this twice is a no-op.
 set -eu
@@ -45,6 +49,7 @@ apply_patch() {
 }
 
 echo "applying patches"
-apply_patch libkrun "$ROOT/patches/libkrun-85bed71-macos-gpu.patch"
+apply_patch libkrun "$ROOT/patches/libkrun-85bed71-gpu.patch"
 apply_patch libkrun "$ROOT/patches/libkrun-85bed71-windows-virtiofs.patch"
-apply_patch rutabaga_gfx "$ROOT/patches/rutabaga_gfx-8cb133e-macos-virgl-renderer.patch"
+apply_patch libkrun "$ROOT/patches/libkrun-85bed71-windows-vsock.patch"
+apply_patch rutabaga_gfx "$ROOT/patches/rutabaga_gfx-8cb133e-virgl-renderer.patch"

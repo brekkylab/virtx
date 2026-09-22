@@ -1,0 +1,118 @@
+diff --git a/src/devices/src/virtio/vsock/tsi_dgram/windows.rs b/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
+index 3922fd26..01a1a269 100644
+--- a/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
++++ b/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
+@@ -94,11 +94,12 @@ pub(crate) fn init_pkt(proxy: &super::TsiDgramProxy, pkt: &mut VsockPacket) {
+ 
+ pub(crate) fn recv_to_pkt(proxy: &super::TsiDgramProxy, pkt: &mut VsockPacket) -> RecvPkt {
+     if let Some(buf) = pkt.buf_mut() {
+-        let peer_credit = proxy.peer_avail_credit();
+-        let max_len = std::cmp::min(buf.len(), peer_credit);
+-        if max_len == 0 {
+-            return RecvPkt::WaitForCredit;
+-        }
++        // UDP credit accounting is disabled here for the same reason it is on
++        // the unix side: the guest kernel never returns credit for a datagram
++        // socket, so honouring it strands every reply. Asking for credit that
++        // will not come also parks the socket on an empty polling interest,
++        // which is why a DNS reply was dropped rather than merely delayed.
++        let max_len = buf.len();
+ 
+         let res = unsafe { recv(sock(proxy), buf.as_mut_ptr() as _, max_len as i32, 0) };
+ 
+@@ -108,11 +109,18 @@ pub(crate) fn recv_to_pkt(proxy: &super::TsiDgramProxy, pkt: &mut VsockPacket) -
+             RecvPkt::Close
+         } else {
+             let err = unsafe { WSAGetLastError() };
+-            if err == WSAEWOULDBLOCK {
+-                RecvPkt::WaitForCredit
+-            } else {
+-                RecvPkt::Error
++            if err != WSAEWOULDBLOCK {
++                debug!("dgram recv error: id={} err={err}", proxy.id);
+             }
++            // WOULDBLOCK means the socket is drained, which is how this loop
++            // ends every time it succeeds -- not that the guest owes us credit.
++            // Reporting it as the latter made the muxer disarm the socket after
++            // each read, and this epoll is WSAEventSelect-backed: re-arming does
++            // not re-announce a datagram that landed while the interest was
++            // off. The reply to the next query then went missing, which is how
++            // a DNS lookup fails at random. The unix side answers `Error` here
++            // for the same reason.
++            RecvPkt::Error
+         }
+     } else {
+         RecvPkt::Error
+diff --git a/src/devices/src/virtio/vsock/tsi_stream/windows.rs b/src/devices/src/virtio/vsock/tsi_stream/windows.rs
+index be3c7dc8..b1e72847 100644
+--- a/src/devices/src/virtio/vsock/tsi_stream/windows.rs
++++ b/src/devices/src/virtio/vsock/tsi_stream/windows.rs
+@@ -287,35 +287,41 @@ pub(crate) fn update_peer_credit(
+     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
+     let mut update = ProxyUpdate::default();
+ 
+-    // If we were deadlocked waiting for credit, and credit is now restored:
+-    if proxy.status == ProxyStatus::WaitingCreditUpdate && proxy.peer_avail_credit() > 0 {
+-        proxy.status = ProxyStatus::Connected;
++    // Re-arming interest is not enough here, whatever the credit update says.
++    // This epoll is IOCP-backed and reports only what arrives *after* a
++    // registration, and the bytes that stranded this proxy arrived while its
++    // interest was empty -- so the edge that would deliver them is already
++    // gone, and a sender with nothing left to send will never produce another.
++    // Pull once, unconditionally.
++    //
++    // Both branches used to be here, but the drain sat behind
++    // `status == WaitingCreditUpdate && peer_avail_credit() > 0`. A credit
++    // update that arrives before the guest has actually freed space fails that
++    // test, takes the quiet path, re-arms, and waits forever: a download into a
++    // slow consumer -- `wget | tar -xz` onto virtiofs -- stops dead, with the
++    // guest still running and every device idle.
++    proxy.status = ProxyStatus::Connected;
+ 
+-        // Proactively pull data to bypass the missed Windows edge-trigger
+-        let (signal_queue, wait_credit) = proxy.recv_pkt();
+-        update.signal_queue = signal_queue;
+-
+-        if wait_credit {
+-            // We immediately ran out of credit again. Suspend again and ask for more.
+-            proxy.status = ProxyStatus::WaitingCreditUpdate;
+-            let rx = MuxerRx::CreditRequest {
+-                local_port: proxy.local_port,
+-                peer_port: proxy.peer_port,
+-                fwd_cnt: proxy.tx_cnt.0,
+-            };
+-            update.push_credit_req = Some(rx);
+-            update.polling = Some((
+-                proxy.id,
+-                proxy.fd.as_raw_socket() as RawFd,
+-                EventSet::empty(),
+-            ));
+-        } else {
+-            // Successfully drained, safe to listen for the next edge
+-            update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
+-        }
++    let (signal_queue, wait_credit) = proxy.recv_pkt();
++    update.signal_queue = signal_queue;
++
++    if wait_credit {
++        // Still nothing to write into. Park again and ask for more; the next
++        // update comes back through here and pulls again.
++        proxy.status = ProxyStatus::WaitingCreditUpdate;
++        let rx = MuxerRx::CreditRequest {
++            local_port: proxy.local_port,
++            peer_port: proxy.peer_port,
++            fwd_cnt: proxy.tx_cnt.0,
++        };
++        update.push_credit_req = Some(rx);
++        update.polling = Some((
++            proxy.id,
++            proxy.fd.as_raw_socket() as RawFd,
++            EventSet::empty(),
++        ));
+     } else {
+-        // Normal update (wasn't suspended)
+-        proxy.status = ProxyStatus::Connected;
++        // Drained, so the next edge is one this registration will see.
+         update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
+     }
+ 

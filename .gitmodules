@@ -13,3 +13,8 @@
 	# path, so the patch cannot live in an exported copy.
 	ignore = dirty
 	url = https://github.com/magma-gpu/rutabaga_gfx.git
+[submodule "3rdparty/libepoxy"]
+	path = 3rdparty/libepoxy
+	# Built by scripts/build-virglrenderer-windows.ps1 only: virglrenderer
+	# requires epoxy unconditionally, and Windows has no package manager here.
+	url = https://github.com/anholt/libepoxy.git

@@ -9,10 +9,10 @@ use super::{Cache, Digest, Error, Image, ImageConfig, ImageManifest, Layer, Resu
 /// What a single-platform manifest may be served as.
 const MANIFEST_MEDIA_TYPES: &[&str] = &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE];
 
-/// Remote registry that the OCI registry an image is pulled from.
+/// The remote OCI registry an image is pulled from.
 ///
 /// Always resolves the **linux** image for the host's architecture, never the host's own
-/// platform -- the thing that runs the image is the guest, and the guest is Linux even on
+/// platform. The thing that runs the image is the guest, and the guest is Linux even on
 /// a Mac or on Windows.
 ///
 /// Downloads only. Nothing is unpacked or converted here.
@@ -40,12 +40,10 @@ impl Registry {
         self
     }
 
-    /// What `reference` points at now, for deciding whether a tag has moved or what a
-    /// pull would cost. Downloads the manifest and nothing else.
+    /// Fetches the manifest for `reference` and the digest that names it.
     ///
-    /// The digest is the platform manifest's -- what [`Cache::resolved`] holds, and so
-    /// what it can be compared against. An index has a digest of its own, different for
-    /// every multi-platform image, and it is not this one.
+    /// The digest is the platform manifest's and not the index's, and only that one
+    /// matches what the cache records.
     pub async fn resolve(&self, reference: impl AsRef<str>) -> Result<(ImageManifest, Digest)> {
         let reference = reference.as_ref();
         let parsed = parse(reference)?;
@@ -80,8 +78,8 @@ impl Registry {
         cache.put(config.as_bytes())?;
 
         for descriptor in &manifest.layers {
-            // The compressed blob, which is what a registry serves and verifies. It is not
-            // on `Layer`: nothing outside this loop has any use for it.
+            // The compressed blob, which is what a registry serves and verifies. It is
+            // not on `Layer`, because nothing outside this loop has any use for it.
             let blob = Digest::parse(&descriptor.digest)?;
             if cache.has(&blob) {
                 continue;
@@ -106,8 +104,9 @@ impl Registry {
             cache.commit(&staged, &blob)?;
         }
 
-        // Fetched again rather than re-serialised from `manifest`: a manifest digest is
-        // over exact bytes, and JSON that has been through a struct is no longer them.
+        // Fetched again rather than re-serialised from `manifest`, because a manifest
+        // digest is over exact bytes and JSON that has been through a struct is no
+        // longer them.
         // Pinned to the resolved digest so a multi-platform reference does not come back
         // as its index.
         let pinned = parsed.clone_with_digest(image.manifest.to_string());
@@ -120,6 +119,7 @@ impl Registry {
                 source: Box::new(e),
             })?;
 
+        let size = raw.len() as u64;
         let stored = cache.put(&raw)?;
         if stored != image.manifest {
             return Err(Error::Manifest(
@@ -132,9 +132,18 @@ impl Registry {
         }
 
         // Last, so the memo never names an image whose layers did not all arrive. A
-        // digest reference is skipped: it already names its own answer.
+        // digest reference is skipped, since it already names its own answer.
         if parsed.digest().is_none() {
-            cache.remember(&parsed, &image.manifest)?;
+            cache.register_reference(
+                &parsed,
+                &image.manifest,
+                manifest
+                    .media_type
+                    .as_deref()
+                    .unwrap_or(OCI_IMAGE_MEDIA_TYPE),
+                size,
+                Some(&image.platform),
+            )?;
         }
 
         Ok(image)
@@ -171,7 +180,7 @@ fn host_architecture() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
         "x86_64" => "amd64",
-        // Not a host libkrun runs on; passing the name through keeps the error honest.
+        // Not a host libkrun runs on. Passing the name through keeps the error honest.
         other => other,
     }
 }

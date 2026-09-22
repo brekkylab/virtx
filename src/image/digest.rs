@@ -23,7 +23,7 @@ impl Digest {
         }
     }
 
-    /// Read a digest, checking the algorithm and the hex -- a digest is used as a file
+    /// Read a digest, checking the algorithm and the hex. A digest is used as a file
     /// name, so one that is not what it claims would name a real-looking blob.
     pub fn parse(text: impl AsRef<str>) -> Result<Digest, Error> {
         let text = text.as_ref();

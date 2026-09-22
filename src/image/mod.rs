@@ -1,8 +1,8 @@
-//! OCI images: pulling them from a registry, keeping them on this machine.
+//! OCI images, pulled from a registry and kept on this machine.
 //!
 //! [`Registry`] is the remote side, [`Cache`] the local one. A pull leaves the
-//! registry's own bytes in the cache -- compressed layer tarballs, config, manifest --
-//! and nothing is unpacked. Turning those into something a guest can mount is a
+//! registry's own bytes in the cache, being the compressed layer tarballs, the config
+//! and the manifest, and nothing is unpacked. Turning those into something a guest can mount is a
 //! separate step.
 
 mod cache;
@@ -19,16 +19,16 @@ pub use registry::Registry;
 /// One layer of an image.
 #[derive(Clone, Debug)]
 pub struct Layer {
-    /// Digest of the layer uncompressed -- `diff_id` in the OCI config. Names what the
-    /// layer contains, whatever a registry happened to compress it with.
+    /// Digest of the layer uncompressed, called `diff_id` in the OCI config. Names what
+    /// the layer contains, whatever a registry happened to compress it with.
     pub digest: Digest,
 }
 
-/// How an image is named: a registry, a repository, and a tag or a digest.
+/// How an image is named, being a registry, a repository, and a tag or a digest.
 ///
 /// Re-exported for the same reason as [`ImageManifest`]. Its `Display` is the canonical
-/// spelling -- `alpine:3.21` and `docker.io/library/alpine:3.21` print the same -- which
-/// is what makes it, and not a string, what the cache is keyed by.
+/// spelling, so that `alpine:3.21` and `docker.io/library/alpine:3.21` print the same.
+/// That is what makes it, and not a string, what the cache is keyed by.
 pub use oci_client::Reference;
 
 #[derive(Debug, thiserror::Error)]

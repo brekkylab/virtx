@@ -372,6 +372,27 @@ would need the bug fixed upstream.
 - **Docker**, in Linux-container mode, to build `libkrunfw.dll`.
 - **WSL**, to unpack the rootfs. Both reasons are below.
 
+For the `gpu` feature, additionally:
+
+- The **Vulkan SDK**, and `LIBCLANG_PATH` pointing at a directory holding
+  `libclang.dll`. `bindgen` builds `krun_display` and needs that DLL; having
+  `clang.exe` on `PATH` is not enough, even though an LLVM install keeps both
+  in the same directory — `clang-sys` does not look there. Without it the
+  build stops at `krun-display` with `Unable to find libclang`.
+
+  ```powershell
+  $env:LIBCLANG_PATH = 'C:\path\to\llvm\bin'
+  ```
+
+  Set it once per machine in `%USERPROFILE%\.cargo\config.toml` to be done with
+  it, since the path is machine-specific and this repo's `.cargo/config.toml`
+  is tracked:
+
+  ```toml
+  [env]
+  LIBCLANG_PATH = 'C:\path\to\llvm\bin'
+  ```
+
 One host setting is worth checking before anything else: **Smart App Control**
 blocks unsigned executables, which is every build script cargo compiles and
 every binary it produces. With it on, `cargo build` fails with `os error 4551`
@@ -669,10 +690,6 @@ Getting the guest packages in took three of the patches below. Every `.so.N`
 symlink failed to extract, `stat` on a freshly renamed file answered ENOENT,
 and a download into a slow consumer — `apk` unpacking a 190 MiB library while
 still fetching it — stopped dead about a third of the way in.
-
-`bindgen` builds `krun_display` for the `gpu` feature and looks for
-`libclang.dll`, which is not what `clang.exe` on `PATH` provides. Point
-`LIBCLANG_PATH` at an LLVM `bin` directory that has one.
 
 The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 `CONFIG_DRM_VIRTIO_GPU=y` and `CONFIG_DRM_VIRTIO_GPU_KMS=y`.

@@ -31,6 +31,24 @@ krun_init = { path = "3rdparty/libkrun/init/init-blob", package = "krun-init-blo
 # Needed to hand libkrun a display backend for the virtio-gpu device.
 krun_display = { path = "3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
+# The registry side of the OCI distribution spec: reference parsing, token
+# auth, manifest negotiation and blob downloads. `native-tls` rather than the
+# default `rustls-tls`, which drags in aws-lc-sys and therefore cmake and a C
+# toolchain -- on Windows that is a build this repo does not want to own. With
+# native-tls, TLS is Schannel on Windows and Security.framework on macOS.
+oci-client = { version = "0.18", default-features = false, features = [
+    "native-tls",
+] }
+
+# oci-client is async and its blob downloads write into an `AsyncWrite`.
+tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "macros"] }
+
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
 # rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
 # 2026-09-02) and routes macOS to a stub backend that panics at runtime.
 # Track the repo until a release carries it.

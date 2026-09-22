@@ -40,7 +40,7 @@ git submodule update --init
 ## Running
 
 ```sh
-cargo run --example hello               # boots a microVM, runs a command in it
+cargo run --example macos_hello                      # boots a microVM, runs a command in it
 cargo run --example macos_gpu -- 'uname -a'          # adds TSI networking
 cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
 ./scripts/run-ncnn-squeezenet.sh                     # a CNN on the guest GPU
@@ -344,7 +344,7 @@ clang cross-linker for the guest init.
 The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
 `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
 [`examples/win_hello.rs`](examples/win_hello.rs) differs from
-[`examples/hello.rs`](examples/hello.rs) by little more than `AsFd` →
+[`examples/macos_hello.rs`](examples/macos_hello.rs) by little more than `AsFd` →
 `AsHandle`.
 
 It also hands the console no stdin. libkrun's Windows console parks its input

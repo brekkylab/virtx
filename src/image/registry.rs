@@ -9,13 +9,13 @@ use super::{Cache, Digest, Error, Image, ImageConfig, ImageManifest, Layer, Resu
 /// What a single-platform manifest may be served as.
 const MANIFEST_MEDIA_TYPES: &[&str] = &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE];
 
-/// The remote OCI registry an image is pulled from.
+/// A handle to a remote OCI registry to pull images from.
 ///
-/// Always resolves the **linux** image for the host's architecture, never the host's own
-/// platform. The thing that runs the image is the guest, and the guest is Linux even on
-/// a Mac or on Windows.
-///
-/// Downloads only. Nothing is unpacked or converted here.
+/// A few constraints apply:
+/// - Always resolves a **linux** image, whatever the host platform is. Only the
+///   architecture follows the host, because the guest that runs the image is Linux even
+///   on a Mac or on Windows.
+/// - Downloads image only.
 pub struct Registry {
     client: Client,
     auth: RegistryAuth,

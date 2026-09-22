@@ -1,0 +1,2692 @@
+diff --git a/bindings/libkrun-via-cdylib-weak/ffier-krun.json b/bindings/libkrun-via-cdylib-weak/ffier-krun.json
+index fa56d80..776553f 100644
+--- a/bindings/libkrun-via-cdylib-weak/ffier-krun.json
++++ b/bindings/libkrun-via-cdylib-weak/ffier-krun.json
+@@ -823,7 +823,8 @@
+           },
+           "ffi_name": "krun_console_builder_add_default_console"
+         }
+-      ]
++      ],
++      "cfg": "not(target_os = \"windows\")"
+     },
+     {
+       "name": "FsOverlay",
+@@ -1405,7 +1406,7 @@
+             "c_convention": "out_param"
+           },
+           "ffi_name": "krun_vmm_builder_add_serial_console",
+-          "cfg": "unix"
++          "cfg": "not(target_os = \"windows\")"
+         },
+         {
+           "name": "nested_virt",
+diff --git a/init/init-blob/build.rs b/init/init-blob/build.rs
+index 4cdce04..b56a0c0 100644
+--- a/init/init-blob/build.rs
++++ b/init/init-blob/build.rs
+@@ -122,13 +122,15 @@ fn build_rust_init() -> PathBuf {
+         // the per-target env vars take effect.
+         cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
+ 
+-        if cfg!(target_os = "macos") {
++        if cfg!(any(target_os = "macos", target_os = "windows")) {
+             let target_env_key = musl_target.to_uppercase().replace('-', "_");
+             let linker_triple = musl_target.replace("-unknown", "").replace("-musl", "-gnu");
+-            cmd.env(
+-                format!("CARGO_TARGET_{target_env_key}_LINKER"),
+-                "/usr/bin/clang",
+-            );
++            let linker = if cfg!(target_os = "windows") {
++                "clang"
++            } else {
++                "/usr/bin/clang"
++            };
++            cmd.env(format!("CARGO_TARGET_{target_env_key}_LINKER"), linker);
+             cmd.env(
+                 format!("CARGO_TARGET_{target_env_key}_RUSTFLAGS"),
+                 format!(
+diff --git a/src/arch/src/x86_64/layout.rs b/src/arch/src/x86_64/layout.rs
+index 4f5bbd8..ffc7175 100644
+--- a/src/arch/src/x86_64/layout.rs
++++ b/src/arch/src/x86_64/layout.rs
+@@ -70,12 +70,6 @@ pub const RESET_VECTOR: u64 = 0xfff0;
+ pub const RESET_VECTOR: u64 = 0xffff_fff0;
+ pub const RESET_VECTOR_SEV_AP: u64 = 0xfff3;
+ 
+-/// Address of the AP idle trampoline (`cli; hlt; jmp` loop) used during
+-/// SMP boot on WHP. APs park here in real mode until the BSP sends
+-/// INIT + SIPI through the emulated local APIC.
+-#[cfg(target_os = "windows")]
+-pub const AP_TRAMPOLINE_START: u64 = 0x1000;
+-
+ /// The address to load the firmware, if present.
+ pub const FIRMWARE_START: u64 = 0xffff_0000;
+ 
+diff --git a/src/arch/src/x86_64/windows/regs.rs b/src/arch/src/x86_64/windows/regs.rs
+index fbeb084..9f9c5cc 100644
+--- a/src/arch/src/x86_64/windows/regs.rs
++++ b/src/arch/src/x86_64/windows/regs.rs
+@@ -4,9 +4,7 @@
+ use vm_memory::GuestMemoryMmap;
+ 
+ use super::super::gdt::SegmentDescriptor;
+-use super::super::layout::{
+-    AP_TRAMPOLINE_START, BOOT_STACK_POINTER, RESET_VECTOR_SEV_AP, ZERO_PAGE_START,
+-};
++use super::super::layout::{BOOT_STACK_POINTER, ZERO_PAGE_START};
+ use super::super::regs::{
+     EFER_LMA, EFER_LME, Error, X86_CR0_PE, compute_page_tables, compute_segments,
+ };
+@@ -21,28 +19,14 @@ type Result<T> = std::result::Result<T, Error>;
+ /// * `vcpu` - Structure for the VCPU that holds the WHP VCPU.
+ /// * `boot_ip` - Starting instruction pointer.
+ pub fn setup_regs(vcpu: &whp::WhpVcpu, boot_ip: u64) -> Result<()> {
+-    if vcpu.index() == 0 {
+-        vcpu.set_registers64([
+-            (WHvX64RegisterRflags, 0x0000_0000_0000_0002u64),
+-            (WHvX64RegisterRip, boot_ip),
+-            (WHvX64RegisterRsp, BOOT_STACK_POINTER),
+-            (WHvX64RegisterRbp, BOOT_STACK_POINTER),
+-            (WHvX64RegisterRsi, ZERO_PAGE_START),
+-        ])
+-        .map_err(Error::SetWhpRegisters)
+-    } else {
+-        let rip = if cfg!(feature = "tee") {
+-            RESET_VECTOR_SEV_AP
+-        } else {
+-            AP_TRAMPOLINE_START
+-        };
+-
+-        vcpu.set_registers64([
+-            (WHvX64RegisterRflags, 0x0000_0000_0000_0002u64),
+-            (WHvX64RegisterRip, rip),
+-        ])
+-        .map_err(Error::SetWhpRegisters)
+-    }
++    vcpu.set_registers64([
++        (WHvX64RegisterRflags, 0x0000_0000_0000_0002u64),
++        (WHvX64RegisterRip, boot_ip),
++        (WHvX64RegisterRsp, BOOT_STACK_POINTER),
++        (WHvX64RegisterRbp, BOOT_STACK_POINTER),
++        (WHvX64RegisterRsi, ZERO_PAGE_START),
++    ])
++    .map_err(Error::SetWhpRegisters)
+ }
+ 
+ /// Configures the segment registers and system page tables for a given CPU.
+@@ -52,13 +36,6 @@ pub fn setup_regs(vcpu: &whp::WhpVcpu, boot_ip: u64) -> Result<()> {
+ /// * `mem` - The memory that will be passed to the guest.
+ /// * `vcpu` - Structure for the VCPU that holds the WHP VCPU.
+ pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &whp::WhpVcpu) -> Result<()> {
+-    if vcpu.index() != 0 {
+-        if cfg!(feature = "tee") {
+-            return Ok(());
+-        }
+-        return setup_ap_segments(vcpu);
+-    }
+-
+     let segs = compute_segments(mem, false)?;
+     let pt = compute_page_tables(mem)?;
+ 
+@@ -114,20 +91,6 @@ pub fn setup_sregs(mem: &GuestMemoryMmap, vcpu: &whp::WhpVcpu) -> Result<()> {
+     .map_err(Error::SetWhpRegisters)
+ }
+ 
+-/// Reset CS.base to 0 for an AP vCPU so that RIP addresses land in low
+-/// memory rather than at the default reset CS.base of 0xFFFF_0000.
+-/// All other segment registers and control registers stay at their
+-/// power-on defaults (real mode).
+-fn setup_ap_segments(vcpu: &whp::WhpVcpu) -> Result<()> {
+-    let [mut value] = vcpu
+-        .get_registers([WHvX64RegisterCs])
+-        .map_err(Error::GetWhpRegisters)?;
+-    value.Segment.Base = 0;
+-    value.Segment.Selector = 0;
+-    vcpu.set_registers([(WHvX64RegisterCs, value)])
+-        .map_err(Error::SetWhpRegisters)
+-}
+-
+ #[cfg(test)]
+ mod tests {
+     use super::super::super::regs::{BOOT_GDT_OFFSET, BOOT_IDT_OFFSET, X86_CR0_PG, X86_CR4_PAE};
+@@ -183,24 +146,16 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_setup_regs_ap() {
++    fn test_ap_starts_suspended() {
+         let vm = Arc::new(WhpVm::new(2).unwrap());
+         let _bsp = WhpVcpu::new(vm.clone(), 0).unwrap();
+         let ap = WhpVcpu::new(vm.clone(), 1).unwrap();
+ 
+-        setup_regs(&ap, 0).unwrap();
+-
+-        let [rflags, rip] = ap
+-            .get_registers64([WHvX64RegisterRflags, WHvX64RegisterRip])
++        let [activity] = ap
++            .get_registers64([WHvRegisterInternalActivityState])
+             .unwrap();
+ 
+-        assert_eq!(rflags & 0x2, 0x2);
+-        let expected_rip = if cfg!(feature = "tee") {
+-            RESET_VECTOR_SEV_AP
+-        } else {
+-            AP_TRAMPOLINE_START
+-        };
+-        assert_eq!(rip, expected_rip);
++        assert_eq!(activity & 1, 1);
+     }
+ 
+     #[test]
+@@ -247,18 +202,4 @@ mod tests {
+             assert_eq!((i << 21) + 0x83, read_u64(0xb000 + (i * 8)));
+         }
+     }
+-
+-    #[test]
+-    fn test_setup_ap_segments() {
+-        let vm = Arc::new(WhpVm::new(2).unwrap());
+-        let _bsp = WhpVcpu::new(vm.clone(), 0).unwrap();
+-        let ap = WhpVcpu::new(vm.clone(), 1).unwrap();
+-
+-        setup_ap_segments(&ap).unwrap();
+-
+-        let [cs_val] = ap.get_registers([WHvX64RegisterCs]).unwrap();
+-        let cs = unsafe { cs_val.Segment };
+-        assert_eq!(cs.Base, 0);
+-        assert_eq!(cs.Selector, 0);
+-    }
+ }
+diff --git a/src/cpuid/src/lib.rs b/src/cpuid/src/lib.rs
+index 32e7a5e..df12ef7 100644
+--- a/src/cpuid/src/lib.rs
++++ b/src/cpuid/src/lib.rs
+@@ -8,7 +8,7 @@
+ #![deny(missing_docs)]
+ //! Utility for configuring the CPUID (CPU identification) for the guest microVM.
+ 
+-#![cfg(target_arch = "x86_64")]
++#![cfg(all(target_arch = "x86_64", target_os = "linux"))]
+ 
+ use kvm_bindings::CpuId;
+ 
+diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
+index 9a0946f..7d52362 100644
+--- a/src/libkrun/Cargo.toml
++++ b/src/libkrun/Cargo.toml
+@@ -28,13 +28,13 @@ bitflags = "2.10.0"
+ crossbeam-channel = ">=0.5.15"
+ env_logger = "0.11"
+ flate2 = "1.0.35"
+-ffier = { git = "https://github.com/mtjhrc/ffier.git", tag = "0.2.0rc1", optional = true }
+-ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", tag = "0.2.0rc1", optional = true }
++ffier = { git = "https://github.com/mtjhrc/ffier.git", tag = "v0.2.0-rc2", optional = true }
++ffier-builtins = { git = "https://github.com/mtjhrc/ffier.git", tag = "v0.2.0-rc2", optional = true }
+ iocuddle = { version = "0.1.1", optional = true }
+ kbs-types = { version = "0.13.0", optional = true }
+ libc = ">=0.2.39"
+ libloading = "0.8"
+-linux-loader = { version = "0.14.0", features = ["bzimage", "elf", "pe"] }
++
+ log = "0.4.0"
+ once_cell = "1.4.1"
+ serde = { version = "1.0.125", optional = true }
+@@ -58,6 +58,7 @@ cpuid = { package = "krun-cpuid", version = "=0.1.0-2.0.0-dev", path = "../cpuid
+ zstd = "0.13"
+ 
+ [target.'cfg(unix)'.dependencies]
++linux-loader = { version = "0.14.0", features = ["bzimage", "elf", "pe"] }
+ nix = { version = "0.30.1", features = ["fs", "term"] }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
+@@ -71,6 +72,7 @@ nitro-enclaves = { version = "0.5.0", optional = true }
+ tdx = { version = "0.1.2", optional = true }
+ 
+ [target.'cfg(target_os = "windows")'.dependencies]
++whp = { package = "krun-whp", version = "=0.1.0-2.0.0-dev", path = "../whp" }
+ windows-sys = { version = "0.61.2", features = [
+     "Win32_Foundation",
+     "Win32_System_Console",
+@@ -81,4 +83,4 @@ devices = { package = "krun-devices", version = "=0.1.0-2.0.0-dev", path = "../d
+ 
+ [lib]
+ name = "krun"
+-crate-type = ["cdylib", "lib"]
++crate-type = ["cdylib", "lib"]
+\ No newline at end of file
+diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
+index ca2b296..f744738 100644
+--- a/src/libkrun/src/api/device_builders.rs
++++ b/src/libkrun/src/api/device_builders.rs
+@@ -3,11 +3,16 @@ use std::collections::HashMap;
+ use std::ffi::CString;
+ use std::io::IsTerminal;
+ use std::marker::PhantomData;
+-#[cfg(feature = "net")]
++#[cfg(all(feature = "net", not(target_os = "windows")))]
+ use std::os::fd::OwnedFd;
+ #[cfg(target_os = "linux")]
+ use std::os::fd::RawFd;
++#[cfg(not(target_os = "windows"))]
+ use std::os::fd::{AsRawFd, BorrowedFd};
++#[cfg(windows)]
++use std::os::windows::io::{AsRawHandle, BorrowedHandle};
++#[cfg(target_os = "windows")]
++use std::os::windows::io::{AsRawSocket, OwnedHandle};
+ use std::path::PathBuf;
+ use std::sync::atomic::AtomicI32;
+ use std::sync::{Arc, Mutex};
+@@ -187,10 +192,16 @@ impl<'a> AttachContext<'a> {
+ 
+     /// Set up terminal raw mode for the given fd, registering a cleanup
+     /// observer to restore the terminal on VM shutdown.
++    #[cfg(not(target_os = "windows"))]
+     pub fn setup_terminal_raw_mode(&mut self, fd: BorrowedFd<'_>) {
+         setup_terminal_raw_mode(self.vmm, Some(fd), false);
+     }
+ 
++    #[cfg(windows)]
++    pub fn setup_terminal_raw_mode(&mut self, handle: BorrowedHandle<'_>) {
++        setup_terminal_raw_mode(self.vmm, Some(handle), false);
++    }
++
+     /// Get the macOS memory mapping channel sender, if available.
+     /// Used by GPU and Fs devices for DAX memory mapping on macOS.
+     #[cfg(target_os = "macos")]
+@@ -575,22 +586,38 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
+ ///
+ /// Use [`ConsoleDevice::builder`] to configure ports, then
+ /// [`ConsoleBuilder::build`] to finalize.
++#[cfg(not(target_os = "windows"))]
+ pub struct ConsoleDevice<'a> {
+     pub(crate) ports: Vec<PortDescription>,
+     pub(crate) tty_fds: Vec<BorrowedFd<'static>>,
+     _lifetime: PhantomData<&'a ()>,
+ }
+ 
++#[cfg(target_os = "windows")]
++pub struct ConsoleDevice<'a> {
++    pub(crate) ports: Vec<PortDescription>,
++    pub(crate) tty_fds: Vec<BorrowedHandle<'static>>,
++    _lifetime: PhantomData<&'a ()>,
++}
++
+ /// Builder for configuring a [`ConsoleDevice`].
+ ///
+ /// Add one or more ports with [`add_tty_port`](ConsoleBuilder::add_tty_port),
+ /// then call [`build`](ConsoleBuilder::build) to create the device.
++#[cfg(not(target_os = "windows"))]
+ pub struct ConsoleBuilder<'a> {
+     ports: Vec<PortDescription>,
+     tty_fds: Vec<BorrowedFd<'static>>,
+     _lifetime: PhantomData<&'a ()>,
+ }
+ 
++#[cfg(target_os = "windows")]
++pub struct ConsoleBuilder<'a> {
++    ports: Vec<PortDescription>,
++    tty_fds: Vec<BorrowedHandle<'static>>,
++    _lifetime: PhantomData<&'a ()>,
++}
++
+ #[cfg_attr(feature = "ffi", ffier::export)]
+ impl<'a> ConsoleDevice<'a> {
+     /// Create a new console builder.
+@@ -603,7 +630,9 @@ impl<'a> ConsoleDevice<'a> {
+     }
+ }
+ 
+-#[cfg_attr(feature = "ffi", ffier::export)]
++#[cfg_attr(feature = "ffi", ffier::export(cfg = "not(target_os = \"windows\")"))]
++#[cfg_attr(not(feature = "ffi"), cfg(not(target_os = "windows")))]
++#[cfg(not(target_os = "windows"))]
+ impl<'a> ConsoleBuilder<'a> {
+     /// Add a TTY-backed port to the console.
+     ///
+@@ -774,6 +803,155 @@ impl<'a> ConsoleBuilder<'a> {
+     }
+ }
+ 
++#[cfg(target_os = "windows")]
++#[cfg_attr(feature = "ffi", ffier::export(cfg = "target_os = \"windows\""))]
++#[cfg_attr(not(feature = "ffi"), cfg(target_os = "windows"))]
++impl<'a> ConsoleBuilder<'a> {
++    pub fn add_tty_port(
++        &mut self,
++        name: &str,
++        tty_fd: BorrowedHandle<'a>,
++    ) -> Result<u32, VmmError> {
++        let index = self.ports.len() as u32;
++        self.add_tty_port_inner(name, tty_fd)?;
++        Ok(index)
++    }
++
++    pub fn add_inout_port(
++        &mut self,
++        name: &str,
++        input_fd: Option<BorrowedHandle<'a>>,
++        output_fd: Option<BorrowedHandle<'a>>,
++    ) -> Result<u32, VmmError> {
++        let index = self.ports.len() as u32;
++        let input = input_fd
++            .map(|fd| {
++                port_io::input_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
++                    log::error!("dup input fd: {e}");
++                    VmmError::BadFd()
++                })
++            })
++            .transpose()?;
++        let output = output_fd
++            .map(|fd| {
++                port_io::output_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
++                    log::error!("dup output fd: {e}");
++                    VmmError::BadFd()
++                })
++            })
++            .transpose()?;
++        self.ports.push(PortDescription {
++            name: name.to_string().into(),
++            input,
++            output,
++            terminal: None,
++        });
++        Ok(index)
++    }
++
++    /// Build the console device. At least one port must have been added.
++    pub fn build(self) -> Result<ConsoleDevice<'a>, VmmError> {
++        if self.ports.is_empty() {
++            return Err(VmmError::MissingConfig("no ports added to console".into()));
++        }
++        Ok(ConsoleDevice {
++            ports: self.ports,
++            tty_fds: self.tty_fds,
++            _lifetime: PhantomData,
++        })
++    }
++
++    pub fn add_default_console(
++        &mut self,
++        stdin: Option<BorrowedHandle<'a>>,
++        stdout: Option<BorrowedHandle<'a>>,
++        stderr: Option<BorrowedHandle<'a>>,
++    ) -> Result<(), VmmError> {
++        let stdin_is_tty = stdin.as_ref().is_some_and(|fd| fd.is_terminal());
++        let stdout_is_tty = stdout.as_ref().is_some_and(|fd| fd.is_terminal());
++        let stderr_is_tty = stderr.as_ref().is_some_and(|fd| fd.is_terminal());
++
++        let term_handle = if stdin_is_tty {
++            stdin
++        } else if stdout_is_tty {
++            stdout
++        } else if stderr_is_tty {
++            stderr
++        } else {
++            None
++        };
++
++        let console_input = if stdin_is_tty {
++            if let Some(ref fd) = stdin {
++                Some(
++                    port_io::input_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
++                        log::error!("dup input fd: {e}");
++                        VmmError::BadFd()
++                    })?,
++                )
++            } else {
++                None
++            }
++        } else {
++            None
++        };
++
++        let console_output = if stdout_is_tty {
++            if let Some(ref fd) = stdout {
++                Some(
++                    port_io::output_to_handle_dup(fd.as_raw_handle()).map_err(|e| {
++                        log::error!("dup output fd: {e}");
++                        VmmError::BadFd()
++                    })?,
++                )
++            } else {
++                Some(port_io::output_to_log_as_err())
++            }
++        } else {
++            Some(port_io::output_to_log_as_err())
++        };
++
++        let terminal: Option<Box<dyn devices::virtio::port_io::PortTerminalProperties>> =
++            if let Some(tfd) = term_handle {
++                // SAFETY: The caller guarantees via `'a` that the borrowed file descriptor outlasts
++                // the console device and VMM. Currently, the VMM runs until process termination via `_exit()`,
++                // so the host file descriptor is valid for the remainder of the process.
++                // TODO: remove this transmute once we get proper support for stopping the VMM instead of _exit().
++                let static_fd = unsafe {
++                    std::mem::transmute::<BorrowedHandle<'a>, BorrowedHandle<'static>>(tfd)
++                };
++                self.tty_fds.push(static_fd);
++                Some(port_io::term_handle(tfd.as_raw_handle()).map_err(|e| {
++                    log::error!("term fd: {e}");
++                    VmmError::BadFd()
++                })?)
++            } else {
++                Some(port_io::term_fixed_size(0, 0))
++            };
++
++        // Port 0: default console (hvc0)
++        self.ports.push(PortDescription {
++            name: "".into(),
++            input: console_input,
++            output: console_output,
++            terminal,
++        });
++
++        // Named redirect ports for non-terminal fds
++        if stdin.is_some() && !stdin_is_tty {
++            self.add_inout_port("krun-stdin", stdin, None)?;
++        }
++        if stdout.is_some() && !stdout_is_tty {
++            self.add_inout_port("krun-stdout", None, stdout)?;
++        }
++        if stderr.is_some() && !stderr_is_tty {
++            self.add_inout_port("krun-stderr", None, stderr)?;
++        }
++
++        Ok(())
++    }
++}
++
+ #[allow(dead_code)]
+ impl<'a> ConsoleBuilder<'a> {
+     /// Add an output-only port (no input, no terminal).
+@@ -808,6 +986,7 @@ impl<'a> ConsoleBuilder<'a> {
+         index
+     }
+ 
++    #[cfg(not(target_os = "windows"))]
+     fn add_tty_port_inner(&mut self, name: &str, tty_fd: BorrowedFd<'a>) -> Result<(), VmmError> {
+         let raw_fd = tty_fd.as_raw_fd();
+ 
+@@ -849,6 +1028,54 @@ impl<'a> ConsoleBuilder<'a> {
+         });
+         Ok(())
+     }
++
++    #[cfg(target_os = "windows")]
++    fn add_tty_port_inner(
++        &mut self,
++        name: &str,
++        tty_fd: BorrowedHandle<'a>,
++    ) -> Result<(), VmmError> {
++        let handle = tty_fd.as_raw_handle();
++
++        let input = Some(port_io::input_to_handle_dup(handle).map_err(|e| {
++            log::error!("dup input fd: {e}");
++            VmmError::BadFd()
++        })?);
++        let output = Some(port_io::output_to_handle_dup(handle).map_err(|e| {
++            log::error!("dup output fd: {e}");
++            VmmError::BadFd()
++        })?);
++
++        let is_term = tty_fd.is_terminal();
++        let terminal: Option<Box<dyn devices::virtio::port_io::PortTerminalProperties>> = if is_term
++        {
++            Some(port_io::term_handle(handle).map_err(|e| {
++                log::error!("term fd: {e}");
++                VmmError::BadFd()
++            })?)
++        } else {
++            None
++        };
++
++        if is_term {
++            // SAFETY: The caller guarantees via `'a` that the borrowed handle outlasts
++            // the console device and VMM. Currently, the VMM runs until process termination via `_exit()`,
++            // so the host file descriptor is valid for the remainder of the process.
++            // TODO: remove this transmute once we get proper support for stopping the VMM instead of _exit().
++            let static_fd = unsafe {
++                std::mem::transmute::<BorrowedHandle<'a>, BorrowedHandle<'static>>(tty_fd)
++            };
++            self.tty_fds.push(static_fd);
++        }
++
++        self.ports.push(PortDescription {
++            name: name.to_string().into(),
++            input,
++            output,
++            terminal,
++        });
++        Ok(())
++    }
+ }
+ 
+ #[cfg_attr(feature = "ffi", ffier::export)]
+@@ -1110,6 +1337,7 @@ pub struct NetDevice {
+ 
+ #[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"net\""))]
+ #[cfg_attr(not(feature = "ffi"), cfg(feature = "net"))]
++#[cfg(not(target_os = "windows"))]
+ impl NetDevice {
+     /// Create a net device backed by a Unix datagram socket path.
+     pub fn new_unixgram_path(
+@@ -1207,6 +1435,47 @@ impl NetDevice {
+     }
+ }
+ 
++#[cfg(target_os = "windows")]
++#[cfg_attr(feature = "ffi", ffier::export(cfg = "feature = \"net\""))]
++#[cfg_attr(not(feature = "ffi"), cfg(feature = "net"))]
++impl NetDevice {
++    /// Create a net device backed by a Unix stream socket path.
++    pub fn new_unixstream_path(
++        id: &str,
++        path: &str,
++        mac: &[u8],
++        features: u32,
++        flags: NetFlags,
++    ) -> Result<Self, VmmError> {
++        use devices::virtio::net::device::VirtioNetBackend;
++        let _ = flags;
++        Self::new_inner(
++            id,
++            VirtioNetBackend::UnixstreamPath(PathBuf::from(path)),
++            mac,
++            features,
++        )
++    }
++
++    pub fn new_unixstream_handle(
++        id: &str,
++        handle: OwnedHandle,
++        mac: &[u8],
++        features: u32,
++        flags: NetFlags,
++    ) -> Result<Self, VmmError> {
++        use devices::virtio::net::device::VirtioNetBackend;
++        use std::os::windows::io::RawSocket;
++        let _ = flags;
++        Self::new_inner(
++            id,
++            VirtioNetBackend::UnixstreamFd(handle.as_raw_handle() as RawSocket),
++            mac,
++            features,
++        )
++    }
++}
++
+ #[cfg(feature = "net")]
+ impl NetDevice {
+     fn new_inner(
+diff --git a/src/libkrun/src/api/logging.rs b/src/libkrun/src/api/logging.rs
+index 30cd838..976eedc 100644
+--- a/src/libkrun/src/api/logging.rs
++++ b/src/libkrun/src/api/logging.rs
+@@ -1,6 +1,12 @@
+ use std::fmt;
++#[cfg(windows)]
++use std::fs::File;
+ use std::io::{self, Write};
++
++#[cfg(not(target_os = "windows"))]
+ use std::os::fd::BorrowedFd;
++#[cfg(windows)]
++use std::os::windows::io::BorrowedHandle;
+ 
+ use env_logger::Env;
+ 
+@@ -74,6 +80,7 @@ export_bitflags! {
+     }
+ }
+ 
++#[cfg(unix)]
+ #[cfg_attr(feature = "ffi", ffier::export)]
+ pub fn init_log(
+     target: Option<BorrowedFd<'static>>,
+@@ -120,3 +127,60 @@ pub fn init_log(
+ 
+     Ok(())
+ }
++
++#[cfg(windows)]
++#[cfg_attr(feature = "ffi", ffier::export)]
++pub fn init_log(
++    target: Option<BorrowedHandle<'static>>,
++    level: LogLevel,
++    style: LogStyle,
++    options: LogOptions,
++) -> Result<(), VmmError> {
++    struct FdWriter(File);
++
++    impl Write for FdWriter {
++        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++            self.0.write(buf)
++        }
++
++        fn flush(&mut self) -> io::Result<()> {
++            self.0.flush()
++        }
++    }
++
++    let target = match target {
++        None => env_logger::Target::default(),
++        Some(handle) => {
++            // Converts BorrowedHandle into an owned File handle without taking ownership
++            // or closing the underlying OS handle when dropped.
++            let file = File::from(
++                handle
++                    .try_clone_to_owned()
++                    .map_err(|e| VmmError::Internal(format!("failed to clone handle: {e}")))?,
++            );
++            env_logger::Target::Pipe(Box::new(FdWriter(file)))
++        }
++    };
++
++    let filter = level.as_str();
++    let write_style = style.as_str();
++
++    let mut builder = if options.contains(LogOptions::NO_ENV) {
++        let mut builder = env_logger::Builder::new();
++        builder.parse_filters(filter).parse_write_style(write_style);
++        builder
++    } else {
++        env_logger::Builder::from_env(
++            Env::new()
++                .default_filter_or(filter)
++                .default_write_style_or(write_style),
++        )
++    };
++    builder
++        .format_timestamp_micros()
++        .target(target)
++        .try_init()
++        .map_err(|e| VmmError::Internal(format!("logger init: {e}")))?;
++
++    Ok(())
++}
+diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
+index 8412dd7..2e18818 100644
+--- a/src/libkrun/src/api/mod.rs
++++ b/src/libkrun/src/api/mod.rs
+@@ -39,9 +39,10 @@ pub use device_builders::RngDevice;
+ #[cfg(all(feature = "vhost-user", target_os = "linux"))]
+ pub use device_builders::VhostUserDevice;
+ pub use device_builders::{
+-    AttachContext, AttachDevice, ConsoleBuilder, ConsoleDevice, DeviceManager, DeviceRequirements,
+-    MmioDeviceManager, ResolvedShmRegion, TsiFlags, VsockDevice,
++    AttachContext, AttachDevice, DeviceManager, DeviceRequirements, MmioDeviceManager,
++    ResolvedShmRegion, TsiFlags, VsockDevice,
+ };
++pub use device_builders::{ConsoleBuilder, ConsoleDevice};
+ #[cfg(any(feature = "gpu", feature = "vhost-user"))]
+ pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+ #[cfg(feature = "gpu")]
+diff --git a/src/libkrun/src/api/payload.rs b/src/libkrun/src/api/payload.rs
+index a02c4e0..67845fe 100644
+--- a/src/libkrun/src/api/payload.rs
++++ b/src/libkrun/src/api/payload.rs
+@@ -277,6 +277,8 @@ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
+ const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
+ #[cfg(target_os = "macos")]
+ const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
++#[cfg(target_os = "windows")]
++const KRUNFW_NAME: &str = "libkrunfw.dll";
+ 
+ static KRUNFW: std::sync::LazyLock<Option<libloading::Library>> =
+     std::sync::LazyLock::new(|| unsafe { libloading::Library::new(KRUNFW_NAME).ok() });
+diff --git a/src/libkrun/src/api/vmm_builder.rs b/src/libkrun/src/api/vmm_builder.rs
+index 7f3587c..7a111cc 100644
+--- a/src/libkrun/src/api/vmm_builder.rs
++++ b/src/libkrun/src/api/vmm_builder.rs
+@@ -1,5 +1,5 @@
+ use std::marker::PhantomData;
+-#[cfg(unix)]
++#[cfg(not(target_os = "windows"))]
+ use std::os::fd::{AsRawFd, BorrowedFd};
+ use std::sync::{Arc, Mutex};
+ 
+@@ -82,7 +82,7 @@ impl<'a> VmmBuilder<'a> {
+     ///
+     /// The descriptors are borrowed, not duplicated. They must remain open and valid
+     /// until the VMM exits.
+-    #[cfg(unix)]
++    #[cfg(not(target_os = "windows"))]
+     pub fn add_serial_console(
+         mut self,
+         input_fd: Option<BorrowedFd<'a>>,
+@@ -306,6 +306,10 @@ pub fn check_nested_virt() -> bool {
+             })
+         })
+     }
++    #[cfg(target_os = "windows")]
++    {
++        false
++    }
+ }
+ 
+ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
+diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
+index 89794c3..988a5d8 100644
+--- a/src/libkrun/src/vmm/builder.rs
++++ b/src/libkrun/src/vmm/builder.rs
+@@ -17,12 +17,12 @@ use std::os::fd::AsRawFd;
+ #[cfg(unix)]
+ use std::os::fd::{AsFd, BorrowedFd, FromRawFd};
+ #[cfg(windows)]
+-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle};
++use std::os::windows::io::AsHandle;
++#[cfg(windows)]
++use std::os::windows::io::BorrowedHandle;
+ use std::sync::atomic::AtomicI32;
+ use std::sync::{Arc, Mutex};
+ #[cfg(windows)]
+-use utils::windows::SendHandle;
+-#[cfg(windows)]
+ use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+ 
+ use super::{Error, Vmm};
+@@ -36,14 +36,16 @@ use crate::vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
+ use devices::legacy::Cmos;
+ #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
+ use devices::legacy::KvmAia;
+-#[cfg(target_arch = "x86_64")]
++#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+ use devices::legacy::KvmIoapic;
+ use devices::legacy::Serial;
+ #[cfg(target_os = "macos")]
+ use devices::legacy::VcpuList;
++#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
++use devices::legacy::WhpIoapic;
+ #[cfg(target_os = "macos")]
+ use devices::legacy::{GicV3, HvfGicV3};
+-#[cfg(target_arch = "x86_64")]
++#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+ use devices::legacy::{IoApic, IrqChipT};
+ use devices::legacy::{IrqChip, IrqChipDevice};
+ #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+@@ -71,6 +73,7 @@ use flate2::read::GzDecoder;
+ #[cfg(feature = "amd-sev")]
+ use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
+ #[cfg(target_arch = "x86_64")]
++#[cfg(not(target_os = "windows"))]
+ use linux_loader::loader::{self, KernelLoader};
+ use polly::event_manager::{Error as EventManagerError, EventManager};
+ use utils::eventfd::EventFd;
+@@ -80,15 +83,20 @@ use vm_memory::Bytes;
+ use vm_memory::FileOffset;
+ #[cfg(feature = "tdx")]
+ use vm_memory::GuestMemoryRegion;
+-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
++#[cfg(all(
++    target_arch = "x86_64",
++    not(feature = "tee"),
++    not(target_os = "windows")
++))]
+ use vm_memory::GuestRegionMmap;
+-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
++#[cfg(all(
++    target_arch = "x86_64",
++    not(feature = "tee"),
++    not(target_os = "windows")
++))]
+ use vm_memory::mmap::MmapRegion;
+ use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+ 
+-#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+-use arch::x86_64::layout::AP_TRAMPOLINE_START;
+-
+ /// Errors associated with starting the instance.
+ #[derive(Debug)]
+ #[allow(unused)]
+@@ -103,9 +111,13 @@ pub enum StartMicrovmError {
+     CreateKvmIrqChip(kvm_ioctls::Error),
+     /// Failed to create a `RateLimiter` object.
+     CreateRateLimiter(io::Error),
++    /// Failed to duplicate a borrowed serial console handle.
++    #[cfg(target_os = "windows")]
++    DuplicateSerialHandle(io::Error),
+     /// Cannot open the file containing the kernel code.
+     ElfOpenKernel(io::Error),
+     /// Cannot load the kernel into the VM.
++    #[cfg(not(target_os = "windows"))]
+     ElfLoadKernel(linux_loader::loader::Error),
+     /// The firmware can't be loaded into the provided memory address.
+     FirmwareInvalidAddress(vm_memory::GuestMemoryError),
+@@ -118,6 +130,7 @@ pub enum StartMicrovmError {
+     /// Cannot find compressed kernel in file.
+     ImageBz2Invalid,
+     /// Cannot load the kernel from the uncompressed ELF data.
++    #[cfg(not(target_os = "windows"))]
+     ImageBz2LoadKernel(linux_loader::loader::Error),
+     /// Cannot open the file containing the kernel code.
+     ImageBz2OpenKernel(io::Error),
+@@ -126,6 +139,7 @@ pub enum StartMicrovmError {
+     /// Cannot find compressed kernel in file.
+     ImageGzInvalid,
+     /// Cannot load the kernel from the uncompressed ELF data.
++    #[cfg(not(target_os = "windows"))]
+     ImageGzLoadKernel(linux_loader::loader::Error),
+     /// Cannot open the file containing the kernel code.
+     ImageGzOpenKernel(io::Error),
+@@ -134,6 +148,7 @@ pub enum StartMicrovmError {
+     /// Cannot find compressed kernel in file.
+     ImageZstdInvalid,
+     /// Cannot load the kernel from the uncompressed ELF data.
++    #[cfg(not(target_os = "windows"))]
+     ImageZstdLoadKernel(linux_loader::loader::Error),
+     /// Cannot open the file containing the kernel code.
+     ImageZstdOpenKernel(io::Error),
+@@ -243,9 +258,14 @@ impl Display for StartMicrovmError {
+                 write!(f, "Cannot create KVM in-kernel IrqChip: {err}")
+             }
+             CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter: {err}"),
++            #[cfg(target_os = "windows")]
++            DuplicateSerialHandle(ref err) => {
++                write!(f, "Cannot duplicate serial console handle: {err}")
++            }
+             ElfOpenKernel(ref err) => {
+                 write!(f, "Cannot open the file containing the kernel code: {err}")
+             }
++            #[cfg(not(target_os = "windows"))]
+             ElfLoadKernel(ref err) => {
+                 write!(f, "Cannot load the kernel into the VM: {err}")
+             }
+@@ -270,6 +290,7 @@ impl Display for StartMicrovmError {
+             ImageBz2Invalid => {
+                 write!(f, "Cannot find compressed kernel in file.")
+             }
++            #[cfg(not(target_os = "windows"))]
+             ImageBz2LoadKernel(ref err) => {
+                 write!(
+                     f,
+@@ -285,6 +306,7 @@ impl Display for StartMicrovmError {
+             ImageGzInvalid => {
+                 write!(f, "Cannot find compressed kernel in file.")
+             }
++            #[cfg(not(target_os = "windows"))]
+             ImageGzLoadKernel(ref err) => {
+                 write!(
+                     f,
+@@ -300,6 +322,7 @@ impl Display for StartMicrovmError {
+             ImageZstdInvalid => {
+                 write!(f, "Cannot find compressed kernel in file.")
+             }
++            #[cfg(not(target_os = "windows"))]
+             ImageZstdLoadKernel(ref err) => {
+                 write!(
+                     f,
+@@ -516,10 +539,19 @@ impl Display for StartMicrovmError {
+ }
+ 
+ pub enum Payload {
+-    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
++    #[cfg(all(
++        target_arch = "x86_64",
++        not(feature = "tee"),
++        not(target_os = "windows")
++    ))]
+     KernelMmap,
+-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
++    #[cfg(any(
++        target_arch = "aarch64",
++        target_arch = "riscv64",
++        target_os = "windows"
++    ))]
+     KernelCopy,
++    #[cfg(not(target_os = "windows"))]
+     ExternalKernel(ExternalKernel),
+     #[cfg(test)]
+     Empty,
+@@ -550,10 +582,17 @@ pub fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrov
+         #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+         return Ok(Payload::KernelMmap);
+ 
+-        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
++        #[cfg(any(
++            target_arch = "aarch64",
++            target_arch = "riscv64",
++            target_os = "windows"
++        ))]
+         return Ok(Payload::KernelCopy);
+-    } else if let Some(external_kernel) = vm_resources.external_kernel() {
+-        Ok(Payload::ExternalKernel(external_kernel.clone()))
++    } else if let Some(_external_kernel) = vm_resources.external_kernel() {
++        #[cfg(not(target_os = "windows"))]
++        return Ok(Payload::ExternalKernel(_external_kernel.clone()));
++        #[cfg(target_os = "windows")]
++        unreachable!()
+     } else if vm_resources.firmware_config.is_some() {
+         Ok(Payload::Firmware)
+     } else {
+@@ -785,13 +824,16 @@ pub fn build_microvm(
+         }
+     }
+ 
+-    #[cfg(not(feature = "tee"))]
++    #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
+     #[allow(unused_mut)]
+     let mut vm = setup_vm(
+         &guest_memory,
+         &mut arch_memory_info,
+         vm_resources.nested_enabled,
+     )?;
++    #[cfg(all(not(feature = "tee"), target_os = "windows"))]
++    #[allow(unused_mut)]
++    let mut vm = setup_vm(&guest_memory, vcpu_config.vcpu_count)?;
+ 
+     #[cfg(feature = "tee")]
+     let (_kvm, vm) = {
+@@ -938,27 +980,32 @@ pub fn build_microvm(
+     #[cfg(windows)]
+     for s in &vm_resources.serial_consoles {
+         let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
+-            if is_valid_handle(s.input_handle.as_raw_handle()) {
+-                if unsafe {
+-                    BorrowedHandle::borrow_raw(s.input_handle.as_raw_handle()).is_terminal()
+-                } {
+-                    serial_ttys.push(s.input_handle);
++            if is_valid_handle(s.input_handle) {
++                let handle = unsafe { BorrowedHandle::borrow_raw(s.input_handle) };
++                let owned_handle = handle
++                    .try_clone_to_owned()
++                    .map_err(StartMicrovmError::DuplicateSerialHandle)?;
++                if owned_handle.as_handle().is_terminal() {
++                    serial_ttys.push(
++                        owned_handle
++                            .try_clone()
++                            .map_err(StartMicrovmError::DuplicateSerialHandle)?,
++                    );
+                 }
+-                Some(Box::new(unsafe {
+-                    File::from_raw_handle(s.input_handle.as_raw_handle())
+-                }))
++                Some(Box::new(File::from(owned_handle)))
+             } else {
+                 None
+             };
+ 
+-        let output: Option<Box<dyn io::Write + Send>> =
+-            if is_valid_handle(s.output_handle.as_raw_handle()) {
+-                Some(Box::new(unsafe {
+-                    File::from_raw_handle(s.output_handle.as_raw_handle())
+-                }))
+-            } else {
+-                None
+-            };
++        let output: Option<Box<dyn io::Write + Send>> = if is_valid_handle(s.output_handle) {
++            let handle = unsafe { BorrowedHandle::borrow_raw(s.output_handle) };
++            let owned_handle = handle
++                .try_clone_to_owned()
++                .map_err(StartMicrovmError::DuplicateSerialHandle)?;
++            Some(Box::new(File::from(owned_handle)))
++        } else {
++            None
++        };
+ 
+         serial_devices.push(setup_serial_device(event_manager, input, output)?);
+     }
+@@ -1003,7 +1050,7 @@ pub fn build_microvm(
+     let intc: IrqChip;
+     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
+     // while on aarch64 we need to do it the other way around.
+-    #[cfg(target_arch = "x86_64")]
++    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+     {
+         let ioapic: Box<dyn IrqChipT> = if vm_resources.split_irqchip {
+             Box::new(
+@@ -1040,6 +1087,37 @@ pub fn build_microvm(
+         .map_err(StartMicrovmError::Internal)?;
+     }
+ 
++    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
++    {
++        // WHP emulates the local APIC but not the IOAPIC, so we provide a
++        // software IOAPIC that injects interrupts via WHvRequestInterrupt.
++        // Unlike KVM there is no register_irqfd shortcut -- device interrupts
++        // go through WhpIoapic::set_irq() → WHvRequestInterrupt() entirely
++        // in userspace.
++        intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(WhpIoapic::new(
++            vm.whp_vm().clone(),
++        )))));
++
++        attach_legacy_devices_whp(
++            &mut pio_device_manager,
++            &mut mmio_device_manager,
++            Some(intc.clone()),
++        )?;
++
++        let kernel_boot = vm_resources.firmware_config.is_none();
++
++        vcpus = create_vcpus_x86_64_whp(
++            &vm,
++            &vcpu_config,
++            &guest_memory,
++            payload_config.entry_addr,
++            &pio_device_manager.io_bus,
++            &exit_evt,
++            kernel_boot,
++        )
++        .map_err(StartMicrovmError::Internal)?;
++    }
++
+     #[cfg(feature = "tdx")]
+     {
+         for vcpu in &vcpus {
+@@ -1177,7 +1255,10 @@ pub fn build_microvm(
+ 
+     // Set raw mode for FDs that are connected to legacy serial devices.
+     for serial_tty in serial_ttys {
++        #[cfg(unix)]
+         setup_terminal_raw_mode(&mut vmm, Some(serial_tty), false);
++        #[cfg(windows)]
++        setup_terminal_raw_mode(&mut vmm, Some(serial_tty.as_handle()), false);
+     }
+ 
+     device_manager
+@@ -1195,7 +1276,10 @@ pub fn build_microvm(
+         vmm.kernel_cmdline.insert_str(s).unwrap();
+     }
+ 
+-    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
++    #[cfg(all(
++        target_arch = "x86_64",
++        any(target_os = "linux", target_os = "windows")
++    ))]
+     if !vm_resources.acpi_enabled {
+         use device_manager::mmio::Error as MmioError;
+         for (mmio_base, irq) in vmm.mmio_device_manager.virtio_mmio_devices() {
+@@ -1224,13 +1308,19 @@ pub fn build_microvm(
+         load_cmdline(&vmm)?;
+     }
+ 
+-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    #[cfg(all(
++        target_arch = "x86_64",
++        any(target_os = "linux", target_os = "windows")
++    ))]
+     let virtio_mmio_devices = if vm_resources.acpi_enabled {
+         vmm.mmio_device_manager.virtio_mmio_devices()
+     } else {
+         Vec::new()
+     };
+-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
++    #[cfg(not(all(
++        target_arch = "x86_64",
++        any(target_os = "linux", target_os = "windows")
++    )))]
+     let virtio_mmio_devices: Vec<(u64, u32)> = vec![];
+     vmm.configure_system(
+         vcpus.as_slice(),
+@@ -1291,6 +1381,7 @@ pub fn build_microvm(
+     Ok(vmm)
+ }
+ 
++#[cfg(not(target_os = "windows"))]
+ fn load_external_kernel(
+     guest_mem: &GuestMemoryMmap,
+     arch_mem_info: &ArchMemoryInfo,
+@@ -1472,7 +1563,11 @@ pub fn load_payload(
+     payload: &Payload,
+ ) -> std::result::Result<LoadedPayload, StartMicrovmError> {
+     match payload {
+-        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
++        #[cfg(any(
++            target_arch = "aarch64",
++            target_arch = "riscv64",
++            target_os = "windows"
++        ))]
+         Payload::KernelCopy => {
+             let (kernel_entry_addr, kernel_host_addr, kernel_guest_addr, kernel_size) =
+                 if let Some(kernel_bundle) = kernel_bundle {
+@@ -1505,7 +1600,11 @@ pub fn load_payload(
+                 pvh: false,
+             })
+         }
+-        #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
++        #[cfg(all(
++            target_arch = "x86_64",
++            not(feature = "tee"),
++            not(target_os = "windows")
++        ))]
+         Payload::KernelMmap => {
+             let (kernel_entry_addr, kernel_host_addr, kernel_guest_addr, kernel_size) =
+                 if let Some(kernel_bundle) = kernel_bundle {
+@@ -1608,6 +1707,7 @@ pub fn load_payload(
+                 pvh: false,
+             })
+         }
++        #[cfg(not(target_os = "windows"))]
+         Payload::ExternalKernel(external_kernel) => {
+             let (entry_addr, initrd_config, cmdline, pvh) =
+                 load_external_kernel(&guest_mem, _arch_mem_info, external_kernel)?;
+@@ -1727,7 +1827,7 @@ pub fn create_guest_memory(
+ 
+     #[cfg(target_arch = "x86_64")]
+     let (mut arch_mem_info, mut arch_mem_regions) = match payload {
+-        #[cfg(not(feature = "tee"))]
++        #[cfg(not(any(feature = "tee", target_os = "windows")))]
+         Payload::KernelMmap => {
+             let (kernel_guest_addr, kernel_size) = if let Some(kernel_bundle) = kernel_bundle {
+                 (kernel_bundle.guest_addr, kernel_bundle.size)
+@@ -1736,6 +1836,7 @@ pub fn create_guest_memory(
+             };
+             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
+         }
++        #[cfg(not(target_os = "windows"))]
+         Payload::ExternalKernel(external_kernel) => {
+             #[cfg(not(feature = "tee"))]
+             let fw = _firmware_size;
+@@ -1743,6 +1844,8 @@ pub fn create_guest_memory(
+             let fw: Option<(u64, usize)> = None;
+             arch::arch_memory_regions(mem_size, None, 0, external_kernel.initramfs_size, fw)
+         }
++        #[cfg(target_os = "windows")]
++        Payload::KernelCopy => arch::arch_memory_regions(mem_size, None, 0, 0, None),
+         #[cfg(feature = "tee")]
+         Payload::Tee => {
+             let (kernel_guest_addr, kernel_size) = if let Some(kernel_bundle) = kernel_bundle {
+@@ -1877,6 +1980,7 @@ pub fn create_guest_memory(
+ 
+     // Only write firmware if data exists AND this isn't an ExternalKernel payload
+     // (ExternalKernel does direct kernel boot and doesn't use EFI firmware)
++    #[cfg(not(target_os = "windows"))]
+     if !matches!(payload, Payload::ExternalKernel(_))
+         && let Some(firmware_data) = firmware_data.as_ref()
+     {
+@@ -1927,6 +2031,20 @@ pub(crate) fn setup_vm(
+     Ok(vm)
+ }
+ 
++#[cfg(all(target_os = "windows", not(feature = "tee")))]
++pub(crate) fn setup_vm(
++    guest_memory: &GuestMemoryMmap,
++    vcpu_count: u8,
++) -> std::result::Result<Vm, StartMicrovmError> {
++    let mut vm = Vm::new(vcpu_count)
++        .map_err(Error::Vm)
++        .map_err(StartMicrovmError::Internal)?;
++    vm.memory_init(guest_memory)
++        .map_err(Error::Vm)
++        .map_err(StartMicrovmError::Internal)?;
++    Ok(vm)
++}
++
+ #[cfg(all(feature = "tee", target_arch = "x86_64"))]
+ fn validate_tee_config(tee: Tee) -> std::result::Result<(), StartMicrovmError> {
+     match tee {
+@@ -1997,7 +2115,7 @@ pub fn setup_serial_device(
+     Ok(serial)
+ }
+ 
+-#[cfg(target_arch = "x86_64")]
++#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+ fn attach_legacy_devices(
+     vm: &Vm,
+     split_irqchip: bool,
+@@ -2038,6 +2156,52 @@ fn attach_legacy_devices(
+     Ok(())
+ }
+ 
++#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
++fn attach_legacy_devices_whp(
++    pio_device_manager: &mut PortIODeviceManager,
++    mmio_device_manager: &mut MMIODeviceManager,
++    intc: Option<Arc<Mutex<IrqChipDevice>>>,
++) -> std::result::Result<(), StartMicrovmError> {
++    pio_device_manager
++        .register_devices()
++        .map_err(Error::LegacyIOBus)
++        .map_err(StartMicrovmError::Internal)?;
++
++    mmio_device_manager
++        .register_mmio_ioapic(intc)
++        .map_err(Error::RegisterMMIODevice)
++        .map_err(StartMicrovmError::Internal)?;
++
++    Ok(())
++}
++
++#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
++fn create_vcpus_x86_64_whp(
++    vm: &Vm,
++    vcpu_config: &VcpuConfig,
++    guest_mem: &GuestMemoryMmap,
++    entry_addr: GuestAddress,
++    io_bus: &devices::Bus,
++    exit_evt: &EventFd,
++    kernel_boot: bool,
++) -> super::Result<Vec<Vcpu>> {
++    let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
++    for cpu_index in 0..vcpu_config.vcpu_count {
++        let mut vcpu = Vcpu::new_x86_64(
++            cpu_index,
++            vm.whp_vm().clone(),
++            guest_mem.clone(),
++            io_bus.clone(),
++            exit_evt.try_clone().map_err(Error::EventFd)?,
++        )
++        .map_err(Error::Vcpu)?;
++        vcpu.configure_x86_64(guest_mem, entry_addr, kernel_boot)
++            .map_err(Error::Vcpu)?;
++        vcpus.push(vcpu);
++    }
++    Ok(vcpus)
++}
++
+ #[cfg(all(
+     any(target_arch = "aarch64", target_arch = "riscv64"),
+     target_os = "linux"
+@@ -2102,7 +2266,7 @@ fn attach_legacy_devices(
+     Ok(())
+ }
+ 
+-#[cfg(target_arch = "x86_64")]
++#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+ #[allow(clippy::too_many_arguments)]
+ fn create_vcpus_x86_64(
+     vm: &Vm,
+@@ -2249,7 +2413,7 @@ pub(crate) fn attach_mmio_device(
+     let (_mmio_base, _irq) =
+         vmm.mmio_device_manager
+             .register_mmio_device(vmm.vm.fd(), mmio_device, type_id, id)?;
+-    #[cfg(target_os = "macos")]
++    #[cfg(any(target_os = "macos", target_os = "windows"))]
+     let (_mmio_base, _irq) =
+         vmm.mmio_device_manager
+             .register_mmio_device(mmio_device, type_id, id)?;
+@@ -2257,6 +2421,11 @@ pub(crate) fn attach_mmio_device(
+     Ok(())
+ }
+ 
++#[cfg(windows)]
++fn is_valid_handle(h: *mut core::ffi::c_void) -> bool {
++    !h.is_null() && h != INVALID_HANDLE_VALUE
++}
++
+ #[cfg(unix)]
+ pub fn setup_terminal_raw_mode(
+     vmm: &mut Vmm,
+@@ -2289,17 +2458,19 @@ pub fn setup_terminal_raw_mode(
+ #[cfg(target_os = "windows")]
+ pub fn setup_terminal_raw_mode(
+     vmm: &mut Vmm,
+-    term_handle: Option<SendHandle>,
++    term_handle: Option<BorrowedHandle<'_>>,
+     handle_signals_by_terminal: bool,
+ ) {
+     if let Some(term_handle) = term_handle {
+         match term_set_raw_mode(term_handle, handle_signals_by_terminal) {
+             Ok(old_mode) => {
+-                vmm.exit_observers.push(Arc::new(Mutex::new(move || {
+-                    if let Err(e) = term_restore_mode(term_handle, &old_mode) {
+-                        log::error!("Failed to restore terminal mode: {e}")
+-                    }
+-                })));
++                if let Ok(owned_handle) = term_handle.try_clone_to_owned() {
++                    vmm.exit_observers.push(Arc::new(Mutex::new(move || {
++                        if let Err(e) = term_restore_mode(owned_handle.as_handle(), &old_mode) {
++                            log::error!("Failed to restore terminal mode: {e}");
++                        }
++                    })));
++                }
+             }
+             Err(e) => {
+                 log::error!("Failed to set terminal to raw mode: {e}")
+@@ -2307,6 +2478,7 @@ pub fn setup_terminal_raw_mode(
+         };
+     }
+ }
++#[cfg(not(target_os = "windows"))]
+ #[cfg(test)]
+ pub mod tests {
+     use super::*;
+@@ -2344,7 +2516,7 @@ pub mod tests {
+     }
+ 
+     #[test]
+-    #[cfg(target_arch = "x86_64")]
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+     fn test_create_vcpus_x86_64() {
+         let vcpu_count = 2;
+ 
+diff --git a/src/libkrun/src/vmm/device_manager/whp/mmio.rs b/src/libkrun/src/vmm/device_manager/whp/mmio.rs
+index 826def9..0c99a4d 100644
+--- a/src/libkrun/src/vmm/device_manager/whp/mmio.rs
++++ b/src/libkrun/src/vmm/device_manager/whp/mmio.rs
+@@ -163,6 +163,19 @@ impl MMIODeviceManager {
+             .map_err(Error::Cmdline)
+     }
+ 
++    /// Returns the address and interrupt assigned to each virtio-mmio device.
++    pub fn virtio_mmio_devices(&self) -> Vec<(u64, u32)> {
++        let mut devices = self
++            .id_to_dev_info
++            .iter()
++            .filter_map(|((device_type, _), info)| {
++                matches!(device_type, DeviceType::Virtio(_)).then_some((info.addr, info.irq))
++            })
++            .collect::<Vec<_>>();
++        devices.sort_unstable_by_key(|(addr, _)| *addr);
++        devices
++    }
++
+     /// Gets the specified device.
+     pub fn get_device(
+         &self,
+diff --git a/src/libkrun/src/vmm/mod.rs b/src/libkrun/src/vmm/mod.rs
+index 22ab9ed..86bbe61 100644
+--- a/src/libkrun/src/vmm/mod.rs
++++ b/src/libkrun/src/vmm/mod.rs
+@@ -33,16 +33,24 @@ pub mod worker;
+ #[cfg(target_os = "macos")]
+ use macos::vstate;
+ 
++#[cfg(target_os = "windows")]
++mod windows;
++#[cfg(target_os = "windows")]
++use crate::vmm::windows::vstate;
++
+ use std::fmt::{Display, Formatter};
+ use std::io;
++#[cfg(not(target_os = "windows"))]
+ use std::os::unix::io::AsRawFd;
+ use std::sync::atomic::{AtomicI32, Ordering};
+ use std::sync::{Arc, Mutex};
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "windows"))]
+ use std::time::Duration;
++#[cfg(target_os = "windows")]
++use utils::windows::AsRawFd;
+ 
+ use crate::vmm::device_manager::mmio::MMIODeviceManager;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "windows"))]
+ use crate::vmm::vstate::VcpuEvent;
+ use crate::vmm::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
+ 
+@@ -220,6 +228,25 @@ impl Vmm {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "windows")]
++    pub fn resume_vcpus(&mut self) -> Result<()> {
++        for handle in self.vcpus_handles.iter() {
++            handle
++                .send_event(VcpuEvent::Resume)
++                .map_err(Error::VcpuEvent)?;
++        }
++        for handle in self.vcpus_handles.iter() {
++            match handle
++                .response_receiver()
++                .recv_timeout(Duration::from_millis(1000))
++            {
++                Ok(VcpuResponse::Resumed) => (),
++                _ => return Err(Error::VcpuResume),
++            }
++        }
++        Ok(())
++    }
++
+     /// Sender for live [`VmCtl`] requests. The event loop runs [`Vmm::pause`] /
+     /// [`Vmm::resume`] in response.
+     #[cfg(target_os = "macos")]
+diff --git a/src/libkrun/src/vmm/resources.rs b/src/libkrun/src/vmm/resources.rs
+index 6538398..376d0dc 100644
+--- a/src/libkrun/src/vmm/resources.rs
++++ b/src/libkrun/src/vmm/resources.rs
+@@ -9,6 +9,8 @@ use std::fs::File;
+ use std::io::BufReader;
+ #[cfg(unix)]
+ use std::os::fd::RawFd;
++#[cfg(target_os = "windows")]
++use std::os::windows::raw::HANDLE;
+ #[cfg(feature = "tee")]
+ use std::path::PathBuf;
+ #[cfg(target_os = "windows")]
+@@ -80,8 +82,8 @@ pub struct SerialConsoleConfig {
+ 
+ #[cfg(target_os = "windows")]
+ pub struct SerialConsoleConfig {
+-    pub input_handle: SendHandle,
+-    pub output_handle: SendHandle,
++    pub input_handle: HANDLE,
++    pub output_handle: HANDLE,
+ }
+ 
+ /// A data structure that encapsulates the device configurations
+@@ -132,7 +134,9 @@ impl VmResources {
+         // supplied by the user.
+         VcpuConfig {
+             vcpu_count: self.vm_config().vcpu_count.unwrap(),
++            #[cfg(not(target_os = "windows"))]
+             ht_enabled: self.vm_config().ht_enabled.unwrap(),
++            #[cfg(not(target_os = "windows"))]
+             cpu_template: self.vm_config().cpu_template,
+             #[cfg(target_os = "linux")]
+             nested_enabled: self.nested_enabled,
+@@ -274,7 +278,9 @@ mod tests {
+         let vm_resources = default_vm_resources();
+         let expected_vcpu_config = VcpuConfig {
+             vcpu_count: vm_resources.vm_config().vcpu_count.unwrap(),
++            #[cfg(not(target_os = "windows"))]
+             ht_enabled: vm_resources.vm_config().ht_enabled.unwrap(),
++            #[cfg(not(target_os = "windows"))]
+             cpu_template: vm_resources.vm_config().cpu_template,
+             #[cfg(target_os = "linux")]
+             nested_enabled: vm_resources.nested_enabled,
+diff --git a/src/libkrun/src/vmm/terminal.rs b/src/libkrun/src/vmm/terminal.rs
+index 99fcd94..9fedcc4 100644
+--- a/src/libkrun/src/vmm/terminal.rs
++++ b/src/libkrun/src/vmm/terminal.rs
+@@ -4,9 +4,10 @@ use nix::sys::termios::{LocalFlags, SetArg, Termios, cfmakeraw, tcgetattr, tcset
+ use std::os::fd::BorrowedFd;
+ 
+ #[cfg(windows)]
+-use std::io;
+-#[cfg(windows)]
+-use utils::windows::SendHandle;
++use std::{
++    io,
++    os::windows::io::{AsRawHandle, BorrowedHandle},
++};
+ #[cfg(windows)]
+ use windows_sys::Win32::System::Console::{
+     CONSOLE_MODE, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+@@ -45,13 +46,12 @@ pub fn term_restore_mode(term: BorrowedFd, restore: &TerminalMode) -> Result<(),
+ 
+ #[cfg(windows)]
+ pub fn term_set_raw_mode(
+-    term: SendHandle,
++    term: BorrowedHandle<'_>,
+     handle_signals_by_terminal: bool,
+ ) -> Result<TerminalMode, io::Error> {
+-    let handle = term.as_raw_handle();
+     let mut mode: CONSOLE_MODE = 0;
+ 
+-    let ret = unsafe { GetConsoleMode(handle, &mut mode) };
++    let ret = unsafe { GetConsoleMode(term.as_raw_handle(), &mut mode) };
+     if ret == 0 {
+         return Err(io::Error::last_os_error());
+     }
+@@ -68,7 +68,7 @@ pub fn term_set_raw_mode(
+ 
+     mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+ 
+-    let ret = unsafe { SetConsoleMode(handle, mode) };
++    let ret = unsafe { SetConsoleMode(term.as_raw_handle(), mode) };
+     if ret == 0 {
+         return Err(io::Error::last_os_error());
+     }
+@@ -77,9 +77,11 @@ pub fn term_set_raw_mode(
+ }
+ 
+ #[cfg(windows)]
+-pub fn term_restore_mode(term: SendHandle, restore: &TerminalMode) -> Result<(), io::Error> {
+-    let handle = term.as_raw_handle();
+-    let ret = unsafe { SetConsoleMode(handle, restore.0) };
++pub fn term_restore_mode(
++    term: BorrowedHandle<'_>,
++    restore: &TerminalMode,
++) -> Result<(), io::Error> {
++    let ret = unsafe { SetConsoleMode(term.as_raw_handle(), restore.0) };
+     if ret == 0 {
+         return Err(io::Error::last_os_error());
+     }
+diff --git a/src/libkrun/src/vmm/vmm_config/kernel_cmdline.rs b/src/libkrun/src/vmm/vmm_config/kernel_cmdline.rs
+index 0cfcb2d..8995e81 100644
+--- a/src/libkrun/src/vmm/vmm_config/kernel_cmdline.rs
++++ b/src/libkrun/src/vmm/vmm_config/kernel_cmdline.rs
+@@ -7,6 +7,13 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodu
+ #[cfg(target_os = "macos")]
+ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodule console=hvc0 \
+                                           rootfstype=virtiofs rw quiet no-kvmapf";
++// WHP (Windows Hypervisor Platform) differs from KVM in that it provides
++// no in-kernel PIT, PIC, or IOAPIC emulation. All three are emulated in
++// userspace. This makes interrupt delivery inherently less precise than KVM,
++// so we add the no_timer_check flag to skip the timer check to avoid panics.
++#[cfg(target_os = "windows")]
++pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodule console=hvc0 \
++                                          rootfstype=virtiofs rw quiet no_timer_check";
+ 
+ /// Strongly typed data structure used to configure the boot source of the
+ /// microvm.
+diff --git a/src/libkrun/src/vmm/windows/mod.rs b/src/libkrun/src/vmm/windows/mod.rs
+new file mode 100644
+index 0000000..ab96286
+--- /dev/null
++++ b/src/libkrun/src/vmm/windows/mod.rs
+@@ -0,0 +1 @@
++pub mod vstate;
+diff --git a/src/libkrun/src/vmm/windows/vstate.rs b/src/libkrun/src/vmm/windows/vstate.rs
+new file mode 100644
+index 0000000..5c4d36e
+--- /dev/null
++++ b/src/libkrun/src/vmm/windows/vstate.rs
+@@ -0,0 +1,619 @@
++// Copyright 2026 Red Hat, Inc.
++// SPDX-License-Identifier: Apache-2.0
++
++//! Windows Hypervisor Platform (WHP) virtual-machine and vCPU management.
++//!
++//! This module follows the same structure as `linux/vstate.rs` and
++//! `macos/vstate.rs`: it consumes `whp::{WhpVm, WhpVcpu, VcpuExitReason}`
++//! and routes I/O and MMIO exits through the WHP instruction emulator.
++
++use log::{debug, error};
++use std::ffi::c_void;
++use std::fmt::{Display, Formatter};
++use std::io;
++use std::mem;
++use std::result;
++use std::sync::Arc;
++use std::thread;
++
++use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
++
++use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
++use utils::eventfd::EventFd;
++use vm_memory::{
++    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryBackend, GuestMemoryError,
++    GuestMemoryMmap, GuestMemoryRegion,
++};
++use whp::{self, VcpuExitReason, WhpEmulator, WhpVcpu, WhpVm};
++use windows_sys::Win32::Foundation::S_OK;
++use windows_sys::Win32::System::Hypervisor::{
++    WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO, WHV_EMULATOR_MEMORY_ACCESS_INFO,
++    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_TRANSLATE_GVA_FLAGS,
++    WHV_TRANSLATE_GVA_RESULT, WHV_TRANSLATE_GVA_RESULT_CODE, WHvGetVirtualProcessorRegisters,
++    WHvSetVirtualProcessorRegisters, WHvTranslateGva, WHvX64RegisterRflags,
++};
++
++// ---------------------------------------------------------------------------
++// Error
++// ---------------------------------------------------------------------------
++
++#[derive(Debug)]
++pub enum Error {
++    /// Cannot create the instruction emulator.
++    CreateEmulator(whp::Error),
++    /// Instruction emulation failed.
++    Emulation(whp::Error),
++    /// Invalid guest memory configuration.
++    GuestMemoryMmap(GuestMemoryError),
++    /// The number of configured slots is bigger than the maximum reported by WHP.
++    NotEnoughMemorySlots,
++    /// Cannot set the memory regions.
++    SetUserMemoryRegion(whp::Error),
++    /// Failed to signal Vcpu.
++    SignalVcpu(io::Error),
++    /// vCPU count is not initialized.
++    VcpuCountNotInitialized,
++    /// Cannot run the VCPUs.
++    VcpuRun(whp::Error),
++    /// Cannot spawn a new vCPU thread.
++    VcpuSpawn(io::Error),
++    /// Unexpected VM exit reason.
++    VcpuUnhandledExit,
++    /// Cannot configure the microvm.
++    VmSetup(whp::Error),
++    /// WHP hypervisor not available.
++    WhpNotAvailable(whp::Error),
++    /// Error configuring the general purpose registers.
++    REGSConfiguration(arch::x86_64::regs::Error),
++    /// Error configuring the special registers.
++    SREGSConfiguration(arch::x86_64::regs::Error),
++    /// Error configuring the MSR registers.
++    MSRSConfiguration(arch::x86_64::msr::Error),
++}
++
++impl Display for Error {
++    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
++        use Error::*;
++        match self {
++            CreateEmulator(e) => write!(f, "Cannot create instruction emulator: {e}"),
++            Emulation(e) => write!(f, "Instruction emulation failed: {e}"),
++            GuestMemoryMmap(e) => write!(f, "Guest memory error: {e:?}"),
++            NotEnoughMemorySlots => write!(f, "Not enough memory slots"),
++            SetUserMemoryRegion(e) => write!(f, "Cannot set memory regions: {e}"),
++            SignalVcpu(e) => write!(f, "Failed to signal vCPU: {e}"),
++            VcpuCountNotInitialized => write!(f, "vCPU count is not initialized"),
++            VcpuRun(e) => write!(f, "Cannot run vCPU: {e}"),
++            VcpuSpawn(e) => write!(f, "Cannot spawn vCPU thread: {e}"),
++            VcpuUnhandledExit => write!(f, "Unexpected VM exit reason"),
++            VmSetup(e) => write!(f, "Cannot configure the VM: {e}"),
++            WhpNotAvailable(e) => write!(f, "WHP hypervisor not available: {e}"),
++            REGSConfiguration(e) => write!(f, "Error configuring registers: {e:?}"),
++            SREGSConfiguration(e) => write!(f, "Error configuring special registers: {e:?}"),
++            MSRSConfiguration(e) => write!(f, "Error configuring MSRs: {e:?}"),
++        }
++    }
++}
++
++pub type Result<T> = result::Result<T, Error>;
++
++pub struct Vm {
++    whp_vm: Arc<WhpVm>,
++}
++
++impl Vm {
++    pub fn new(vcpu_count: u8) -> Result<Self> {
++        whp::check_hypervisor().map_err(Error::WhpNotAvailable)?;
++        let whp_vm = Arc::new(WhpVm::new(vcpu_count as u32).map_err(Error::VmSetup)?);
++        Ok(Vm { whp_vm })
++    }
++
++    pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
++        for region in guest_mem.iter() {
++            // It's safe to unwrap because the guest address is valid.
++            let host_addr = guest_mem.get_host_address(region.start_addr()).unwrap();
++            debug!(
++                "Guest memory host_addr={:x?} guest_addr={:x?} len={:x?}",
++                host_addr,
++                region.start_addr().raw_value(),
++                region.len()
++            );
++            let map_result = unsafe {
++                self.whp_vm.map_memory(
++                    host_addr as *mut c_void,
++                    region.start_addr().raw_value(),
++                    region.len(),
++                )
++            };
++            map_result.map_err(Error::SetUserMemoryRegion)?;
++        }
++        Ok(())
++    }
++
++    pub fn whp_vm(&self) -> &Arc<WhpVm> {
++        &self.whp_vm
++    }
++}
++
++#[derive(Debug, Eq, PartialEq)]
++pub struct VcpuConfig {
++    pub vcpu_count: u8,
++}
++
++/// Passed as the opaque `*const c_void` context to every emulator callback.
++///
++/// For I/O emulation `bus` points to the I/O port bus; for MMIO emulation it
++/// points to the memory-mapped bus.  `guest_mem` is always set so the memory
++/// callback can fetch instruction bytes from guest RAM when WHP doesn't supply
++/// them in the exit context.
++#[repr(C)]
++struct CallbackContext {
++    partition_handle: WHV_PARTITION_HANDLE,
++    vp_index: u32,
++    bus: *const devices::Bus,
++    guest_mem: *const GuestMemoryMmap,
++}
++
++unsafe extern "system" fn io_port_callback(
++    context: *const c_void,
++    io_access: *mut WHV_EMULATOR_IO_ACCESS_INFO,
++) -> i32 {
++    let (ctx, io, bus) = unsafe {
++        let ctx = &*(context as *const CallbackContext);
++        let io = &mut *io_access;
++        let bus = &*ctx.bus;
++        (ctx, io, bus)
++    };
++
++    if io.Direction != 0 {
++        let data_bytes = io.Data.to_le_bytes();
++        let access_size = (io.AccessSize as usize).min(data_bytes.len());
++        bus.write(
++            ctx.vp_index as u64,
++            io.Port as u64,
++            &data_bytes[..access_size],
++        );
++    } else {
++        let mut data_bytes = [0u8; 4];
++        let access_size = (io.AccessSize as usize).min(data_bytes.len());
++        bus.read(
++            ctx.vp_index as u64,
++            io.Port as u64,
++            &mut data_bytes[..access_size],
++        );
++        io.Data = u32::from_le_bytes(data_bytes);
++    }
++    S_OK
++}
++
++unsafe extern "system" fn memory_callback(
++    context: *const c_void,
++    mem_access: *mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
++) -> i32 {
++    let (ctx, ma) = unsafe {
++        let ctx = &*(context as *const CallbackContext);
++        let ma = &mut *mem_access;
++        (ctx, ma)
++    };
++    let size = (ma.AccessSize as usize).min(ma.Data.len());
++
++    // Try guest RAM first. If the GPA is in a RAM region succeeds immediately.
++    // Otherwise it's an actual MMIO access and we fall through to the MMIO bus.
++    if !ctx.guest_mem.is_null() {
++        let gpa = GuestAddress(ma.GpaAddress);
++        let mem = unsafe { &*ctx.guest_mem };
++        if ma.Direction != 0 {
++            if mem.write_slice(&ma.Data[..size], gpa).is_ok() {
++                return S_OK;
++            }
++        } else if mem.read_slice(&mut ma.Data[..size], gpa).is_ok() {
++            return S_OK;
++        }
++    }
++
++    // GPA is not in a RAM region -- dispatch to the MMIO bus.
++    if ctx.bus.is_null() {
++        return S_OK;
++    }
++    let bus = unsafe { &*ctx.bus };
++
++    if ma.Direction != 0 {
++        bus.write(ctx.vp_index as u64, ma.GpaAddress, &ma.Data[..size]);
++    } else {
++        bus.read(ctx.vp_index as u64, ma.GpaAddress, &mut ma.Data[..size]);
++    }
++    S_OK
++}
++
++unsafe extern "system" fn get_vp_registers_callback(
++    context: *const c_void,
++    register_names: *const WHV_REGISTER_NAME,
++    register_count: u32,
++    register_values: *mut WHV_REGISTER_VALUE,
++) -> i32 {
++    let ctx = unsafe { &*(context as *const CallbackContext) };
++    unsafe {
++        WHvGetVirtualProcessorRegisters(
++            ctx.partition_handle,
++            ctx.vp_index,
++            register_names,
++            register_count,
++            register_values,
++        )
++    }
++}
++
++unsafe extern "system" fn set_vp_registers_callback(
++    context: *const c_void,
++    register_names: *const WHV_REGISTER_NAME,
++    register_count: u32,
++    register_values: *const WHV_REGISTER_VALUE,
++) -> i32 {
++    let ctx = unsafe { &*(context as *const CallbackContext) };
++    unsafe {
++        WHvSetVirtualProcessorRegisters(
++            ctx.partition_handle,
++            ctx.vp_index,
++            register_names,
++            register_count,
++            register_values,
++        )
++    }
++}
++
++unsafe extern "system" fn translate_gva_callback(
++    context: *const c_void,
++    gva: u64,
++    translate_flags: WHV_TRANSLATE_GVA_FLAGS,
++    translation_result: *mut WHV_TRANSLATE_GVA_RESULT_CODE,
++    gpa: *mut u64,
++) -> i32 {
++    let ctx = unsafe { &*(context as *const CallbackContext) };
++    let mut result = WHV_TRANSLATE_GVA_RESULT::default();
++    let hr = unsafe {
++        WHvTranslateGva(
++            ctx.partition_handle,
++            ctx.vp_index,
++            gva,
++            translate_flags,
++            &mut result,
++            gpa,
++        )
++    };
++    if hr == S_OK {
++        unsafe { *translation_result = result.ResultCode };
++    }
++    hr
++}
++
++fn build_emulator_callbacks() -> WHV_EMULATOR_CALLBACKS {
++    WHV_EMULATOR_CALLBACKS {
++        Size: mem::size_of::<WHV_EMULATOR_CALLBACKS>() as u32,
++        Reserved: 0,
++        WHvEmulatorIoPortCallback: Some(io_port_callback),
++        WHvEmulatorMemoryCallback: Some(memory_callback),
++        WHvEmulatorGetVirtualProcessorRegisters: Some(get_vp_registers_callback),
++        WHvEmulatorSetVirtualProcessorRegisters: Some(set_vp_registers_callback),
++        WHvEmulatorTranslateGvaPage: Some(translate_gva_callback),
++    }
++}
++
++pub struct Vcpu {
++    whp_vcpu: WhpVcpu,
++    emulator: WhpEmulator,
++    guest_mem: GuestMemoryMmap,
++    io_bus: devices::Bus,
++    mmio_bus: Option<devices::Bus>,
++    exit_evt: EventFd,
++
++    event_receiver: Receiver<VcpuEvent>,
++    event_sender: Option<Sender<VcpuEvent>>,
++    response_receiver: Option<Receiver<VcpuResponse>>,
++    response_sender: Sender<VcpuResponse>,
++}
++
++impl Vcpu {
++    /// No-op on Windows -- cancellation uses `WHvCancelRunVirtualProcessor`.
++    pub fn register_kick_signal_handler() {}
++
++    pub fn new_x86_64(
++        id: u8,
++        vm: Arc<WhpVm>,
++        guest_mem: GuestMemoryMmap,
++        io_bus: devices::Bus,
++        exit_evt: EventFd,
++    ) -> Result<Self> {
++        let whp_vcpu = WhpVcpu::new(vm, id as u32).map_err(Error::VcpuRun)?;
++        let emulator =
++            WhpEmulator::new(build_emulator_callbacks()).map_err(Error::CreateEmulator)?;
++
++        let (event_sender, event_receiver) = unbounded();
++        let (response_sender, response_receiver) = unbounded();
++
++        Ok(Vcpu {
++            whp_vcpu,
++            emulator,
++            guest_mem,
++            io_bus,
++            mmio_bus: None,
++            exit_evt,
++            event_receiver,
++            event_sender: Some(event_sender),
++            response_receiver: Some(response_receiver),
++            response_sender,
++        })
++    }
++
++    pub fn configure_x86_64(
++        &mut self,
++        guest_mem: &GuestMemoryMmap,
++        kernel_start_addr: GuestAddress,
++        kernel_boot: bool,
++    ) -> Result<()> {
++        if self.cpu_index() != 0 {
++            // WHP creates APs startup-suspended and releases them on INIT/SIPI.
++            return Ok(());
++        }
++
++        if kernel_boot {
++            arch::x86_64::regs::setup_regs(&self.whp_vcpu, kernel_start_addr.raw_value())
++                .map_err(Error::REGSConfiguration)?;
++            arch::x86_64::regs::setup_sregs(guest_mem, &self.whp_vcpu)
++                .map_err(Error::SREGSConfiguration)?;
++            arch::x86_64::msr::setup_msrs(&self.whp_vcpu).map_err(Error::MSRSConfiguration)?;
++        }
++
++        Ok(())
++    }
++
++    pub fn cpu_index(&self) -> u8 {
++        self.whp_vcpu.index() as u8
++    }
++
++    pub fn set_mmio_bus(&mut self, mmio_bus: devices::Bus) {
++        self.mmio_bus = Some(mmio_bus);
++    }
++
++    /// Moves the vcpu to its own thread and constructs a VcpuHandle.
++    /// The handle can be used to control the remote vCPU.
++    pub fn start_threaded(mut self) -> Result<VcpuHandle> {
++        let event_sender = self.event_sender.take().unwrap();
++        let response_receiver = self.response_receiver.take().unwrap();
++
++        let vm = self.whp_vcpu.vm().clone();
++        let vp_index = self.whp_vcpu.index();
++
++        let _vcpu_thread = thread::Builder::new()
++            .name(format!("fc_vcpu {}", self.cpu_index()))
++            .spawn(move || {
++                self.run();
++            })
++            .map_err(Error::VcpuSpawn)?;
++
++        Ok(VcpuHandle {
++            event_sender,
++            response_receiver,
++            vm,
++            vp_index,
++        })
++    }
++
++    fn run(&mut self) {
++        self.wait_for_resume();
++
++        loop {
++            match self.event_receiver.try_recv() {
++                Ok(VcpuEvent::Resume) => {
++                    self.response_sender
++                        .send(VcpuResponse::Resumed)
++                        .expect("failed to send Resumed");
++                }
++                Ok(VcpuEvent::Pause) => {
++                    self.response_sender
++                        .send(VcpuResponse::Paused)
++                        .expect("failed to send Paused");
++                    self.wait_for_resume();
++                }
++                Err(TryRecvError::Empty) => {}
++                Err(TryRecvError::Disconnected) => break,
++            }
++
++            match self.run_emulation() {
++                Ok(VcpuEmulation::Handled) => {}
++                Ok(VcpuEmulation::Stopped) => {
++                    self.exit(FC_EXIT_CODE_OK);
++                    break;
++                }
++                Err(_) => {
++                    self.exit(FC_EXIT_CODE_GENERIC_ERROR);
++                    break;
++                }
++            }
++        }
++    }
++
++    fn wait_for_resume(&mut self) {
++        loop {
++            match self.event_receiver.recv() {
++                Ok(VcpuEvent::Resume) => {
++                    self.response_sender
++                        .send(VcpuResponse::Resumed)
++                        .expect("failed to send Resumed");
++                    return;
++                }
++                Ok(VcpuEvent::Pause) => continue,
++                Err(_) => return,
++            }
++        }
++    }
++
++    fn callback_context(&self, bus: *const devices::Bus) -> CallbackContext {
++        CallbackContext {
++            partition_handle: self.whp_vcpu.partition_handle(),
++            vp_index: self.whp_vcpu.index(),
++            bus,
++            guest_mem: &self.guest_mem as *const GuestMemoryMmap,
++        }
++    }
++
++    fn run_emulation(&mut self) -> Result<VcpuEmulation> {
++        let reason = self.whp_vcpu.run().map_err(Error::VcpuRun)?;
++
++        let result = match reason {
++            VcpuExitReason::IoPortAccess => {
++                let ctx = self.callback_context(&self.io_bus as *const devices::Bus);
++                unsafe {
++                    self.emulator
++                        .try_io_emulation(
++                            &ctx as *const _ as *const c_void,
++                            self.whp_vcpu.vp_exit_context(),
++                            self.whp_vcpu.io_port_access_context(),
++                        )
++                        .map_err(Error::Emulation)?;
++                }
++                Ok(VcpuEmulation::Handled)
++            }
++            VcpuExitReason::MemoryAccess => {
++                let bus = self
++                    .mmio_bus
++                    .as_ref()
++                    .map_or(std::ptr::null(), |b| b as *const devices::Bus);
++                let ctx = self.callback_context(bus);
++                unsafe {
++                    self.emulator
++                        .try_mmio_emulation(
++                            &ctx as *const _ as *const c_void,
++                            self.whp_vcpu.vp_exit_context(),
++                            self.whp_vcpu.memory_access_context(),
++                        )
++                        .map_err(Error::Emulation)?;
++                }
++                Ok(VcpuEmulation::Handled)
++            }
++            VcpuExitReason::Halt => {
++                // A Linux guest hits HLT when idle.
++                // WHP handles most HLT states internally (if interrupts are enabled),
++                // but if we land here, the vCPU is truly stalled.
++
++                // Check if we should actually be shutting down.
++                if self.exit_evt.is_signaled() {
++                    return Ok(VcpuEmulation::Stopped);
++                }
++
++                // Yield the timeslice so the synthetic-timer and PIT
++                // worker threads can run.  sleep(1ms) on Windows rounds
++                // up to one scheduler tick (~1-15 ms) which is acceptable
++                // for an idle vCPU and avoids burning a full core.
++                thread::sleep(std::time::Duration::from_millis(1));
++                Ok(VcpuEmulation::Handled)
++            }
++            VcpuExitReason::InterruptWindow => {
++                let _ = self.whp_vcpu.clear_interrupt_window();
++                Ok(VcpuEmulation::Handled)
++            }
++            VcpuExitReason::Canceled => {
++                // If the vCPU was canceled while waiting for an interrupt window,
++                // and the guest has now unmasked interrupts (IF=1), clear the window
++                // request to prevent a spurious InterruptWindow exit storm on re-entry.
++                let rflags = self
++                    .whp_vcpu
++                    .get_registers64([WHvX64RegisterRflags])
++                    .unwrap_or([0]);
++                if rflags[0] & 0x200 != 0 {
++                    let _ = self.whp_vcpu.clear_interrupt_window();
++                }
++                Ok(VcpuEmulation::Handled)
++            }
++            _ => {
++                error!(
++                    "vCPU {} unhandled or unexpected exit reason: {:?}",
++                    self.cpu_index(),
++                    reason
++                );
++                Err(Error::VcpuUnhandledExit)
++            }
++        };
++
++        // If a shutdown device (i8042, ACPI PM, …) signaled exit_evt --
++        // possibly from this vCPU or from another -- stop immediately.
++        if self.exit_evt.is_signaled() {
++            return Ok(VcpuEmulation::Stopped);
++        }
++
++        result
++    }
++
++    fn exit(&mut self, exit_code: u8) {
++        self.response_sender
++            .send(VcpuResponse::Exited(exit_code))
++            .expect("failed to send Exited status");
++
++        if let Err(e) = self.exit_evt.write(1) {
++            error!("Failed signaling vcpu exit event: {e}");
++        }
++    }
++}
++
++// Allow currently unused Pause and Exit events. These will be used by the vmm later on.
++#[allow(unused)]
++#[derive(Debug)]
++/// List of events that the Vcpu can receive.
++pub enum VcpuEvent {
++    /// Pause the Vcpu.
++    Pause,
++    /// Event that should resume the Vcpu.
++    Resume,
++}
++
++#[derive(Debug, Eq, PartialEq)]
++/// List of responses that the Vcpu reports.
++pub enum VcpuResponse {
++    /// Vcpu is paused.
++    Paused,
++    /// Vcpu is resumed.
++    Resumed,
++    /// Vcpu is stopped.
++    Exited(u8),
++}
++
++/// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
++pub struct VcpuHandle {
++    /// The transmitting end of the events channel which will be given to the handler.
++    event_sender: Sender<VcpuEvent>,
++    /// The receiving end of the responses channel which will be given to the handler.
++    response_receiver: Receiver<VcpuResponse>,
++    /// The VM that the vCPU belongs to.
++    vm: Arc<WhpVm>,
++    /// The index of the vCPU.
++    vp_index: u32,
++}
++
++impl VcpuHandle {
++    pub fn send_event(&self, event: VcpuEvent) -> Result<()> {
++        self.event_sender
++            .send(event)
++            .expect("event sender channel closed on vcpu end.");
++
++        // Interrupt WHvRunVirtualProcessor so the vCPU picks up the event.
++        unsafe {
++            let hr = windows_sys::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor(
++                self.vm.partition_handle(),
++                self.vp_index,
++                0,
++            );
++            if hr != windows_sys::Win32::Foundation::S_OK {
++                error!("WHvCancelRunVirtualProcessor failed: HRESULT 0x{hr:08x}");
++            }
++        }
++
++        Ok(())
++    }
++
++    pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
++        &self.response_receiver
++    }
++}
++
++enum VcpuEmulation {
++    Handled,
++    Stopped,
++}
+diff --git a/src/libkrun/src/vmm/worker.rs b/src/libkrun/src/vmm/worker.rs
+index c00647a..11297ab 100644
+--- a/src/libkrun/src/vmm/worker.rs
++++ b/src/libkrun/src/vmm/worker.rs
+@@ -49,7 +49,7 @@ impl super::Vmm {
+             WorkerMessage::GpuAddMapping(s, h, g, l) => self.add_mapping(s, h, g, l),
+             #[cfg(target_os = "macos")]
+             WorkerMessage::GpuRemoveMapping(s, g, l) => self.remove_mapping(s, g, l),
+-            #[cfg(target_arch = "x86_64")]
++            #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+             WorkerMessage::GsiRoute(sender, entries) => {
+                 let mut routing = kvm_bindings::KvmIrqRouting::new(entries.len()).unwrap();
+                 let routing_entries = routing.as_mut_slice();
+@@ -58,12 +58,13 @@ impl super::Vmm {
+                     .send(self.vm.fd().set_gsi_routing(&routing).is_ok())
+                     .unwrap();
+             }
+-            #[cfg(target_arch = "x86_64")]
++            #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+             WorkerMessage::IrqLine(sender, irq, active) => {
+                 sender
+                     .send(self.vm.fd().set_irq_line(irq, active).is_ok())
+                     .unwrap();
+             }
++            #[cfg(not(target_os = "windows"))]
+             WorkerMessage::ConvertMemory(_sender, _properties) => {
+                 #[cfg(all(feature = "tee", target_arch = "x86_64"))]
+                 {
+diff --git a/src/utils/src/windows/eventfd.rs b/src/utils/src/windows/eventfd.rs
+index f3f68ea..ce30212 100644
+--- a/src/utils/src/windows/eventfd.rs
++++ b/src/utils/src/windows/eventfd.rs
+@@ -143,6 +143,13 @@ impl EventFd {
+             false
+         }
+     }
++
++    /// Returns `true` if the event is currently signaled (counter > 0)
++    /// without consuming it.
++    pub fn is_signaled(&self) -> bool {
++        let counter = self.inner.counter.lock().unwrap();
++        *counter > 0
++    }
+ }
+ 
+ impl AsRawFd for EventFd {
+diff --git a/src/whp/src/lib.rs b/src/whp/src/lib.rs
+index 735c290..2fa2e6d 100644
+--- a/src/whp/src/lib.rs
++++ b/src/whp/src/lib.rs
+@@ -14,18 +14,18 @@ use windows_sys::Win32::System::Hypervisor::{
+     WHV_CAPABILITY, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_STATUS, WHV_MEMORY_ACCESS_CONTEXT,
+     WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY, WHV_PARTITION_PROPERTY_CODE,
+     WHV_PROCESSOR_FEATURES_BANKS, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
+-    WHV_VP_EXIT_CONTEXT, WHV_X64_CPUID_RESULT, WHV_X64_IO_PORT_ACCESS_CONTEXT,
+-    WHvCancelRunVirtualProcessor, WHvCapabilityCodeHypervisorPresent,
+-    WHvCapabilityCodeProcessorFeaturesBanks, WHvCreatePartition, WHvCreateVirtualProcessor,
+-    WHvDeletePartition, WHvDeleteVirtualProcessor, WHvEmulatorCreateEmulator,
+-    WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation, WHvEmulatorTryMmioEmulation,
+-    WHvGetCapability, WHvGetVirtualProcessorRegisters, WHvMapGpaRange, WHvMapGpaRangeFlagExecute,
+-    WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeCpuidResultList,
+-    WHvPartitionPropertyCodeExtendedVmExits, WHvPartitionPropertyCodeLocalApicEmulationMode,
++    WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS, WHV_VP_EXIT_CONTEXT, WHV_X64_CPUID_RESULT,
++    WHV_X64_IO_PORT_ACCESS_CONTEXT, WHvCancelRunVirtualProcessor,
++    WHvCapabilityCodeHypervisorPresent, WHvCapabilityCodeProcessorFeaturesBanks,
++    WHvCapabilityCodeSyntheticProcessorFeaturesBanks, WHvCreatePartition,
++    WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor,
++    WHvEmulatorCreateEmulator, WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation,
++    WHvEmulatorTryMmioEmulation, WHvGetCapability, WHvGetVirtualProcessorRegisters, WHvMapGpaRange,
++    WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite,
++    WHvPartitionPropertyCodeCpuidResultList, WHvPartitionPropertyCodeLocalApicEmulationMode,
+     WHvPartitionPropertyCodeProcessorCount, WHvPartitionPropertyCodeProcessorFeaturesBanks,
+-    WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
+-    WHvPartitionPropertyCodeX64MsrExitBitmap, WHvRequestInterrupt, WHvRunVirtualProcessor,
+-    WHvRunVpExitReasonCanceled, WHvRunVpExitReasonInvalidVpRegisterValue,
++    WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks, WHvRequestInterrupt,
++    WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled, WHvRunVpExitReasonInvalidVpRegisterValue,
+     WHvRunVpExitReasonMemoryAccess, WHvRunVpExitReasonUnrecoverableException,
+     WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
+     WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
+@@ -175,6 +175,53 @@ fn get_processor_features_banks() -> Result<WHV_PROCESSOR_FEATURES_BANKS, Error>
+     }
+ }
+ 
++// These are WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS bits, not the bit positions
++// returned to the guest in CPUID 0x40000003.EAX. WHP performs that translation.
++const WHP_HYPERVISOR_PRESENT: u64 = 1 << 0;
++const WHP_HV1_INTERFACE: u64 = 1 << 1;
++const WHP_ACCESS_VP_RUNTIME: u64 = 1 << 2;
++const WHP_ACCESS_REFERENCE_COUNTER: u64 = 1 << 3;
++const WHP_ACCESS_HYPERCALL_REGISTERS: u64 = 1 << 7;
++const WHP_ACCESS_VP_INDEX: u64 = 1 << 8;
++const WHP_ACCESS_REFERENCE_TSC: u64 = 1 << 9;
++const WHP_ACCESS_FREQUENCY_REGISTERS: u64 = 1 << 11;
++
++const HV1_BASELINE: u64 = WHP_HYPERVISOR_PRESENT
++    | WHP_HV1_INTERFACE
++    | WHP_ACCESS_HYPERCALL_REGISTERS
++    | WHP_ACCESS_VP_INDEX;
++const REQUESTED_ENLIGHTENMENTS: u64 = HV1_BASELINE
++    | WHP_ACCESS_VP_RUNTIME
++    | WHP_ACCESS_REFERENCE_COUNTER
++    | WHP_ACCESS_REFERENCE_TSC
++    | WHP_ACCESS_FREQUENCY_REGISTERS;
++
++fn select_synthetic_processor_features(supported: u64) -> Option<u64> {
++    let enabled = supported & REQUESTED_ENLIGHTENMENTS;
++    (enabled & HV1_BASELINE == HV1_BASELINE).then_some(enabled)
++}
++
++fn get_synthetic_processor_features_banks() -> Option<WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS> {
++    let mut capability = MaybeUninit::<WHV_CAPABILITY>::uninit();
++    let mut written_size = 0;
++
++    unsafe {
++        let hr = WHvGetCapability(
++            WHvCapabilityCodeSyntheticProcessorFeaturesBanks,
++            capability.as_mut_ptr().cast(),
++            mem::size_of::<WHV_CAPABILITY>() as u32,
++            &mut written_size,
++        );
++
++        if hr != S_OK {
++            debug!("WHP synthetic processor features are unavailable: HRESULT 0x{hr:08x}");
++            return None;
++        }
++
++        Some(capability.assume_init().SyntheticProcessorFeaturesBanks)
++    }
++}
++
+ /// Parsed CPUID exit context returned by [`WhpVcpu::cpuid_exit_info`].
+ #[derive(Debug, Clone)]
+ pub struct CpuidExitInfo {
+@@ -285,19 +332,6 @@ impl WhpVm {
+             },
+         )?;
+ 
+-        // Enable MSR exits (bit 1)
+-        // https://github.com/google/crosvm/blob/main/hypervisor/src/whpx/whpx_sys/WinHvPlatformDefs.h#L74
+-        Self::set_property(handle, WHvPartitionPropertyCodeExtendedVmExits, |p| {
+-            p.ExtendedVmExits.AsUINT64 = 0b10; // bit 1 = X64MsrExit
+-        })?;
+-
+-        // Configure how MSRs are handled
+-        // We just set the bit 0 (UnhandledMsrs) so that any MSR read/write does not automatically fail
+-        // but it triggers an exit that we can handle
+-        Self::set_property(handle, WHvPartitionPropertyCodeX64MsrExitBitmap, |p| {
+-            p.X64MsrExitBitmap.AsUINT64 = 0b01; // bit 0 = UnhandledMsrs
+-        })?;
+-
+         // Set invariant TSC support
+         // First we need to retrieve the processor features banks and re-set them with the invariant TSC support
+         // otherwise they get lost
+@@ -316,111 +350,29 @@ impl WhpVm {
+             )?;
+         }
+ 
+-        // This unlocks the MSRs you are advertising in CPUID.
+-        Self::set_property(
+-            handle,
+-            WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
+-            |p| {
+-                p.SyntheticProcessorFeaturesBanks.BanksCount = 1;
+-                // We use bitwise OR on the AsUINT64 array of the union for safety/clarity.
+-                // Bit 0: HypervisorPresent
+-                // Bit 1: Hv1 (Report support for Hv1: CPUID leaves 0x40000000 - 0x40000006)
+-                // Bit 2: AccessVpRunTimeReg
+-                // Bit 3: AccessPartitionReferenceCounter
+-                // Bit 7: Hypercalls
+-                // Bit 8: AccessVpIndex
+-                // Bit 9: AccessPartitionReferenceTsc
+-                // Bit 11: AccessFrequencyRegs
+-                unsafe {
+-                    p.SyntheticProcessorFeaturesBanks.Anonymous.AsUINT64[0] = 0xB8F;
+-                }
+-            },
+-        )?;
++        if let Some(supported_synthetic_features) = get_synthetic_processor_features_banks()
++            && supported_synthetic_features.BanksCount > 0
++        {
++            let supported = unsafe { supported_synthetic_features.Anonymous.AsUINT64[0] };
++
++            if let Some(enabled) = select_synthetic_processor_features(supported) {
++                Self::set_property(
++                    handle,
++                    WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
++                    |property| {
++                        property.SyntheticProcessorFeaturesBanks.BanksCount = 1;
++                        unsafe {
++                            property.SyntheticProcessorFeaturesBanks.Anonymous.AsUINT64[0] =
++                                enabled;
++                        }
++                    },
++                )?;
++                debug!("Enabled WHP synthetic processor features: 0x{enabled:x}");
++            }
++        }
+ 
+         let mut cpuid_results: Vec<WHV_X64_CPUID_RESULT> = Vec::new();
+ 
+-        // WHP does NOT expose Hyper-V CPUID to the guest automatically;
+-        // we must provide 0x40000000+ via CpuidResultList.
+-        // More info on Hypervisor Top Level Functional Specification
+-        // https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/tlfs
+-
+-        // 0x40000000 — Hypervisor signature: "Microsoft Hv"
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000000,
+-            Reserved: [0; 3],
+-            Eax: 0x40000006,
+-            Ebx: 0x7263694D, // "Micr"
+-            Ecx: 0x666F736F, // "osof"
+-            Edx: 0x76482074, // "t Hv"
+-        });
+-        // 0x40000001 — Interface identification: "Hv#1"
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000001,
+-            Reserved: [0; 3],
+-            Eax: 0x31237648, // "Hv#1"
+-            Ebx: 0,
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-        // 0x40000002 — Version (minimal)
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000002,
+-            Reserved: [0; 3],
+-            Eax: 0x3839,  // build number
+-            Ebx: 0xa0000, // version
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-        // 0x40000003 — Feature identification (Hyper-V TLFS §2.4)
+-        const ACCESS_VP_RUNTIME: u32 = 1 << 0;
+-        const ACCESS_REF_COUNTER: u32 = 1 << 1;
+-        const ACCESS_HYPERCALLS: u32 = 1 << 5;
+-        const ACCESS_VP_INDEX: u32 = 1 << 6;
+-        const ACCESS_REF_TSC: u32 = 1 << 9;
+-        const ACCESS_FREQ_REGS: u32 = 1 << 11;
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000003,
+-            Reserved: [0; 3],
+-            Eax: ACCESS_VP_RUNTIME
+-                | ACCESS_REF_COUNTER
+-                | ACCESS_HYPERCALLS
+-                | ACCESS_VP_INDEX
+-                | ACCESS_REF_TSC
+-                | ACCESS_FREQ_REGS,
+-            Ebx: 0,
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-        // 0x40000004 — Recommendations
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000004,
+-            Reserved: [0; 3],
+-            Eax: 1 << 5, // RelaxedTiming
+-            Ebx: 0,
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-        // 0x40000005 — Implementation limits
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000005,
+-            Reserved: [0; 3],
+-            Eax: 64, // max virtual processors
+-            Ebx: 0,
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-        // 0x40000006: Hardware Features
+-        const HV_MSR_BITMAPS: u32 = 1 << 1;
+-        const HV_SLAT: u32 = 1 << 3;
+-        cpuid_results.push(WHV_X64_CPUID_RESULT {
+-            Function: 0x40000006,
+-            Reserved: [0; 3],
+-            Eax: HV_MSR_BITMAPS | HV_SLAT,
+-            Ebx: 0,
+-            Ecx: 0,
+-            Edx: 0,
+-        });
+-
+         // invariant tsc
+         if processor_features_banks.BanksCount >= 2 {
+             cpuid_results.push(WHV_X64_CPUID_RESULT {
+@@ -457,16 +409,18 @@ impl WhpVm {
+             });
+         }
+ 
+-        let hr = unsafe {
+-            WHvSetPartitionProperty(
+-                handle,
+-                WHvPartitionPropertyCodeCpuidResultList,
+-                cpuid_results.as_ptr() as *const _,
+-                (cpuid_results.len() * mem::size_of::<WHV_X64_CPUID_RESULT>()) as u32,
+-            )
+-        };
+-        if hr != S_OK {
+-            return Err(Error::SetPartitionProperty(hr));
++        if !cpuid_results.is_empty() {
++            let hr = unsafe {
++                WHvSetPartitionProperty(
++                    handle,
++                    WHvPartitionPropertyCodeCpuidResultList,
++                    cpuid_results.as_ptr().cast(),
++                    (cpuid_results.len() * mem::size_of::<WHV_X64_CPUID_RESULT>()) as u32,
++                )
++            };
++            if hr != S_OK {
++                return Err(Error::SetPartitionProperty(hr));
++            }
+         }
+ 
+         let hr = unsafe { WHvSetupPartition(handle) };
+@@ -503,28 +457,26 @@ impl WhpVm {
+     /// Tries CPUID 0x15, then 0x16 (Intel), then falls back to measuring
+     /// via RDTSC over a short sleep (works on AMD and all other x86_64).
+     fn detect_tsc_frequency() -> u64 {
+-        unsafe {
+-            // Leaf 0 returns the maximum supported standard leaf in EAX.
+-            // leaves 0x15 and 0x16 may not be supported (like in non-Intel hardware (like AMD)
+-            // or when using nested virtualization), so it's better to check first.
+-            let max_leaf = core::arch::x86_64::__cpuid(0x0).eax;
+-
+-            if max_leaf >= 0x15 {
+-                let cpuid15 = core::arch::x86_64::__cpuid(0x15);
+-                if cpuid15.eax != 0 && cpuid15.ebx != 0 && cpuid15.ecx != 0 {
+-                    let freq = (cpuid15.ecx as u64 * cpuid15.ebx as u64) / cpuid15.eax as u64;
+-                    debug!("TSC frequency from CPUID 0x15: {} Hz", freq);
+-                    return freq;
+-                }
++        // Leaf 0 returns the maximum supported standard leaf in EAX.
++        // leaves 0x15 and 0x16 may not be supported (like in non-Intel hardware (like AMD)
++        // or when using nested virtualization), so it's better to check first.
++        let max_leaf = core::arch::x86_64::__cpuid(0x0).eax;
++
++        if max_leaf >= 0x15 {
++            let cpuid15 = core::arch::x86_64::__cpuid(0x15);
++            if cpuid15.eax != 0 && cpuid15.ebx != 0 && cpuid15.ecx != 0 {
++                let freq = (cpuid15.ecx as u64 * cpuid15.ebx as u64) / cpuid15.eax as u64;
++                debug!("TSC frequency from CPUID 0x15: {} Hz", freq);
++                return freq;
+             }
++        }
+ 
+-            if max_leaf >= 0x16 {
+-                let cpuid16 = core::arch::x86_64::__cpuid(0x16);
+-                if cpuid16.eax != 0 {
+-                    let freq = cpuid16.eax as u64 * 1_000_000;
+-                    debug!("TSC frequency from CPUID 0x16: {} Hz", freq);
+-                    return freq;
+-                }
++        if max_leaf >= 0x16 {
++            let cpuid16 = core::arch::x86_64::__cpuid(0x16);
++            if cpuid16.eax != 0 {
++                let freq = cpuid16.eax as u64 * 1_000_000;
++                debug!("TSC frequency from CPUID 0x16: {} Hz", freq);
++                return freq;
+             }
+         }
+ 
+@@ -751,9 +703,10 @@ impl WhpEmulator {
+         vp_context: *const WHV_VP_EXIT_CONTEXT,
+         io_context: *const WHV_X64_IO_PORT_ACCESS_CONTEXT,
+     ) -> Result<(), Error> {
+-        let mut status: WHV_EMULATOR_STATUS = mem::zeroed();
+-        let hr =
+-            WHvEmulatorTryIoEmulation(self.handle, context, vp_context, io_context, &mut status);
++        let mut status: WHV_EMULATOR_STATUS = unsafe { mem::zeroed() };
++        let hr = unsafe {
++            WHvEmulatorTryIoEmulation(self.handle, context, vp_context, io_context, &mut status)
++        };
+         Self::check_emulation_result(hr, status, Error::IoEmulation)
+     }
+ 
+@@ -771,14 +724,10 @@ impl WhpEmulator {
+         vp_context: *const WHV_VP_EXIT_CONTEXT,
+         mmio_context: *const WHV_MEMORY_ACCESS_CONTEXT,
+     ) -> Result<(), Error> {
+-        let mut status: WHV_EMULATOR_STATUS = mem::zeroed();
+-        let hr = WHvEmulatorTryMmioEmulation(
+-            self.handle,
+-            context,
+-            vp_context,
+-            mmio_context,
+-            &mut status,
+-        );
++        let mut status: WHV_EMULATOR_STATUS = unsafe { mem::zeroed() };
++        let hr = unsafe {
++            WHvEmulatorTryMmioEmulation(self.handle, context, vp_context, mmio_context, &mut status)
++        };
+         Self::check_emulation_result(hr, status, Error::MmioEmulation)
+     }
+ }
+@@ -815,6 +764,21 @@ pub struct WhpVcpu {
+     exit_context: WHV_RUN_VP_EXIT_CONTEXT,
+ }
+ 
++/*
++WHP API requires virtual processor register structures to be 16-byte aligned in memory.
++
++However, Rust's `windows-sys` metadata generator drops the DECLSPEC_ALIGN(16) attribute,
++causing `WHV_REGISTER_VALUE` to default to an 8-byte alignment.
++As a result, stack-allocated arrays `[WHV_REGISTER_VALUE; N]` can land on
++8-byte boundaries, triggering alignment faults or access violations in
++`winhvplatform.dll`.
++
++To fix this, we use a wrapper struct `AlignedRegisterValues<T>` to
++guarantee proper 16-byte stack alignment.
++*/
++#[repr(C, align(16))]
++struct AlignedRegisterValues<T>(T);
++
+ impl WhpVcpu {
+     /// Creates a new virtual processor within the given partition.
+     pub fn new(vm: Arc<WhpVm>, index: u32) -> Result<Self, Error> {
+@@ -936,8 +900,8 @@ impl WhpVcpu {
+         &self,
+         names: [WHV_REGISTER_NAME; N],
+     ) -> Result<[WHV_REGISTER_VALUE; N], Error> {
+-        // Create a zeroed array on the stack to hold the results
+-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
++        // Create a 16-byte aligned zeroed array on the stack
++        let mut values = AlignedRegisterValues(unsafe { mem::zeroed::<[WHV_REGISTER_VALUE; N]>() });
+ 
+         let hr = unsafe {
+             WHvGetVirtualProcessorRegisters(
+@@ -945,7 +909,7 @@ impl WhpVcpu {
+                 self.index,
+                 names.as_ptr(),
+                 N as u32,
+-                values.as_mut_ptr(),
++                values.0.as_mut_ptr(),
+             )
+         };
+ 
+@@ -953,7 +917,7 @@ impl WhpVcpu {
+             Err(Error::GetRegisters(hr))
+         } else {
+             // Return the array directly!
+-            Ok(values)
++            Ok(values.0)
+         }
+     }
+ 
+@@ -994,14 +958,14 @@ impl WhpVcpu {
+         pairs: [(WHV_REGISTER_NAME, WHV_REGISTER_VALUE); N],
+     ) -> Result<(), Error> {
+         let mut names: [WHV_REGISTER_NAME; N] = unsafe { mem::zeroed() };
+-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
++        let mut values = AlignedRegisterValues(unsafe { mem::zeroed::<[WHV_REGISTER_VALUE; N]>() });
+ 
+         for i in 0..N {
+             names[i] = pairs[i].0;
+-            values[i] = pairs[i].1;
++            values.0[i] = pairs[i].1;
+         }
+ 
+-        self.set_whp_registers(&names, &values)
++        self.set_whp_registers(&names, &values.0)
+     }
+ 
+     pub fn set_registers64<const N: usize>(
+@@ -1009,14 +973,14 @@ impl WhpVcpu {
+         pairs: [(WHV_REGISTER_NAME, u64); N],
+     ) -> Result<(), Error> {
+         let mut names: [WHV_REGISTER_NAME; N] = unsafe { mem::zeroed() };
+-        let mut values: [WHV_REGISTER_VALUE; N] = unsafe { mem::zeroed() };
++        let mut values = AlignedRegisterValues(unsafe { mem::zeroed::<[WHV_REGISTER_VALUE; N]>() });
+ 
+         for i in 0..N {
+             names[i] = pairs[i].0;
+-            values[i].Reg64 = pairs[i].1;
++            values.0[i].Reg64 = pairs[i].1;
+         }
+ 
+-        self.set_whp_registers(&names, &values)
++        self.set_whp_registers(&names, &values.0)
+     }
+ 
+     pub fn vm(&self) -> &Arc<WhpVm> {
+@@ -1075,3 +1039,24 @@ impl Drop for WhpVcpu {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn synthetic_features_require_hv1_baseline() {
++        assert_eq!(
++            select_synthetic_processor_features(REQUESTED_ENLIGHTENMENTS),
++            Some(REQUESTED_ENLIGHTENMENTS)
++        );
++        assert_eq!(
++            select_synthetic_processor_features(HV1_BASELINE),
++            Some(HV1_BASELINE)
++        );
++        assert_eq!(
++            select_synthetic_processor_features(REQUESTED_ENLIGHTENMENTS & !WHP_ACCESS_VP_INDEX),
++            None
++        );
++    }
++}

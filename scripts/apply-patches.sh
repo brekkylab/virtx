@@ -1,5 +1,5 @@
 #!/bin/sh
-# Apply the macOS GPU patches to the libkrun and rutabaga_gfx submodules, in
+# Apply the out-of-tree patches to the libkrun and rutabaga_gfx submodules, in
 # place.
 #
 # These two are Rust crates that cargo resolves by path, so unlike the
@@ -7,6 +7,13 @@
 # exported copy under data/ -- cargo needs the real tree. The submodules
 # therefore carry the patches in their working trees and are marked
 # `ignore = dirty` in .gitmodules.
+#
+# Both libkrun patches are applied on every host, including the Windows one.
+# It is inert off Windows -- every hunk outside src/whp/ and src/**/windows/ is
+# cfg-gated -- and applying it everywhere keeps the submodule in a single
+# canonical state, so the `apply --check` below reports a stale patch as soon
+# as the submodule moves, rather than on whichever day someone next builds for
+# Windows.
 #
 # Running this twice is a no-op.
 set -eu
@@ -40,4 +47,5 @@ apply_patch() {
 
 echo "applying patches"
 apply_patch libkrun "$ROOT/patches/libkrun-e6cdb55-macos-gpu.patch"
+apply_patch libkrun "$ROOT/patches/libkrun-e6cdb55-windows-whp.patch"
 apply_patch rutabaga_gfx "$ROOT/patches/rutabaga_gfx-8cb133e-macos-virgl-renderer.patch"

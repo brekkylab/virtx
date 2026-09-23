@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::io::{Seek, SeekFrom, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use super::{Digest, Error, Image, Result};
 
-use super::{Digest, Error, Reference, Result};
+/// The index, under the root.
+const INDEX: &str = "images.json";
 
-/// The annotation an image layout names a manifest with.
-const REF_NAME: &str = "org.opencontainers.image.ref.name";
+/// What guards it, beside it.
+const LOCK: &str = "images.lock";
 
 /// Where to keep images when the caller does not say. `CORTEX_IMAGE_CACHE_ROOT`
 /// overrides it.
@@ -38,46 +41,42 @@ fn cache_root() -> PathBuf {
 ///
 /// # Layout
 ///
-/// An OCI image layout, so that `skopeo`, `podman` and anything else that reads the
-/// standard can read this directory as it stands:
-///
 /// ```text
 /// <root>/
-///   oci-layout           marks the directory as an image layout
-///   index.json           one entry per reference pulled here, naming its manifest
-///   blobs/sha256/<hex>   layers, configs and manifests, as the registry served them
-///   tmp/                 downloads in progress
+///   images.json            one entry per reference pulled here
+///   images.lock            guards `image.json`
+///   erofs/sha256/<hex>     one EROFS per layer, named by its digest
+///   tmp/                   what is being written
 /// ```
 ///
-/// ## `blobs/`
-/// `blobs/` is content-addressed, so it needs no invalidation and a name that exists is
-/// bytes that are whole. Nothing lands there except a rename out of `tmp/`.
+/// ## `images.json`
+/// The only part that goes stale, and must, because a tag is a name somebody else can
+/// move. Read and written under a lock, being the one file every pull rewrites.
 ///
-/// ## `index.json`
-/// `index.json` is the only part that goes stale, and must, because a tag is a name
-/// somebody else can move. It is read and written under a lock, being one file that every pull appends
-/// to.
+/// Keyed by the reference as it is spelled canonically, so `alpine:3.21` and
+/// `docker.io/library/alpine:3.21` are one entry. What each holds is what a boot needs
+/// and nothing more: which layers, in which order, and what to run.
 ///
 /// ```json
 /// {
-///   "schemaVersion": 2,
-///   "mediaType": "application/vnd.oci.image.index.v1+json",
-///   "manifests": [
-///     {
-///       "mediaType": "application/vnd.oci.image.manifest.v1+json",
-///       "digest": "sha256:0a7ed0d449b9318548e66674610d757de19b7645759f74b587b610b59d6b43fd",
-///       "size": 1025,
-///       "annotations": {
-///         "org.opencontainers.image.ref.name": "docker.io/library/alpine:3.21"
-///       },
-///       "platform": {
-///         "architecture": "arm64",
-///         "os": "linux"
-///       }
-///     }
-///   ]
+///   "docker.io/library/alpine:3.21": {
+///     "manifest": "sha256:0a7ed0d449b9318548e66674610d757de19b7645759f74b587b610b59d6b43fd",
+///     "layers": [
+///       { "digest": "sha256:a16e98724c05975ee8c40d8fe389c3481373d34ab20a1cf52ea2accc43f71f4c" }
+///     ],
+///     "config": { "Env": ["PATH=/usr/sbin:/usr/bin:/sbin:/bin"], "Cmd": ["/bin/sh"] },
+///     "platform": "linux/arm64"
+///   }
 /// }
 /// ```
+///
+/// ## `erofs/`
+/// Content-addressed, so it needs no invalidation and a name that exists is a whole
+/// file. The name is the layer's `diff_id` -- the digest of its contents rather than of
+/// whatever a registry compressed them into -- which is also what the image config
+/// signs, so a pull can ask whether a layer is already here before fetching a byte of
+/// it. Nothing lands there except a rename out of `tmp/`.
+///
 #[derive(Debug, Clone)]
 pub struct Cache {
     root: PathBuf,
@@ -96,137 +95,66 @@ impl Cache {
         &self.root
     }
 
-    /// Where this blob lies, whether or not anything is there.
-    pub fn blob(&self, digest: &Digest) -> PathBuf {
-        self.root.join("blobs").join(digest.path())
+    /// Where this layer's EROFS image lies, whether or not anything is there. Named by
+    /// the layer's `digest`, which is what the image config signs and so names the
+    /// same contents whatever a registry happened to compress them with.
+    pub fn erofs_path(&self, digest: &Digest) -> PathBuf {
+        self.root.join("erofs").join(digest.path())
     }
 
-    /// Whether a download can be skipped.
-    pub fn has(&self, digest: &Digest) -> bool {
-        self.blob(digest).is_file()
+    /// Whether a download *and* a conversion can both be skipped. Answerable before
+    /// anything is fetched, because the config names every layer's `diff_id`.
+    pub fn has_erofs(&self, digest: &Digest) -> bool {
+        self.erofs_path(digest).is_file()
     }
 
-    pub fn read(&self, digest: &Digest) -> Result<Vec<u8>> {
-        let path = self.blob(digest);
-        fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))
-    }
+    /// Somewhere to write `to` before it is `to`.
+    ///
+    /// Keeps half-finished bytes out of the way of anything looking for a finished
+    /// one, and removes them again if they stay half-finished. The destination is
+    /// named here rather than at the commit, because every caller knows it before it
+    /// writes a byte -- and naming it once is what keeps a file from being staged for
+    /// one thing and committed as another.
+    pub fn staged_writer(&self, to: impl Into<PathBuf>) -> Result<Staged> {
+        let to = to.into();
 
-    /// Keep bytes already in hand, such as a manifest or a config. A layer goes through
-    /// [`staging`](Self::staging) and [`commit`](Self::commit) so it never has to be in
-    /// memory.
-    pub fn put(&self, bytes: &[u8]) -> Result<Digest> {
-        let digest = Digest::of(bytes);
-        if self.has(&digest) {
-            return Ok(digest);
-        }
-
-        let staged = self.staging(digest.hex())?;
-        fs::write(&staged, bytes)
-            .map_err(|e| Error::io(format!("writing {}", staged.display()), e))?;
-        self.commit(&staged, &digest)?;
-        Ok(digest)
-    }
-
-    /// Somewhere to write a download to. Keeps half-finished bytes out of the way of
-    /// anything looking for a finished blob.
-    pub fn staging(&self, hint: &str) -> Result<PathBuf> {
         let tmp = self.root.join("tmp");
         fs::create_dir_all(&tmp).map_err(|e| Error::io(format!("making {}", tmp.display()), e))?;
-        Ok(tmp.join(format!("{}.{hint}.part", std::process::id())))
-    }
 
-    /// Publish a finished download, so that from here on [`has`](Self::has) answers yes.
-    pub fn commit(&self, staged: &Path, digest: &Digest) -> Result<PathBuf> {
-        let kept = self.blob(digest);
-        if kept.is_file() {
-            let _ = fs::remove_file(staged);
-            return Ok(kept);
-        }
+        // The destination's own name, so a file left in `tmp/` says what it was going
+        // to be, and two of them in one process cannot collide.
+        let name = to.file_name().unwrap_or(to.as_os_str()).to_string_lossy();
+        let at = tmp.join(format!("{}.{name}.part", std::process::id()));
+        let file = fs::File::create(&at)
+            .map_err(|e| Error::io(format!("creating {}", at.display()), e))?;
 
-        let parent = kept.parent().expect("a blob path has a directory");
-        fs::create_dir_all(parent)
-            .map_err(|e| Error::io(format!("making {}", parent.display()), e))?;
-        fs::rename(staged, &kept).map_err(|e| {
-            Error::io(
-                format!("moving {} to {}", staged.display(), kept.display()),
-                e,
-            )
-        })?;
-        Ok(kept)
-    }
-
-    /// What `reference` last resolved to, for deciding whether a tag has moved. A memo,
-    /// not an answer, because only the registry knows what a tag means now.
-    pub fn resolved(&self, reference: &Reference) -> Option<Digest> {
-        let name = reference.to_string();
-        self.index()
-            .ok()?
-            .manifests
-            .iter()
-            .find(|entry| entry.annotations.get(REF_NAME) == Some(&name))
-            .and_then(|entry| Digest::parse(&entry.digest).ok())
-    }
-
-    /// Register about the `reference` to the `index.json`.
-    pub fn register_reference(
-        &self,
-        reference: &Reference,
-        manifest: &Digest,
-        media_type: &str,
-        size: u64,
-        platform: Option<&str>,
-    ) -> Result<()> {
-        let name = reference.to_string();
-        self.with_index(|index| {
-            index
-                .manifests
-                .retain(|entry| entry.annotations.get(REF_NAME) != Some(&name));
-            index.manifests.push(Entry {
-                media_type: media_type.to_string(),
-                digest: manifest.to_string(),
-                size,
-                annotations: BTreeMap::from([(REF_NAME.to_string(), name.clone())]),
-                platform: platform.and_then(|platform| {
-                    platform.split_once('/').map(|(os, architecture)| Platform {
-                        os: os.to_string(),
-                        architecture: architecture.to_string(),
-                    })
-                }),
-            });
-            // An order nobody has to diff against last time.
-            index.manifests.sort_by(|a, b| {
-                a.annotations
-                    .get(REF_NAME)
-                    .cmp(&b.annotations.get(REF_NAME))
-            });
+        Ok(Staged {
+            file: Some(file),
+            at,
+            to,
         })
     }
 
-    /// Every reference registered here, and the manifest it names.
-    pub fn images(&self) -> Result<Vec<(String, Digest)>> {
-        Ok(self
-            .index()?
-            .manifests
-            .into_iter()
-            .filter_map(|entry| {
-                let name = entry.annotations.get(REF_NAME)?.clone();
-                Some((name, Digest::parse(&entry.digest).ok()?))
-            })
-            .collect())
-    }
-
-    fn index_path(&self) -> PathBuf {
-        self.root.join("index.json")
-    }
-
-    /// The index as it stands, or an empty one where there is no cache yet.
-    fn index(&self) -> Result<Index> {
-        let path = self.index_path();
+    /// Every reference pulled here, and the image it named.
+    ///
+    /// The whole map, because it is one file of a few lines an entry: a caller after
+    /// one of them is a caller that can look at the rest itself.
+    ///
+    /// No lock. An update lands by a rename, so what this reads is one whole index or
+    /// the one before it, never half of either. What it cannot do is be changed and put
+    /// back -- [`image_index_mut`](Self::image_index_mut) is that.
+    ///
+    /// An index that is not there yet is an empty one. An index that is there and
+    /// cannot be read is an error, because answering "no images" would lose every one
+    /// of them at the next write.
+    pub fn image_index(&self) -> Result<BTreeMap<String, Image>> {
+        let path = self.root.join(INDEX);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Index::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
         };
+
         serde_json::from_slice(&bytes).map_err(|e| {
             Error::io(
                 format!("reading {}", path.display()),
@@ -235,81 +163,157 @@ impl Cache {
         })
     }
 
-    /// Read the index, change it, and put it back, with every other process holding off.
+    /// The same, to change and put back, with the file locked until it is.
     ///
-    /// The lock is on a file of its own, because the index itself is replaced by a rename
-    /// and a lock on a replaced file guards nothing.
-    fn with_index(&self, change: impl FnOnce(&mut Index)) -> Result<()> {
+    /// Everything between this and [`ImageIndex::commit`] is inside the lock, which is
+    /// what keeps two pulls at once from leaving only the second one's entry.
+    ///
+    /// The lock is on a file of its own, because the index is replaced by a rename and
+    /// a lock on a replaced file guards nothing. What holds it is the open file rather
+    /// than the file's existence, so a process that dies gives the lock up instead of
+    /// leaving one nothing can take.
+    pub fn image_index_mut(&self) -> Result<ImageIndex> {
         fs::create_dir_all(&self.root)
             .map_err(|e| Error::io(format!("making {}", self.root.display()), e))?;
 
-        let guard = self.root.join("index.lock");
-        let lock = File::create(&guard)
-            .map_err(|e| Error::io(format!("opening {}", guard.display()), e))?;
+        let path = self.root.join(LOCK);
+        let lock =
+            File::create(&path).map_err(|e| Error::io(format!("opening {}", path.display()), e))?;
         lock.lock()
-            .map_err(|e| Error::io(format!("locking {}", guard.display()), e))?;
+            .map_err(|e| Error::io(format!("locking {}", path.display()), e))?;
 
-        let mut index = self.index()?;
-        change(&mut index);
-
-        // What marks the directory as an image layout. Written beside the index, since a
-        // layout with no `index.json` is not one anything would read.
-        let layout = self.root.join("oci-layout");
-        fs::write(&layout, br#"{"imageLayoutVersion": "1.0.0"}"#)
-            .map_err(|e| Error::io(format!("writing {}", layout.display()), e))?;
-
-        let bytes = serde_json::to_vec_pretty(&index)
-            .map_err(|e| Error::io("writing the index", std::io::Error::other(e)))?;
-        let staged = self.staging("index")?;
-        fs::write(&staged, &bytes)
-            .map_err(|e| Error::io(format!("writing {}", staged.display()), e))?;
-        fs::rename(&staged, self.index_path())
-            .map_err(|e| Error::io(format!("writing {}", self.index_path().display()), e))?;
-        Ok(())
+        Ok(ImageIndex {
+            images: self.image_index()?,
+            cache: self.clone(),
+            _lock: lock,
+        })
     }
-}
-
-/// `index.json`, as far as anything here reads it.
-#[derive(Serialize, Deserialize)]
-struct Index {
-    #[serde(rename = "schemaVersion")]
-    schema_version: u8,
-    #[serde(rename = "mediaType", skip_serializing_if = "Option::is_none")]
-    media_type: Option<String>,
-    manifests: Vec<Entry>,
-}
-
-impl Default for Index {
-    fn default() -> Index {
-        Index {
-            schema_version: 2,
-            media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
-            manifests: Vec::new(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Entry {
-    #[serde(rename = "mediaType")]
-    media_type: String,
-    digest: String,
-    size: u64,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    annotations: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    platform: Option<Platform>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Platform {
-    architecture: String,
-    os: String,
 }
 
 impl Default for Cache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A part-written file, which removes itself when it goes out of scope.
+///
+/// Written through rather than beside: this *is* the writer, so a caller never holds
+/// the staging path and cannot write somewhere else by accident. [`Seek`] as well as
+/// [`Write`], because the one thing written this way -- an EROFS image -- is laid out
+/// rather than streamed.
+///
+/// Committing renames the file away, so by the time the removal runs there is nothing
+/// left to remove. What it is for is the other endings: a conversion that refused what
+/// it was given, and a task that panicked part-way. Neither leaves anything in `tmp/`.
+pub struct Staged {
+    /// Open until it is committed or dropped. An `Option` because both of those have
+    /// to close it before they touch the name -- Windows renames and removes nothing
+    /// that is still open.
+    file: Option<fs::File>,
+    /// Where it is being written.
+    at: PathBuf,
+    /// Where it belongs once it is whole.
+    to: PathBuf,
+}
+
+impl Staged {
+    /// Where it is being written, for saying so in an error.
+    pub fn path(&self) -> &Path {
+        &self.at
+    }
+
+    /// Move what was written where it belongs, making its directory if it is not there.
+    ///
+    /// A rename, so nothing is ever half-written under the destination: either the
+    /// whole file is there or the name is not. Consuming, because afterwards there is
+    /// nothing left to write to.
+    ///
+    /// Whatever was there is replaced. Where the destination is addressed by what it
+    /// holds, that is a file being replaced by the same bytes.
+    pub fn commit(mut self) -> Result<()> {
+        drop(self.file.take());
+
+        let parent = self.to.parent().expect("a committed path has a directory");
+        fs::create_dir_all(parent)
+            .map_err(|e| Error::io(format!("making {}", parent.display()), e))?;
+
+        fs::rename(&self.at, &self.to).map_err(|e| {
+            Error::io(
+                format!("moving {} to {}", self.at.display(), self.to.display()),
+                e,
+            )
+        })
+    }
+
+    /// The open file, which is there until a commit takes it.
+    fn file(&mut self) -> std::io::Result<&mut fs::File> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("a staged file that was already committed"))
+    }
+}
+
+impl Write for Staged {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file()?.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file()?.flush()
+    }
+}
+
+impl Seek for Staged {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file()?.seek(pos)
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.at);
+    }
+}
+
+/// Index images, which `images.json` holds.
+pub struct ImageIndex {
+    images: BTreeMap<String, Image>,
+    cache: Cache,
+    _lock: File,
+}
+
+impl ImageIndex {
+    /// Write it back, replacing what was there, and let the lock go.
+    ///
+    /// Into place by a rename, so a reader sees one whole index or the one before it.
+    /// Consuming, because what was read is only worth writing while the lock that was
+    /// taken with it is still held -- and dropping one instead gives the lock up and
+    /// changes nothing, which is what a pull that failed wants.
+    pub fn commit(self) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(&self.images)
+            .map_err(|e| Error::io("writing the index", std::io::Error::other(e)))?;
+
+        let mut staged = self.cache.staged_writer(self.cache.root.join(INDEX))?;
+        staged
+            .write_all(&bytes)
+            .map_err(|e| Error::io(format!("writing {}", staged.path().display()), e))?;
+        staged.commit()
+    }
+}
+
+impl Deref for ImageIndex {
+    type Target = BTreeMap<String, Image>;
+
+    fn deref(&self) -> &BTreeMap<String, Image> {
+        &self.images
+    }
+}
+
+impl DerefMut for ImageIndex {
+    fn deref_mut(&mut self) -> &mut BTreeMap<String, Image> {
+        &mut self.images
     }
 }
 
@@ -339,116 +343,62 @@ mod tests {
     }
 
     #[test]
-    fn a_blob_comes_back_as_it_went_in() {
-        let scratch = Scratch::new("blob");
-        let cache = scratch.cache();
-
-        let digest = cache.put(b"layer bytes").unwrap();
-        assert!(cache.has(&digest));
-        assert_eq!(cache.read(&digest).unwrap(), b"layer bytes");
-        assert_eq!(digest, Digest::of(b"layer bytes"));
-    }
-
-    #[test]
-    fn the_same_bytes_are_one_blob() {
-        let scratch = Scratch::new("dedup");
-        let cache = scratch.cache();
-
-        let first = cache.put(b"shared").unwrap();
-        let again = cache.put(b"shared").unwrap();
-        assert_eq!(first, again);
-
-        let blobs = cache.root().join("blobs").join("sha256");
-        assert_eq!(fs::read_dir(blobs).unwrap().count(), 1);
-    }
-
-    #[test]
     fn staging_does_not_accumulate() {
         let scratch = Scratch::new("tmp");
         let cache = scratch.cache();
 
-        cache.put(b"one").unwrap();
-        cache.put(b"two").unwrap();
+        // Dropped rather than committed: what was half-written goes with it.
+        let mut abandoned = cache.staged_writer(cache.root().join("abandoned")).unwrap();
+        abandoned.write_all(b"half").unwrap();
+        drop(abandoned);
 
+        // Committed: moved under its name, and not left behind as well.
+        let kept = cache.root().join("done");
+        let mut staged = cache.staged_writer(&kept).unwrap();
+        staged.write_all(b"whole").unwrap();
+        staged.commit().unwrap();
+
+        assert_eq!(fs::read(&kept).unwrap(), b"whole");
         let leftover = fs::read_dir(cache.root().join("tmp")).unwrap().count();
         assert_eq!(leftover, 0, "a staged file was not moved or removed");
     }
 
-    const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
-
-    fn reference(text: &str) -> Reference {
+    fn reference(text: &str) -> crate::image::Reference {
         text.parse().unwrap()
     }
 
-    #[test]
-    fn a_reference_is_remembered_and_read_back() {
-        let scratch = Scratch::new("refs");
-        let cache = scratch.cache();
-        let manifest = Digest::of(b"a manifest");
-
-        assert_eq!(cache.resolved(&reference("alpine:latest")), None);
-        cache
-            .register_reference(
-                &reference("alpine:latest"),
-                &manifest,
-                MANIFEST_TYPE,
-                901,
-                Some("linux/arm64"),
-            )
-            .unwrap();
-        assert_eq!(cache.resolved(&reference("alpine:latest")), Some(manifest));
-        assert_eq!(cache.resolved(&reference("alpine:3.20")), None);
+    /// An image with nothing in it but the one thing this looks at.
+    fn image(manifest: Digest) -> Image {
+        Image {
+            manifest,
+            layers: Vec::new(),
+            config: Default::default(),
+            platform: "linux/arm64".to_string(),
+        }
     }
 
-    /// Two spellings of one image are one memo.
+    /// Two things at once, because they are one round trip: what is written comes back,
+    /// and every spelling of one image is one entry -- a `Reference` prints canonically,
+    /// which is what makes the key a key.
     #[test]
-    fn spellings_of_one_reference_agree() {
-        let scratch = Scratch::new("canon");
+    fn an_index_comes_back_as_it_went_in() {
+        let scratch = Scratch::new("index");
         let cache = scratch.cache();
-        let manifest = Digest::of(b"a manifest");
+        assert!(cache.image_index().unwrap().is_empty(), "no cache yet");
 
-        cache
-            .register_reference(
-                &reference("alpine:3.21"),
-                &manifest,
-                MANIFEST_TYPE,
-                901,
-                Some("linux/arm64"),
-            )
-            .unwrap();
+        let manifest = Digest::of(b"a manifest");
+        let mut index = cache.image_index_mut().unwrap();
         for spelling in [
             "alpine:3.21",
             "docker.io/library/alpine:3.21",
             "index.docker.io/library/alpine:3.21",
         ] {
-            assert_eq!(
-                cache.resolved(&reference(spelling)),
-                Some(manifest.clone()),
-                "{spelling} did not find the memo"
-            );
+            index.insert(reference(spelling).to_string(), image(manifest.clone()));
         }
-        assert_eq!(cache.images().unwrap().len(), 1);
-    }
+        index.commit().unwrap();
 
-    #[test]
-    fn remembering_again_replaces() {
-        let scratch = Scratch::new("moved");
-        let cache = scratch.cache();
-
-        for manifest in [Digest::of(b"before"), Digest::of(b"after")] {
-            cache
-                .register_reference(
-                    &reference("alpine:latest"),
-                    &manifest,
-                    MANIFEST_TYPE,
-                    901,
-                    None,
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            cache.resolved(&reference("alpine:latest")),
-            Some(Digest::of(b"after"))
-        );
+        let read = cache.image_index().unwrap();
+        assert_eq!(read.len(), 1, "three spellings made {} entries", read.len());
+        assert_eq!(read["docker.io/library/alpine:3.21"].manifest, manifest);
     }
 }

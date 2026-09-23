@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
 use super::Error;
@@ -20,6 +21,15 @@ impl Digest {
         Digest {
             algorithm: "sha256".to_string(),
             hex: hex::encode(Sha256::digest(bytes)),
+        }
+    }
+
+    /// A digest for a SHA-256 already computed, as when the bytes were hashed on
+    /// their way past rather than gathered up first.
+    pub fn from_sha256(hash: [u8; 32]) -> Digest {
+        Digest {
+            algorithm: "sha256".to_string(),
+            hex: hex::encode(hash),
         }
     }
 
@@ -74,6 +84,20 @@ impl Digest {
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.algorithm, self.hex)
+    }
+}
+
+/// `sha256:e3b0c442…`, the one spelling anything else would recognise.
+impl Serialize for Digest {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Digest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Digest, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Digest::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 

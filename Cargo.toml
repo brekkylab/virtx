@@ -21,7 +21,11 @@ gpu = ["krun/gpu", "dep:krun_display"]
 [dependencies]
 # libkrun 2.0-dev, pinned via the `3rdparty/libkrun` submodule.
 # The package is named `libkrun`; its lib target is `krun`.
-krun = { path = "3rdparty/libkrun/src/libkrun", package = "libkrun" }
+# `blk` is off by default in libkrun; without it there is no `BlockDevice` and
+# so no way to hand the guest an EROFS image to mount.
+krun = { path = "3rdparty/libkrun/src/libkrun", package = "libkrun", features = [
+    "blk",
+] }
 
 # Guest init binary + config builder, split out of libkrun in 2.0.
 # `direct` links libkrun as an rlib instead of going through its C ABI.
@@ -41,8 +45,24 @@ oci-client = { version = "0.18", default-features = false, features = [
     "native-tls",
 ] }
 
+# A download reports itself as it goes, and the natural shape for that is a
+# stream. `async-stream` is the generator macro that lets the download be written
+# as the loop it is instead of a hand-rolled state machine; `futures-core` is only
+# the `Stream` trait, to name it in a signature. Both are already compiled here as
+# dependencies of oci-client.
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
 # oci-client is async and its blob downloads write into an `AsyncWrite`.
 tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "macros"] }
+
+# Reading layer blobs. `tar` parses the archive and reports where each entry's
+# bytes are, which is what lets the tree hold offsets instead of contents;
+# `flate2` is the gzip nearly every registry serves them under, on its pure-Rust
+# backend so no C toolchain comes with it.
+tar = "0.4"
+flate2 = "1"
 
 sha2 = "0.10"
 hex = "0.4"

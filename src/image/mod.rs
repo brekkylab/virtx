@@ -1,28 +1,35 @@
-//! OCI images, pulled from a registry and kept on this machine.
+//! OCI images, pulled from a registry and turned into something a guest can mount.
 //!
-//! [`Registry`] is the remote side, [`Cache`] the local one. A pull leaves the
-//! registry's own bytes in the cache, being the compressed layer tarballs, the config
-//! and the manifest, and nothing is unpacked. Turning those into something a guest can mount is a
-//! separate step.
+//! [`Registry`] is the remote side and [`Cache`] the local one. A [`pull`] goes from one
+//! to the other in three steps per layer, none of which keeps what the step before it
+//! read: [`decompress_blob`] inflates the blob a registry served, [`blob_to_erofs`]
+//! reads that archive and writes an EROFS image, and the cache keeps the image under
+//! the layer's `diff_id`. The compressed bytes are never on disk, and the archive is
+//! never on disk.
+//!
+//! What every side of that speaks is a [`Tree`], the shape of a filesystem held in
+//! memory: [`ingest`] reads one out of a layer archive and the EROFS writer puts one
+//! down. Neither knows about the other.
 
+mod blob;
 mod cache;
 mod digest;
-#[allow(clippy::module_inception)]
+mod erofs;
 mod image;
+mod layer;
+mod ops;
 mod registry;
+mod tree;
 
-pub use cache::Cache;
+pub use blob::ingest;
+pub use cache::{Cache, ImageIndex, Staged};
 pub use digest::Digest;
-pub use image::{Image, ImageConfig, ImageManifest};
+pub use erofs::Layout;
+pub use image::{Image, ImageConfig, ImageManifest, ImageState};
+pub use layer::{Layer, blob_to_erofs, decompress_blob};
+pub use ops::{provision, pull};
 pub use registry::Registry;
-
-/// One layer of an image.
-#[derive(Clone, Debug)]
-pub struct Layer {
-    /// Digest of the layer uncompressed, called `diff_id` in the OCI config. Names what
-    /// the layer contains, whatever a registry happened to compress it with.
-    pub digest: Digest,
-}
+pub use tree::Tree;
 
 /// How an image is named, being a registry, a repository, and a tag or a digest.
 ///
@@ -48,6 +55,12 @@ pub enum Error {
 
     #[error("{0} said something an image cannot say: {1}")]
     Manifest(String, String),
+
+    #[error("{0}")]
+    Archive(String),
+
+    #[error("writing an EROFS image: {0}")]
+    Erofs(#[source] erofs::Error),
 
     #[error("{context}: {source}")]
     Io {

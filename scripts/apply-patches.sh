@@ -49,6 +49,7 @@ apply_patch() {
 }
 
 echo "applying patches"
+apply_patch libkrun "$ROOT/patches/libkrun-85bed71-overlay-root.patch"
 apply_patch libkrun "$ROOT/patches/libkrun-85bed71-gpu.patch"
 apply_patch libkrun "$ROOT/patches/libkrun-85bed71-windows-virtiofs.patch"
 apply_patch libkrun "$ROOT/patches/libkrun-85bed71-windows-vsock.patch"

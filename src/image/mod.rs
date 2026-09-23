@@ -48,8 +48,11 @@ pub use oci_client::Reference;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("{0} is not an OCI reference: {1}")]
-    Reference(String, oci_client::ParseError),
+    /// What was handed in as a name did not parse as one. Only what was wrong with
+    /// it, not what it was: the conversion takes the name by value, so by the time it
+    /// has failed there is nothing left to quote.
+    #[error("not an OCI reference: {0}")]
+    Reference(String),
 
     #[error("{0}")]
     Digest(String),

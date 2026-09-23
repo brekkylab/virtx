@@ -64,6 +64,13 @@ tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "macros
 tar = "0.4"
 flate2 = "1"
 
+# The writable layer a session runs on. An ext4 image has to be made on the host, and
+# macOS has no `mke2fs` -- nor does Windows -- so a formatter that is a library rather
+# than a program is the only form that works on the hosts this runs on. Pure Rust, so it
+# brings no C toolchain with it, and it writes the file sparse: a session's ceiling costs
+# nothing until it is used.
+arcbox-ext4 = "0.1"
+
 sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

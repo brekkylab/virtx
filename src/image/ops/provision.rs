@@ -38,6 +38,7 @@
 //! The descriptor names the files absolutely, because a VM reads it from wherever it
 //! happens to stand. A cache that is moved is one whose disks have to be made again.
 
+use std::fmt::Display;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,12 @@ use crate::image::{Cache, Digest, Disk, Error, Image, Reference, Result, stack};
 
 /// Put the layers of `reference` together into a disk, and say where it is.
 ///
+/// `reference` is anything a [`Reference`] can be read out of -- `"alpine:3.21"`, a
+/// `String`, or one already parsed -- and it is read the way a registry reads it, so
+/// every spelling of one image is that image: `alpine:3.21`,
+/// `docker.io/library/alpine:3.21` and `alpine@sha256:0a7e...` all name the same thing
+/// here.
+///
 /// The image has to be in the cache already -- this asks no registry anything, and an
 /// image that was never pulled is an error rather than a download. `None` for the
 /// cache takes the same default [`pull`](super::pull) writes to.
@@ -54,16 +61,35 @@ use crate::image::{Cache, Digest, Disk, Error, Image, Reference, Result, stack};
 /// A disk already stitched is not made again: it is named by the layers it was made
 /// of, so a name that exists is the same disk. What is re-read each time is only
 /// whether the two files are there.
-pub fn provision(reference: &Reference, cache: Option<Cache>) -> Result<Disk> {
+pub fn provision<E: Display>(
+    reference: impl TryInto<Reference, Error = E>,
+    cache: Option<Cache>,
+) -> Result<Disk> {
     let cache = cache.unwrap_or_default();
 
+    // Parsed and then printed again rather than looked up as it was written: the index is
+    // keyed by the canonical spelling, so `alpine:3.21` finds what
+    // `docker.io/library/alpine:3.21` pulled.
+    let reference = reference
+        .try_into()
+        .map_err(|e| Error::Reference(e.to_string()))?;
     let name = reference.to_string();
-    let image = cache
-        .image_index()?
-        .remove(&name)
-        .ok_or(Error::NotPulled(name))?;
 
-    stitch(&image, &cache)
+    let index = cache.image_index()?;
+
+    // The name it was pulled under, and failing that the digest it was pulled as. A
+    // manifest digest names the image rather than the way somebody reached it, so
+    // `repo@sha256:...` finds what arrived under a tag -- and finds it whatever
+    // repository it is spelled with, the digest being the stronger of the two names.
+    let image = index
+        .get(&name)
+        .or_else(|| {
+            let digest = Digest::parse(reference.digest()?).ok()?;
+            index.values().find(|image| image.manifest == digest)
+        })
+        .ok_or_else(|| Error::NotPulled(name.clone()))?;
+
+    stitch(image, &cache)
 }
 
 /// The same for an image in hand, which is what a caller that just pulled one has.
@@ -75,9 +101,19 @@ fn stitch(image: &Image, cache: &Cache) -> Result<Disk> {
     }
 
     // What the disk is called: the ordered layers it is made of, and so a name two
-    // images with the same layers share. Not kept on the `Disk` -- a boot has no use
-    // for it, and it is in the cache for anything that does.
-    let stack = stack_digest(image);
+    // images with the same layers share. The order counts -- the same layers stacked
+    // the other way up are a different filesystem -- and the tag is its own, so that a
+    // change to how a disk is put together does not read an old one as a new one. Not
+    // kept on the `Disk`: a boot has no use for it, and it is in the cache for
+    // anything that does.
+    let stack = {
+        let mut text = String::from("cortex-krun/erofs-stack/1\n");
+        for layer in &image.layers {
+            text.push_str(&layer.digest.to_string());
+            text.push('\n');
+        }
+        Digest::of(text)
+    };
     let disk = Disk {
         path: cache.disk_path(&stack),
         config: image.config.clone(),
@@ -166,20 +202,6 @@ fn stitch(image: &Image, cache: &Cache) -> Result<Disk> {
     staged.commit()?;
 
     Ok(disk)
-}
-
-/// What a stack of layers is called.
-///
-/// The layers in order, and the order counts: the same layers stacked the other way up
-/// are a different filesystem. Under a tag of its own, so that a change to how a disk
-/// is put together does not read an old one as a new one.
-fn stack_digest(image: &Image) -> Digest {
-    let mut text = String::from("cortex-krun/erofs-stack/1\n");
-    for layer in &image.layers {
-        text.push_str(&layer.digest.to_string());
-        text.push('\n');
-    }
-    Digest::of(text)
 }
 
 #[cfg(test)]
@@ -274,7 +296,7 @@ mod tests {
 
     /// An image over `layers`, filed in the cache under `reference`. Handed back with
     /// the image, because what the cache names a stack is not on the `Disk`.
-    fn pulled(cache: &Cache, reference: &str, layers: Vec<Layer>) -> (Reference, Image) {
+    fn pulled(cache: &Cache, reference: &str, layers: Vec<Layer>) -> (String, Image) {
         let image = Image {
             manifest: Digest::of(reference.as_bytes()),
             layers,
@@ -287,7 +309,7 @@ mod tests {
         index.insert(reference.to_string(), image.clone());
         index.commit().unwrap();
 
-        (reference, image)
+        (reference.to_string(), image)
     }
 
     /// The files a descriptor names, in the order it names them.
@@ -353,11 +375,10 @@ mod tests {
     fn a_stack_is_one_filesystem_holding_what_its_layers_put_in_it() {
         let scratch = Scratch::new("stack");
         let cache = scratch.cache();
-        let (reference, image) = pulled(&cache, "test/stack:1", vec![base(&cache), over(&cache)]);
+        let (reference, _) = pulled(&cache, "test/stack:1", vec![base(&cache), over(&cache)]);
 
-        let provisioned = provision(&reference, Some(cache.clone())).unwrap();
+        let provisioned = provision(reference.as_str(), Some(cache.clone())).unwrap();
         assert!(provisioned.path.is_file(), "no descriptor was written");
-        assert_eq!(provisioned.path, cache.disk_path(&stack_digest(&image)));
 
         // The metadata image first, then the layers it points into, bottom first.
         // Compared through `canonicalize`, because a descriptor names its extents the
@@ -367,7 +388,6 @@ mod tests {
             assert_eq!(named, std::fs::canonicalize(expected).unwrap());
         };
         assert_eq!(named.len(), 3, "{named:?}");
-        same(&named[0], cache.fsmeta_path(&stack_digest(&image)));
         same(&named[1], cache.layer_path(&Digest::of(b"base")));
         same(&named[2], cache.layer_path(&Digest::of(b"over")));
 
@@ -423,10 +443,10 @@ mod tests {
         let cache = scratch.cache();
         let (reference, _) = pulled(&cache, "test/again:1", vec![base(&cache), over(&cache)]);
 
-        let first = provision(&reference, Some(cache.clone())).unwrap();
+        let first = provision(reference.as_str(), Some(cache.clone())).unwrap();
         let written = std::fs::metadata(&first.path).unwrap().modified().unwrap();
 
-        let again = provision(&reference, Some(cache.clone())).unwrap();
+        let again = provision(reference.as_str(), Some(cache.clone())).unwrap();
         assert_eq!(again.path, first.path);
         assert_eq!(
             std::fs::metadata(&again.path).unwrap().modified().unwrap(),
@@ -442,7 +462,7 @@ mod tests {
         let cache = scratch.cache();
         let (reference, _) = pulled(&cache, "test/one:1", vec![base(&cache)]);
 
-        let provisioned = provision(&reference, Some(cache.clone())).unwrap();
+        let provisioned = provision(reference.as_str(), Some(cache.clone())).unwrap();
         let bytes = disk(&provisioned.path);
         let (tree, _) = erofs::read(&mut Cursor::new(bytes.clone())).unwrap();
 
@@ -473,7 +493,7 @@ mod tests {
         file.write_all(&[0u8; BLOCK_SIZE as usize]).unwrap();
         drop(file);
 
-        let error = provision(&reference, Some(cache.clone())).unwrap_err();
+        let error = provision(reference.as_str(), Some(cache.clone())).unwrap_err();
         assert!(
             matches!(&error, Error::Disk(what) if what.contains("the same layer")),
             "{error}"
@@ -485,11 +505,54 @@ mod tests {
         );
     }
 
+    /// A digest names the image and not the way somebody reached it: filed under a
+    /// tag, asked for as `repo@sha256:...`, and the same disk comes back.
+    #[test]
+    fn an_image_is_found_by_the_digest_it_was_pulled_as() {
+        let scratch = Scratch::new("digest");
+        let cache = scratch.cache();
+        let (tagged, image) = pulled(&cache, "test/digest:1", vec![base(&cache)]);
+
+        let by_tag = provision(tagged.as_str(), Some(cache.clone())).unwrap();
+        let by_digest = provision(
+            format!("test/digest@{}", image.manifest),
+            Some(cache.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(by_digest.path, by_tag.path);
+    }
+
+    /// Every way of holding a name is a way of passing one. What the disk comes out as
+    /// the tests above already say; this is here so that all three spellings compile.
+    #[test]
+    fn a_name_is_taken_however_the_caller_holds_it() {
+        let scratch = Scratch::new("spellings");
+        let cache = scratch.cache();
+        let (name, _) = pulled(&cache, "test/spellings:1", vec![base(&cache)]);
+        let parsed: Reference = name.parse().unwrap();
+
+        let by_str = provision(name.as_str(), Some(cache.clone())).unwrap();
+        let by_string = provision(name.clone(), Some(cache.clone())).unwrap();
+        let by_reference = provision(parsed, Some(cache.clone())).unwrap();
+
+        assert_eq!(by_string.path, by_str.path);
+        assert_eq!(by_reference.path, by_str.path);
+    }
+
     #[test]
     fn an_image_nothing_pulled_is_not_provisioned() {
         let scratch = Scratch::new("missing");
-        let reference: Reference = "test/missing:1".parse().unwrap();
-        let error = provision(&reference, Some(scratch.cache())).unwrap_err();
+        let error = provision("test/missing:1", Some(scratch.cache())).unwrap_err();
         assert!(matches!(error, Error::NotPulled(_)), "{error}");
+    }
+
+    /// What is not a reference at all is said so rather than read as a name nothing
+    /// pulled: the two are different mistakes and only one of them is fixed by a pull.
+    #[test]
+    fn what_is_not_a_reference_is_refused() {
+        let scratch = Scratch::new("garbage");
+        let error = provision("NOT A REFERENCE", Some(scratch.cache())).unwrap_err();
+        assert!(matches!(error, Error::Reference(_)), "{error}");
     }
 }

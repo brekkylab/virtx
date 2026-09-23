@@ -1,5 +1,6 @@
 //! Putting an image into the cache.
 
+use std::fmt::Display;
 use std::io::Cursor;
 
 use oci_client::Reference;
@@ -12,6 +13,10 @@ use crate::image::{
 /// offline. Only what is missing is downloaded, and a failed attempt keeps whatever
 /// did arrive.
 ///
+/// `reference` is anything a [`Reference`] can be read out of -- `"alpine:3.21"`, a
+/// `String`, or one already parsed. A reference a caller is only borrowing has to be
+/// cloned, there being no conversion from `&Reference` for this to reach.
+///
 /// `None` for either side takes the default: a [`Registry`] that reads what anybody can
 /// read, and the [`Cache`] at `CORTEX_IMAGE_CACHE_ROOT` or below the user's cache
 /// directory. Name one to pull from a private repository, or to keep the image
@@ -19,13 +24,29 @@ use crate::image::{
 ///
 /// A layer is held whole in memory only for as long as it takes to uncompress it,
 /// and one already in the cache is not asked for at all.
-pub async fn pull(
-    reference: Reference,
+///
+/// ```no_run
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// use cortex_krun::image::pull;
+///
+/// pull("alpine:3.21", None, None).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn pull<E: Display>(
+    reference: impl TryInto<Reference, Error = E>,
     registry: Option<Registry>,
     cache: Option<Cache>,
 ) -> Result<Image> {
     let registry = registry.unwrap_or_default();
     let cache = cache.unwrap_or_default();
+
+    // Before the registry is asked anything, so a name that is not a name costs no
+    // round trip -- and so that what lands in the index is the canonical spelling and
+    // not whichever of its spellings this caller reached for.
+    let reference = reference
+        .try_into()
+        .map_err(|e| Error::Reference(e.to_string()))?;
 
     let (image_manifest, digest, config) = registry.get_metadata(&reference).await?;
 

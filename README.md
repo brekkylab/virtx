@@ -41,15 +41,31 @@ git submodule update --init
 
 ```sh
 cargo run --example macos_hello                      # boots a microVM, runs a command in it
+cargo run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
 cargo run --example macos_gpu -- 'uname -a'          # adds TSI networking
 cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
 ./scripts/run-ncnn-squeezenet.sh                     # a CNN on the guest GPU
 ```
 
+`run` is the [`session`](src/session/) module end to end: it pulls the
+image, stitches its layers into one disk, formats a writable ext4 beside it and
+boots the guest on an overlay of the two. The session is the ext4 file, so the
+second run of the same image sees what the first one did:
+
+```sh
+cargo run --example run -- alpine:3.21 'echo hi > /root/note'
+cargo run --example run -- alpine:3.21 'cat /root/note'     # hi
+```
+
+Deleting `data/sessions/<image>.ext4` is how one starts over. The file is
+sparse — a 2 GiB ceiling costs a couple of megabytes until it is used.
+
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
 
-On Windows the example is `win_hello` and the setup is different throughout; see
-[Windows (WHP)](#windows-whp).
+`run` is the one example not gated by host — `session` attaches the guest's
+console itself, which is the only call that differs between them. The `hello`
+and `gpu` examples still come in `macos_` and `win_` pairs, and the Windows
+setup is different throughout; see [Windows (WHP)](#windows-whp).
 
 `cargo run` goes through `scripts/macos-run.sh`, registered as the cargo runner
 for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
@@ -62,6 +78,53 @@ for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
    default search path.
 
 Running the built binary directly, without the runner, will fail on both counts.
+
+## Sessions — `patches/libkrun-85bed71-overlay-root.patch`
+
+[`image`](src/image/) answers with a disk: the layers stitched into one
+read-only EROFS filesystem, shared by every machine ever booted from that image.
+[`session`](src/session/) is what makes one of those machines writable, by
+stacking an ext4 of its own over it:
+
+```
+/dev/vdb  ext4,  writable    this session's upper layer ─┐
+                                                         ├─ overlay ──► /
+/dev/vda  erofs, read-only   the image's disk           ─┘
+```
+
+**The stacking happens in the guest**, because overlayfs is a kernel filesystem
+and the host has no way to mount one — let alone an EROFS a macOS kernel cannot
+read at all. libkrun's init already knows how to mount a block device as the
+root and pivot onto it (`KRUN_BLOCK_ROOT_DEVICE`), but it takes exactly one
+device. The patch teaches it the two-device form: `KRUN_BLOCK_LOWER_DEVICE` and
+`KRUN_BLOCK_UPPER_DEVICE`, mounted, overlaid and pivoted onto through the same
+code path. It touches one file, `init/init-binary/src/fs.rs`, and a boot that
+names neither variable behaves exactly as before.
+
+**Two block devices and not a virtio-fs share for the upper layer**, which would
+need no patch at all and does not work. The guest kernel refuses a FUSE
+filesystem as an upperdir outright — `filesystem on %s not supported as
+upperdir` — and even past that, deleting a file the image shipped is recorded as
+a character device numbered `0:0`, which `mknod` on a macOS host refuses to
+anything but root. It is the same wall [`image::ingest`](src/image/blob.rs) is
+written around, and the reason layers become EROFS images rather than extracted
+directories.
+
+**The patch carries a second, smaller thing**: the guest's exit status. libkrun's
+init reports it as an ioctl on the virtiofs mount, and any boot that pivots onto
+a block root — the existing `KRUN_BLOCK_ROOT_DEVICE` one as much as this — has
+left that mount under no path by the time the workload exits, so the status was
+dropped and the host always saw 0. The init now holds a descriptor on the
+virtiofs root across the pivot and sends the ioctl to that, which is what makes
+`cargo run --example run -- alpine:3.21 'exit 42'` exit 42.
+
+The ext4 is formatted on the host, by [`arcbox-ext4`][arcbox]: macOS has no
+`mke2fs`, nor does Windows, so a formatter that is a library rather than a
+program is the only form that works here. Pure Rust, so no C toolchain comes
+with it. The guest makes the overlay's `upperdir` and `workdir` on it, which is
+also what lets it pick up a disk an earlier session left.
+
+[arcbox]: https://docs.rs/arcbox-ext4
 
 ## The `gpu` feature
 
@@ -809,10 +872,10 @@ guest/                      sources compiled and run inside the VM
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-patches/                    see "The gpu feature" and "Windows (WHP)"
+patches/                    see "Sessions", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner
 examples/
-data/                       untracked: rootfs, models, build outputs
+data/                       untracked: rootfs, sessions, models, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the

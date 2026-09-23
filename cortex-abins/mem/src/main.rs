@@ -48,8 +48,8 @@ const NAME: &str = env!("CARGO_BIN_NAME");
 /// What `mem` accepts and what it says about it.
 #[derive(Debug, clap::Parser)]
 #[command(
-    about = "Stores what an agent remembers and searches it back",
-    after_help = "<store> is a path like any other this program is given, so a relative one resolves against the working directory. `init` creates it; every other command expects it to be there already.\n\nThe default output is one memory per line, which a memory containing a newline cannot be spelled in. A caller whose memories may be multi-line — Markdown, say — should ask for `--json`, which is one JSON object per line and carries the id as well.",
+    about = "Search an agent's memories, or change what they hold",
+    after_help = "<store> is the path the memory file is kept at. It is a path like any other this program is given, so a relative one resolves against the working directory. `init` creates it; every other command expects it to be there already.\n\nThe default output is one memory per line, which a memory containing a newline cannot be spelled in. A caller whose memories may be multi-line, Markdown for instance, should ask for `--json`, which is one JSON object per line and carries the id as well.",
     // The doc comments here are for whoever reads this file. What a caller of the command sees is
     // `about` and the first line of each item's; nothing below argues a design decision at
     // somebody who typed `--help`.

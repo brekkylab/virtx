@@ -78,10 +78,10 @@ const NAME: &str = env!("CARGO_BIN_NAME");
 // prints, so anything a *caller* would not act on belongs in a comment instead.
 #[derive(clap::Parser)]
 #[command(
-    about = "index files from a directory tree and search them",
+    about = "Index document files and search them",
     subcommand_required = true,
     arg_required_else_help = true,
-    after_help = "<STORE> is a path like any other this program is given. `init` makes one; every other command expects it to be there already."
+    after_help = "<STORE> is the path the index file is kept at. It is a path like any other this program is given. `init` makes one; every other command expects it to be there already."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -96,7 +96,7 @@ enum Command {
     /// there, which is what keeps a mistyped path from becoming an empty store that answers
     /// every search with nothing.
     Init {
-        /// Where to make it — `notes.db`.
+        /// Where to make it, `notes.db` for instance.
         #[arg(value_name = "STORE")]
         store: PathBuf,
     },
@@ -110,8 +110,8 @@ enum Command {
         #[arg(value_name = "STORE")]
         store: PathBuf,
 
-        /// What to index — `docs`, `docs/a.md`. A document is filed under the path as it is
-        /// written here, so this is also what `sync` and `purge` name it by.
+        /// What to index, `docs` or `docs/a.md` for instance. A document is filed under the
+        /// path as it is written here, so this is also what `sync` and `purge` name it by.
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
@@ -126,7 +126,7 @@ enum Command {
         #[arg(short = 'n', long = "limit", value_name = "N", default_value_t = DEFAULT_LIMIT)]
         limit: usize,
 
-        /// The words to look for, joined — a shell has already split them.
+        /// The words to look for, joined back together since a shell has already split them.
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
     },

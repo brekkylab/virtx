@@ -9,27 +9,16 @@ edition.workspace = true
 name = "docread"
 path = "src/main.rs"
 
-# Reading a `.docx`, and on by default because it costs nothing anybody has to install: it is
-# Rust from end to end, so a build for the guest is the same `cargo build` as without it. What
-# the switch is for is a build that wants the text reader and nothing else — the crate below is
-# by far the heaviest thing here, and a `/abin` that never meets a Word document has no use for
-# it.
+# Reading a `.docx` is not a switch any more: it costs nothing anybody has to install, since it
+# is Rust from end to end and a build for the guest is the same `cargo build` either way. A
+# program whose answer to a Word document depended on how it was compiled was one more thing a
+# caller had to know about the binary in front of them, and this one always reads them.
 #
-# `pdfium` is the other shape entirely: it is off, because it needs a library this machine has
-# to have built. See `build.rs`.
-#
-# Turned on to link a PDF engine into this program; off is the default and off is what the
-# `/abin` release is built with today. A feature and not a second binary because what changes
-# is one refusal turning into an answer: with it, a PDF is a file this reads, and without it a
-# PDF is named and refused. Everything else about the program is the same either way.
-#
-# It is off by default because it is the difference between a program that builds anywhere with
-# rustup alone and one that needs a `libpdfium.a` — see `build.rs`, which is where that library
-# is found or made.
-[features]
-default = ["docx"]
-docx = ["dep:docx-rs", "dep:zip"]
-pdfium = ["dep:pdfium-render", "dep:flate2", "dep:sha2", "dep:ureq"]
+# A PDF is read the same way, and that is no longer a switch either. It was one because the
+# engine is a `libpdfium.a` this machine has to have built, so the feature bought a `cargo
+# build` that needed nothing but rustup — at the price of a program whose answer to a PDF
+# depended on how it was compiled, which is exactly what a caller cannot see. `build.rs` is
+# where the library is found or made, and it is now on the path of every build here.
 
 [dependencies]
 # The command line, and the whole of the driving. One command with two options is small enough
@@ -63,7 +52,7 @@ clap = { workspace = true }
 #
 # It also parses real files the alternatives choke on, and it writes as well as reads — which
 # is what the tests build their fixtures with, so no `.docx` is checked into this repository.
-docx-rs = { version = "0.4.22", optional = true }
+docx-rs = { version = "0.4.22" }
 
 # Deciding whether a file is a Word document, which is a different job from reading one and
 # the reason this is here beside `docx-rs`. `read_docx` takes the file's bytes — all of them,
@@ -82,7 +71,7 @@ docx-rs = { version = "0.4.22", optional = true }
 #
 # `default-features = false` because the rest is compression methods a `.docx` does not use
 # and a writer this only wants in its tests.
-zip = { version = "8", optional = true, default-features = false, features = [
+zip = { version = "8", default-features = false, features = [
     "deflate-flate2",
 ] }
 
@@ -99,7 +88,7 @@ zip = { version = "8", optional = true, default-features = false, features = [
 # The linking itself is `build.rs`'s and not this crate's: setting `PDFIUM_STATIC_LIB_PATH`
 # would have this crate's own build script emit the flags too, and two places saying where a
 # library comes from is how one of them ends up wrong.
-pdfium-render = { version = "0.9.3", optional = true, default-features = false, features = [
+pdfium-render = { version = "0.9.3", default-features = false, features = [
     "static",
     "pdfium_7881",
 ] }
@@ -111,12 +100,11 @@ pdfium-render = { version = "0.9.3", optional = true, default-features = false, 
 # unwraps a `.gz`, because a 20 MB archive published uncompressed is a download nobody should
 # have to repeat.
 #
-# All three are optional and pulled in by the `pdfium` feature, so a default build compiles
-# none of them.
+# All three are the build script's alone: none of this is linked into the program.
 [build-dependencies]
-flate2 = { version = "1", optional = true }
-sha2 = { workspace = true, optional = true }
-ureq = { version = "3", optional = true }
+flate2 = { version = "1" }
+sha2 = { workspace = true }
+ureq = { version = "3" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

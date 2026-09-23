@@ -19,13 +19,18 @@ use std::process::ExitCode;
 const NOT_EXECUTABLE: u8 = 126;
 
 /// Everything this server keeps on disk, under one root -- `$CORTEX_KRUN_HOME`, or
-/// `$HOME/.cache/cortex-krun`.
+/// `cortex-krun` under the user's cache directory. The rule is
+/// [`cortex_krun::home`]'s, so that this and the images below it are one answer to where
+/// this host keeps things rather than two.
 ///
 /// ```text
 /// {home}/
 /// ├── abin/                   cortex's own executables, shared into every guest at
-/// │                           `/abin` -- put there by `scripts/build-abin.sh`, and a
-/// │                           directory this server reads and never writes
+/// │   │                       `/abin` -- put there by `scripts/build-abin.sh`, and a
+/// │   │                       directory this server reads and never writes
+/// │   └── skills/{program}/   what each of them is, as the session reads it
+/// ├── images/                 the images sessions boot from, shared by every tool in
+/// │                           this repository -- `Cache`'s, not this server's
 /// └── session/                one directory per live server process
 ///     └── {pid}/
 ///         ├── session.ext4    what the session wrote -- outlives any one machine
@@ -39,18 +44,17 @@ const NOT_EXECUTABLE: u8 = 126;
 /// same for all of them, and a host that has none is a host whose sessions get no `/abin` --
 /// see `ABIN_DIR`.
 ///
-/// The images a session boots from are **not** under this: they are
-/// [`Cache`](cortex_krun::image::Cache)'s, shared by every tool in this repository and
-/// answered for by `CORTEX_IMAGE_CACHE_ROOT`. What is here is one process's own, split by
-/// lifetime so that each level's cleanup is one call: a `stop` removes `machine/`, and the
-/// end of a session removes `{pid}/`.
+/// `images/` is under this root and is not this server's: it is
+/// [`Cache`](cortex_krun::image::Cache)'s, every tool in this repository reads and writes
+/// it, and `CORTEX_IMAGE_CACHE_ROOT` moves it out from under here on its own. What is left
+/// is one process's own, split by lifetime so that each level's cleanup is one call: a
+/// `stop` removes `machine/`, and the end of a session removes `{pid}/`.
+///
+/// A host with nowhere to keep this is a panic and not a temporary directory, unlike the
+/// images: `session.ext4` is what a session wrote, and a server that put it somewhere the
+/// machine may sweep would be losing it rather than saying it had nowhere to put it.
 pub(crate) fn home() -> PathBuf {
-    std::env::var_os("CORTEX_KRUN_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/cortex-krun"))
-        })
-        .expect("neither CORTEX_KRUN_HOME nor HOME is set")
+    cortex_krun::home().expect("neither CORTEX_KRUN_HOME nor a cache directory is to be had")
 }
 
 #[tokio::main]

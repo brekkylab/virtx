@@ -1,8 +1,9 @@
 //! Where `libpdfium.a` comes from.
 //!
-//! Nothing here runs without the `pdfium` feature. Off — which is the default and what the
-//! `/abin` release is built with — this script prints two `rerun-if` lines and stops, so a
-//! plain `cargo build` of this workspace never learns that a PDF engine exists.
+//! This runs on every build. There is no feature to turn a PDF engine off any more, because a
+//! program whose answer to a PDF depended on how it was compiled was one a caller could not
+//! read off the binary in front of them. The cost is that a build here needs a `libpdfium.a`,
+//! and the four sentences below are how one is come by.
 //!
 //! # Static, which is the whole reason this file is complicated
 //!
@@ -25,10 +26,10 @@
 //! 3. [`BUILD_ENV`], if it is set: check pdfium out and build it, then cache it.
 //! 4. Otherwise, refuse and say which of those three to reach for.
 //!
-//! **The source build is behind an environment variable and not merely behind the feature.**
+//! **The source build is behind an environment variable of its own.**
 //! It is a multi-gigabyte checkout and tens of minutes of C++, and a build system that starts
-//! that because a feature was on is one nobody can predict the cost of. Asking for it is one
-//! variable; not asking for it is a message that says so.
+//! that on its own is one nobody can predict the cost of. Asking for it is one variable; not
+//! asking for it is a message that says so.
 //!
 //! # The host, not the guest
 //!
@@ -41,12 +42,10 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "pdfium")]
     pdfium::link_it();
 }
 
-/// Everything the `pdfium` feature needs, and nothing a build without it compiles.
-#[cfg(feature = "pdfium")]
+/// Where the archive comes from, and how it is linked in.
 mod pdfium {
     use std::{
         path::{Path, PathBuf},
@@ -99,10 +98,8 @@ mod pdfium {
 
     /// The library, found or made, and the flags that link it.
     ///
-    /// Called from a `main` that is three lines, because everything this needs — an HTTP
-    /// client, a digest, a decompressor — is a dependency a build without the feature should
-    /// not be compiling. A build script is compiled with its package's features, so leaving
-    /// the whole of it behind one `cfg` is what makes that true rather than merely unused.
+    /// Kept in a module of its own, with a `main` of three lines above it, so that what a
+    /// reader meets first is the one thing that happens and not the four ways it can happen.
     pub fn link_it() {
         // Printed here rather than beside `rerun-if-changed`, because a variable that names
         // where a library comes from is only a reason to run again where there is a library
@@ -248,7 +245,7 @@ mod pdfium {
     /// decide on somebody's behalf.
     fn unbuilt(target: &str, cached: &Path) -> String {
         format!(
-            "the `pdfium` feature is on and there is no {LIB} for {target}.\n\
+            "there is no {LIB} for {target}, and docread links one into every build.\n\
              \n\
              Point {DIR_ENV} at a directory holding one (<dir>/{target}/{LIB} or <dir>/{LIB}),\n\
              or {URL_ENV} and {SHA256_ENV} at a published one — a `.a`, or a `.gz` of one,\n\
@@ -259,8 +256,8 @@ mod pdfium {
              \n\
              The build is how one of these is *made*, and it is meant to happen once: what the\n\
              next person needs is the artifact it produced, not the toolchain that made it.\n\
-             \n\
-             Or build without the feature, which is what the /abin release is.",
+             There is no way past this one: reading a PDF is not a switch on this program, so\n\
+             a build here is a build with the engine in it.",
             cached.display()
         )
     }

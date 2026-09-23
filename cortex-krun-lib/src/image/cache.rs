@@ -12,28 +12,24 @@ const INDEX: &str = "images.json";
 /// What guards it, beside it.
 const LOCK: &str = "images.lock";
 
-/// Where to keep images when the caller does not say. `CORTEX_IMAGE_CACHE_ROOT`
-/// overrides it.
+/// Where to keep images when the caller does not say: `images` under
+/// [`home`](crate::home), which `CORTEX_KRUN_HOME` answers for.
+///
+/// `CORTEX_IMAGE_CACHE_ROOT` still overrides it, being the narrower of the two: somebody
+/// keeping images on another disk is saying something about images and not about everything
+/// this host keeps.
+///
+/// A host with no home directory to speak of gets a temporary one rather than a failure.
+/// What is here can be downloaded again, so the cost of falling back is a re-pull -- unlike
+/// a session's own disk, which is why [`home`](crate::home) leaves the answer to its
+/// callers.
 fn cache_root() -> PathBuf {
     if let Some(named) = std::env::var_os("CORTEX_IMAGE_CACHE_ROOT") {
         return PathBuf::from(named);
     }
 
-    #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|home| PathBuf::from(home).join("AppData").join("Local"))
-        });
-
-    #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
-
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("cortex")
+    crate::home()
+        .unwrap_or_else(|| std::env::temp_dir().join("cortex-krun"))
         .join("images")
 }
 

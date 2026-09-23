@@ -723,14 +723,40 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 ## `/abin`
 
 Every guest gets one directory of cortex's own executables at `/abin`, **first on a
-command's `PATH`**. Today that is `docread`, `index` and `mem` -- the programs in
+command's `PATH`**. Today that is `index` and `mem` -- the programs in
 [`cortex-abins/`](cortex-abins), which are written in the sibling `cortex` checkout and built
 here for the machine that runs them.
+
+`docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
+C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
+that can cross-compile it for the guest. [`scripts/build-abin.sh`](scripts/build-abin.sh) says
+what would lift that.
 
 ```sh
 ./scripts/fetch-musl-sysroot.sh   # once
 ./scripts/build-abin.sh           # -> $CORTEX_KRUN_HOME/abin, or ~/.cache/cortex-krun/abin
 ```
+
+Everything this host keeps is under that one root -- `$CORTEX_KRUN_HOME`, or `cortex-krun`
+under the user's cache directory (`XDG_CACHE_HOME`, `%LOCALAPPDATA%` on Windows, `~/.cache`
+otherwise): `abin/` here, `images/` that every tool in this repository pulls into, and
+`session/{pid}/` while a server is up. One rule, in `cortex_krun::home`, because a host has
+one answer to where its things go. `CORTEX_IMAGE_CACHE_ROOT` still moves the images out from
+under it on their own, being the narrower of the two.
+
+What each program is travels with it: `cortex-abins/{program}/SKILLS.md` is installed at
+`/abin/skills/{program}/SKILLS.md`, so a session gets the programs and the reading of them from
+the one mount. Under `skills/` rather than beside the executables, because the top of `/abin`
+is what goes on `PATH` -- a file there that is not a program is something a shell would offer
+to run. A program whose crate carries no `SKILLS.md` has none installed.
+
+What is in one is the program's own `--help`, copied out: the front matter's `name` and
+`description` are the usage line and the sentence clap opens with, and the body is that output,
+subcommand by subcommand where there are subcommands. The content is settled on purpose -- a
+program that answers `--help` has already written down what it is, and a second description
+kept beside it is one that drifts from the parser it describes -- but **the copying is by hand
+today**. Nothing checks that a `SKILLS.md` still says what its binary says, so a clap string
+that moves is a file to regenerate. Making that mechanical is work not done.
 
 The server looks for that one directory and nothing names another: where it keeps things is
 already what `home()` answers, so a second way to point somewhere else would be two answers to
@@ -753,8 +779,10 @@ cortex-krun/                the console server a user runs; spawns the VM, is no
 cortex-krun-host/           the process that becomes a VM, and -- as its library half --
                             the command line the server starts one with; signed on macOS
 cortex-krun-guest/          the half inside the VM; its own workspace, built for musl
-cortex-abins/               the programs in the guest's /abin -- docread, index, mem --
-                            copied from cortex/cortex-execs/; its own workspace, built for musl
+cortex-abins/               the programs in the guest's /abin -- index and mem, with docread
+                            beside them and not on it -- and a SKILLS.md each, saying what one
+                            is; copied from cortex/cortex-execs/; its own workspace, built for
+                            musl
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
@@ -763,7 +791,8 @@ cortex-abins/               the programs in the guest's /abin -- docread, index,
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner and linker,
                             the musl cc/ar that cortex-abins/ cross-compiles with, and
-                            build-abin.sh, which installs the result where a session finds it
+                            build-abin.sh, which installs the result -- programs and skills
+                            both -- where a session finds it
 data/                       untracked: musl sysroot, sessions, build outputs
 ```
 

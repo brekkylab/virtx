@@ -52,10 +52,10 @@
 //!
 //! # Documents, which hold text without being text
 //!
-//! Two of them are read rather than refused: a Word document always ([`docx`]), and a PDF in
-//! a build that has an engine linked in ([`pdf`], the `pdfium` feature). The rest — a
-//! `.pptx`, a spreadsheet — are named and refused, and become readable here the way anything
-//! else does: by something turning them into a file that has lines.
+//! Two of them are read rather than refused: a Word document ([`docx`]) and a PDF ([`pdf`]),
+//! both in every build there is. The rest — a `.pptx`, a spreadsheet — are named and refused,
+//! and become readable here the way anything else does: by something turning them into a file
+//! that has lines.
 //!
 //! **What comes back from a document is not the file's lines**, and the answer says so on its
 //! own line before the first of them. A paragraph is a unit somebody wrote and a PDF's line is
@@ -63,9 +63,7 @@
 //! the file, and a number quoted out of one means what it means only as long as the rules that
 //! produced it hold. Those rules are written down in each of those modules.
 
-#[cfg(feature = "docx")]
 mod docx;
-#[cfg(feature = "pdfium")]
 mod pdf;
 mod text;
 
@@ -91,10 +89,17 @@ const NAME: &str = env!("CARGO_BIN_NAME");
 /// enough that a file which is not fits in what is reading it anyway.
 const DEFAULT_LIMIT: usize = 2000;
 
+/// The one line `--help` opens with, naming the formats this reads.
+///
+/// All three are always here. That is what makes this a sentence rather than something assembled
+/// per build: there is no compilation of this program that refuses one of them, so a caller who
+/// read this line once knows what any `docread` they meet will do.
+const ABOUT: &str = "Read a document file (text, Word, PDF) by numbered lines, a window at a time";
+
 /// What `docread` accepts and what it says about it.
 #[derive(Debug, clap::Parser)]
 #[command(
-    about = "docread — a file's lines, numbered, a window at a time",
+    about = ABOUT,
     after_help = "Lines are counted from 1, and the numbers printed are the ones -o takes back. \
                   Output ends with a bracketed line only when the window is not the whole file; \
                   no such line means there is nothing else in it.",
@@ -249,9 +254,9 @@ fn run(cli: Cli) -> Result<String, String> {
 ///
 /// The documents come first and the text reader last, because a document is only a document
 /// when its bytes say so: each of these asks the file what it is and steps aside otherwise, so
-/// a build with neither feature is [`text::read`] and nothing else. Nothing looks at the
-/// extension, for the reason every question about a file's contents is asked of its bytes: the
-/// name is a claim.
+/// an ordinary file reaches [`text::read`] having cost two cheap questions. Nothing looks at
+/// the extension, for the reason every question about a file's contents is asked of its bytes:
+/// the name is a claim.
 ///
 /// **Asking has to be cheaper than reading**, because these questions are asked of every file
 /// and answered `no` about nearly all of them. The one below is bounded on purpose ([`docx`],
@@ -263,12 +268,10 @@ fn read(
     offset: usize,
     limit: usize,
 ) -> std::io::Result<(text::Window, Option<&'static str>)> {
-    #[cfg(feature = "pdfium")]
     if starts_with(file, pdf::MAGIC) {
         return pdf::read(file, offset, limit).map(|window| (window, Some(pdf::ORIGIN)));
     }
 
-    #[cfg(feature = "docx")]
     if let Some(read) = docx::read(file, offset, limit) {
         return read.map(|window| (window, Some(docx::ORIGIN)));
     }
@@ -280,7 +283,6 @@ fn read(
 ///
 /// A failure to look is a `false` and not a refusal: whatever is wrong with the file, the read
 /// that follows meets it too and says so about the file rather than about a peek.
-#[cfg(feature = "pdfium")]
 fn starts_with(file: &Path, magic: &[u8]) -> bool {
     use std::io::Read as _;
 
@@ -575,7 +577,6 @@ mod tests {
 
     /// What came out of a document says so before its first line, so that a caller quoting a
     /// number has already read what the number is a number of.
-    #[cfg(feature = "docx")]
     #[test]
     fn a_document_says_that_its_lines_are_its_own() {
         use docx_rs::{Docx, Paragraph, Run};

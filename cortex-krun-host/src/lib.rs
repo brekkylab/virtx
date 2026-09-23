@@ -58,6 +58,11 @@ pub const GUEST_BIN: &str = "cortex-krun-guest";
 /// name, so the directory they are in is one a caller could have typed. The guest binary is
 /// the opposite -- nothing in a session should ever reach for it.
 ///
+/// **The top of it is the executables and nothing else**, because the top of it is what goes
+/// on `PATH`. What each program *is* travels with it, one skill to a program, at
+/// `/abin/skills/{program}/SKILLS.md` -- a directory among the programs rather than files
+/// beside them, so that nothing looking for a program finds a document.
+///
 /// **A session whose host has no such directory gets no `/abin` at all**, rather than an
 /// empty one. These are executables a session is better off with and can run without, so
 /// their absence is a `PATH` that is only the image's rather than a machine that will not

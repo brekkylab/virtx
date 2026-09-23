@@ -1,8 +1,7 @@
-//! A PDF as lines, when there is an engine linked in to make them.
+//! A PDF as lines, made by the engine linked into every build of this program.
 //!
-//! Only compiled with the `pdfium` feature, which is also what puts `libpdfium.a` in the
-//! binary — see `build.rs`. Without it, a PDF is a file this program names and refuses, and
-//! this module does not exist.
+//! `build.rs` is what puts `libpdfium.a` in the binary, and it runs unconditionally: there is
+//! no build of `docread` that meets a PDF and refuses it for want of an engine.
 //!
 //! # Whose lines these are
 //!

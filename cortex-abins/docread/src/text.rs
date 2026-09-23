@@ -304,26 +304,14 @@ fn not_text(format: Option<&'static str>, byte: impl FnOnce() -> String) -> std:
 /// else, which is what keeps the list from being a thing to maintain.
 fn format_of(head: &[u8]) -> Option<&'static str> {
     const KNOWN: &[(&[u8], &str)] = &[
-        // A PDF only reaches here in a build with no engine in it — with one it is read
-        // rather than named, so this says which of the two the caller is looking at.
-        #[cfg(not(feature = "pdfium"))]
-        (
-            b"%PDF-",
-            "a PDF, and this build has no engine to read one with",
-        ),
-        #[cfg(feature = "pdfium")]
+        // A PDF is read rather than named, so one that reaches here is one the engine could not
+        // open.
         (b"%PDF-", "a PDF, and it does not open as one"),
-        // Likewise a Word document, which is read where the `docx` feature is on. A zip that
-        // gets this far is then one of the others that are also zips.
-        #[cfg(feature = "docx")]
+        // A Word document is read rather than named, so a zip that gets this far is one of the
+        // others that are also zips.
         (
             b"PK\x03\x04",
             "a zip and not a Word document — .xlsx and .pptx are zips too",
-        ),
-        #[cfg(not(feature = "docx"))]
-        (
-            b"PK\x03\x04",
-            "a zip — which is also what .docx, .xlsx and .pptx are",
         ),
         (b"\x1f\x8b", "gzip-compressed"),
         (b"\x7fELF", "an ELF executable"),

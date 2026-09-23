@@ -30,14 +30,14 @@ const NOT_EXECUTABLE: u8 = 126;
 ///     └── {pid}/
 ///         ├── session.ext4    what the session wrote -- outlives any one machine
 ///         └── machine/        what only makes sense while one is up
-///             ├── agent/      shared into the guest: the agent binary it execs
+///             ├── guest/      shared into the guest: the guest binary it execs
 ///             ├── port.sock   the console channel
 ///             └── console.log the kernel's own output
 /// ```
 ///
 /// `abin/` is the one thing here that is not a session's: it outlives every process, is the
 /// same for all of them, and a host that has none is a host whose sessions get no `/abin` --
-/// see `ABIN_PATH`.
+/// see `ABIN_DIR`.
 ///
 /// The images a session boots from are **not** under this: they are
 /// [`Cache`](cortex_krun::image::Cache)'s, shared by every tool in this repository and

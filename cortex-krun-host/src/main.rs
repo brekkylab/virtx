@@ -19,8 +19,8 @@
 //! --image <ref>         what the session runs; already in the cache, because a boot asks
 //!                       no registry anything
 //! --session <path>      the ext4 the session writes to -- made here if it is not there
-//! --agent <dir>         shared into the guest at AGENT_PATH; holds the agent binary
-//! --abin <dir>          shared read-only at ABIN_PATH; cortex's own executables, and the
+//! --guest <dir>         shared into the guest at GUEST_DIR; holds the guest binary
+//! --abin <dir>          shared read-only at ABIN_DIR; cortex's own executables, and the
 //!                       directory that goes first on a command's PATH          [optional]
 //! --channel <path>      the socket to connect back on, which becomes the console port
 //! --network <reach>     none | host | public | full; what the guest can reach
@@ -56,13 +56,13 @@
 //!
 //! ```text
 //! a console port   the protocol's channel, the other end of it a socket on the server
-//! the agent share  the directory the guest binary is in, so the guest has one to exec
-//! an exact argv    the agent, and not whatever the image states as its program
+//! the guest share  the directory the guest binary is in, so the guest has one to exec
+//! an exact argv    the guest binary, and not whatever the image states as its program
 //! ```
 //!
 //! And one more when the server has it to give: `/abin`, cortex's own executables, shared
 //! read-only. Optional because it is the one of these a session can do without -- see
-//! [`ABIN_PATH`].
+//! [`ABIN_DIR`].
 //!
 //! The trees a session was given are ordinary shares beside them, each read-only or not as
 //! the client asked, mounted by the init once the root is the overlay.
@@ -81,7 +81,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cortex_krun::session::{Ext4, Mount, Network, Session};
-use cortex_krun_host::{ABIN_PATH, AGENT_PATH, CAPABILITIES_ARG, PORT_NAME, agent_program};
+use cortex_krun_host::{ABIN_DIR, CAPABILITIES_ARG, GUEST_DIR, PORT_NAME, guest_program};
 
 /// A failure of ours, not a guest's -- the shell's code for "found it, could not run it",
 /// which is what a boot that could not become a VM is.
@@ -136,10 +136,10 @@ fn main() -> ExitCode {
 struct Args {
     image: String,
     session: PathBuf,
-    agent: PathBuf,
+    guest: PathBuf,
     /// The directory holding cortex's own executables, and `None` for a server that had
-    /// none to give -- see [`ABIN_PATH`]. Optional where `agent` is required: a machine
-    /// with no agent has nothing to exec, and one with no `/abin` merely has less on
+    /// none to give -- see [`ABIN_DIR`]. Optional where `guest` is required: a machine
+    /// with no guest binary has nothing to exec, and one with no `/abin` merely has less on
     /// `PATH`.
     abin: Option<PathBuf>,
     channel: PathBuf,
@@ -166,7 +166,7 @@ impl Args {
     fn parse(argv: impl IntoIterator<Item = OsString>) -> anyhow::Result<Args> {
         let mut image = None;
         let mut session = None;
-        let mut agent = None;
+        let mut guest = None;
         let mut abin = None;
         let mut channel = None;
         let mut network = None;
@@ -191,7 +191,7 @@ impl Args {
             match flag.as_str() {
                 "--image" => image = Some(text(&flag, value()?)?),
                 "--session" => session = Some(PathBuf::from(value()?)),
-                "--agent" => agent = Some(PathBuf::from(value()?)),
+                "--guest" => guest = Some(PathBuf::from(value()?)),
                 "--abin" => abin = Some(PathBuf::from(value()?)),
                 "--channel" => channel = Some(PathBuf::from(value()?)),
                 "--network" => {
@@ -239,7 +239,7 @@ impl Args {
             image: image
                 .ok_or_else(|| anyhow::anyhow!("--image is missing -- a boot runs one image"))?,
             session: required("--session", session)?,
-            agent: required("--agent", agent)?,
+            guest: required("--guest", guest)?,
             abin,
             channel: required("--channel", channel)?,
             // Required rather than defaulted to `none`. A reach is the server's decision and
@@ -323,13 +323,13 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
         // that failed rather than a session the server thought it had.
         .rootfs(Ext4::at(&args.session, Ext4::SIZE)?)
         .port(PORT_NAME, channel.as_raw_fd())
-        // The directory the agent binary is in, shared so that the guest has one to exec.
-        .mount(Mount::new(&args.agent, AGENT_PATH))
+        // The directory the guest binary is in, shared so that the guest has one to exec.
+        .mount(Mount::new(&args.guest, GUEST_DIR))
         .network(args.network)
         .host_ports(args.host_ports.iter().copied())
-        // Exactly the agent -- see [`Session::exec`]. An image stating an entrypoint states
-        // it about its own program, and this is not that program.
-        .exec([agent_program()])
+        // Exactly the guest binary -- see [`Session::exec`]. An image stating an entrypoint
+        // states it about its own program, and this is not that program.
+        .exec([guest_program()])
         .gpu(args.gpu);
 
     // Cortex's own executables, and the ordinary mount path rather than anything of its own:
@@ -337,7 +337,7 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
     // host's virtiofs server refuses the write, so a guest that is root inside itself cannot
     // remount it away. Before the client's trees below, because it is this backend's.
     if let Some(abin) = &args.abin {
-        session = session.mount(Mount::new(abin, ABIN_PATH).read_only());
+        session = session.mount(Mount::new(abin, ABIN_DIR).read_only());
     }
 
     if let Some(vcpus) = args.vcpus {

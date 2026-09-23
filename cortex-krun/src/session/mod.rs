@@ -15,7 +15,7 @@ use cortex::console::{
     Response, Server, SnapshotResp,
 };
 use cortex_krun::session::{Ext4, Network};
-use cortex_krun_host::{ABIN_PATH, AGENT_PATH, agent_program};
+use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
 
 use machine::{HOST_PORTS_ENV, NETWORK_ENV};
 
@@ -40,8 +40,8 @@ struct Session {
     /// Where the session's writes are. Outlives every machine started on it, and is what a
     /// `snapshot` reads.
     upper: Ext4,
-    /// Guest paths a snapshot must not carry, as the guest spells them: the agent's share,
-    /// and every mount point the boot made to hang a tree on. Making a directory is a
+    /// Guest paths a snapshot must not carry, as the guest spells them: the guest binary's
+    /// share, and every mount point the boot made to hang a tree on. Making a directory is a
     /// write, and a write lands on the upper -- so without these a snapshot would claim
     /// directories nobody asked for. See [`Ext4::to_blob`].
     skip: Vec<String>,
@@ -96,8 +96,8 @@ pub async fn run() -> anyhow::Result<()> {
             }
 
             // **The one call the guest does not answer.** What a snapshot is here is the
-            // disk, and the disk is this end's -- one root up from the agent, which is why
-            // the agent refuses this and says so. See [`snapshot`].
+            // disk, and the disk is this end's -- one root up from the guest, which is why
+            // the guest refuses this and says so. See [`snapshot`].
             Message::Request {
                 id,
                 call: Call::Snapshot(_),
@@ -237,7 +237,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
 
     // What a snapshot must leave out: this backend's own two shares, and every directory the
     // boot made to hang one of the client's trees on.
-    let skip = [AGENT_PATH.to_string(), ABIN_PATH.to_string()]
+    let skip = [GUEST_DIR.to_string(), ABIN_DIR.to_string()]
         .into_iter()
         .chain(mounts.iter().map(|mount| mount.at.clone()))
         .collect();
@@ -501,7 +501,7 @@ async fn quiesce(machine: &mut Option<Machine>, session: &Option<Session>) -> an
     if let Some(up) = machine.as_mut() {
         let flushed = up
             .call(Call::Exec(ExecCall {
-                cmd: vec![agent_program(), SYNC.into()],
+                cmd: vec![guest_program(), SYNC.into()],
                 timeout_ms: None,
             }))
             .await;
@@ -697,11 +697,11 @@ fn mounts(init: &InitCall) -> anyhow::Result<Vec<Mount>> {
                 anyhow::anyhow!("{spec}: / is the session's own root and is not a mount point"),
             ));
         }
-        // The agent's share lives there, and it is what the guest execs -- a tree over it is
-        // a machine that comes up with nothing to run. `/abin` is the same answer for a
+        // The guest binary's share lives there, and it is what the guest execs -- a tree over
+        // it is a machine that comes up with nothing to run. `/abin` is the same answer for a
         // different reason: it is what this backend undertakes to put on `PATH`, and a tree
         // over it is that undertaking quietly not held.
-        for reserved in [AGENT_PATH, ABIN_PATH] {
+        for reserved in [GUEST_DIR, ABIN_DIR] {
             if at.starts_with(reserved) {
                 return Err(coded(
                     Error::INVALID_PARAMS,

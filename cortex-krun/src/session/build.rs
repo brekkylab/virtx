@@ -45,7 +45,7 @@ use cortex::console::{Call, Error, ExecCall, InitCall, Response};
 use cortex::image::{Image as Recipe, Step};
 use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
 use cortex_krun::session::{Ext4, Network};
-use cortex_krun_host::{ABIN_PATH, AGENT_PATH, agent_program};
+use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
 
 use super::machine::{Machine, Shape};
 use super::{SYNC, coded, pulled};
@@ -113,7 +113,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     upper.settled()?;
 
     let written = std::fs::File::create(&blob)?;
-    let diff_id = upper.to_blob(&[AGENT_PATH, ABIN_PATH], &written)?;
+    let diff_id = upper.to_blob(&[GUEST_DIR, ABIN_DIR], &written)?;
     written.sync_all()?;
     drop(written);
 
@@ -200,7 +200,7 @@ async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> a
     // nothing; and the file is about to be read on this side.
     match machine
         .call(Call::Exec(ExecCall {
-            cmd: vec![agent_program(), SYNC.into()],
+            cmd: vec![guest_program(), SYNC.into()],
             timeout_ms: None,
         }))
         .await?
@@ -222,7 +222,7 @@ async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> a
 /// in front of the commands after it, and a directory is `cd`'d into before them.
 ///
 /// The environment the *base* states is not exported here. The guest's init already
-/// started the agent with it, and a command the agent spawns inherits it -- so exporting it
+/// started the guest with it, and a command the guest spawns inherits it -- so exporting it
 /// again would be this end repeating something that is already true.
 fn plan(recipe: &Recipe, base: &ImageState) -> anyhow::Result<(Vec<String>, ImageState)> {
     let mut config = base.clone();

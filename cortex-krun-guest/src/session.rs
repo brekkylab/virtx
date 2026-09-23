@@ -21,7 +21,7 @@
 //! # Where the session stands
 //!
 //! It starts where libkrun's init stood this process, which is where the base image said --
-//! and moves only through [`cd`](Session::change_dir), which this agent answers itself: `cd`
+//! and moves only through [`cd`](Session::change_dir), which this process answers itself: `cd`
 //! is a shell builtin rather than a program, so an `exec` carrying an argv has no other way
 //! to offer it, and the shell a person would be talking to is the session. A `cd` inside a
 //! command (`sh -c 'cd x'`) moves that command's own process and nothing else, exactly as a
@@ -50,10 +50,10 @@
 //! read-only, and the share behind it is read-only at the device besides.
 //!
 //! `exec.timeout_ms` is enforced by a kill; `init` carries no default. An `exec` that names
-//! no timeout is therefore unbounded -- a command that never ends is one this agent waits on
+//! no timeout is therefore unbounded -- a command that never ends is one this process waits on
 //! forever, and the client waits with it.
 //!
-//! What a timed-out command started is killed with it, and this agent is the guest's PID 1:
+//! What a timed-out command started is killed with it, and this process is the guest's PID 1:
 //! whatever those processes were parented to, their corpses come here, and nothing here reaps
 //! a child it did not spawn -- a general `waitpid(-1)` would take statuses tokio is waiting
 //! on. A guest that times out many commands is a guest with that many zombie entries, which a
@@ -72,7 +72,7 @@ use cortex::console::{
     Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec,
     Notification, ReadCall, ReadResp, Response, Server, WriteCall, WriteResp,
 };
-use cortex_krun_host::{ABIN_PATH, HANDSHAKE};
+use cortex_krun_host::{ABIN_DIR, HANDSHAKE};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 
@@ -154,7 +154,7 @@ pub async fn serve(port: std::fs::File) -> anyhow::Result<()> {
             Message::Notification(Notification::Stop) => session.release(),
 
             Message::Request { id, call } => match call {
-                // A session is taken or it is not: a tree this agent cannot stand in is
+                // A session is taken or it is not: a tree this process cannot stand in is
                 // refused rather than answered with a path, since a path is what every later
                 // call is spelled in. See [`Session::configure`].
                 Call::Init(init) => {
@@ -204,17 +204,17 @@ pub async fn serve(port: std::fs::File) -> anyhow::Result<()> {
                 // whiteouts for what it deleted. On a backend that stacks the overlay itself
                 // that is a directory this process could walk. Here the stacking is libkrun's
                 // init, one root up: the upperdir is on the ext4 the server attached, and once
-                // the pivot is done it is under no path this agent can reach.
+                // the pivot is done it is under no path this process can reach.
                 //
                 // So the server answers it, off the disk, with the machine stopped -- which is
                 // the only state that file is the whole of what the session wrote. It never
-                // forwards one, and this is what anything talking to the agent directly is
+                // forwards one, and this is what anything talking to this process directly is
                 // told.
                 Call::Snapshot(_) => {
                     let answered = Response::Error(refused(
                         Error::METHOD_NOT_FOUND,
                         "this backend keeps a session on a disk the host attached, which is \
-                         one root up from this agent and not something it can read -- the \
+                         one root up from this process and not something it can read -- the \
                          server answers a snapshot off that disk instead",
                     ));
                     server.respond(id, answered).await?;
@@ -303,7 +303,7 @@ impl Session {
 
     /// Take a new shape, answering what the client has to know about it.
     ///
-    /// Every URL is read before anything is let go of, so a session this agent cannot take is
+    /// Every URL is read before anything is let go of, so a session this process cannot take is
     /// one it has not taken. Otherwise the old boot goes: the trees are what a boot checked
     /// for, and a boot from before this is a boot that no longer matches.
     fn configure(&mut self, config: InitCall) -> Result<InitResp, Error> {
@@ -459,7 +459,7 @@ struct Tree {
     read_only: bool,
 }
 
-/// The tree one of a session's mounts names, or why it names none this agent can use.
+/// The tree one of a session's mounts names, or why it names none this process can use.
 ///
 /// `file://` and nothing else. Inside a guest that is not a limitation the way it is on the
 /// host: whatever a tree is made of was realized before the VM started, and what reaches here
@@ -564,7 +564,7 @@ async fn execute(exec: &ExecCall, session: &Session) -> Response {
         .kill_on_drop(true)
         // Its own process group, so a `killpg` here reaches everything the command started --
         // `sh -c 'a & b'` leaves two children of its own -- and so that the group is this
-        // command's alone: the `killpg` below never reaches this agent, which as the guest's
+        // command's alone: the `killpg` below never reaches this process, which as the guest's
         // PID 1 is not a process a stray signal may end.
         .process_group(0)
         .current_dir(session.cwd());
@@ -663,7 +663,7 @@ async fn read_to_end<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<V
 /// The environment variables an execution is given: this process's own, less the plumbing,
 /// plus the one thing that has to agree with where the command is standing.
 ///
-/// **This process's own is the image's.** libkrun's init execs this agent with what the boot
+/// **This process's own is the image's.** libkrun's init execs this process with what the boot
 /// named, and what the boot named is what the image stated -- its `PATH`, its `LANG`,
 /// whatever a Debian-based Python image puts there -- with the session's own additions over
 /// the top. So there is nothing to replay: a command that inherits this inherits the image.
@@ -676,7 +676,7 @@ async fn read_to_end<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<V
 /// directory would otherwise be told it was standing wherever this process is. Set to match,
 /// which is what a shell does for itself when it moves.
 ///
-/// What is added is [`ABIN_PATH`], **prepended** -- see below.
+/// What is added is [`ABIN_DIR`], **prepended** -- see below.
 ///
 /// Per command rather than per process, for the same reason a host-local console does it that
 /// way: `std::env::set_var` is unsound with any other thread running, and this program has
@@ -691,7 +691,7 @@ fn environment(session: &Session) -> Vec<(OsString, OsString)> {
     env
 }
 
-/// Put [`ABIN_PATH`] in front of whatever `PATH` the image stated.
+/// Put [`ABIN_DIR`] in front of whatever `PATH` the image stated.
 ///
 /// **Prepended, not appended.** `/abin` is what cortex undertakes to provide, and an image
 /// that happens to carry a program of the same name would make that undertaking untrue -- a
@@ -708,13 +708,13 @@ fn environment(session: &Session) -> Vec<(OsString, OsString)> {
 /// and the default for an image that states none was already put there by the host -- so an
 /// empty one at this point would be a session that was told to have none.
 fn with_abin(env: &mut [(OsString, OsString)]) {
-    if !std::path::Path::new(ABIN_PATH).is_dir() {
+    if !std::path::Path::new(ABIN_DIR).is_dir() {
         return;
     }
     let Some((_, path)) = env.iter_mut().find(|(name, _)| name == "PATH") else {
         return;
     };
-    let mut first = OsString::from(ABIN_PATH);
+    let mut first = OsString::from(ABIN_DIR);
     first.push(":");
     first.push(&*path);
     *path = first;

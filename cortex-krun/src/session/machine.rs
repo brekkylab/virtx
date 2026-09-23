@@ -3,7 +3,7 @@
 //! **Nothing here holds a hypervisor.** What this module does is make what a machine needs on
 //! disk, spawn `cortex-krun-host` over it, and talk to the guest down a socket that boot
 //! turned into a console port. The VMM and the entitlement it needs are both in that other
-//! binary -- see [`halves`](super::halves) for where it and the agent are found.
+//! binary -- see [`halves`](super::halves) for where it and the guest binary are found.
 //!
 //! What this end tells a boot is [`told`], and the boot's own module doc is where those
 //! arguments are written down. No type is shared between the two: they are one repository
@@ -18,7 +18,7 @@ use cortex::console::{
     stdio::{read, write},
 };
 use cortex_krun::session::Network;
-use cortex_krun_host::{AGENT_BIN, CAPABILITIES_ARG, GPU_CAPABILITY};
+use cortex_krun_host::{CAPABILITIES_ARG, GPU_CAPABILITY, GUEST_BIN};
 
 /// The reach a session gets when its client did not ask for one, and the host ports granted
 /// with it.
@@ -205,18 +205,18 @@ impl Machine {
         let dir = super::sessions()
             .join(std::process::id().to_string())
             .join("machine");
-        let agent_dir = dir.join("agent");
-        std::fs::create_dir_all(&agent_dir)?;
+        let guest_dir = dir.join("guest");
+        std::fs::create_dir_all(&guest_dir)?;
 
         let (socket, console) = (dir.join("port.sock"), dir.join("console.log"));
 
         // A copy and not a link: this directory is served to the guest over virtio-fs, and
         // what it holds has to be a file under it rather than a name pointing out of it.
-        let agent = agent_dir.join(AGENT_BIN);
+        let bin = guest_dir.join(GUEST_BIN);
         let from = super::halves::guest()?;
-        std::fs::copy(&from, &agent)
+        std::fs::copy(&from, &bin)
             .map_err(|e| anyhow::anyhow!("copying {} into the share: {e}", from.display()))?;
-        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
 
         // Bound before the child is started, because the child connects to it as its first
         // act and there is nothing to retry against if it is not there yet.
@@ -226,7 +226,7 @@ impl Machine {
         let mut told = told(
             image,
             session,
-            &agent_dir,
+            &guest_dir,
             abin().as_deref(),
             &socket,
             network,
@@ -366,7 +366,7 @@ impl Machine {
 fn told(
     image: &str,
     session: &Path,
-    agent: &Path,
+    guest: &Path,
     // Taken rather than looked up here, so that what a boot is told is a function of its
     // arguments: `abin()` asks the filesystem, and the one caller asks it once.
     abin: Option<&Path>,
@@ -380,8 +380,8 @@ fn told(
         image.into(),
         "--session".into(),
         session.into(),
-        "--agent".into(),
-        agent.into(),
+        "--guest".into(),
+        guest.into(),
         "--channel".into(),
         channel.into(),
         // Always spelled, even for a session that reaches nothing: the boot requires it, so
@@ -416,7 +416,7 @@ fn told(
 /// somewhere else would be two answers to one question.
 ///
 /// **A host with none is a session with no `/abin`, not a session that fails.** These are
-/// executables a session is better off with and can run without -- see `ABIN_PATH`.
+/// executables a session is better off with and can run without -- see `ABIN_DIR`.
 fn abin() -> Option<PathBuf> {
     let dir = crate::home().join("abin");
     dir.is_dir().then_some(dir)
@@ -464,7 +464,7 @@ mod tests {
             told(
                 "alpine:3.21",
                 Path::new("/s/session.ext4"),
-                Path::new("/s/agent"),
+                Path::new("/s/guest"),
                 abin,
                 Path::new("/s/port.sock"),
                 Network::Disabled,
@@ -492,7 +492,7 @@ mod tests {
             told(
                 "alpine:3.21",
                 Path::new("/s/session.ext4"),
-                Path::new("/s/agent"),
+                Path::new("/s/guest"),
                 None,
                 Path::new("/s/port.sock"),
                 Network::Disabled,

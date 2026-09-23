@@ -15,7 +15,7 @@ const POLL: Duration = Duration::from_millis(20);
 /// Open the port, waiting for it to appear.
 ///
 /// Read-write, and opened exactly once. The virtio-console driver allows a single opener per
-/// port and answers a second with `EBUSY`, which is why the two directions the agent needs
+/// port and answers a second with `EBUSY`, which is why the two directions this binary needs
 /// come from `dup`ing this handle rather than from opening the device again.
 pub fn open() -> anyhow::Result<File> {
     let deadline = Instant::now() + TIMEOUT;

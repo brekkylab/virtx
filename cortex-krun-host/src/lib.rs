@@ -39,30 +39,30 @@ pub const PORT_NAME: &str = "cortex-console";
 pub const HANDSHAKE: &[u8; 8] = b"CORTEXKR";
 
 /// Where the machine's own directory is mounted inside the guest, and therefore where the
-/// agent binary is found.
+/// guest binary is found.
 ///
-/// A share rather than anything built into the image: the guest agent is this build's, and
+/// A share rather than anything built into the image: the guest binary is this build's, and
 /// the image is whoever's the session named.
 ///
 /// A dotted name at the root, so that it is out of the way of whatever the image put there.
-pub const AGENT_PATH: &str = "/.cortex";
+pub const GUEST_DIR: &str = "/.cortex";
 
-/// The agent's file name inside [`AGENT_PATH`], which is also what the server copies into the
-/// directory it shares.
-pub const AGENT_BIN: &str = "cortex-krun-guest";
+/// The guest binary's file name inside [`GUEST_DIR`], which is also what the server copies
+/// into the directory it shares.
+pub const GUEST_BIN: &str = "cortex-krun-guest";
 
 /// Where cortex's own executables are mounted inside the guest, and what goes first on a
 /// command's `PATH`.
 ///
-/// Not a dotted name, unlike [`AGENT_PATH`]: these are programs a session is meant to run by
-/// name, so the directory they are in is one a caller could have typed. The agent is the
-/// opposite -- nothing in a session should ever reach for it.
+/// Not a dotted name, unlike [`GUEST_DIR`]: these are programs a session is meant to run by
+/// name, so the directory they are in is one a caller could have typed. The guest binary is
+/// the opposite -- nothing in a session should ever reach for it.
 ///
 /// **A session whose host has no such directory gets no `/abin` at all**, rather than an
 /// empty one. These are executables a session is better off with and can run without, so
 /// their absence is a `PATH` that is only the image's rather than a machine that will not
 /// start.
-pub const ABIN_PATH: &str = "/abin";
+pub const ABIN_DIR: &str = "/abin";
 
 /// The one argument a boot answers without becoming a machine: what this build of it can
 /// make, one name to a line on stdout, and then it exits.
@@ -83,31 +83,31 @@ pub const CAPABILITIES_ARG: &str = "--capabilities";
 /// feature builds in.
 pub const GPU_CAPABILITY: &str = "gpu";
 
-/// What the guest execs: the agent, at the one path both ends spell.
-pub fn agent_program() -> String {
-    format!("{AGENT_PATH}/{AGENT_BIN}")
+/// What the guest execs: its own binary, at the one path both ends spell.
+pub fn guest_program() -> String {
+    format!("{GUEST_DIR}/{GUEST_BIN}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One path, spelled once. The server copies the agent into the directory it shares, the
-    /// boot shares that directory at [`AGENT_PATH`], and the guest is told to exec the join
+    /// One path, spelled once. The server copies the binary into the directory it shares, the
+    /// boot shares that directory at [`GUEST_DIR`], and the guest is told to exec the join
     /// of the two -- three processes, and the machine execs nothing if they disagree.
     /// Both are refused as a client's mount point by `starts_with`, and both are left out of
     /// a snapshot the same way -- so one of them lying inside the other would be a rule that
     /// covers a path twice and a share that lands inside a share.
     #[test]
     fn the_two_reserved_paths_are_beside_each_other() {
-        assert_ne!(AGENT_PATH, ABIN_PATH);
-        assert!(!AGENT_PATH.starts_with(ABIN_PATH));
-        assert!(!ABIN_PATH.starts_with(AGENT_PATH));
+        assert_ne!(GUEST_DIR, ABIN_DIR);
+        assert!(!GUEST_DIR.starts_with(ABIN_DIR));
+        assert!(!ABIN_DIR.starts_with(GUEST_DIR));
     }
 
     #[test]
-    fn the_agent_is_at_one_path() {
-        assert_eq!(agent_program(), format!("{AGENT_PATH}/{AGENT_BIN}"));
-        assert_eq!(agent_program(), "/.cortex/cortex-krun-guest");
+    fn the_guest_binary_is_at_one_path() {
+        assert_eq!(guest_program(), format!("{GUEST_DIR}/{GUEST_BIN}"));
+        assert_eq!(guest_program(), "/.cortex/cortex-krun-guest");
     }
 }

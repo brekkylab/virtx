@@ -978,7 +978,7 @@ cortex-krun-lib/            the machinery: images, disks, sessions (lib `cortex_
 cortex-krun/                the console server a user runs; spawns the VM, is not one
 cortex-krun-host/           the process that becomes a VM, and -- as its library half --
                             the command line the server starts one with; signed on macOS
-cortex-krun-guest/          the agent inside the VM; its own workspace, built for musl
+cortex-krun-guest/          the half inside the VM; its own workspace, built for musl
 cortex-abins/               the programs in the guest's /abin -- docread, index, mem --
                             copied from cortex/cortex-execs/; its own workspace, built for musl
 guest/                      C sources compiled and run inside the VM by the examples

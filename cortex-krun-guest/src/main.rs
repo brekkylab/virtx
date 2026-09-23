@@ -22,7 +22,7 @@
 //! that would mean a protocol stream a single kernel warning could corrupt.
 //!
 //! So the session runs over a named virtio-console port --
-//! [`PORT_NAME`](cortex_krun_host::PORT_NAME) -- opened here before the agent starts. Two
+//! [`PORT_NAME`](cortex_krun_host::PORT_NAME) -- opened here before the session starts. Two
 //! halves from one descriptor, because the driver allows a single opener per port: [`serve`]
 //! `dup`s the handle rather than opening the device twice.
 //!
@@ -31,8 +31,8 @@
 //! what the host writes while no process in the guest has it open, so the host has to be told
 //! when reading has started, and there is nothing in the protocol for this end to say first.
 
-mod agent;
 mod port;
+mod session;
 
 use std::process::ExitCode;
 
@@ -79,5 +79,5 @@ fn run() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(agent::serve(port))
+        .block_on(session::serve(port))
 }

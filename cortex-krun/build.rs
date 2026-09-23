@@ -18,7 +18,7 @@
 //! It could be `include_bytes!`d instead, which would make this one file. What that costs is
 //! a copy of it on the way to every boot and a server binary carrying an executable it never
 //! runs itself. Two files that ship together is the cheaper arrangement: a machine's share
-//! gets the agent by copying a file rather than by writing a few megabytes out of this
+//! gets the guest binary by copying a file rather than by writing a few megabytes out of this
 //! binary's own image.
 //!
 //! # What this needs installed

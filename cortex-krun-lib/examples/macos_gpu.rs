@@ -89,7 +89,12 @@ mod mac {
             .nth(1)
             .unwrap_or_else(|| DEFAULT_COMMAND.to_string());
 
-        let rootfs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rootfs/alpine");
+        // `data/` is at the repo root, a directory up from this package.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let rootfs = repo.join("data/rootfs/alpine");
         if !rootfs.join("bin/busybox").exists() {
             return Err(format!(
                 "no rootfs at {}; run ./scripts/fetch-alpine-rootfs.sh first",

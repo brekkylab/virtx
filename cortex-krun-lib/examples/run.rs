@@ -58,9 +58,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .collect();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("data/sessions")
-        .join(format!("{named}.ext4"));
+    // `data/` is at the repo root, a directory up from this package.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let path = repo.join("data/sessions").join(format!("{named}.ext4"));
 
     eprintln!("session: {}", path.display());
 

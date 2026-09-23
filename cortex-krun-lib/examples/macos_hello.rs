@@ -28,9 +28,14 @@ mod mac {
     const ROOTFS_TAG: &str = "/dev/root";
 
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+        // `data/` is at the repo root, a directory up from this package.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let rootfs = match std::env::args().nth(1) {
             Some(path) => PathBuf::from(path),
-            None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rootfs/alpine"),
+            None => repo.join("data/rootfs/alpine"),
         };
         if !rootfs.join("bin/busybox").exists() {
             return Err(format!(

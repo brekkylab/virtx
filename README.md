@@ -47,7 +47,7 @@ cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
 ./scripts/run-ncnn-squeezenet.sh                     # a CNN on the guest GPU
 ```
 
-`run` is the [`session`](src/session/) module end to end: it pulls the
+`run` is the [`session`](cortex-krun-lib/src/session/) module end to end: it pulls the
 image, stitches its layers into one disk, formats a writable ext4 beside it and
 boots the guest on an overlay of the two. The session is the ext4 file, so the
 second run of the same image sees what the first one did:
@@ -81,9 +81,9 @@ Running the built binary directly, without the runner, will fail on both counts.
 
 ## Sessions — `patches/libkrun-85bed71-overlay-root.patch`
 
-[`image`](src/image/) answers with a disk: the layers stitched into one
+[`image`](cortex-krun-lib/src/image/) answers with a disk: the layers stitched into one
 read-only EROFS filesystem, shared by every machine ever booted from that image.
-[`session`](src/session/) is what makes one of those machines writable, by
+[`session`](cortex-krun-lib/src/session/) is what makes one of those machines writable, by
 stacking an ext4 of its own over it:
 
 ```
@@ -106,7 +106,7 @@ need no patch at all and does not work. The guest kernel refuses a FUSE
 filesystem as an upperdir outright — `filesystem on %s not supported as
 upperdir` — and even past that, deleting a file the image shipped is recorded as
 a character device numbered `0:0`, which `mknod` on a macOS host refuses to
-anything but root. It is the same wall [`image::ingest`](src/image/blob.rs) is
+anything but root. It is the same wall [`image::ingest`](cortex-krun-lib/src/image/blob.rs) is
 written around, and the reason layers become EROFS images rather than extracted
 directories.
 
@@ -469,8 +469,8 @@ clang cross-linker for the guest init.
 
 The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
 `BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
-[`examples/win_hello.rs`](examples/win_hello.rs) differs from
-[`examples/macos_hello.rs`](examples/macos_hello.rs) by little more than `AsFd` →
+[`cortex-krun-lib/examples/win_hello.rs`](cortex-krun-lib/examples/win_hello.rs) differs from
+[`cortex-krun-lib/examples/macos_hello.rs`](cortex-krun-lib/examples/macos_hello.rs) by little more than `AsFd` →
 `AsHandle`.
 
 It also hands the console no stdin. libkrun's Windows console parks its input
@@ -718,7 +718,7 @@ fill 4096 words : OK
 
 `scripts/run-ncnn-squeezenet.ps1` is the counterpart of the POSIX script
 described under [Inference on the guest GPU](#inference-on-the-guest-gpu), over
-[`examples/win_inference.rs`](examples/win_inference.rs):
+[`cortex-krun-lib/examples/win_inference.rs`](cortex-krun-lib/examples/win_inference.rs):
 
 ```
 [0 Virtio-GPU Venus (NVIDIA GeForce RTX 5090)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/1
@@ -808,7 +808,7 @@ object that `MapViewOfFile` accepts, which macOS could not offer: the
 descriptor route stays open here, and `export_blob` need not stay
 `Unsupported` forever.
 
-[`examples/win_gpu.rs`](examples/win_gpu.rs) is `win_hello` plus a TSI vsock,
+[`cortex-krun-lib/examples/win_gpu.rs`](cortex-krun-lib/examples/win_gpu.rs) is `win_hello` plus a TSI vsock,
 and — under `--features gpu` — the virtio-gpu device, the same division of
 labour `macos_gpu` has.
 
@@ -930,6 +930,10 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 ## Layout
 
 ```
+cortex-krun-lib/            the machinery: images, disks, sessions (lib `cortex_krun`)
+cortex-krun/                the console server a user runs; holds no hypervisor
+cortex-krun-host/           the process that becomes a VM; signed, spawned by the above
+cortex-krun-guest/          the init inside the VM; its own workspace, built for musl
 guest/                      sources compiled and run inside the VM
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
@@ -937,7 +941,6 @@ guest/                      sources compiled and run inside the VM
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 patches/                    see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner
-examples/
 data/                       untracked: rootfs, sessions, models, build outputs
 ```
 

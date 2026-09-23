@@ -103,9 +103,12 @@ mod win {
         // which -- unlike Win32 -- has no working directory and no notion of a
         // forward slash. `absolute` fixes both, and unlike `canonicalize` it does
         // not return a `\\?\` path, which `NtCreateFile` would reject in turn.
-        let rootfs = std::path::absolute(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rootfs/alpine"),
-        )?;
+        // `data/` is at the repo root, a directory up from this package.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let rootfs = std::path::absolute(repo.join("data/rootfs/alpine"))?;
         if !rootfs.join("bin/busybox").exists() {
             return Err(format!(
                 "no rootfs at {}; run .\\scripts\\fetch-alpine-rootfs.ps1 first",

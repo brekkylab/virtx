@@ -1,0 +1,20 @@
+[package]
+name = "cortex-krun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# What a user runs: it answers a console session and tends the images a session
+# boots from. It does not become a VM -- `cortex-krun-host` does, spawned as a
+# file beside this binary rather than taken as a dependency, so that the signed
+# artefact stays a VMM instead of the whole of a console server.
+[[bin]]
+name = "cortex-krun"
+path = "src/main.rs"
+
+[dependencies]
+# Images: pulling, stitching and naming them. The session half of this crate
+# comes with a hypervisor attached, which is not wanted here -- splitting it out
+# is what would let this binary link none.
+cortex-krun-lib = { workspace = true }

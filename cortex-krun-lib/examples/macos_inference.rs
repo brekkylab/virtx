@@ -107,9 +107,13 @@ mod mac {
             .nth(1)
             .unwrap_or_else(|| DEFAULT_COMMAND.to_string());
 
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // `data/` is at the repo root, a directory up from this package.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
 
-        let rootfs = manifest.join("data/rootfs/alpine");
+        let rootfs = repo.join("data/rootfs/alpine");
         if !rootfs.join("bin/busybox").exists() {
             return Err(format!(
                 "no rootfs at {}; run ./scripts/fetch-alpine-rootfs.sh first",
@@ -120,7 +124,7 @@ mod mac {
 
         // Created rather than required: an empty share is a valid starting point,
         // and the provisioning script fills it from inside the VM.
-        let workspace = manifest.join(WORKSPACE_HOST_DIR);
+        let workspace = repo.join(WORKSPACE_HOST_DIR);
         std::fs::create_dir_all(&workspace)?;
 
         // Borrowed by the console device for as long as the VM runs.

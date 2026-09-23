@@ -108,13 +108,17 @@ mod win {
             .nth(1)
             .unwrap_or_else(|| DEFAULT_COMMAND.to_string());
 
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // `data/` is at the repo root, a directory up from this package.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
 
         // The virtio-fs passthrough hands each root straight to `NtCreateFile`,
         // which -- unlike Win32 -- has no working directory and no notion of a
         // forward slash. `absolute` fixes both, and unlike `canonicalize` it does
         // not return a `\\?\` path, which `NtCreateFile` would reject in turn.
-        let rootfs = std::path::absolute(manifest.join("data/rootfs/alpine"))?;
+        let rootfs = std::path::absolute(repo.join("data/rootfs/alpine"))?;
         if !rootfs.join("bin").join("busybox").exists() {
             return Err(format!(
                 "no rootfs at {}; run .\\scripts\\fetch-alpine-rootfs.ps1 first",
@@ -125,7 +129,7 @@ mod win {
 
         // Created rather than required: an empty share is a valid starting point,
         // and the provisioning script fills it from inside the VM.
-        let workspace = std::path::absolute(manifest.join(WORKSPACE_HOST_DIR))?;
+        let workspace = std::path::absolute(repo.join(WORKSPACE_HOST_DIR))?;
         std::fs::create_dir_all(&workspace)?;
 
         // KRUN_LOG=debug (or trace) turns on libkrun's own logging.

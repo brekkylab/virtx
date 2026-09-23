@@ -1,0 +1,22 @@
+[package]
+name = "cortex-krun-guest"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The half that runs inside the micro-VM. Its own workspace root rather than a
+# member of the one above: it is cross-compiled to `*-unknown-linux-musl`, and a
+# member would be built for the host by a bare `cargo build` -- for a target that
+# has no host to run on.
+[workspace]
+
+[[bin]]
+name = "cortex-krun-guest"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

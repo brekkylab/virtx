@@ -1,3 +1,5 @@
-/target
+# Unanchored: `cortex-krun-guest/` is a workspace of its own and so builds into
+# a target directory of its own.
+target/
 Cargo.lock
 /data

@@ -1,0 +1,27 @@
+[package]
+name = "cortex-krun-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The process that becomes a micro-VM. A binary and nothing else: `cortex-krun`
+# never links it, it spawns the file next to itself.
+#
+# Its own package rather than a mode of `cortex-krun`, and either reason alone
+# would be enough. **It has to be signed**: on macOS, Hypervisor.framework needs
+# the `com.apple.security.hypervisor` entitlement, an entitlement is carried by a
+# code signature, and a signature is read at `exec`. **It becomes the VM**:
+# entering a guest does not return, so whatever holds a hypervisor stops being
+# able to answer anything else.
+[[bin]]
+name = "cortex-krun-host"
+path = "src/main.rs"
+
+[dependencies]
+# The sessions this binary exists to enter, and the disks they are stitched from.
+cortex-krun-lib = { workspace = true }
+
+[features]
+# Built-in virtio-gpu with venus (Vulkan), passed through to the session layer.
+gpu = ["cortex-krun-lib/gpu"]

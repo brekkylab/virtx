@@ -47,7 +47,7 @@ use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
 use cortex_krun::session::{Ext4, Network};
 use cortex_krun_host::{AGENT_PATH, agent_program};
 
-use super::machine::Machine;
+use super::machine::{Machine, Shape};
 use super::{SYNC, coded, pulled};
 
 /// How a build's name is spelled, so that a change to what goes into the digest cannot be
@@ -140,7 +140,12 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
 /// that failed takes the machine with it and the disk is left holding whatever the steps
 /// before it wrote.
 async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> anyhow::Result<()> {
-    let mut machine = Machine::boot(base, &upper.path, &[], network, &[])
+    // This server's own shape and not the session's: what a build gets is its operator's
+    // business, where a session's size is what its client asked for. The reach is the
+    // exception above, and it is one because a recipe's commonest first step fetches packages
+    // -- a build that could not reach a registry would be a different build, where one that
+    // is smaller is the same one, slower.
+    let mut machine = Machine::boot(base, &upper.path, &[], network, &[], Shape::from_env())
         .await
         .map_err(|e| coded(Error::BOOT_FAILED, e))?;
 

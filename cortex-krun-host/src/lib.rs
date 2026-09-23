@@ -16,6 +16,11 @@
 //! and the two are one repository built by one `cargo build` -- so what a shared type would
 //! buy is a compile error in place of a refusal, and the refusal is not a quiet one: a boot
 //! given an argument it does not know says so and exits before a hypervisor is touched.
+//!
+//! [`CAPABILITIES_ARG`] and [`GPU_CAPABILITY`] are the exception that shows the rule. They are
+//! the one exchange where a disagreement is *not* refused by anybody -- a server that asks in
+//! words the boot does not answer in hears nothing back and concludes the boot cannot do the
+//! thing -- so they are read from here by both ends.
 
 /// The virtio-console port carrying the console session.
 ///
@@ -45,6 +50,25 @@ pub const AGENT_PATH: &str = "/.cortex";
 /// The agent's file name inside [`AGENT_PATH`], which is also what the server copies into the
 /// directory it shares.
 pub const AGENT_BIN: &str = "cortex-krun-guest";
+
+/// The one argument a boot answers without becoming a machine: what this build of it can
+/// make, one name to a line on stdout, and then it exits.
+///
+/// **Here rather than spelled at each end, unlike the rest of the command line.** An argument
+/// either end gets wrong is refused by name, which is what makes the rest safe to write twice;
+/// a capability that is misspelled is not refused by anybody -- the server hears a name it was
+/// not looking for, concludes the boot cannot do the thing, and refuses a session the boot
+/// would have taken. A word whose mismatch is silent is a word both ends have to read from one
+/// place.
+///
+/// Asked at all because a capability is a fact about *that file*: the two binaries are built
+/// by one `cargo build` but a cargo feature is not, and
+/// `CORTEX_KRUN_BOOT_BIN` can name a boot from another build entirely.
+pub const CAPABILITIES_ARG: &str = "--capabilities";
+
+/// A boot that can attach a virtio-gpu, which is what `--gpu` needs and what the `gpu`
+/// feature builds in.
+pub const GPU_CAPABILITY: &str = "gpu";
 
 /// What the guest execs: the agent, at the one path both ends spell.
 pub fn agent_program() -> String {

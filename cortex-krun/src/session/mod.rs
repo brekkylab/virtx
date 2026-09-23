@@ -19,7 +19,7 @@ use cortex_krun_host::{AGENT_PATH, agent_program};
 
 use machine::{HOST_PORTS_ENV, NETWORK_ENV};
 
-use machine::{Machine, Mount};
+use machine::{Machine, Mount, Shape};
 
 /// A machine that has been booted and told what the session is, with the guest's own answer
 /// to where it stands -- see [`InitResp::cwd`].
@@ -184,6 +184,11 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // virtio-net device is attached, and a device is attached before a kernel comes up.
     let (network, host_ports) = reach(&init)?;
 
+    // And how big a machine, for the same reason and at the same moment: a vCPU count and a
+    // memory size are fixed when a machine is made, a GPU is a device attached before a kernel
+    // comes up, and all three are cheaper to refuse now than after an image has been pulled.
+    let shape = shape(&init)?;
+
     let image = init.image.clone().ok_or_else(|| {
         coded(
             Error::INVALID_PARAMS,
@@ -247,7 +252,8 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
             at.clone(),
         );
         Box::pin(async move {
-            let mut machine = Machine::boot(&booting, &at, &mounts, network, &host_ports).await?;
+            let mut machine =
+                Machine::boot(&booting, &at, &mounts, network, &host_ports, shape).await?;
             let cwd = configure(&mut machine, &mounts).await?;
             Ok((machine, cwd))
         })
@@ -355,6 +361,59 @@ fn reach(init: &InitCall) -> anyhow::Result<(Network, Vec<u16>)> {
     Ok((network, host_ports))
 }
 
+/// How big a machine this session gets, and whether it has a Vulkan device.
+///
+/// The client's where it said and this server's own environment where it did not -- see
+/// [`Shape::from_env`] -- which is [`reach`]'s rule, and here for [`reach`]'s reason: the end
+/// that knows what this host can spare is the one that started this process, and the end that
+/// knows what the work needs is the one asking for it -- so the client's word stands where it
+/// has one, member by member, and the operator's where it has none.
+///
+/// Two refusals, and the difference is what has to change. A machine nothing can run on --
+/// no vCPU, or no memory -- is [`INVALID_PARAMS`](Error::INVALID_PARAMS), because the number
+/// is what has to change. A GPU this build cannot attach is
+/// [`UNSUPPORTED_MACHINE`](Error::UNSUPPORTED_MACHINE), because the request is well formed and
+/// what is missing is a boot built with `gpu` on a host with virglrenderer -- and it is said
+/// here, at `init`, rather than left to a boot that would otherwise come up without the device
+/// and never mention it.
+fn shape(init: &InitCall) -> anyhow::Result<Shape> {
+    // The client's zero and not the environment's: a frame asking for a machine nothing runs
+    // on is a frame to answer, where an override nobody can act on costs the override and
+    // nothing else -- see [`Shape::from_env`].
+    for (what, given) in [
+        ("vcpus", init.vcpus.map(u64::from)),
+        ("memory_mib", init.memory_mib.map(u64::from)),
+    ] {
+        if given == Some(0) {
+            return Err(coded(
+                Error::INVALID_PARAMS,
+                anyhow::anyhow!("{what}: 0 is a machine nothing can run on"),
+            ));
+        }
+    }
+
+    let default = Shape::from_env();
+    let gpu = init.gpu.unwrap_or(default.gpu);
+    // Asked of the boot and not of this build: the file that attaches the device is the one
+    // that was built with it -- see [`machine::can_gpu`]. Asked only when something wants one,
+    // so a session that does not pays nothing for the question.
+    if gpu && !machine::can_gpu()? {
+        return Err(coded(
+            Error::UNSUPPORTED_MACHINE,
+            anyhow::anyhow!(
+                "a GPU was asked for and this boot has none to attach -- it is built with the \
+                 `gpu` feature, on a host that has virglrenderer"
+            ),
+        ));
+    }
+
+    Ok(Shape {
+        vcpus: init.vcpus.or(default.vcpus),
+        memory_mib: init.memory_mib.or(default.memory_mib),
+        gpu,
+    })
+}
+
 /// Tell the guest what the session is, in the one spelling both ends use.
 ///
 /// The client's `init` named its trees by host URL; the guest's copy names them by the guest
@@ -375,10 +434,15 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
             })
             .collect::<Result<_, cortex::console::InvalidMount>>()?,
         // None of these reaches the guest: an image is what this end booted, a network is a
-        // device that either is or is not attached by now, and a snapshot is refused above.
+        // device that either is or is not attached by now, a snapshot is refused above, and
+        // the machine's shape was spent on the boot -- the guest is running on the answer and
+        // has nothing left to do with the question.
         image: None,
         network: None,
         snapshot: None,
+        vcpus: None,
+        memory_mib: None,
+        gpu: None,
     };
     match machine.call(Call::Init(replayed)).await? {
         Response::Init(answer) => Ok(answer.cwd),

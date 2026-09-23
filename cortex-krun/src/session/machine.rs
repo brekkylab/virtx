@@ -18,7 +18,7 @@ use cortex::console::{
     stdio::{read, write},
 };
 use cortex_krun::session::Network;
-use cortex_krun_host::AGENT_BIN;
+use cortex_krun_host::{AGENT_BIN, CAPABILITIES_ARG, GPU_CAPABILITY};
 
 /// The reach a session gets when its client did not ask for one, and the host ports granted
 /// with it.
@@ -31,21 +31,20 @@ use cortex_krun_host::AGENT_BIN;
 pub const NETWORK_ENV: &str = "CORTEX_KRUN_NETWORK";
 pub const HOST_PORTS_ENV: &str = "CORTEX_KRUN_HOST_PORTS";
 
-/// Guest vCPUs and memory, when this server was told to override what a boot would otherwise
-/// pick.
+/// The shape a session's machine gets when its client did not ask for one.
+///
+/// This server's own environment, read for the reason [`NETWORK_ENV`] is: a client that says
+/// nothing about the size of its machine is not asking for one size over another, it is
+/// leaving the question to whoever started this process -- who is the only party here that
+/// knows what the host it runs on can spare. A client that does have an opinion says so, and
+/// what it says wins.
 ///
 /// Read here and passed on the command line, rather than left for the boot to find in the
 /// environment it inherits: what a machine was given is then something this end can be asked,
 /// and the boot has one place it learns its shape from.
-const VCPUS_ENV: &str = "CORTEX_KRUN_VCPUS";
-const MEMORY_ENV: &str = "CORTEX_KRUN_MEMORY_MIB";
-
-/// Whether to ask for a Vulkan device in the guest.
-///
-/// This server's own setting and not the client's, because whether it can be given is a fact
-/// about the machine this runs on -- the boot has to have been built with `gpu`, and that
-/// build needs a virglrenderer installed here. A client has no way to know either.
-const GPU_ENV: &str = "CORTEX_KRUN_GPU";
+pub const VCPUS_ENV: &str = "CORTEX_KRUN_VCPUS";
+pub const MEMORY_ENV: &str = "CORTEX_KRUN_MEMORY_MIB";
+pub const GPU_ENV: &str = "CORTEX_KRUN_GPU";
 
 /// How long to wait for the guest to come up before saying it did not.
 const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -60,6 +59,85 @@ pub struct Mount {
     pub at: String,
     pub from: PathBuf,
     pub read_only: bool,
+}
+
+/// The machine a session runs in: how much of the host it gets, and whether it has a Vulkan
+/// device.
+///
+/// What [`InitCall`](cortex::console::InitCall)'s three machine members came to on this side,
+/// each already resolved against this server's own defaults -- so what reaches a boot is one
+/// answer per question and not a client's wish beside an operator's.
+///
+/// `None` is not a number this end picks: it is the boot's own default, which is the last
+/// place left that has one. A `0` never reaches here -- it is refused where an `init` is read,
+/// since a machine nothing runs on is a request that has to change rather than a shape to
+/// spell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shape {
+    pub vcpus: Option<u8>,
+    pub memory_mib: Option<u32>,
+    pub gpu: bool,
+}
+
+impl Shape {
+    /// What this server makes of a machine nobody described: its operator's overrides, and
+    /// the boot's defaults where there are none.
+    pub fn from_env() -> Shape {
+        Shape {
+            // A zero from the environment is dropped rather than refused, the way an
+            // unparseable one is: these are a knob for whoever started this process, and what
+            // a typo costs is the override.
+            vcpus: number::<u8>(VCPUS_ENV).filter(|vcpus| *vcpus > 0),
+            memory_mib: number::<u32>(MEMORY_ENV).filter(|mib| *mib > 0),
+            gpu: flag(GPU_ENV),
+        }
+    }
+}
+
+/// Whether the boot beside this binary can attach a GPU, asked of that boot itself.
+///
+/// **Asked rather than assumed**, because it is a fact about *that file*: the two binaries are
+/// built by one `cargo build` but a cargo feature is not, and `CORTEX_KRUN_BOOT_BIN` can name
+/// a boot from another build entirely. Assuming would mean one of the two failures this
+/// protocol has no room for -- a session refused for a device the boot had, or a session
+/// taken, booted and quietly run on the CPU.
+///
+/// Once per process and only when something wants a GPU. The answer cannot change under a
+/// running server -- it is a file's, and the file is resolved the same way every boot resolves
+/// it -- so the spawn is paid by the first session that asks and by none after it. A boot that
+/// could not be asked is an error and not a `false`: this end knows nothing either way, and
+/// what it must not do is decide.
+pub fn can_gpu() -> anyhow::Result<bool> {
+    // The failure is kept as a sentence rather than as the error it was, because a `OnceLock`
+    // holds one value for every caller and `anyhow::Error` is nobody's to clone.
+    static ASKED: std::sync::OnceLock<Result<Vec<String>, String>> = std::sync::OnceLock::new();
+
+    match ASKED.get_or_init(|| capabilities().map_err(|e| format!("{e:#}"))) {
+        Ok(names) => Ok(names.iter().any(|name| name == GPU_CAPABILITY)),
+        Err(said) => Err(anyhow::anyhow!("{said}")),
+    }
+}
+
+/// Everything the boot says it can make, one name to a line.
+fn capabilities() -> anyhow::Result<Vec<String>> {
+    let program = super::halves::boot()?;
+    let said = std::process::Command::new(&program)
+        .arg(CAPABILITIES_ARG)
+        .output()
+        .map_err(|e| anyhow::anyhow!("asking {} what it can make: {e}", program.display()))?;
+    anyhow::ensure!(
+        said.status.success(),
+        "{} answered {CAPABILITIES_ARG} with {}: {}",
+        program.display(),
+        said.status,
+        String::from_utf8_lossy(&said.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&said.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// A booted micro-VM, held for as long as there is something to ask it.
@@ -106,6 +184,9 @@ impl Machine {
         // Beside the reach rather than folded into it, because widening the one must never
         // widen the other -- see the boot's own note on the two axes.
         host_ports: &[u16],
+        // How much of the host this machine gets, and whether it has a Vulkan device --
+        // settled against this server's own defaults before it arrived here.
+        shape: Shape,
     ) -> anyhow::Result<Machine> {
         use std::io::Read as _;
         use std::os::unix::fs::PermissionsExt as _;
@@ -142,7 +223,9 @@ impl Machine {
         let listener = std::os::unix::net::UnixListener::bind(&socket)
             .map_err(|e| anyhow::anyhow!("binding the console channel: {e}"))?;
 
-        let mut told = told(image, session, &agent_dir, &socket, network, host_ports);
+        let mut told = told(
+            image, session, &agent_dir, &socket, network, host_ports, shape,
+        );
         // In the order the client named them, which is the order the protocol says they are
         // realized in -- so a boot is handed the list as it stands and nothing here sorts or
         // merges it.
@@ -268,9 +351,11 @@ impl Machine {
 ///
 /// Written here and read there, with no type in between. What a shared one would buy is a
 /// compile error in place of a refusal, and the refusal is not a quiet one: a boot given an
-/// argument it does not know says so and exits before a hypervisor is touched. The three
-/// overrides are this server's own environment rather than anything a client said, because
-/// what they are worth is a fact about the machine this runs on.
+/// argument it does not know says so and exits before a hypervisor is touched.
+///
+/// Nothing is decided here. The reach and the shape both arrive already settled -- a client's
+/// word where it had one and this server's environment where it did not -- so this spells what
+/// it was handed and a machine's size is answered in one place rather than two.
 fn told(
     image: &str,
     session: &Path,
@@ -278,6 +363,7 @@ fn told(
     channel: &Path,
     network: Network,
     host_ports: &[u16],
+    shape: Shape,
 ) -> Vec<OsString> {
     let mut told: Vec<OsString> = vec![
         "--image".into(),
@@ -296,19 +382,19 @@ fn told(
     for port in host_ports {
         told.extend(["--host-port".into(), OsString::from(port.to_string())]);
     }
-    if let Some(vcpus) = number::<u8>(VCPUS_ENV) {
+    if let Some(vcpus) = shape.vcpus {
         told.extend(["--vcpus".into(), OsString::from(vcpus.to_string())]);
     }
-    if let Some(memory) = number::<u32>(MEMORY_ENV) {
+    if let Some(memory) = shape.memory_mib {
         told.extend(["--memory-mib".into(), OsString::from(memory.to_string())]);
     }
-    if flag(GPU_ENV) {
+    if shape.gpu {
         told.push("--gpu".into());
     }
     told
 }
 
-/// An override read out of this server's environment, ignoring anything that is not a number.
+/// A default read out of this server's environment, ignoring anything that is not a number.
 ///
 /// A value nobody can act on is not a reason to refuse a session: these are a knob for
 /// whoever started the process, and the boot's own default is a machine that works. What a
@@ -334,5 +420,51 @@ fn said(console: &Path) -> String {
             )
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shape is spelled only where it was answered, and the boot's own defaults are what an
+    /// unspelled one leaves in place -- so a machine nobody described is a command line with
+    /// nothing about one on it.
+    #[test]
+    fn a_boot_is_told_the_shape_it_was_given() {
+        let line = |shape| {
+            told(
+                "alpine:3.21",
+                Path::new("/s/session.ext4"),
+                Path::new("/s/agent"),
+                Path::new("/s/port.sock"),
+                Network::Disabled,
+                &[],
+                shape,
+            )
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+        };
+
+        let quiet = line(Shape::default());
+        assert!(!quiet.iter().any(|arg| arg == "--vcpus"));
+        assert!(!quiet.iter().any(|arg| arg == "--memory-mib"));
+        assert!(!quiet.iter().any(|arg| arg == "--gpu"));
+
+        let asked = line(Shape {
+            vcpus: Some(4),
+            memory_mib: Some(4096),
+            gpu: true,
+        });
+        let after = |flag: &str| {
+            asked
+                .iter()
+                .position(|arg| arg == flag)
+                .map(|at| asked[at + 1].clone())
+        };
+        assert_eq!(after("--vcpus").as_deref(), Some("4"));
+        assert_eq!(after("--memory-mib").as_deref(), Some("4096"));
+        assert!(asked.iter().any(|arg| arg == "--gpu"));
     }
 }

@@ -199,6 +199,15 @@ refusing to start, so a caller never has to `cfg` around the call. The image
 carries the guest half either way (`apk add mesa-vulkan-virtio vulkan-loader`);
 one without it boots and finds no device.
 
+**The console server does not ignore it.** `cortex-krun` answers a `gpu` member on
+`init`, and there what is asked for is what is given: it asks the boot beside it
+(`cortex-krun-host --capabilities`) whether a device can be attached and refuses
+the session with `UNSUPPORTED_MACHINE` when it cannot. A client on the other end
+of a pipe cannot `cfg` around anything, and a session that silently ran on the CPU
+costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
+with `CORTEX_KRUN_GPU`, `CORTEX_KRUN_VCPUS` and `CORTEX_KRUN_MEMORY_MIB` as this
+server's own defaults for a client that says nothing.
+
 The examples below do the same thing by hand, over a plain rootfs rather than an
 image. Working end to end:
 

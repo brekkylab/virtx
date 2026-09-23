@@ -30,7 +30,13 @@
 //!                       tree inside another                                  [optional]
 //! --vcpus <n>           overrides, when the server was told to                [optional]
 //! --memory-mib <n>                                                            [optional]
-//! --gpu                 attach virtio-gpu, if this was built with `gpu`       [optional]
+//! --gpu                 attach virtio-gpu; refused unless built with `gpu`   [optional]
+//! ```
+//!
+//! And one argument that is a question rather than a machine:
+//!
+//! ```text
+//! --capabilities        write what this build can make, a name to a line, and exit
 //! ```
 //!
 //! Read here and spelled where a boot is spawned, with no type shared between the two. A boot
@@ -69,14 +75,47 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cortex_krun::session::{Ext4, Mount, Network, Session};
-use cortex_krun_host::{AGENT_PATH, PORT_NAME, agent_program};
+use cortex_krun_host::{AGENT_PATH, CAPABILITIES_ARG, PORT_NAME, agent_program};
 
 /// A failure of ours, not a guest's -- the shell's code for "found it, could not run it",
 /// which is what a boot that could not become a VM is.
 const NOT_EXECUTABLE: u8 = 126;
 
+/// What this build can make, for the server that is about to spawn it -- see
+/// [`CAPABILITIES_ARG`].
+///
+/// A capability is here when a feature decides whether an argument can be honoured, which
+/// today is one: `--gpu` needs a device that needs virglrenderer, and a host without that
+/// library does not link a build that has it. Everything else on the command line is answered
+/// by every build of this binary, and a name for those would be a list a server reads and
+/// learns nothing from.
+const CAPABILITIES: &[&str] = &[
+    #[cfg(feature = "gpu")]
+    cortex_krun_host::GPU_CAPABILITY,
+];
+
 fn main() -> ExitCode {
-    match Args::parse(std::env::args_os().skip(1)).and_then(enter) {
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+
+    // Answered before the argv is read as a machine, because it is not one: a server asks
+    // this of the file it is about to spawn, and nothing else on the line is meaningful
+    // beside it. Alone, therefore -- a boot asked what it can do and also handed a session
+    // is two commands, and the second would never run.
+    if argv.first().is_some_and(|first| first == CAPABILITIES_ARG) {
+        if argv.len() > 1 {
+            eprintln!(
+                "{}: {CAPABILITIES_ARG} is asked on its own",
+                env!("CARGO_BIN_NAME")
+            );
+            return ExitCode::from(NOT_EXECUTABLE);
+        }
+        for name in CAPABILITIES {
+            println!("{name}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    match Args::parse(argv).and_then(enter) {
         // `enter` only returns on success by not returning at all: the `Ok` holds an
         // `Infallible`, and the empty match is what says so.
         Ok(never) => match never {},
@@ -160,10 +199,23 @@ impl Args {
                 "--memory-mib" => memory_mib = Some(number(&flag, value()?)?),
                 // A flag and not a value: it is asked for or it is not, and `--gpu false`
                 // would be a second spelling of leaving it out.
+                //
                 "--gpu" => gpu = true,
                 other => anyhow::bail!("{other} is not an argument a boot takes"),
             }
         }
+
+        // Refused where this build has no device to attach, rather than taken and dropped by
+        // the session layer: a session that asked for an accelerator and quietly ran without
+        // one is a client waiting on the CPU for an answer nothing told it was coming that
+        // way. A server asks `--capabilities` before it spells this, so reaching here is a
+        // boot named by `CORTEX_KRUN_BOOT_BIN` that is not the build the server asked.
+        #[cfg(not(feature = "gpu"))]
+        anyhow::ensure!(
+            !gpu,
+            "--gpu: this boot was built without the `gpu` feature, which is what virglrenderer \
+             and a virtio-gpu device come in with"
+        );
 
         let required = |name: &str, value: Option<PathBuf>| {
             value.ok_or_else(|| {

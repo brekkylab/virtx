@@ -14,6 +14,15 @@ rust-version.workspace = true
 name = "cortex-krun"
 path = "src/main.rs"
 
+# Only `examples/run.rs` reads this, and it forwards to the library's own: `session.gpu(true)`
+# is a flag a build without a virtio-gpu device ignores, so an example that can ask for one
+# needs the feature on the package it lives in. The server itself has no use for it -- it does
+# not make a machine, it spawns a boot that does, and whether *that* file can attach a device
+# is something it asks the file rather than something this build decides. So it is off, and a
+# `cargo build` of this package links no display backend.
+[features]
+gpu = ["cortex-krun-lib/gpu"]
+
 [build-dependencies]
 anyhow = { workspace = true }
 

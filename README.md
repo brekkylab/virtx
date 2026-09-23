@@ -34,7 +34,6 @@ brew install libkrunfw
 ```sh
 git submodule update --init
 ./scripts/apply-patches.sh              # patches the libkrun and rutabaga_gfx submodules
-./scripts/fetch-alpine-rootfs.sh        # guest rootfs -> data/rootfs/alpine
 ./scripts/build-virglrenderer.sh        # only for the `gpu` feature
 ./scripts/fetch-musl-sysroot.sh         # only to build cortex-abins/
 ./scripts/build-abin.sh                 # cortex's own executables -> {home}/abin
@@ -43,12 +42,15 @@ git submodule update --init
 ## Running
 
 ```sh
-cargo run --example macos_hello                      # boots a microVM, runs a command in it
 cargo run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
-cargo run --example macos_gpu -- 'uname -a'          # adds TSI networking
-cargo run --features gpu --example macos_gpu         # vulkaninfo over venus
-./scripts/run-ncnn-squeezenet.sh                     # a CNN on the guest GPU
+CORTEX_NET=public cargo run --example run -- alpine:3.21 'apk add curl'
+CORTEX_GPU=1 cargo run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 ```
+
+One example, because there is one thing to show: a machine made out of the parts
+this repository has. What a *session* is — the agent, the console protocol, `/abin`
+— is the server's, and a client reaches that by spawning `cortex-krun` rather than
+by running an example.
 
 `run` is the [`session`](cortex-krun-lib/src/session/) module end to end: it pulls the
 image, stitches its layers into one disk, formats a writable ext4 beside it and
@@ -65,10 +67,10 @@ sparse — a 2 GiB ceiling costs a couple of megabytes until it is used.
 
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
 
-`run` is the one example not gated by host — `session` attaches the guest's
-console itself, which is the only call that differs between them. The `hello`
-and `gpu` examples still come in `macos_` and `win_` pairs, and the Windows
-setup is different throughout; see [Windows (WHP)](#windows-whp).
+Nothing in it is gated by host: `session` attaches the guest's console itself,
+which is the one call that would otherwise differ. The cargo runner is
+host-specific all the same, and the Windows setup is different throughout; see
+[Windows (WHP)](#windows-whp).
 
 `cargo run` goes through `scripts/macos-run.sh`, registered as the cargo runner
 for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
@@ -210,38 +212,6 @@ of a pipe cannot `cfg` around anything, and a session that silently ran on the C
 costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
 with `CORTEX_KRUN_GPU`, `CORTEX_KRUN_VCPUS` and `CORTEX_KRUN_MEMORY_MIB` as this
 server's own defaults for a client that says nothing.
-
-The examples below do the same thing by hand, over a plain rootfs rather than an
-image. Working end to end:
-
-```
-$ cargo run --features gpu --example macos_gpu
-GPU0:
-        deviceName = Virtio-GPU Venus (Apple M3 Pro)
-        driverID   = DRIVER_ID_MESA_VENUS
-        driverInfo = Mesa 26.1.6
-```
-
-Install the guest side once, which needs networking and so the TSI vsock that
-`macos_gpu` already sets up:
-
-```sh
-cargo run --example macos_gpu -- 'apk add --no-cache mesa-vulkan-virtio vulkan-loader vulkan-tools'
-```
-
-`vulkaninfo` only enumerates. `scripts/run-vk-smoke.sh` compiles
-`guest/vk_smoke.c` inside the VM and runs a real round-trip -- create a device,
-allocate host-visible memory, submit `vkCmdFillBuffer`, wait on a fence, read
-the result back:
-
-```
-instance      : 1.4.347
-device        : Virtio-GPU Venus (Apple M3 Pro)
-device api    : 1.2.0
-queue family  : 0
-memory type   : 1 (16384 bytes)
-fill 4096 words : OK
-```
 
 ### Why the guest device reports Vulkan 1.2
 
@@ -388,90 +358,16 @@ live in an exported copy the way virglrenderer's does — `scripts/apply-patches
 applies them to the submodule working trees, and both submodules are marked
 `ignore = dirty` in `.gitmodules`. Running the script twice is a no-op.
 
-## Inference on the guest GPU
-
-`scripts/run-ncnn-squeezenet.sh` runs SqueezeNet v1.1 on the guest GPU with
-[ncnn](https://github.com/Tencent/ncnn)'s Vulkan backend, and checks the result
-against ncnn's CPU backend in the same process:
-
-```
-$ ./scripts/run-ncnn-squeezenet.sh
-[0 Virtio-GPU Venus (Apple M3 Pro)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
-[0 Virtio-GPU Venus (Apple M3 Pro)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
-device        : Virtio-GPU Venus (Apple M3 Pro)
-device api    : 1.2.0
-image         : /mnt/inference/assets/dog.jpg (1546x1213)
-model         : squeezenet_v1.1 (1000 classes)
-cpu           : 1.6 ms/iter
-vulkan        : 3.7 ms/iter
-
-top-5 on vulkan:
-   82.57%  n02111889 Samoyed, Samoyede
-    5.28%  n02112018 Pomeranian
-    ...
-
-cpu/vulkan top-1 : match
-max score diff   : 7.32e-03
-```
-
-ncnn's own probe lines restate what the sections above worked out: fp16 all the
-way through, no cooperative matrix, bf16 storage but no bf16 arithmetic.
-
-### Why ncnn
-
-ncnn's floor is Vulkan 1.0 plus `VK_KHR_get_physical_device_properties2`;
-everything past that — fp16, int8, cooperative matrix — is probed at runtime
-and has a fallback path. That is the only requirement the 1.2 ceiling above
-leaves comfortable room under. The alternatives do not fit as well:
-
-- Alpine's `onnxruntime` is built with no GPU execution provider, and upstream
-  ONNX Runtime has no Vulkan one at all.
-- `llama.cpp-vulkan` is packaged for aarch64 and would run here (it needs
-  instance 1.2 and treats maintenance4, coopmat and bf16 as optional, and never
-  touches `KHR_synchronization2`), but it only runs GGUF language models.
-- wonnx and Burn/wgpu are the Rust-native options; wonnx has been dormant since
-  2023 with thin operator coverage, and wgpu brings its own feature demands.
-
-ONNX models go in through ncnn's `onnx2ncnn`/`pnnx` converters on the host.
-
-### The build
-
-ncnn is compiled inside the VM, so `macos_inference` differs from `macos_gpu`
-in two ways: up to 8 vcpus and 6 GiB of RAM (`KRUN_VCPUS`, `KRUN_RAM_MIB`), and a
-second virtiofs share, `data/inference/` mounted at `/mnt/inference`, holding
-the checkout, the build trees and the model. The first run takes around 13
-minutes; after that the script only recompiles `guest/ncnn_squeezenet.cpp`.
-
-The build uses Alpine's glslang rather than ncnn's submodule, which is what
-keeps the clone shallow. That needs `spirv-tools-dev` as well as `glslang-dev`:
-`glslang-config.cmake` does a `find_dependency(SPIRV-Tools-opt)`, and without
-it `find_package(glslang)` fails quietly, `NCNN_SYSTEM_GLSLANG` switches itself
-off, and the build dies asking for the submodule. `cmake` also needs
-`-DCMAKE_POLICY_VERSION_MINIMUM=3.5`, since ncnn still declares a 2.8.12 floor
-that cmake 4 rejects.
-
-### On the timings
-
-The GPU is slower than the CPU here, and that is the expected result.
-SqueezeNet v1.1 is 75 layers over a 227x227 input — very little arithmetic per
-dispatch, and every dispatch crosses the guest/host boundary into virglrenderer
-and then MoltenVK. At this size the per-dispatch overhead is the measurement.
-This checks that the stack computes the right answer, not that it is fast.
-
-The right answer is the part worth trusting: ncnn falls back to its CPU
-implementation per layer, silently, for any layer whose Vulkan path is missing,
-so a passing run needs more than a plausible number. The reported max score
-difference is 7.32e-03 and not zero, which is fp16 on the GPU against fp32 on
-the CPU — a silent fallback would agree exactly.
-
 ## Windows (WHP)
 
 An x86_64 Windows host boots a microVM over the Windows Hypervisor Platform:
 
+```powershell
+cargo run --example run -- alpine:3.21 'uname -srm'
 ```
-> cargo run --example win_hello
-hello from Linux 6.12.109 x86_64
-```
+
+The guest kernel there is `libkrunfw.dll`'s, which is 6.12.109 on x86_64 at the
+tag `scripts/build-libkrunfw-windows.sh` pins.
 
 Everything libkrun needs is upstream — the Windows port merged as
 [libkrun#858](https://github.com/libkrun/libkrun/pull/858) on 2026-09-21 and the
@@ -487,10 +383,11 @@ eventfd in `utils`, the `Vm`/`Vcpu` pair on WHP in
 clang cross-linker for the guest init.
 
 The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
-`BorrowedHandle` where it takes `BorrowedFd` elsewhere, so
-[`cortex-krun-lib/examples/win_hello.rs`](cortex-krun-lib/examples/win_hello.rs) differs from
-[`cortex-krun-lib/examples/macos_hello.rs`](cortex-krun-lib/examples/macos_hello.rs) by little more than `AsFd` →
-`AsHandle`.
+`BorrowedHandle` where it takes `BorrowedFd` elsewhere, which is why
+[`session`](cortex-krun-lib/src/session/) owns that call rather than leaving it to
+a caller: the two spellings differ by little more than `AsFd` → `AsHandle`, and
+holding the difference in one place is what lets everything above it be written
+once.
 
 It also hands the console no stdin. libkrun's Windows console parks its input
 thread in a blocking `ReadFile`, and the VMM joins that thread before it exits
@@ -514,8 +411,8 @@ would need the bug fixed upstream.
 - MSVC build tools — `bzip2-sys` and `zstd-sys` compile C on x86_64 — plus
   clang and lld, which the guest init is linked with, and
   `rustup target add x86_64-unknown-linux-musl`.
-- **Docker**, in Linux-container mode, to build `libkrunfw.dll`.
-- **WSL**, to unpack the rootfs. Both reasons are below.
+- **Docker**, in Linux-container mode, to build `libkrunfw.dll`. The reason is
+  below.
 
 For the `gpu` feature, additionally:
 
@@ -550,10 +447,8 @@ cannot be re-enabled without reinstalling Windows.
 git submodule update --init
 sh scripts/apply-patches.sh             # Git Bash; patches the submodules
 sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
-.\scripts\fetch-alpine-rootfs.ps1       # guest rootfs -> data/rootfs/alpine
 .\scripts\build-virglrenderer-windows.ps1   # only for the `gpu` feature
-cargo run --example win_hello
-cargo run --features gpu --example win_gpu   # vulkaninfo over venus
+cargo run --example run -- alpine:3.21 'uname -srm'
 ```
 
 `cargo run` goes through [`scripts/windows-run.ps1`](scripts/windows-run.ps1),
@@ -577,36 +472,6 @@ None of that runs on Windows, so
 it in a throwaway `ubuntu:24.04` container and copies the DLL back into
 `data/krunfw/`. It pins libkrunfw to a tag for the same reason the submodules
 are pinned. Expect 10–20 minutes on the first run; it is a full kernel build.
-
-### The rootfs needs NTFS to carry things NTFS has no idea about
-
-[`scripts/fetch-alpine-rootfs.ps1`](scripts/fetch-alpine-rootfs.ps1) replaces the
-POSIX script on Windows. Unpacking the tarball is the easy part; two properties
-of a Linux rootfs have no native NTFS equivalent, and libkrun's Windows
-passthrough reads each from a specific place.
-
-**Symlinks** come from `IO_REPARSE_TAG_LX_SYMLINK` reparse points — the WSL
-representation, which stores the target verbatim as a Linux path. A native
-Windows symlink cannot hold `/bin/busybox`: Windows resolves it against the
-current drive, and creating one needs administrator rights or Developer Mode
-besides. So the tarball is unpacked from inside WSL, whose drvfs creates LX
-symlinks, and no elevation is needed.
-
-**Mode bits** have no NTFS equivalent at all. `file_info_to_stat64` reports
-0o644 for every regular file and 0o755 for every directory, and only an
-alternate data stream named `user.containers.override_stat` — holding
-`uid:gid:0mode` — overrides that. Without it `/bin/busybox` is not executable
-and init dies with `EACCES`. The modes are read back out of the tarball, not off
-disk, because drvfs synthesises a mode for every file it shows; only entries
-whose mode differs from what the passthrough assumes get a stream, which is 27
-of them for Alpine 3.24.2.
-
-One more thing the passthrough cannot absorb: the rootfs path it is handed goes
-straight to `NtCreateFile`, which — unlike Win32 — has no working directory and
-no notion of a forward slash. A relative root aborts the VM and
-`data/rootfs/alpine` is `ERROR_INVALID_NAME`, so `win_hello` puts the path
-through `std::path::absolute` first. Not `canonicalize`: that returns a `\\?\`
-path, which `NtCreateFile` rejects in turn.
 
 ### libkrun — `patches/libkrun-85bed71-windows-virtiofs.patch`
 
@@ -632,8 +497,7 @@ never boots a guest. The first two are on the path every `execve` takes.
   a native symlink cannot hold `/bin/busybox`, since Windows resolves it
   against the current drive. It now writes an `IO_REPARSE_TAG_LX_SYMLINK`
   reparse point: no privilege, target stored verbatim, and the same
-  representation `read_lx_symlink_by_handle` already read and
-  `fetch-alpine-rootfs.ps1` already writes. `write_override_stat` grew a
+  representation `read_lx_symlink_by_handle` already read. `write_override_stat` grew a
   no-follow path with it, because the mode bits of a link belong on the link
   and nothing on the host can resolve an LX reparse tag — a plain `fs::write`
   to the stream fails with `ERROR_CANT_ACCESS_FILE`.
@@ -696,95 +560,9 @@ There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-### Guest Vulkan
-
-```
-> cargo run --features gpu --example win_gpu
-GPU0:
-        apiVersion   = 1.2.0
-        deviceName   = Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
-        driverID     = DRIVER_ID_MESA_VENUS
-        driverInfo   = Mesa 26.1.6
-```
-
-The guest reaches the host GPU the same way it does on macOS — Mesa's venus
-driver over virtio-gpu, served by virglrenderer — except that virglrenderer
-talks to the native Vulkan driver here rather than to MoltenVK. The 1.2 cap has
-the same cause as on macOS, described above: no sync-fd import, so no
-`KHR_synchronization2`.
-
-Setup is [virglrenderer on Windows](#virglrenderer-on-windows), then the guest
-side once:
-
-```powershell
-cargo run --example win_gpu -- 'apk add --no-cache mesa-vulkan-virtio vulkan-loader vulkan-tools'
-```
-
-`vulkaninfo` only enumerates. `scripts/run-vk-smoke.ps1` compiles
-`guest/vk_smoke.c` inside the VM and runs the same round-trip the POSIX script
-does — create a device, allocate host-visible memory, submit `vkCmdFillBuffer`,
-wait on a fence, read the result back — which is what puts the blob mapping
-above under load:
-
-```
-instance      : 1.4.347
-device        : Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
-device api    : 1.2.0
-queue family  : 0
-memory type   : 2 (16384 bytes)
-fill 4096 words : OK
-```
-
-`scripts/run-ncnn-squeezenet.ps1` is the counterpart of the POSIX script
-described under [Inference on the guest GPU](#inference-on-the-guest-gpu), over
-[`cortex-krun-lib/examples/win_inference.rs`](cortex-krun-lib/examples/win_inference.rs):
-
-```
-[0 Virtio-GPU Venus (NVIDIA GeForce RTX 5090)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/1
-[0 Virtio-GPU Venus (NVIDIA GeForce RTX 5090)]  fp16-cm=16x16x16/16x8x16/16x8x8  int8-cm=16x16x32/16x8x32  bf16-cm=16x16x16  fp8-cm=16x16x32
-device        : Virtio-GPU Venus (NVIDIA GeForce RTX 5090)
-device api    : 1.2.0
-cpu           : 3.2 ms/iter
-vulkan        : 2.2 ms/iter
-
-top-5 on vulkan:
-   82.47%  n02111889 Samoyed, Samoyede
-    5.36%  n02112018 Pomeranian
-    ...
-
-cpu/vulkan top-1 : match
-max score diff   : 2.80e-03
-```
-
-### The same stack, and the answers the macOS sections could not give
-
-ncnn's probe lines are the two hosts' capabilities side by side, from the same
-Mesa and the same venus:
-
-| | macOS / MoltenVK | Windows / NVIDIA |
-|---|---|---|
-| bf16 storage / arithmetic | `1/0` | `1/1` |
-| cooperative matrix | `fp16-cm=0 int8-cm=0 bf16-cm=0 fp8-cm=0` | `16x16x16` / `16x16x32` / `16x16x16` / `16x16x32` |
-| SqueezeNet, cpu vs vulkan | 1.6 vs 3.7 ms | 3.2 vs 2.2 ms |
-
-So [bfloat16 is not available, and the version is not why](#bfloat16-is-not-available-and-the-version-is-not-why)
-was right about the cause and can now be said plainly: the missing piece was
-MoltenVK, not venus and not the 1.2 cap, which is still 1.2 here for the
-unrelated sync-fd reason. Cooperative matrix arrives with it.
-
-The GPU also stops being the slower of the two. [On the
-timings](#on-the-timings) puts that down to per-dispatch overhead dominating a
-75-layer, 227x227 model rather than to the GPU — same model, same code, and
-here it comes out ahead.
-
-What has not changed is what makes the run worth trusting: ncnn falls back to
-its CPU implementation per layer, silently, for any layer whose Vulkan path is
-missing, so the score difference being 2.80e-03 rather than zero is the
-evidence that the work really happened on the GPU, in fp16.
-
 ### A guest command is an argument, and arguments do not survive the trip
 
-`cargo run --example win_gpu -- '<script>'` reaches the binary through
+`cargo run --example run -- alpine:3.21 '<script>'` reaches the binary through
 `powershell -File scripts/windows-run.ps1`, and PowerShell's `-File` argument
 parsing does not carry a multi-line shell script intact. Indented lines vanish
 outright — an `if` body or a function body comes out empty, leaving syntax that
@@ -793,10 +571,10 @@ space. A backslash line continuation loses every line but the first. `!`
 arrives as `'\!'`. None of it is reported.
 
 Short single-line commands are fine, which is what every example in this README
-passes. Anything longer belongs in a file: `run-ncnn-squeezenet.ps1` writes its
-script into the share the guest already mounts and passes
-`sh /mnt/inference/run.sh`. Write it with LF line endings — `Set-Content` gives
-CRLF, and `sh` takes the carriage return as part of each command.
+passes. Anything longer belongs in a file: write the script into a directory the
+guest already mounts and pass `sh /mnt/run.sh`. Write it with LF line endings —
+`Set-Content` gives CRLF, and `sh` takes the carriage return as part of each
+command.
 
 **The blob mapping is what the design rests on.** Guest Vulkan puts host memory
 in the guest's shm window: venus
@@ -826,10 +604,6 @@ not be confined to system RAM. And an `OPAQUE_WIN32` export is a real section
 object that `MapViewOfFile` accepts, which macOS could not offer: the
 descriptor route stays open here, and `export_blob` need not stay
 `Unsupported` forever.
-
-[`cortex-krun-lib/examples/win_gpu.rs`](cortex-krun-lib/examples/win_gpu.rs) is `win_hello` plus a TSI vsock,
-and — under `--features gpu` — the virtio-gpu device, the same division of
-labour `macos_gpu` has.
 
 Getting the guest packages in took three of the patches below. Every `.so.N`
 symlink failed to extract, `stat` on a freshly renamed file answered ENOENT,
@@ -990,7 +764,7 @@ patches/                    see "Sessions", "Mounts", "The gpu feature" and "Win
 scripts/                    build and provisioning helpers, plus the cargo runner and linker,
                             the musl cc/ar that cortex-abins/ cross-compiles with, and
                             build-abin.sh, which installs the result where a session finds it
-data/                       untracked: rootfs, musl sysroot, sessions, models, build outputs
+data/                       untracked: musl sysroot, sessions, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the

@@ -39,13 +39,17 @@
 //!
 //!   CORTEX_GPU=1 cargo run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 //!
-//! Unlike the `macos_*` and `win_*` examples, this one is not gated by host. Nothing in
-//! it is host-specific: [`session`](cortex_krun::session) attaches the guest's console
-//! itself, which is the one call that differs between them. The cargo runner still is,
-//! though, and both are registered in `.cargo/config.toml`: on macOS
+//! Nothing here is host-specific: [`session`](cortex_krun::session) attaches the guest's
+//! console itself, which is the one call that would otherwise differ between them. The cargo
+//! runner is, though, and both are registered in `.cargo/config.toml`: on macOS
 //! `scripts/macos-run.sh` ad-hoc signs the binary with
 //! `com.apple.security.hypervisor`, which Hypervisor.framework will not start a VM
 //! without, and on Windows `scripts/windows-run.ps1` puts `libkrunfw.dll` on `PATH`.
+//!
+//! **This boots a machine directly, which is not what a session does.** A console client
+//! spawns `cortex-krun`, which spawns the signed boot beside it; what this example shows is
+//! the layer under both -- an image, a disk, and a command -- with no protocol over it. So
+//! there is no agent here and no `/abin`: those are the server's, not the library's.
 
 use std::path::PathBuf;
 

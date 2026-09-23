@@ -72,7 +72,7 @@ use cortex::console::{
     Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec,
     Notification, ReadCall, ReadResp, Response, Server, WriteCall, WriteResp,
 };
-use cortex_krun_host::HANDSHAKE;
+use cortex_krun_host::{ABIN_PATH, HANDSHAKE};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 
@@ -676,6 +676,8 @@ async fn read_to_end<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<V
 /// directory would otherwise be told it was standing wherever this process is. Set to match,
 /// which is what a shell does for itself when it moves.
 ///
+/// What is added is [`ABIN_PATH`], **prepended** -- see below.
+///
 /// Per command rather than per process, for the same reason a host-local console does it that
 /// way: `std::env::set_var` is unsound with any other thread running, and this program has
 /// one.
@@ -684,8 +686,38 @@ fn environment(session: &Session) -> Vec<(OsString, OsString)> {
         .filter(|(name, _)| !name.as_encoded_bytes().starts_with(b"KRUN_"))
         .filter(|(name, _)| name != "PWD")
         .collect();
+    with_abin(&mut env);
     env.push(("PWD".into(), session.cwd().into()));
     env
+}
+
+/// Put [`ABIN_PATH`] in front of whatever `PATH` the image stated.
+///
+/// **Prepended, not appended.** `/abin` is what cortex undertakes to provide, and an image
+/// that happens to carry a program of the same name would make that undertaking untrue -- a
+/// session would get the image's `index` rather than the one it was promised, and nothing
+/// would say which it got.
+///
+/// Guarded on the directory being there, because a session whose host had no executables to
+/// give it gets none: the boot leaves `--abin` off and there is nothing at that path. The
+/// mount is the init's, so by the time this runs it has either happened or was never asked
+/// for.
+///
+/// A `PATH` the image did not state is not invented here. This process's environment is the
+/// one libkrun's init execed it with, which is the image's with the session's over the top,
+/// and the default for an image that states none was already put there by the host -- so an
+/// empty one at this point would be a session that was told to have none.
+fn with_abin(env: &mut [(OsString, OsString)]) {
+    if !std::path::Path::new(ABIN_PATH).is_dir() {
+        return;
+    }
+    let Some((_, path)) = env.iter_mut().find(|(name, _)| name == "PATH") else {
+        return;
+    };
+    let mut first = OsString::from(ABIN_PATH);
+    first.push(":");
+    first.push(&*path);
+    *path = first;
 }
 
 /// A command that ended, as the answer to whatever asked for it.

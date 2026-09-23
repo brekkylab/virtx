@@ -224,7 +224,14 @@ impl Machine {
             .map_err(|e| anyhow::anyhow!("binding the console channel: {e}"))?;
 
         let mut told = told(
-            image, session, &agent_dir, &socket, network, host_ports, shape,
+            image,
+            session,
+            &agent_dir,
+            abin().as_deref(),
+            &socket,
+            network,
+            host_ports,
+            shape,
         );
         // In the order the client named them, which is the order the protocol says they are
         // realized in -- so a boot is handed the list as it stands and nothing here sorts or
@@ -360,6 +367,9 @@ fn told(
     image: &str,
     session: &Path,
     agent: &Path,
+    // Taken rather than looked up here, so that what a boot is told is a function of its
+    // arguments: `abin()` asks the filesystem, and the one caller asks it once.
+    abin: Option<&Path>,
     channel: &Path,
     network: Network,
     host_ports: &[u16],
@@ -379,6 +389,11 @@ fn told(
         "--network".into(),
         network.as_str().into(),
     ];
+    // Left off entirely when this host has none, which is what the boot reads as a machine
+    // that gets no `/abin` rather than one with an empty directory at that path.
+    if let Some(abin) = abin {
+        told.extend(["--abin".into(), abin.into()]);
+    }
     for port in host_ports {
         told.extend(["--host-port".into(), OsString::from(port.to_string())]);
     }
@@ -392,6 +407,19 @@ fn told(
         told.push("--gpu".into());
     }
     told
+}
+
+/// Cortex's own executables, or `None` for a host that has none.
+///
+/// One well-known place under [`home`](crate::home) and no variable naming another: where
+/// this server keeps things is already something `home` answers, so a second way to point
+/// somewhere else would be two answers to one question.
+///
+/// **A host with none is a session with no `/abin`, not a session that fails.** These are
+/// executables a session is better off with and can run without -- see `ABIN_PATH`.
+fn abin() -> Option<PathBuf> {
+    let dir = crate::home().join("abin");
+    dir.is_dir().then_some(dir)
 }
 
 /// A default read out of this server's environment, ignoring anything that is not a number.
@@ -427,6 +455,34 @@ fn said(console: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// `/abin` is spelled when this host has one and left off entirely when it does not --
+    /// which is what the boot reads as a machine that gets none, rather than one with an
+    /// empty directory at that path.
+    #[test]
+    fn a_boot_is_told_about_abin_only_when_there_is_one() {
+        let line = |abin| {
+            told(
+                "alpine:3.21",
+                Path::new("/s/session.ext4"),
+                Path::new("/s/agent"),
+                abin,
+                Path::new("/s/port.sock"),
+                Network::Disabled,
+                &[],
+                Shape::default(),
+            )
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+        };
+
+        assert!(!line(None).iter().any(|arg| arg == "--abin"));
+
+        let given = line(Some(Path::new("/h/abin")));
+        let at = given.iter().position(|arg| arg == "--abin").unwrap();
+        assert_eq!(given[at + 1], "/h/abin");
+    }
+
     /// A shape is spelled only where it was answered, and the boot's own defaults are what an
     /// unspelled one leaves in place -- so a machine nobody described is a command line with
     /// nothing about one on it.
@@ -437,6 +493,7 @@ mod tests {
                 "alpine:3.21",
                 Path::new("/s/session.ext4"),
                 Path::new("/s/agent"),
+                None,
                 Path::new("/s/port.sock"),
                 Network::Disabled,
                 &[],

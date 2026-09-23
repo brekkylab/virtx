@@ -1,0 +1,46 @@
+# The programs that live in the guest's `/abin`: `docread`, `index` and `mem`, on the store
+# `storebase` is. They are written in `cortex/cortex-execs/` -- `cortex` is what decides what
+# a delegated executable *is* -- and built here, for the machine that runs them.
+#
+# Its own workspace root rather than a member of the one above, for the same reason
+# `cortex-krun-guest/` is: everything here is cross-compiled to `*-unknown-linux-musl`, and a
+# member would be built for the host by a bare `cargo build` -- for a target that has no host
+# to run on. One root over the four rather than four roots of one, because `storebase` is the
+# substrate `mem` and `index` share: split apart, each would resolve and lock it alone.
+[workspace]
+resolver = "3"
+members = ["docread", "index", "mem", "storebase"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# RFC 3339 timestamps. A row carries when it was last written, and the store is a file other
+# tools read: a sortable, unambiguous spelling is worth a dependency.
+chrono = "0.4"
+# The parser every program here is driven by, and where their `--help` comes from.
+clap = { version = "4", features = ["derive"] }
+# The store format `mem` and `index` share: the tables, what a store says about itself, and
+# how one is opened.
+cortex-exec-storebase = { path = "storebase" }
+# The store. `bundled` on purpose: every schema here is an FTS5 index, and FTS5 is a
+# compile-time option the guest's own SQLite is free to have been built without -- a store
+# that opened and then answered every search with nothing is the failure being avoided. It
+# compiles SQLite's C, which is the one thing here a cross build needs more than rustup for;
+# see `.cargo/config.toml`.
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `docread`'s build script alone, under its `pdfium` feature: the check that makes a published
+# `libpdfium.a` safe to fetch, since what is fetched ends up inside the binary.
+sha2 = "0.10"
+tempfile = "3"
+uuid = "1"
+
+# These ship inside an image rather than onto a disk somebody buys, so the binary's size is
+# the image's. No `opt-level = "z"` all the same -- unlike the agent, what these do between
+# starting and answering is work: an FTS5 query, a `.docx` unpacked, a PDF laid out.
+[profile.release]
+lto = true
+strip = true

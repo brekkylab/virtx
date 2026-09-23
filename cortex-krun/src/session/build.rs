@@ -45,7 +45,7 @@ use cortex::console::{Call, Error, ExecCall, InitCall, Response};
 use cortex::image::{Image as Recipe, Step};
 use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
 use cortex_krun::session::{Ext4, Network};
-use cortex_krun_host::{AGENT_PATH, agent_program};
+use cortex_krun_host::{ABIN_PATH, AGENT_PATH, agent_program};
 
 use super::machine::{Machine, Shape};
 use super::{SYNC, coded, pulled};
@@ -113,7 +113,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     upper.settled()?;
 
     let written = std::fs::File::create(&blob)?;
-    let diff_id = upper.to_blob(&[AGENT_PATH], &written)?;
+    let diff_id = upper.to_blob(&[AGENT_PATH, ABIN_PATH], &written)?;
     written.sync_all()?;
     drop(written);
 

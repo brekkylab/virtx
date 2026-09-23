@@ -26,6 +26,7 @@ brew install libkrunfw
 |---|---|
 | `libkrunfw` | The guest kernel, packaged as a shared library. libkrun `dlopen`s `libkrunfw.5.dylib` at runtime; it is never linked. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
+| `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `scripts/build-virglrenderer.sh` (the `gpu` feature). |
 
 ## Setup
@@ -35,6 +36,8 @@ git submodule update --init
 ./scripts/apply-patches.sh              # patches the libkrun and rutabaga_gfx submodules
 ./scripts/fetch-alpine-rootfs.sh        # guest rootfs -> data/rootfs/alpine
 ./scripts/build-virglrenderer.sh        # only for the `gpu` feature
+./scripts/fetch-musl-sysroot.sh         # only to build cortex-abins/
+./scripts/build-abin.sh                 # cortex's own executables -> {home}/abin
 ```
 
 ## Running
@@ -943,6 +946,31 @@ numbers. Nothing here issues a DRM ioctl — the header is pulled in for the
 capset enums in `virtgpu_drm.h` — so the branch supplies the typedefs and lets
 the `DRM_IOCTL_*` definitions evaluate to zero.
 
+## `/abin`
+
+Every guest gets one directory of cortex's own executables at `/abin`, **first on a
+command's `PATH`**. Today that is `docread`, `index` and `mem` -- the programs in
+[`cortex-abins/`](cortex-abins), which are written in the sibling `cortex` checkout and built
+here for the machine that runs them.
+
+```sh
+./scripts/fetch-musl-sysroot.sh   # once
+./scripts/build-abin.sh           # -> $CORTEX_KRUN_HOME/abin, or ~/.cache/cortex-krun/abin
+```
+
+The server looks for that one directory and nothing names another: where it keeps things is
+already what `home()` answers, so a second way to point somewhere else would be two answers to
+one question. **A host with no such directory is a session with no `/abin`**, not a session
+that fails -- these are executables a session is better off with and can run without, and what
+its absence costs is a `PATH` that is only the image's.
+
+It is shared read-only, which here means read-only *at the device*: the host's virtiofs server
+refuses the write whatever the guest mounted it with, so a guest that is root inside itself
+cannot remount it away. Prepended to `PATH` rather than appended, because `/abin` is what this
+backend undertakes to provide -- an image that happens to carry a program of the same name
+would make that undertaking untrue, and nothing would say which one a session got. The path is
+reserved for the same reason `/.cortex` is: a client that asks for a tree there is refused.
+
 ## Layout
 
 ```
@@ -951,14 +979,18 @@ cortex-krun/                the console server a user runs; spawns the VM, is no
 cortex-krun-host/           the process that becomes a VM, and -- as its library half --
                             the command line the server starts one with; signed on macOS
 cortex-krun-guest/          the agent inside the VM; its own workspace, built for musl
+cortex-abins/               the programs in the guest's /abin -- docread, index, mem --
+                            copied from cortex/cortex-execs/; its own workspace, built for musl
 guest/                      C sources compiled and run inside the VM by the examples
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 patches/                    see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
-scripts/                    build and provisioning helpers, plus the cargo runner and linker
-data/                       untracked: rootfs, sessions, models, build outputs
+scripts/                    build and provisioning helpers, plus the cargo runner and linker,
+                            the musl cc/ar that cortex-abins/ cross-compiles with, and
+                            build-abin.sh, which installs the result where a session finds it
+data/                       untracked: rootfs, musl sysroot, sessions, models, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the

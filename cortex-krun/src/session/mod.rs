@@ -15,7 +15,7 @@ use cortex::console::{
     Response, Server, SnapshotResp,
 };
 use cortex_krun::session::{Ext4, Network};
-use cortex_krun_host::{AGENT_PATH, agent_program};
+use cortex_krun_host::{ABIN_PATH, AGENT_PATH, agent_program};
 
 use machine::{HOST_PORTS_ENV, NETWORK_ENV};
 
@@ -235,9 +235,10 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
         .join("session.ext4");
     let upper = seeded(&disk, init.snapshot.as_deref())?;
 
-    // What a snapshot must leave out: this backend's own share, and every directory the boot
-    // made to hang one of the client's trees on.
-    let skip = std::iter::once(AGENT_PATH.to_string())
+    // What a snapshot must leave out: this backend's own two shares, and every directory the
+    // boot made to hang one of the client's trees on.
+    let skip = [AGENT_PATH.to_string(), ABIN_PATH.to_string()]
+        .into_iter()
         .chain(mounts.iter().map(|mount| mount.at.clone()))
         .collect();
 
@@ -697,12 +698,16 @@ fn mounts(init: &InitCall) -> anyhow::Result<Vec<Mount>> {
             ));
         }
         // The agent's share lives there, and it is what the guest execs -- a tree over it is
-        // a machine that comes up with nothing to run.
-        if at.starts_with(AGENT_PATH) {
-            return Err(coded(
-                Error::INVALID_PARAMS,
-                anyhow::anyhow!("{spec}: {AGENT_PATH} is this backend's own and is not free"),
-            ));
+        // a machine that comes up with nothing to run. `/abin` is the same answer for a
+        // different reason: it is what this backend undertakes to put on `PATH`, and a tree
+        // over it is that undertaking quietly not held.
+        for reserved in [AGENT_PATH, ABIN_PATH] {
+            if at.starts_with(reserved) {
+                return Err(coded(
+                    Error::INVALID_PARAMS,
+                    anyhow::anyhow!("{spec}: {reserved} is this backend's own and is not free"),
+                ));
+            }
         }
         if mounts.iter().any(|mount| Path::new(&mount.at) == at) {
             return Err(coded(

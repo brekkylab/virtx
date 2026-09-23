@@ -23,6 +23,9 @@ const NOT_EXECUTABLE: u8 = 126;
 ///
 /// ```text
 /// {home}/
+/// ├── abin/                   cortex's own executables, shared into every guest at
+/// │                           `/abin` -- put there by `scripts/build-abin.sh`, and a
+/// │                           directory this server reads and never writes
 /// └── session/                one directory per live server process
 ///     └── {pid}/
 ///         ├── session.ext4    what the session wrote -- outlives any one machine
@@ -31,6 +34,10 @@ const NOT_EXECUTABLE: u8 = 126;
 ///             ├── port.sock   the console channel
 ///             └── console.log the kernel's own output
 /// ```
+///
+/// `abin/` is the one thing here that is not a session's: it outlives every process, is the
+/// same for all of them, and a host that has none is a host whose sessions get no `/abin` --
+/// see `ABIN_PATH`.
 ///
 /// The images a session boots from are **not** under this: they are
 /// [`Cache`](cortex_krun::image::Cache)'s, shared by every tool in this repository and

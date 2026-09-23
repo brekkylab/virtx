@@ -16,10 +16,13 @@ members = ["cortex-krun", "cortex-krun-host", "cortex-krun-lib"]
 # workspace. Without this, cargo would auto-adopt the path dependencies as
 # members and collide with that workspace.
 #
-# `cortex-krun-guest/` is a workspace root of its own: it is cross-compiled to
-# `*-unknown-linux-musl`, and a member would be built for the host by a bare
-# `cargo build` -- for a target that has no host to run on.
-exclude = ["3rdparty/libkrun", "cortex-krun-guest"]
+# `cortex-krun-guest/` and `cortex-abins/` are workspace roots of their own: both are
+# cross-compiled to `*-unknown-linux-musl`, and a member would be built for the host
+# by a bare `cargo build` -- for a target that has no host to run on. Listed here and
+# not merely left out of `members`: a package under this directory that is neither
+# resolves against this root, and the ones in `cortex-abins/` inherit dependencies
+# this workspace has no reason to declare.
+exclude = ["3rdparty/libkrun", "cortex-krun-guest", "cortex-abins"]
 
 [workspace.package]
 version = "0.1.0"

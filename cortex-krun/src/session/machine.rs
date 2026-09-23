@@ -50,11 +50,16 @@ const GPU_ENV: &str = "CORTEX_KRUN_GPU";
 /// How long to wait for the guest to come up before saying it did not.
 const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// A host directory the guest can see, and where it sees it.
+/// A host directory the guest can see, where it sees it, and whether a command may write
+/// in it.
+///
+/// What a [`MountSpec`](cortex::console::MountSpec) came to on this side: the URL already
+/// read as a directory, and the guest path and the `ro` carried on as they arrived.
 #[derive(Clone)]
 pub struct Mount {
     pub at: String,
     pub from: PathBuf,
+    pub read_only: bool,
 }
 
 /// A booted micro-VM, held for as long as there is something to ask it.
@@ -140,18 +145,20 @@ impl Machine {
             network,
             host_ports,
         );
+        // In the order the client named them, which is the order the protocol says they are
+        // realized in -- so a boot is handed the list as it stands and nothing here sorts or
+        // merges it.
         for mount in mounts {
-            let flag = match mount.at.as_str() {
-                cortex_krun_host::CONTEXT_PATH => "--context",
-                cortex_krun_host::ARTIFACTS_PATH => "--artifacts",
-                other => anyhow::bail!(
-                    "{other} is neither of the two a session names: {}, {}",
-                    cortex_krun_host::CONTEXT_PATH,
-                    cortex_krun_host::ARTIFACTS_PATH
-                ),
-            };
-            told.push(flag.into());
+            told.push("--mount".into());
             told.push(mount.from.clone().into_os_string());
+            told.push(
+                if mount.read_only {
+                    format!("{}:ro", mount.at)
+                } else {
+                    mount.at.clone()
+                }
+                .into(),
+            );
         }
 
         // The guest's console -- kernel messages, a panic, whatever a boot that failed has to

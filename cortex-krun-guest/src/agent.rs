@@ -45,7 +45,9 @@
 //!
 //! A `read` or a `write` is not confined to anywhere. The path is used as it arrives, so a
 //! client can name any file in the guest -- which is a smaller claim than it sounds, since
-//! the guest is one session's overlay and the client is the one who asked for it.
+//! the guest is one session's overlay and the client is the one who asked for it. The one
+//! path a `write` is refused at is one inside a tree the client itself asked to be
+//! read-only, and the share behind it is read-only at the device besides.
 //!
 //! `exec.timeout_ms` is enforced by a kill; `init` carries no default. An `exec` that names
 //! no timeout is therefore unbounded -- a command that never ends is one this agent waits on
@@ -67,8 +69,8 @@ use std::time::Duration;
 
 use cortex::console::stdio::StdioServer;
 use cortex::console::{
-    Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, Notification,
-    ReadCall, ReadResp, Response, Server, TreeMount, TreeRole, TreeSource, WriteCall, WriteResp,
+    Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec,
+    Notification, ReadCall, ReadResp, Response, Server, WriteCall, WriteResp,
 };
 use cortex_krun_host::HANDSHAKE;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
@@ -190,7 +192,7 @@ pub async fn serve(port: std::fs::File) -> anyhow::Result<()> {
 
                 Call::Write(write) => {
                     let answered = match session.boot() {
-                        Ok(()) => write_file(session.cwd(), &write).await,
+                        Ok(()) => write_file(&session, &write).await,
                         Err(e) => Response::Error(e),
                     };
                     server.respond(id, answered).await?;
@@ -246,20 +248,17 @@ fn greet(outgoing: &mut std::fs::File) -> io::Result<()> {
 /// answered it, so what a session *is* must not depend on which one did. What differs between
 /// them is only where a command runs, which is the whole of what a backend is for.
 struct Session {
-    /// The tree the session works in, as `init` named it -- and as it is mounted in here.
+    /// Every tree the session was given, as `init` named it -- and as it is mounted in here.
     ///
-    /// One string, because the `init` this end hears is the console server's replay and names
-    /// the tree by the guest's own mount point rather than by the host directory behind it.
-    /// So what the client was told, what that replay says, and what this end opens are all
-    /// `/context`.
-    context: Option<PathBuf>,
-
-    /// Where the session leaves what it produces, mounted in here on the same terms.
+    /// The `init` this end hears is the console server's replay, and it names each tree by
+    /// the guest's own mount point rather than by the host directory behind it. So what the
+    /// client asked for, what that replay says, and what this end opens are all the one
+    /// path.
     ///
-    /// Nothing in this agent treats it differently from the context: both are directories a
-    /// command reaches by path, and what the tree is *for* is the client's. Held so that a
-    /// boot can check it is there, which is the whole of this end's part in it.
-    artifacts: Option<PathBuf>,
+    /// What a tree is *for* is the client's and is not here: these differ in where they
+    /// appear and in whether a command may write in them, which is the whole of what this
+    /// end has to know about one.
+    mounts: Vec<Tree>,
 
     /// Where the session stands, which is what an execution runs in and what a relative path
     /// in a file call resolves against.
@@ -297,8 +296,7 @@ impl Session {
         Session {
             cwd: home.clone(),
             home,
-            context: None,
-            artifacts: None,
+            mounts: Vec::new(),
             booted: false,
         }
     }
@@ -309,20 +307,20 @@ impl Session {
     /// one it has not taken. Otherwise the old boot goes: the trees are what a boot checked
     /// for, and a boot from before this is a boot that no longer matches.
     fn configure(&mut self, config: InitCall) -> Result<InitResp, Error> {
-        let context = tree(config.context.as_ref(), TreeRole::Context)?;
-        let artifacts = tree(config.artifacts.as_ref(), TreeRole::Artifacts)?;
+        let mounts = config
+            .mounts
+            .iter()
+            .map(tree)
+            .collect::<Result<Vec<Tree>, Error>>()?;
 
         self.release();
-        self.context = context;
-        self.artifacts = artifacts;
+        self.mounts = mounts;
         // Back to where the image said, because an `init` is the session starting over and a
         // `cd` from the session before it is not something the new one asked for. The root is
         // the same root, so this is the same answer the init already stood in.
         self.cwd = self.home.clone();
 
         Ok(InitResp {
-            context: self.context.as_deref().map(placed),
-            artifacts: self.artifacts.as_deref().map(placed),
             cwd: self.named_cwd(),
         })
     }
@@ -332,14 +330,23 @@ impl Session {
         &self.cwd
     }
 
-    /// Every tree this session named, with what to call each in a failure.
-    fn trees(&self) -> impl Iterator<Item = (TreeRole, &Path)> {
-        [
-            (TreeRole::Context, self.context.as_deref()),
-            (TreeRole::Artifacts, self.artifacts.as_deref()),
-        ]
-        .into_iter()
-        .filter_map(|(role, path)| path.map(|path| (role, path)))
+    /// The read-only tree `path` lands in, if it lands in one.
+    ///
+    /// **A write is refused where the path says it should be**, rather than left to the
+    /// share to answer. The device is read-only either way -- the host's virtiofs server
+    /// refuses the write and the kernel's `EROFS` would come back as the same code -- so
+    /// what this earns is the sentence: a client is told which of its own trees it named,
+    /// which is the thing it can act on.
+    ///
+    /// `starts_with` is by component, so a tree at `/work` does not claim `/workshop`. What
+    /// is passed is the path already landed where the session stands and normalized on
+    /// paper, since a mount point is spelled absolutely and a relative path is not one until
+    /// it is.
+    fn read_only_tree(&self, path: &Path) -> Option<&Path> {
+        self.mounts
+            .iter()
+            .find(|tree| tree.read_only && path.starts_with(&tree.at))
+            .map(|tree| tree.at.as_path())
     }
 
     /// The same, as the protocol can carry it -- `None` for a directory with no string form,
@@ -371,21 +378,22 @@ impl Session {
         }
 
         // Every tree the session named, because the boot shared every one of them and a
-        // client will send paths into both. The message says which: one code, two places it
-        // can be about.
-        for (role, at) in self.trees() {
+        // client will send paths into any. The message names the one it is about: one code,
+        // as many places as the session has trees.
+        for tree in &self.mounts {
+            let at = tree.at.as_path();
             match std::fs::metadata(at) {
                 Ok(meta) if meta.is_dir() => {}
                 Ok(_) => {
                     return Err(refused(
                         Error::MOUNT_FAILED,
-                        format!("{role} {}: not a directory in the guest", at.display()),
+                        format!("{}: not a directory in the guest", at.display()),
                     ));
                 }
                 Err(e) => {
                     return Err(refused(
                         Error::MOUNT_FAILED,
-                        format!("{role} {}: not mounted in the guest: {e}", at.display()),
+                        format!("{}: not mounted in the guest: {e}", at.display()),
                     ));
                 }
             }
@@ -444,45 +452,39 @@ fn cd_target(exec: &ExecCall) -> Option<&[String]> {
     }
 }
 
-/// The directory one of a session's tree URLs names, or why it names none this agent can use
-/// -- and `None` for a tree the session did not name.
+/// One tree of the session's: where it is mounted in this guest, and whether a command may
+/// write in it.
+struct Tree {
+    at: PathBuf,
+    read_only: bool,
+}
+
+/// The tree one of a session's mounts names, or why it names none this agent can use.
 ///
 /// `file://` and nothing else. Inside a guest that is not a limitation the way it is on the
 /// host: whatever a tree is made of was realized before the VM started, and what reaches here
-/// is the directory it was mounted at.
-///
-/// One function for both, which is the same arrangement a host-local backend has and for the
-/// same reason: the trees differ in what the client means by them and not in how a URL is
-/// read. `role` is what makes a refusal name which of them it was about.
-fn tree(named: Option<&TreeSource>, role: TreeRole) -> Result<Option<PathBuf>, Error> {
-    let Some(named) = named else {
-        return Ok(None);
-    };
-
+/// is the directory it was mounted at -- which is why the server's replay spells every one of
+/// them that way.
+fn tree(named: &MountSpec) -> Result<Tree, Error> {
     let Some(path) = named.file_path() else {
         return Err(refused(
-            role.unsupported(),
+            Error::UNSUPPORTED_MOUNT,
             format!(
-                "{role}: {}: a guest is handed a mounted directory, so file:// is the only \
-                 kind it can be told about",
-                named.scheme()
+                "{named}: a guest is handed a mounted directory, so file:// is the only kind \
+                 it can be told about",
             ),
         ));
     };
     if !path.is_absolute() {
         return Err(refused(
             Error::INVALID_PARAMS,
-            format!("{}: a file:// {role} needs an absolute path", named.url),
+            format!("{named}: a file:// tree needs an absolute path"),
         ));
     }
-    Ok(Some(path.to_path_buf()))
-}
-
-/// Where a tree went, as the protocol carries it.
-fn placed(at: &Path) -> TreeMount {
-    TreeMount {
-        path: at.to_string_lossy().into_owned(),
-    }
+    Ok(Tree {
+        at: path.to_path_buf(),
+        read_only: named.is_read_only(),
+    })
 }
 
 /// `path` with `.` dropped and `..` popped, on paper and without touching the filesystem.
@@ -777,9 +779,24 @@ async fn read_file(root: &Path, read: &ReadCall) -> Response {
 /// No offset means the file is to *be* `data`, which is what `create` does: made if it was
 /// not there, cut to nothing if it was. An offset means only those bytes are being spoken
 /// for, so the file is opened without truncating and whatever lies past them stays.
-async fn write_file(root: &Path, write: &WriteCall) -> Response {
-    let path = at(root, &write.path);
+async fn write_file(session: &Session, write: &WriteCall) -> Response {
+    let path = at(session.cwd(), &write.path);
     let path = path.as_path();
+
+    // A tree the client asked to be read-only, refused with the code a read-only filesystem
+    // already answers a write with -- see [`Session::read_only_tree`]. Normalized for the
+    // question and not for the answer: the file is still opened at the path as it arrived,
+    // the way a `read` opens one, so nothing here changes which file a write lands in.
+    if let Some(tree) = session.read_only_tree(&lexical(path)) {
+        return Response::Error(refused(
+            Error::IO_FAILED,
+            format!(
+                "{}: {} is mounted read-only in this session",
+                write.path,
+                tree.display()
+            ),
+        ));
+    }
 
     let file = match write.offset {
         None => tokio::fs::File::create(path).await,

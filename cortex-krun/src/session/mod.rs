@@ -4,15 +4,16 @@ mod halves;
 mod machine;
 
 use std::future::Future;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::{io, path::PathBuf};
 
 use cortex::console::stdio::StdioServer;
 use cortex::console::{
-    Call, Error, InitCall, InitResp, Message, Notification, Response, Server, TreeMount, TreeSource,
+    Call, Error, InitCall, InitResp, Message, MountSpec, Notification, Response, Server,
 };
 use cortex_krun::session::Network;
-use cortex_krun_host::{ARTIFACTS_PATH, CONTEXT_PATH};
+use cortex_krun_host::AGENT_PATH;
 
 use machine::{HOST_PORTS_ENV, NETWORK_ENV};
 
@@ -179,62 +180,28 @@ async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
     // this machine.
     pulled(&rootfs.base).await?;
 
-    let context = at(init.context.as_ref(), "context", Error::UNSUPPORTED_CONTEXT)?;
-    let artifacts = at(
-        init.artifacts.as_ref(),
-        "artifacts",
-        Error::UNSUPPORTED_ARTIFACTS,
-    )?;
-
-    // Where each tree is on this side, against the one path in the guest that names it. Fixed
-    // for the session, which is why the answer below can say them before anything is mounted.
-    let mounts: Vec<Mount> = [
-        (CONTEXT_PATH, context.as_ref()),
-        (ARTIFACTS_PATH, artifacts.as_ref()),
-    ]
-    .into_iter()
-    .filter_map(|(at, from)| {
-        from.map(|from| Mount {
-            at: at.to_string(),
-            from: from.clone(),
-        })
-    })
-    .collect();
+    // Where each tree is on this side, against the one path in the guest that names it. Read
+    // before anything is built, because a session whose trees can never be there is one in
+    // which every later path is a lie -- see [`mounts`].
+    let mounts = mounts(&init)?;
 
     // Cloned per boot rather than borrowed, because what this closure is for is outliving the
     // machine it makes.
     let image = rootfs.base.clone();
-    let told = init.clone();
     let boot: Factory = Box::new(move || {
-        let (image, mounts, told, host_ports) = (
-            image.clone(),
-            mounts.clone(),
-            told.clone(),
-            host_ports.clone(),
-        );
+        let (image, mounts, host_ports) = (image.clone(), mounts.clone(), host_ports.clone());
         Box::pin(async move {
             let mut machine = Machine::boot(&image, &mounts, network, &host_ports).await?;
-            let cwd = configure(&mut machine, &told, &mounts).await?;
+            let cwd = configure(&mut machine, &mounts).await?;
             Ok((machine, cwd))
         })
     });
 
-    // Where the session stands is the image's business and only the guest has read it; where
-    // the trees went is this end's, because it is what attached them.
+    // Where the session stands is the image's business and only the guest has read it. Where
+    // the trees went is not answered at all: the client named the path each one appears at,
+    // so there is nothing this end knows about them that the client did not say.
     let (started, cwd) = boot().await.map_err(|e| coded(Error::BOOT_FAILED, e))?;
-    Ok((
-        boot,
-        started,
-        InitResp {
-            context: context.as_ref().map(|_| TreeMount {
-                path: CONTEXT_PATH.to_string(),
-            }),
-            artifacts: artifacts.as_ref().map(|_| TreeMount {
-                path: ARTIFACTS_PATH.to_string(),
-            }),
-            cwd,
-        },
-    ))
+    Ok((boot, started, InitResp { cwd }))
 }
 
 /// How much of the network this session gets, and which ports on this machine.
@@ -298,27 +265,26 @@ fn reach(init: &InitCall) -> anyhow::Result<(Network, Vec<u16>)> {
 ///
 /// The client's `init` named its trees by host URL; the guest's copy names them by the guest
 /// mount point, because that is where they are from in there and what every later call is
-/// spelled in. Everything else about the call is the client's and travels as it arrived.
-async fn configure(
-    machine: &mut Machine,
-    told: &InitCall,
-    mounts: &[Mount],
-) -> anyhow::Result<Option<String>> {
-    let placed = |at: &str| {
-        mounts
-            .iter()
-            .find(|mount| mount.at == at)
-            .map(|_| TreeSource::new(format!("file://{at}")))
-    };
+/// spelled in. The `ro` travels as it arrived -- the share is already read-only at the
+/// device, and the guest is the end that can say so about a path before a write reaches one.
+async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Option<String>> {
     let replayed = InitCall {
-        context: placed(CONTEXT_PATH),
-        artifacts: placed(ARTIFACTS_PATH),
-        // Neither reaches the guest: a rootfs is what this end booted, and a network is a
-        // device that either is or is not attached by now.
+        mounts: mounts
+            .iter()
+            .map(|mount| {
+                let spec = MountSpec::new(format!("file://{}", mount.at), &mount.at)?;
+                Ok(if mount.read_only {
+                    spec.read_only()
+                } else {
+                    spec
+                })
+            })
+            .collect::<Result<_, cortex::console::InvalidMount>>()?,
+        // None of these reaches the guest: a rootfs is what this end booted, a network is a
+        // device that either is or is not attached by now, and a snapshot is refused above.
         rootfs: None,
         network: None,
         snapshot: None,
-        ..told.clone()
     };
     match machine.call(Call::Init(replayed)).await? {
         Response::Init(answer) => Ok(answer.cwd),
@@ -408,39 +374,72 @@ fn sweep() {
     }
 }
 
-/// A host directory a tree names, and `None` for one the session did not name.
+/// Every tree the session named, as a host directory against the guest path it appears at.
 ///
-/// `unsupported` is the code for the tree in `role`, which the protocol gives one of each: a
-/// client refused at `init` has to know *which* of the two this server cannot take, and a
-/// session names up to two.
-fn at(named: Option<&TreeSource>, role: &str, unsupported: i64) -> anyhow::Result<Option<PathBuf>> {
-    let Some(named) = named else {
-        return Ok(None);
-    };
-    // A scheme and not a spelling: which kinds of tree can be realized is a fact about this
-    // build, and no path written any other way would make this one of them.
-    let path = named.file_path().ok_or_else(|| {
-        coded(
-            unsupported,
-            anyhow::anyhow!(
-                "{role}: a guest is handed a directory, so this server realizes file:// and \
-                 nothing else"
-            ),
-        )
-    })?;
-    // Where the scheme is one this server has, and the URL is not one it can act on. The fix
-    // is the client's spelling rather than a different server, which is what parts it from
-    // the refusal above.
-    if !path.is_absolute() {
-        return Err(coded(
-            Error::INVALID_PARAMS,
-            anyhow::anyhow!(
-                "{role}: a file:// tree needs an absolute path, and {} is not",
-                path.display()
-            ),
-        ));
+/// Two refusals, and the difference between them is what has to change. A scheme this build
+/// has no provider for is [`UNSUPPORTED_MOUNT`](Error::UNSUPPORTED_MOUNT), because which
+/// kinds of tree can be realized is a fact about the *build*. A URL or a mount point this
+/// server cannot act on is [`INVALID_PARAMS`](Error::INVALID_PARAMS), because the request is
+/// what has to change. Each names the entry it is about, since a session names several and a
+/// client hearing only what was wrong cannot tell which.
+///
+/// In the order they were given, which the protocol makes meaningful: a tree at `/work/out`
+/// that follows one at `/work` lands inside it, so nothing here sorts or merges the list.
+fn mounts(init: &InitCall) -> anyhow::Result<Vec<Mount>> {
+    let mut mounts: Vec<Mount> = Vec::with_capacity(init.mounts.len());
+    for spec in &init.mounts {
+        // A scheme and not a spelling: what this server can realize is a directory the
+        // hypervisor shares, and no URL written another way would make one of those.
+        let from = spec.file_path().ok_or_else(|| {
+            coded(
+                Error::UNSUPPORTED_MOUNT,
+                anyhow::anyhow!(
+                    "{spec}: a guest is handed a directory over virtio-fs, so this server \
+                     realizes file:// and nothing else"
+                ),
+            )
+        })?;
+        // Where the scheme is one this server has, and the URL is not one it can act on. The
+        // fix is the client's spelling rather than a different server, which is what parts it
+        // from the refusal above.
+        if !from.is_absolute() {
+            return Err(coded(
+                Error::INVALID_PARAMS,
+                anyhow::anyhow!("{spec}: a file:// tree needs an absolute path"),
+            ));
+        }
+
+        let at = spec.guest_path();
+        // The root is the image's, stacked with the session's own disk under it, and a share
+        // over it would leave a guest with neither.
+        if at == Path::new("/") {
+            return Err(coded(
+                Error::INVALID_PARAMS,
+                anyhow::anyhow!("{spec}: / is the session's own root and is not a mount point"),
+            ));
+        }
+        // The agent's share lives there, and it is what the guest execs -- a tree over it is
+        // a machine that comes up with nothing to run.
+        if at.starts_with(AGENT_PATH) {
+            return Err(coded(
+                Error::INVALID_PARAMS,
+                anyhow::anyhow!("{spec}: {AGENT_PATH} is this backend's own and is not free"),
+            ));
+        }
+        if mounts.iter().any(|mount| Path::new(&mount.at) == at) {
+            return Err(coded(
+                Error::INVALID_PARAMS,
+                anyhow::anyhow!("{spec}: two trees cannot appear at the same path"),
+            ));
+        }
+
+        mounts.push(Mount {
+            at: at.to_string_lossy().into_owned(),
+            from: from.to_path_buf(),
+            read_only: spec.is_read_only(),
+        });
     }
-    Ok(Some(path.to_path_buf()))
+    Ok(mounts)
 }
 
 /// A failure that names the code the protocol has for it.

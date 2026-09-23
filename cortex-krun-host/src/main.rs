@@ -23,8 +23,11 @@
 //! --channel <path>      the socket to connect back on, which becomes the console port
 //! --network <reach>     none | host | public | full; what the guest can reach
 //! --host-port <n>       a TCP port on this machine the guest may open, repeatable [optional]
-//! --context <dir>       the tree to put in front of the guest, read-only      [optional]
-//! --artifacts <dir>     where the session leaves what it produces             [optional]
+//! --mount <dir> <at>    a tree to share into the guest: the host directory, then the
+//!                       absolute path it appears at, with `:ro` on the end of that path
+//!                       for a tree a command may not write in. Repeatable, and the
+//!                       shares are made in the order given -- which is what puts one
+//!                       tree inside another                                  [optional]
 //! --vcpus <n>           overrides, when the server was told to                [optional]
 //! --memory-mib <n>                                                            [optional]
 //! --gpu                 attach virtio-gpu, if this was built with `gpu`       [optional]
@@ -49,8 +52,8 @@
 //! an exact argv    the agent, and not whatever the image states as its program
 //! ```
 //!
-//! The trees a session was given are ordinary shares beside them -- the context read-only,
-//! the artifacts tree writable -- mounted by the init once the root is the overlay.
+//! The trees a session was given are ordinary shares beside them, each read-only or not as
+//! the client asked, mounted by the init once the root is the overlay.
 //!
 //! # The console, and where it goes
 //!
@@ -66,7 +69,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cortex_krun::session::{Ext4, Mount, Network, Session};
-use cortex_krun_host::{AGENT_PATH, ARTIFACTS_PATH, CONTEXT_PATH, PORT_NAME, agent_program};
+use cortex_krun_host::{AGENT_PATH, PORT_NAME, agent_program};
 
 /// A failure of ours, not a guest's -- the shell's code for "found it, could not run it",
 /// which is what a boot that could not become a VM is.
@@ -95,8 +98,9 @@ struct Args {
     /// ports say what it may reach *here* -- so widening the one never widens the other.
     network: Network,
     host_ports: Vec<u16>,
-    context: Option<PathBuf>,
-    artifacts: Option<PathBuf>,
+    /// The trees the session was given, in the order the client named them -- see
+    /// [`Share`].
+    mounts: Vec<Share>,
     vcpus: Option<u8>,
     memory_mib: Option<u32>,
     gpu: bool,
@@ -116,8 +120,7 @@ impl Args {
         let mut channel = None;
         let mut network = None;
         let mut host_ports = Vec::new();
-        let mut context = None;
-        let mut artifacts = None;
+        let mut mounts = Vec::new();
         let mut vcpus = None;
         let mut memory_mib = None;
         let mut gpu = false;
@@ -128,8 +131,8 @@ impl Args {
                 .into_string()
                 .map_err(|flag| anyhow::anyhow!("{flag:?} is not an argument this reads"))?;
             // `OsString` for the paths: one that is not UTF-8 is still a path, and nothing
-            // here has to read one as text. The trees are the exception -- they are told to
-            // the guest as strings -- and that is refused where it is used.
+            // here has to read one as text. A mount point is the exception -- it is told to
+            // the guest as a string -- and that is read as one where it arrives.
             let mut value = || {
                 argv.next()
                     .ok_or_else(|| anyhow::anyhow!("{flag} was given nothing to be"))
@@ -146,8 +149,13 @@ impl Args {
                     })?);
                 }
                 "--host-port" => host_ports.push(number(&flag, value()?)?),
-                "--context" => context = Some(PathBuf::from(value()?)),
-                "--artifacts" => artifacts = Some(PathBuf::from(value()?)),
+                // Two values, because a mount is two things this binary reads differently:
+                // a host directory, which is a path and need not be text, and the place it
+                // takes in the guest, which is a string the protocol already spells.
+                "--mount" => {
+                    let from = PathBuf::from(value()?);
+                    mounts.push(Share::new(from, &text(&flag, value()?)?)?);
+                }
                 "--vcpus" => vcpus = Some(number(&flag, value()?)?),
                 "--memory-mib" => memory_mib = Some(number(&flag, value()?)?),
                 // A flag and not a value: it is asked for or it is not, and `--gpu false`
@@ -176,8 +184,7 @@ impl Args {
                 anyhow::anyhow!("--network is missing -- a boot is told its reach")
             })?,
             host_ports,
-            context,
-            artifacts,
+            mounts,
             vcpus,
             memory_mib,
             gpu,
@@ -185,7 +192,39 @@ impl Args {
     }
 }
 
-/// An argument's value as text, for the one that is not a path.
+/// One tree the guest gets: a directory on this side, the absolute path it appears at, and
+/// whether a command may write in it.
+///
+/// The mount point carries its own `ro` rather than travelling as a third value, because the
+/// protocol's own spelling already puts it there -- a guest path is absolute and carries no
+/// colon, so a trailing `:ro` is unambiguous without anything having to be quoted.
+struct Share {
+    from: PathBuf,
+    at: String,
+    read_only: bool,
+}
+
+impl Share {
+    /// Read `<path>[:ro]` against the directory it names, refusing a mount point this binary
+    /// cannot pass on as one.
+    fn new(from: PathBuf, at: &str) -> anyhow::Result<Share> {
+        let (at, read_only) = match at.strip_suffix(":ro") {
+            Some(at) => (at, true),
+            None => (at.strip_suffix(":rw").unwrap_or(at), false),
+        };
+        anyhow::ensure!(
+            at.starts_with('/'),
+            "--mount: {at} is not an absolute path to appear at"
+        );
+        Ok(Share {
+            from,
+            at: at.to_string(),
+            read_only,
+        })
+    }
+}
+
+/// An argument's value as text, for the ones that are not a path.
 fn text(flag: &str, value: OsString) -> anyhow::Result<String> {
     value
         .into_string()
@@ -233,20 +272,20 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
     if let Some(memory) = args.memory_mib {
         session = session.ram_mib(memory);
     }
-    // **The context read-only**, which is the one way the two trees differ here. It is the
-    // tree the session was given rather than one it was given to fill -- what it produces
-    // belongs in the artifacts and what it needs room for belongs on the session's own root
-    // -- so a write into it is a mistake, and the share is where a mistake can still be
-    // answered with an error rather than with somebody's project already edited.
+    // In the order they were given, which is the order the protocol says they are realized
+    // in: a share at `/work/out` that follows one at `/work` lands inside it.
     //
-    // Read-only *at the device*: the host's virtiofs server refuses every write, whatever
-    // the guest mounted it with, which a guest that is root inside itself could otherwise
-    // remount away.
-    if let Some(context) = &args.context {
-        session = session.mount(Mount::new(context, CONTEXT_PATH).read_only());
-    }
-    if let Some(artifacts) = &args.artifacts {
-        session = session.mount(Mount::new(artifacts, ARTIFACTS_PATH));
+    // A read-only tree is read-only *at the device*: the host's virtiofs server refuses
+    // every write, whatever the guest mounted it with, which a guest that is root inside
+    // itself could otherwise remount away. That is what lets a caller hand over somebody's
+    // project and get it back unchanged rather than a promise that nothing touched it.
+    for share in &args.mounts {
+        let mount = Mount::new(&share.from, &share.at);
+        session = session.mount(if share.read_only {
+            mount.read_only()
+        } else {
+            mount
+        });
     }
 
     Ok(session.enter()?)

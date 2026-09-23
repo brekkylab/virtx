@@ -51,32 +51,6 @@ pub fn agent_program() -> String {
     format!("{AGENT_PATH}/{AGENT_BIN}")
 }
 
-/// Where the context is mounted inside the guest.
-///
-/// **A name for the role and not for the directory behind it.** What a session is given is a
-/// directory somewhere on the host, and what it is *called* in here says which of the two
-/// trees it is -- so a command reads `/context/src/main.rs` and a client sends the same
-/// string, in a session that would have spelled it `/Users/someone/project/src/main.rs` on
-/// the other side of the hypervisor and in another one that would have spelled it `/srv/wt/9`.
-///
-/// Three consequences, and all three are the reason:
-///
-/// - **A guest's paths do not name the host.** Where a caller keeps its projects is that
-///   caller's, and a path is the easiest thing in the world to leak -- into a command's
-///   output, a log, a build artifact, a model's transcript.
-/// - **Two sessions over different directories are the same session to look at**, which is
-///   what makes a transcript comparable and a command reproducible.
-/// - **The guest's root stays a root.** Mounting at the host's own path means a guest with
-///   `/Users/someone/project` in it, which is a directory tree invented inside an image to
-///   mirror a stranger's laptop.
-///
-/// What it costs is that a mount point has two names, one per side -- and nothing has to
-/// translate between them, because the protocol only ever speaks this one.
-pub const CONTEXT_PATH: &str = "/context";
-
-/// Where the artifacts tree is mounted inside the guest -- see [`CONTEXT_PATH`].
-pub const ARTIFACTS_PATH: &str = "/artifacts";
-
 #[cfg(test)]
 mod tests {
     use super::*;

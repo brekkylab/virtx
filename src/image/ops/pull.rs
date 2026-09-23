@@ -59,7 +59,7 @@ pub async fn pull(
         // under. Asked before anything is fetched, so a layer already converted costs
         // neither the download nor the conversion.
         let expected = &layers[index].digest;
-        if cache.has_erofs(expected) {
+        if cache.has_layer(expected) {
             continue;
         }
 
@@ -102,7 +102,7 @@ pub async fn pull(
         //
         // `Cursor` because the conversion reads the archive twice -- once for the
         // shape of the filesystem, once for the bytes -- and so needs it seekable.
-        let mut erofs = cache.staged_writer(cache.erofs_path(&diff_id))?;
+        let mut erofs = cache.staged_writer(cache.layer_path(&diff_id))?;
         let erofs = tokio::task::spawn_blocking(move || {
             blob_to_erofs(&mut Cursor::new(blob), &mut erofs)?;
             Ok::<_, Error>(erofs)

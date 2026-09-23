@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Digest, Error, Layer, Reference, Result};
+use super::{Digest, Layer};
 
 /// The manifest as a registry serves it, holding the config and layer descriptors an
 /// image is made of, before any of it has been downloaded.

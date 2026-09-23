@@ -100,7 +100,7 @@ fn stitch(image: &Image, cache: &Cache) -> Result<Disk> {
     let (mut at, mut ids) = (0u64, 0u32);
 
     for layer in &image.layers {
-        let path = cache.erofs_path(&layer.digest);
+        let path = cache.layer_path(&layer.digest);
         let mut file =
             File::open(&path).map_err(|e| Error::io(format!("opening {}", path.display()), e))?;
 
@@ -265,7 +265,7 @@ mod tests {
         }
 
         let digest = Digest::of(name.as_bytes());
-        let mut staged = cache.staged_writer(cache.erofs_path(&digest)).unwrap();
+        let mut staged = cache.staged_writer(cache.layer_path(&digest)).unwrap();
         erofs::write(&tree, &mut Cursor::new(tar), &mut staged).unwrap();
         staged.commit().unwrap();
 
@@ -368,8 +368,8 @@ mod tests {
         };
         assert_eq!(named.len(), 3, "{named:?}");
         same(&named[0], cache.fsmeta_path(&stack_digest(&image)));
-        same(&named[1], cache.erofs_path(&Digest::of(b"base")));
-        same(&named[2], cache.erofs_path(&Digest::of(b"over")));
+        same(&named[1], cache.layer_path(&Digest::of(b"base")));
+        same(&named[2], cache.layer_path(&Digest::of(b"over")));
 
         let bytes = disk(&provisioned.path);
         let (tree, layout) = erofs::read(&mut Cursor::new(bytes.clone())).unwrap();
@@ -468,7 +468,7 @@ mod tests {
 
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(cache.erofs_path(&bottom.digest))
+            .open(cache.layer_path(&bottom.digest))
             .unwrap();
         file.write_all(&[0u8; BLOCK_SIZE as usize]).unwrap();
         drop(file);

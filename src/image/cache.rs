@@ -43,12 +43,12 @@ fn cache_root() -> PathBuf {
 ///
 /// ```text
 /// <root>/
-///   images.json            one entry per reference pulled here
-///   images.lock            guards `image.json`
-///   erofs/sha256/<hex>     one EROFS per layer, named by its digest
+///   images.json                 one entry per reference pulled here
+///   images.lock                 guards `images.json`
+///   layer/sha256/<hex>.erofs    one EROFS per layer, named by its digest
 ///   fsmeta/sha256/<hex>.erofs   one stack's layers merged, metadata alone
 ///   disk/sha256/<hex>.vmdk      what reads that and those layers as one disk
-///   tmp/                   what is being written
+///   tmp/                        what is being written
 /// ```
 ///
 /// ## `images.json`
@@ -74,12 +74,12 @@ fn cache_root() -> PathBuf {
 ///
 /// ## `fsmeta/` and `disk/`
 /// The other two content-addressed shelves, named by the *stack* -- the ordered layers
-/// of one image -- rather than by a layer. `fsmeta/` holds those layers' trees merged
+/// of one image -- rather than by one layer. `fsmeta/` holds those layers' trees merged
 /// and written as metadata alone, and `disk/` the descriptor that reads it and them as
 /// one block device. Neither holds a byte of any layer's contents, so two images over
 /// one base cost one copy of the base.
 ///
-/// ## `erofs/`
+/// ## `layer/`
 /// Content-addressed, so it needs no invalidation and a name that exists is a whole
 /// file. The name is the layer's `diff_id` -- the digest of its contents rather than of
 /// whatever a registry compressed them into -- which is also what the image config
@@ -107,14 +107,16 @@ impl Cache {
     /// Where this layer's EROFS image lies, whether or not anything is there. Named by
     /// the layer's `digest`, which is what the image config signs and so names the
     /// same contents whatever a registry happened to compress them with.
-    pub fn erofs_path(&self, digest: &Digest) -> PathBuf {
-        self.root.join("erofs").join(digest.path())
+    pub fn layer_path(&self, digest: &Digest) -> PathBuf {
+        let mut path = self.root.join("layer").join(digest.path());
+        path.set_extension("erofs");
+        path
     }
 
     /// Whether a download *and* a conversion can both be skipped. Answerable before
     /// anything is fetched, because the config names every layer's `diff_id`.
-    pub fn has_erofs(&self, digest: &Digest) -> bool {
-        self.erofs_path(digest).is_file()
+    pub fn has_layer(&self, digest: &Digest) -> bool {
+        self.layer_path(digest).is_file()
     }
 
     /// Where a stack's merged metadata lies, whether or not anything is there.

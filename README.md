@@ -126,11 +126,74 @@ also what lets it pick up a disk an earlier session left.
 
 [arcbox]: https://docs.rs/arcbox-ext4
 
+## Mounts — `patches/libkrun-85bed71-session-mounts.patch`
+
+A session can see host directories, each one a virtio-fs share:
+
+```rust
+Session::new()
+    .mount(Mount::new("./data", "/data").read_only())
+    .command(["ls", "/data"])
+    .enter("alpine:3.21", None)?;
+```
+
+**The host half needs no patch.** Sharing a directory under a tag is what
+libkrun has always done — `krun_add_virtiofs` in the C API, `FsDevice::new` and
+`FsDevice::new_read_only` in the Rust one — and read-only is a parameter of the
+device rather than something bolted on afterwards.
+
+**The guest half is what is missing, and deliberately so.** A virtio-fs share
+has no notion of where it belongs: it exports a directory under a tag, and
+something in the guest has to run `mount -t virtiofs <tag> <dir>`. libkrun's init
+mounts the root and one tmpfs and stops there, which leaves automounting to
+whoever builds the guest's boot — and for a session that is this repo. The patch
+reads the rest of the `mounts` list the init already parses out of
+`/.krun_config.json`, and mounts each entry as the config spells it. It touches
+`init/init-binary/src/config.rs` and `init/init-binary/src/main.rs` and adds
+`init/init-binary/src/mounts.rs`; the overlay-root patch owns `fs.rs`, so the two
+do not stack on one file.
+
+**The mounts go on after the pivot**, once the root is the overlay. One made
+before it would sit on the boot root the pivot leaves behind, which afterwards is
+under no path at all. The directory a share lands on is created if the image
+shipped none, which puts it on the upper layer — so it is made once and found
+again by the next session over the same one.
+
+**Read-only is the host's, not the guest's.** `Mount::read_only` attaches the
+device read-only, and the virtiofs server then refuses every write whatever the
+guest mounted it with. A guest that writes anyway gets an error from the write
+rather than from the mount, and `/proc/mounts` inside the guest still says `rw` —
+the flag a guest could remount away is not where the guarantee lives.
+
+Nothing here is a sandbox. libkrun's own README is explicit that a virtio-fs
+share offers no protection against a guest reaching other directories on the same
+host filesystem, and `read_only` bounds what a guest may write, not what it may
+read.
+
 ## The `gpu` feature
 
 Guest Vulkan goes through virtio-gpu with [venus](https://docs.mesa3d.org/drivers/venus.html):
 the guest runs Mesa's venus driver, virglrenderer serves it on the host, and
-MoltenVK turns that into Metal. Working end to end:
+MoltenVK turns that into Metal.
+
+A session asks for one with `.gpu(true)`:
+
+```rust
+Session::new()
+    .image("alpine:3.21")
+    .gpu(true)
+    .command(["vulkaninfo", "--summary"])
+    .enter()?;
+```
+
+**Without the feature the flag is ignored**, and deliberately: a build that has no
+virglrenderer to serve Vulkan runs the same session without a GPU rather than
+refusing to start, so a caller never has to `cfg` around the call. The image
+carries the guest half either way (`apk add mesa-vulkan-virtio vulkan-loader`);
+one without it boots and finds no device.
+
+The examples below do the same thing by hand, over a plain rootfs rather than an
+image. Working end to end:
 
 ```
 $ cargo run --features gpu --example macos_gpu
@@ -872,7 +935,7 @@ guest/                      sources compiled and run inside the VM
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-patches/                    see "Sessions", "The gpu feature" and "Windows (WHP)"
+patches/                    see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner
 examples/
 data/                       untracked: rootfs, sessions, models, build outputs

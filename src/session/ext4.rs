@@ -24,16 +24,23 @@
 //! which is one less thing to write for a disk whose whole content is about to be thrown
 //! away.
 //!
-//! [`SIZE`] is a **ceiling and not an allocation**. The file is sparse, so a session that
-//! writes a kilobyte occupies a kilobyte on the host; what the number bounds is how much
-//! a runaway command can write before the guest reports a full disk.
+//! [`Ext4::SIZE`] is a **ceiling and not an allocation**. The file is sparse, so a
+//! session that writes a kilobyte occupies a kilobyte on the host; what the number bounds
+//! is how much a runaway command can write before the guest reports a full disk.
+//!
+//! # The session nobody named
+//!
+//! A caller who names a path gets a session that outlives its machine. A caller who names
+//! none gets [`scratch`](Ext4::scratch): the same ext4, under the host's temporary
+//! directory, under a name nothing else can guess -- and [`discard`](Ext4::discard)
+//! then takes even that name away, as soon as the machine has the file open. What is left
+//! is a disk with no path to it, which the host reclaims when the process holding it goes
+//! down, however it goes down.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{Error, Result};
-
-/// How large a session's upper layer may grow, when nothing says otherwise.
-pub const SIZE: u64 = 2 << 30;
 
 /// The block size ext4 is written with. The only one [`arcbox_ext4`] accepts, and the
 /// one the guest kernel's page size makes natural anyway.
@@ -46,15 +53,27 @@ const BLOCK_SIZE: u32 = 4096;
 /// guest that had to format its own root would need `mkfs.ext4` in the image -- and the
 /// whole point of this is that it works over an image nobody prepared.
 #[derive(Clone, Debug)]
-pub struct UpperLayer {
+pub struct Ext4 {
     pub path: PathBuf,
 
     /// What the filesystem on it reports as its size. Only meaningful for one this made:
     /// an upper layer that was already there is whatever it was formatted as.
     pub size: u64,
+
+    /// Whether this one is a throwaway -- made by [`scratch`](Ext4::scratch)
+    /// because nobody named a path, and so nobody's to keep. It is what
+    /// [`discard`](Ext4::discard) acts on, and what keeps `discard` from ever
+    /// touching a session a caller means to come back to.
+    pub scratch: bool,
 }
 
-impl UpperLayer {
+impl Ext4 {
+    /// How large a session's upper layer may grow, when nothing says otherwise. An
+    /// associated constant rather than a free one because a caller building a layer has
+    /// to name a size, and this is the one to name when there is no reason to pick
+    /// another.
+    pub const SIZE: u64 = 2 << 30;
+
     /// The upper layer at `path`, formatted if there is nothing there yet.
     ///
     /// **An existing file is carried on rather than reformatted.** That is what makes a
@@ -64,11 +83,17 @@ impl UpperLayer {
     ///
     /// `size` is the ceiling for one being made now, and is ignored for one already here
     /// -- a formatted filesystem states its own, and this does not grow it.
-    pub fn at(path: impl Into<PathBuf>, size: u64) -> Result<UpperLayer> {
+    pub fn at(path: impl Into<PathBuf>, size: u64) -> Result<Ext4> {
         let path = path.into();
 
         match path.try_exists() {
-            Ok(true) => return Ok(UpperLayer { path, size }),
+            Ok(true) => {
+                return Ok(Ext4 {
+                    path,
+                    size,
+                    scratch: false,
+                });
+            }
             Ok(false) => {}
             Err(e) => return Err(Error::io(format!("looking for {}", path.display()), e)),
         }
@@ -82,7 +107,56 @@ impl UpperLayer {
         }
 
         format(&path, size)?;
-        Ok(UpperLayer { path, size })
+        Ok(Ext4 {
+            path,
+            size,
+            scratch: false,
+        })
+    }
+
+    /// An upper layer for a session that named none: a fresh ext4 under the host's
+    /// temporary directory, which nothing is going to find and nothing is going to carry
+    /// on from.
+    ///
+    /// The name holds the process's id and the moment it was made, so two sessions in one
+    /// process do not land on one file. Nobody is meant to read it -- it is a name only
+    /// because a block device has to be opened by one, and
+    /// [`discard`](Ext4::discard) is what removes it once that is done.
+    pub fn scratch(size: u64) -> Result<Ext4> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "cortex-krun-session-{}-{unique}.ext4",
+            std::process::id()
+        ));
+
+        format(&path, size)?;
+        Ok(Ext4 {
+            path,
+            size,
+            scratch: true,
+        })
+    }
+
+    /// Unlink a [`scratch`](Ext4::scratch) upper layer, and do nothing at all to
+    /// one a caller named.
+    ///
+    /// **Called once whatever is going to read the file has it open**, which for a
+    /// session is after the machine is built and before it runs. A file with no name is
+    /// still a file to the descriptor holding it, so the guest goes on writing to a disk
+    /// that no longer exists as a path -- and the host reclaims it when that descriptor
+    /// closes, which includes every way a process can die without running any code of its
+    /// own. Unlinking any earlier would leave the machine nothing to open.
+    ///
+    /// Best effort, and silent: a host that refuses the unlink leaves a file in a
+    /// temporary directory, which is the one place a leftover file is already expected.
+    /// There is nothing a caller could do about it and nothing for it to fail.
+    pub fn discard(&self) {
+        if self.scratch {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -116,10 +190,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let path = std::env::temp_dir().join(format!(
-                "cortex-krun-upper-layer-{name}-{}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("cortex-krun-ext4-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)
@@ -140,12 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn an_upper_layer_that_is_not_there_is_formatted() {
+    fn an_ext4_that_is_not_there_is_formatted() {
         let scratch = Scratch::new("new");
         let path = scratch.0.join("session.ext4");
 
-        let upper_layer = UpperLayer::at(&path, 64 << 20).unwrap();
-        assert_eq!(upper_layer.path, path);
+        let ext4 = Ext4::at(&path, 64 << 20).unwrap();
+        assert_eq!(ext4.path, path);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 64 << 20);
         assert!(is_ext4(&path), "what was written is not an ext4 filesystem");
     }
@@ -153,12 +225,12 @@ mod tests {
     /// The whole of what makes a session persist: the file is the session, so a second
     /// call has to hand back the first one's and not a fresh filesystem over it.
     #[test]
-    fn an_upper_layer_already_there_is_carried_on() {
+    fn an_ext4_already_there_is_carried_on() {
         let scratch = Scratch::new("again");
         let path = scratch.0.join("session.ext4");
 
         let size: u64 = 64 << 20;
-        UpperLayer::at(&path, size).unwrap();
+        Ext4::at(&path, size).unwrap();
 
         // A byte where nothing this wrote put one, which a reformat would take with it.
         let last = (size - 1) as usize;
@@ -167,20 +239,50 @@ mod tests {
         bytes[last] = 0x42;
         std::fs::write(&path, &bytes).unwrap();
 
-        UpperLayer::at(&path, 1 << 30).unwrap();
+        Ext4::at(&path, 1 << 30).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes.len() as u64, size, "the upper layer was resized");
         assert_eq!(bytes[last], 0x42, "the upper layer was formatted again");
     }
 
+    /// A session nobody named still needs a real ext4 to write to; what it does not need
+    /// is a name anyone can reach it by.
+    #[test]
+    fn an_ext4_nobody_named_is_formatted_and_then_unlinked() {
+        let ext4 = Ext4::scratch(64 << 20).unwrap();
+        assert!(ext4.scratch);
+        assert!(is_ext4(&ext4.path));
+
+        ext4.discard();
+        assert!(
+            !ext4.path.exists(),
+            "a throwaway upper layer outlived its discard"
+        );
+    }
+
+    /// The whole reason `discard` asks whether it may: a session a caller named is one
+    /// they mean to come back to, and discarding it would be the one thing that throws it
+    /// away.
+    #[test]
+    fn discarding_an_ext4_a_caller_named_does_nothing() {
+        let scratch = Scratch::new("named");
+        let path = scratch.0.join("session.ext4");
+
+        let ext4 = Ext4::at(&path, 64 << 20).unwrap();
+        assert!(!ext4.scratch);
+
+        ext4.discard();
+        assert!(path.is_file(), "a named session was thrown away");
+    }
+
     /// The parent is made, so that a session directory nobody created is not a failure
     /// the caller has to have anticipated.
     #[test]
-    fn an_upper_layer_under_a_directory_that_is_not_there_makes_it() {
+    fn an_ext4_under_a_directory_that_is_not_there_makes_it() {
         let scratch = Scratch::new("parents");
         let path = scratch.0.join("sessions/one/session.ext4");
 
-        UpperLayer::at(&path, 64 << 20).unwrap();
+        Ext4::at(&path, 64 << 20).unwrap();
         assert!(path.is_file());
     }
 }

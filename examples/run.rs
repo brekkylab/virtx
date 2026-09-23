@@ -12,6 +12,15 @@
 //!
 //! Deleting that file is how the session starts over.
 //!
+//! A third argument is a host directory the guest sees at `/mnt`, read-only:
+//!
+//!   cargo run --example run -- alpine:3.21 'ls /mnt' ./scripts
+//!
+//! `CORTEX_GPU=1` asks for guest Vulkan, which needs the `gpu` feature to be anything
+//! more than a flag and an image carrying Mesa's venus driver:
+//!
+//!   CORTEX_GPU=1 cargo run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+//!
 //! Unlike the `macos_*` and `win_*` examples, this one is not gated by host. Nothing in
 //! it is host-specific: [`session`](cortex_krun::session) attaches the guest's console
 //! itself, which is the one call that differs between them. The cargo runner still is,
@@ -23,12 +32,13 @@
 use std::path::PathBuf;
 
 use cortex_krun::image;
-use cortex_krun::session::{Session, enter};
+use cortex_krun::session::{Ext4, Mount, Session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let reference = args.next().unwrap_or_else(|| "alpine:latest".to_string());
     let command = args.next();
+    let share = args.next();
 
     // The pull is the only async thing here, and the only thing that touches the
     // network. A machine is entered on this thread, so the runtime is over before
@@ -48,27 +58,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .collect();
-    let upper_layer = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("data/sessions")
         .join(format!("{named}.ext4"));
 
-    eprintln!("session: {}", upper_layer.display());
+    eprintln!("session: {}", path.display());
+
+    // Formatted here if this is the first run over that path, and found as it was left if
+    // it is not -- which is what makes a later run carry on from this one. `data/sessions`
+    // is made on the way. A session handed no rootfs would get a throwaway instead,
+    // unlinked as soon as the machine had it.
+    let rootfs = Ext4::at(path, Ext4::SIZE)?;
 
     // What to run: a shell around whatever was asked for, and the image's own command
     // when nothing was.
-    let command = match command {
-        Some(script) => vec!["/bin/sh".to_string(), "-c".to_string(), script],
-        None => Vec::new(),
-    };
+    let mut session = Session::new().image(reference.as_str()).rootfs(rootfs);
+    if let Some(script) = command {
+        session = session.command(["/bin/sh".to_string(), "-c".to_string(), script]);
+    }
+
+    // Read-only, which the host enforces: the guest may read what is shared and the
+    // virtiofs server refuses its writes. `/mnt` need not exist in the image -- the guest
+    // makes it on the overlay.
+    if let Some(dir) = share {
+        eprintln!("mount: {dir} -> /mnt (read-only)");
+        session = session.mount(Mount::new(dir, "/mnt").read_only());
+    }
+
+    // Ignored by a build without the `gpu` feature, which is what makes it safe to read
+    // an environment variable rather than gate the example on the feature.
+    if std::env::var_os("CORTEX_GPU").is_some_and(|on| on == "1") {
+        session = session.gpu(true);
+    }
 
     // Does not return: the VMM exits this process with the guest's status.
-    enter(
-        reference.as_str(),
-        &Session {
-            command,
-            ..Session::at(upper_layer)
-        },
-        None,
-    )?;
+    session.enter()?;
     unreachable!("a session that was entered does not come back")
 }

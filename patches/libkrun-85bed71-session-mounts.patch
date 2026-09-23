@@ -1,0 +1,168 @@
+diff --git a/init/init-binary/src/config.rs b/init/init-binary/src/config.rs
+index 4797798..fa6265f 100644
+--- a/init/init-binary/src/config.rs
++++ b/init/init-binary/src/config.rs
+@@ -55,6 +55,10 @@ pub struct Config {
+     pub workdir: Option<String>,
+     #[cfg(target_os = "linux")]
+     pub tmpfs: Option<String>,
++    /// Everything else the config's `mounts` asked for, in the order it asked. Mounted
++    /// after the root is in place -- see [`crate::mounts`].
++    #[cfg(target_os = "linux")]
++    pub mounts: Vec<crate::mounts::Mount>,
+ }
+ 
+ pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -> Config {
+@@ -104,24 +108,47 @@ pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -
+     };
+     let workdir = process.cwd;
+ 
+-    // Find the first tmpfs mount whose destination is not already mounted.
++    // The first tmpfs mount whose destination is not already mounted, kept apart because
++    // it is mounted by its own path in fs.rs; everything else goes to `mounts`, which is
++    // mounted as the config spells it once the root is in place. An entry missing any of
++    // the three fields is dropped: there is nothing to mount and nothing to say about it
++    // that the boot could act on.
+     #[cfg(target_os = "linux")]
+-    let tmpfs = raw.mounts.unwrap_or_default().into_iter().find_map(|m| {
+-        let dest = m.destination?;
+-        let ty = m.mount_type.as_deref().unwrap_or("");
+-        let src = m.source.as_deref().unwrap_or("");
+-        if ty == "tmpfs" && src == "tmpfs" && !is_mount_point(&dest) {
+-            Some(dest)
+-        } else {
+-            None
++    let (tmpfs, mounts) = {
++        let mut tmpfs: Option<String> = None;
++        let mut mounts = Vec::new();
++
++        for m in raw.mounts.unwrap_or_default() {
++            let (Some(destination), Some(fs_type), Some(source)) =
++                (m.destination, m.mount_type, m.source)
++            else {
++                continue;
++            };
++
++            if fs_type == "tmpfs" && source == "tmpfs" {
++                if tmpfs.is_none() && !is_mount_point(&destination) {
++                    tmpfs = Some(destination);
++                }
++                continue;
++            }
++
++            mounts.push(crate::mounts::Mount {
++                source,
++                fs_type,
++                destination,
++            });
+         }
+-    });
++
++        (tmpfs, mounts)
++    };
+ 
+     Config {
+         argv,
+         workdir,
+         #[cfg(target_os = "linux")]
+         tmpfs,
++        #[cfg(target_os = "linux")]
++        mounts,
+     }
+ }
+ 
+diff --git a/init/init-binary/src/main.rs b/init/init-binary/src/main.rs
+index b7075cf..3bb1eef 100644
+--- a/init/init-binary/src/main.rs
++++ b/init/init-binary/src/main.rs
+@@ -7,6 +7,8 @@ mod exec;
+ mod freebsd;
+ #[cfg(target_os = "linux")]
+ mod fs;
++#[cfg(target_os = "linux")]
++mod mounts;
+ #[cfg(feature = "timesync")]
+ mod timesync;
+ 
+@@ -114,6 +116,11 @@ fn main() -> anyhow::Result<()> {
+         fs::mount_tmpfs(path)?;
+     }
+ 
++    // After the root is whatever it is going to be, so that a share lands on the root the
++    // workload sees rather than the one a pivot left behind -- see `mounts`.
++    #[cfg(target_os = "linux")]
++    mounts::mount_all(&cfg.mounts)?;
++
+     env::apply_env();
+     env::apply_hostname();
+     env::apply_rlimits();
+diff --git a/init/init-binary/src/mounts.rs b/init/init-binary/src/mounts.rs
+new file mode 100644
+index 0000000..1f06767
+--- /dev/null
++++ b/init/init-binary/src/mounts.rs
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: Apache-2.0
++//
++//! The mounts a boot asks for beyond its root.
++//!
++//! `/.krun_config.json` carries a `mounts` list, and until now the init read one entry
++//! out of it -- the first tmpfs -- and dropped the rest. What the rest is for is a host
++//! directory shared into the guest: the host attaches a virtiofs device with a tag, and
++//! the guest mounts that tag somewhere. Without this the device is there and nothing
++//! ever mounts it.
++//!
++//! # After the root, and never before
++//!
++//! These are mounted once the root is whatever it is going to be -- after a boot that
++//! pivots onto a block device or an overlay has pivoted. A mount made before the pivot
++//! would be on the root that the pivot leaves behind, reachable by no path afterwards.
++//!
++//! # Read-only is the host's to enforce
++//!
++//! Nothing here asks for `MS_RDONLY`. A share the host attached read-only is one whose
++//! virtiofs server refuses every write, whatever the guest mounted it with, and that is
++//! the guarantee -- a mount flag the guest could remount away is not one.
++
++use std::fs;
++
++use anyhow::{Context, Result};
++use nix::mount::{self, MsFlags};
++
++/// One entry of the config's `mounts`, as far as this cares.
++pub struct Mount {
++    pub source: String,
++    pub fs_type: String,
++    pub destination: String,
++}
++
++/// Mount each of `mounts`, making the directory it goes on.
++///
++/// The destination is created rather than required: a share is named by a host that
++/// cannot see inside the image, and a path that happens not to exist there is not a
++/// mistake anyone could have avoided. On the root this is the writable layer, so the
++/// directory is made once and found on every boot after.
++///
++/// A mount that fails stops the boot. The alternative is a workload that runs with its
++/// data silently missing, which is worse than not running.
++pub fn mount_all(mounts: &[Mount]) -> Result<()> {
++    for m in mounts {
++        fs::create_dir_all(&m.destination)
++            .with_context(|| format!("create {}", m.destination))?;
++
++        mount::mount(
++            Some(m.source.as_str()),
++            m.destination.as_str(),
++            Some(m.fs_type.as_str()),
++            MsFlags::empty(),
++            None::<&str>,
++        )
++        .with_context(|| {
++            format!(
++                "mount {} -> {} as {}",
++                m.source, m.destination, m.fs_type
++            )
++        })?;
++    }
++    Ok(())
++}

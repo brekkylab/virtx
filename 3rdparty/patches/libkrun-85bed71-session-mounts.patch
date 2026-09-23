@@ -98,10 +98,10 @@ index b7075cf..3bb1eef 100644
      env::apply_rlimits();
 diff --git a/init/init-binary/src/mounts.rs b/init/init-binary/src/mounts.rs
 new file mode 100644
-index 0000000..1f06767
+index 0000000..99e21f6
 --- /dev/null
 +++ b/init/init-binary/src/mounts.rs
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,58 @@
 +// SPDX-License-Identifier: Apache-2.0
 +//
 +//! The mounts a boot asks for beyond its root.
@@ -147,8 +147,7 @@ index 0000000..1f06767
 +/// data silently missing, which is worse than not running.
 +pub fn mount_all(mounts: &[Mount]) -> Result<()> {
 +    for m in mounts {
-+        fs::create_dir_all(&m.destination)
-+            .with_context(|| format!("create {}", m.destination))?;
++        fs::create_dir_all(&m.destination).with_context(|| format!("create {}", m.destination))?;
 +
 +        mount::mount(
 +            Some(m.source.as_str()),
@@ -157,12 +156,7 @@ index 0000000..1f06767
 +            MsFlags::empty(),
 +            None::<&str>,
 +        )
-+        .with_context(|| {
-+            format!(
-+                "mount {} -> {} as {}",
-+                m.source, m.destination, m.fs_type
-+            )
-+        })?;
++        .with_context(|| format!("mount {} -> {} as {}", m.source, m.destination, m.fs_type))?;
 +    }
 +    Ok(())
 +}

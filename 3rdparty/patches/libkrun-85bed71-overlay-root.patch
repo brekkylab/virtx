@@ -66,10 +66,10 @@ index 11c6590..ca6d769 100644
      }
      if let Ok(fd) = fcntl::open(Path::new("/"), OFlag::O_RDONLY, Mode::empty()) {
 diff --git a/init/init-binary/src/fs.rs b/init/init-binary/src/fs.rs
-index 3aea260..5d93261 100644
+index 3aea260..403c82b 100644
 --- a/init/init-binary/src/fs.rs
 +++ b/init/init-binary/src/fs.rs
-@@ -147,26 +147,63 @@ pub fn try_mount(
+@@ -147,26 +147,66 @@ pub fn try_mount(
      bail!("no supported filesystem found for {source}")
  }
  
@@ -118,7 +118,10 @@ index 3aea260..5d93261 100644
 +    match overlay {
 +        Some((lower, upper)) => mount_overlay_root(&lower, &upper)?,
 +        None => {
-+            let krun_root = single.expect("checked above").to_string_lossy().into_owned();
++            let krun_root = single
++                .expect("checked above")
++                .to_string_lossy()
++                .into_owned();
 +            let fstype = env::var("KRUN_BLOCK_ROOT_FSTYPE").ok();
 +            let options = env::var("KRUN_BLOCK_ROOT_OPTIONS").ok();
  
@@ -145,7 +148,7 @@ index 3aea260..5d93261 100644
  
      unistd::chdir("/newroot").context("chdir /newroot")?;
  
-@@ -181,6 +218,65 @@ pub fn mount_block_root_device() -> anyhow::Result<()> {
+@@ -181,6 +221,65 @@ pub fn mount_block_root_device() -> anyhow::Result<()> {
      Ok(())
  }
  

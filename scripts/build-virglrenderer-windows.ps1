@@ -16,7 +16,7 @@
 #                  GLX, so only the WGL half is built and no GL winsys backend
 #                  ends up in virglrenderer.
 #
-#   two patches    patches/virglrenderer-1.3.0-macos-venus.patch carries the
+#   two patches    3rdparty/patches/virglrenderer-1.3.0-macos-venus.patch carries the
 #                  in-process venus context, which is needed on any host
 #                  without the out-of-process render server (fork, epoll,
 #                  seccomp) -- Windows included, despite the name. The Windows

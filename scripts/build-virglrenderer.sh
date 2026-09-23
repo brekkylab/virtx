@@ -3,7 +3,7 @@
 #
 # Upstream virglrenderer forces the out-of-process render server on whenever
 # venus is enabled, and that server is Linux-only (epoll, seccomp). The patch
-# in patches/ ports Sergio Lopez's in-process venus context -- the same work
+# in 3rdparty/patches/ ports Sergio Lopez's in-process venus context -- the same work
 # that krunkit's 0.10.4 fork carries -- onto upstream 1.3.0, which is the
 # minimum version rutabaga_gfx (and therefore libkrun's `gpu` feature) accepts.
 #
@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SUBMODULE="$ROOT/3rdparty/virglrenderer"
 SRC="$ROOT/data/virglrenderer-src"
 PREFIX="$ROOT/data/virglrenderer"
-PATCH="$ROOT/patches/virglrenderer-1.3.0-macos-venus.patch"
+PATCH="$ROOT/3rdparty/patches/virglrenderer-1.3.0-macos-venus.patch"
 VENV="$ROOT/data/meson-venv"
 
 if [ ! -f "$SUBMODULE/meson.build" ]; then

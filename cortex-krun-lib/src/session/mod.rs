@@ -24,7 +24,7 @@
 //! # Where the stacking happens
 //!
 //! In the guest, by libkrun's init, which this repo patches to take two devices where it
-//! took one -- see `patches/libkrun-85bed71-overlay-root.patch`. It has to be the guest:
+//! took one -- see `3rdparty/patches/libkrun-85bed71-overlay-root.patch`. It has to be the guest:
 //! overlayfs is a kernel filesystem and the host has no way to mount one for it, let
 //! alone an EROFS the host kernel may not even read.
 //!

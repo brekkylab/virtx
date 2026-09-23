@@ -1,4 +1,7 @@
 [target.aarch64-apple-darwin]
+# The boot half is signed as it is linked -- see the script. Nothing else about
+# the link is this repository's.
+linker = "scripts/macos-link.sh"
 runner = "scripts/macos-run.sh"
 
 [target.x86_64-pc-windows-msvc]

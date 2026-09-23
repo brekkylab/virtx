@@ -15,16 +15,10 @@ shift
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 codesign --entitlements "$SCRIPT_DIR/hvf-entitlements.plist" --force -s - "$BINARY"
 
-# And the boot half beside it, when there is one. `cortex-krun` never creates a VM itself --
-# it spawns `cortex-krun-host`, which does -- and an entitlement is read at `exec`, so signing
-# the binary cargo is about to run is not enough: the process that calls hv_vm_create is the
-# other one. Signed here rather than by a build script because cargo gives no hook that runs
-# after a *sibling* member is linked, and this is the one place that already knows a binary is
-# about to be run from that directory.
-BOOT="$(dirname "$BINARY")/cortex-krun-host"
-if [ "$BOOT" != "$BINARY" ] && [ -f "$BOOT" ]; then
-    codesign --entitlements "$SCRIPT_DIR/hvf-entitlements.plist" --force -s - "$BOOT"
-fi
+# Not the boot half, which is signed as it is linked -- see scripts/macos-link.sh.
+# `cortex-krun` never creates a VM itself: it spawns `cortex-krun-host`, which does, and that
+# one has to carry the entitlement however it was started. `cargo run` is not on the path a
+# client takes to a session.
 
 if command -v brew >/dev/null 2>&1; then
     DYLD_LIBRARY_PATH="$(brew --prefix)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"

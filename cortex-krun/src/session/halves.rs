@@ -13,7 +13,9 @@
 //!   `com.apple.security.hypervisor` entitlement, and libkrun `dlopen`s libkrunfw, which
 //!   needs library validation off. Both are carried by a code signature, and a signature is
 //!   read at `exec` -- so the process that creates a VM can never be the process that decided
-//!   to.
+//!   to. The signature goes on where the boot is linked: `scripts/macos-link.sh` is the cargo
+//!   linker for this target and signs that one binary, so a plain `cargo build` produces an
+//!   entitled boot rather than one that only works under `cargo run`.
 //! - **The boot does not come back.** Entering the VMM hands it the process, and the VMM
 //!   exits when the guest goes down. A server that entered one would stop being able to
 //!   answer anything.
@@ -23,9 +25,18 @@
 //! # The overrides
 //!
 //! Each half can be named outright, which is what a caller who builds one some other way --
-//! or ships the three somewhere with a layout of its own -- has instead of this rule. The
-//! same variables are read by `build.rs`, where they name what to place rather than what to
-//! run.
+//! or ships the three somewhere with a layout of its own -- has instead of this rule.
+//!
+//! `CORTEX_KRUN_GUEST_BIN` is read twice and means two things. Here it names the file to copy
+//! into a machine's share; in `build.rs` it names a file to place beside this binary instead
+//! of cross-compiling one, which is a build this crate performs and can therefore be told to
+//! skip. `CORTEX_KRUN_BOOT_BIN` is read only here, because there is no matching build to
+//! skip: the boot is a workspace member and cargo links it beside this binary itself.
+//!
+//! A binary named by either is taken as it is. The boot's entitlement is the case that shows
+//! what that costs -- `scripts/macos-link.sh` signs what it links and nothing else, so a boot
+//! built elsewhere carries whatever signature its own build gave it, and one without the
+//! entitlement fails at `hv_vm_create` rather than here.
 
 use std::path::PathBuf;
 

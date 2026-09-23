@@ -77,7 +77,14 @@ for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
    `libkrunfw.5.dylib` by leaf name and `/opt/homebrew/lib` is not on dyld's
    default search path.
 
-Running the built binary directly, without the runner, will fail on both counts.
+Running the built binary directly, without the runner, will fail on both counts
+— with one exception, and it is the one that matters for a console server:
+`cortex-krun-host` is signed as it is *linked*, by `scripts/macos-link.sh`,
+registered as the cargo linker for the same target. A console server is started
+by whoever wants a session — a test, an agent runtime, a CLI — and `cargo run`
+is not on that path, so the binary that calls `hv_vm_create` has to come out of
+a plain `cargo build` already entitled. Nothing else linked for this target is
+touched.
 
 ## Sessions — `patches/libkrun-85bed71-overlay-root.patch`
 
@@ -941,7 +948,7 @@ guest/                      C sources compiled and run inside the VM by the exam
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 patches/                    see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
-scripts/                    build and provisioning helpers, plus the cargo runner
+scripts/                    build and provisioning helpers, plus the cargo runner and linker
 data/                       untracked: rootfs, sessions, models, build outputs
 ```
 
@@ -951,5 +958,7 @@ scripts.
 `cargo build --workspace` is what puts all three binaries in one directory:
 `cortex-krun` finds the other two by looking beside itself, and a `-p cortex-krun`
 builds only the guest -- which is its build script's -- and not the boot. On macOS
-the boot needs the hypervisor entitlement, which `scripts/macos-run.sh` applies to
-it as well as to whatever `cargo run` was asked for.
+the boot needs the hypervisor entitlement, and `scripts/macos-link.sh` -- the cargo
+linker for `aarch64-apple-darwin` -- signs it as it is linked, so a plain build is
+enough. `scripts/macos-run.sh` signs whatever `cargo run` was asked for, which is
+what the examples that create a VM themselves need.

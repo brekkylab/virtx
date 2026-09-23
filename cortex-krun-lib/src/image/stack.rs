@@ -28,6 +28,26 @@
 //! [`link_counts`]: crate::image::tree::Tree::link_counts
 
 use crate::image::tree::{Directory, Node, Tree};
+use crate::image::{Digest, Layer};
+
+/// What a stack is called: the ordered layers it is made of, and so a name two images with
+/// the same layers share.
+///
+/// The order counts -- the same layers stacked the other way up are a different filesystem
+/// -- and the tag is its own, so that a change to how a disk is put together does not read
+/// an old one as a new one.
+///
+/// Here rather than where a disk is stitched, because two callers need it and they need
+/// the same answer: [`provision`](crate::image::provision) names the files it writes, and
+/// removing an image has to know which files are still somebody's.
+pub fn digest(layers: &[Layer]) -> Digest {
+    let mut text = String::from("cortex-krun/erofs-stack/1\n");
+    for layer in layers {
+        text.push_str(&layer.digest.to_string());
+        text.push('\n');
+    }
+    Digest::of(text)
+}
 
 /// The xattr a layer marks a directory with when it hides everything under it.
 const OPAQUE: &[u8] = b"trusted.overlay.opaque";

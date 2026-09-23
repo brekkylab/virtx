@@ -48,7 +48,7 @@ use cortex_krun::session::{Ext4, Network};
 use cortex_krun_host::{AGENT_PATH, agent_program};
 
 use super::machine::Machine;
-use super::{coded, pulled};
+use super::{SYNC, coded, pulled};
 
 /// How a build's name is spelled, so that a change to what goes into the digest cannot be
 /// read as an image somebody once built.
@@ -57,10 +57,6 @@ const RECIPE: &str = "cortex-krun/build/1\n";
 /// Where a built image is filed. Not a registry anybody can reach: an image made here has
 /// no home but this cache, and a name that looked pullable would be a lie.
 const REPOSITORY: &str = "localhost/cortex-krun-build";
-
-/// What the guest is asked to run before the machine is taken down -- see the guest's own
-/// note on it. The disk is read on this side, and a machine is stopped by killing it.
-const SYNC: &str = "sync";
 
 /// Build what `recipe` declares, and answer with the name the built image is filed under.
 ///

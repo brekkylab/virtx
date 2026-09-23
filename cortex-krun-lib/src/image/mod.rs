@@ -6,11 +6,24 @@
 //!
 //! # Operations
 //!
-//! This module supports `pull`, `provision`, and `commit`.
+//! This module supports `pull`, `provision`, `commit`, `list`, `tag`, `untag` and
+//! `remove`.
 //!
-//! - `pull``: downloads an image from a registry and stores it in the cache
-//! - `provision``: prepares a cached image so that it can be booted
-//! - `commit``: writes changes back into the local cache
+//! - `pull`: downloads an image from a registry and stores it in the cache
+//! - `provision`: prepares a cached image so that it can be booted
+//! - `commit`: writes changes back into the local cache
+//! - `list`: says what is in the cache and what it costs
+//! - `tag`: gives an image another name
+//! - `untag`: takes one name away, and nothing else
+//! - `remove`: takes every name away, and then what nothing else is using
+//! - `prune`: sweeps the whole cache of what no image names at all
+//!
+//! `untag` and `remove` are two commands rather than one because here they are two
+//! different acts. Docker has only `rmi`, which untags when an image has other names and
+//! deletes when it does not -- so what it does depends on state the caller did not name.
+//! In this cache a name is a key in `images.json` and the files under it are shared by
+//! digest, so dropping a name and reclaiming what nothing points at are separable, and
+//! separating them is what makes either one safe to run without checking first.
 //!
 //! See the individual function docs for details on each of them.
 //!
@@ -34,10 +47,13 @@ pub use digest::Digest;
 pub use disk::Disk;
 pub use erofs::Layout;
 pub use erofs::read as read_erofs;
+pub use ext4::from_blob as blob_to_ext4;
 pub use ext4::to_blob as ext4_to_blob;
 pub use image::{Image, ImageConfig, ImageManifest, ImageState};
-pub use layer::{Layer, blob_to_erofs, decompress_blob};
-pub use ops::{commit, provision, pull};
+pub use layer::{Layer, blob_to_erofs, compress_blob, decompress_blob};
+pub use ops::{
+    GRACE, Listed, Pruned, Removed, commit, list, provision, prune, pull, remove, tag, untag,
+};
 pub use registry::Registry;
 pub use tree::{Directory, Node, Tree};
 
@@ -90,6 +106,12 @@ pub enum Error {
 
     #[error("{0} is not in the cache; pull it first")]
     NotPulled(String),
+
+    /// A name the cache does not have, where pulling one is not the answer. Parted from
+    /// [`NotPulled`](Self::NotPulled) because that one is advice -- a boot can fetch what
+    /// it is missing, and tagging or removing something that is not here cannot.
+    #[error("nothing in the cache is named {0}")]
+    Unknown(String),
 
     #[error("{context}: {source}")]
     Io {

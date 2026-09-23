@@ -11,10 +11,11 @@ use std::pin::Pin;
 
 use cortex::console::stdio::StdioServer;
 use cortex::console::{
-    Call, Error, InitCall, InitResp, Message, MountSpec, Notification, Response, Server,
+    Call, Error, ExecCall, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec, Notification,
+    Response, Server, SnapshotResp,
 };
-use cortex_krun::session::Network;
-use cortex_krun_host::AGENT_PATH;
+use cortex_krun::session::{Ext4, Network};
+use cortex_krun_host::{AGENT_PATH, agent_program};
 
 use machine::{HOST_PORTS_ENV, NETWORK_ENV};
 
@@ -29,6 +30,23 @@ type Booted = Pin<Box<dyn Future<Output = anyhow::Result<(Machine, Option<String
 /// session.
 type Factory = Box<dyn Fn() -> Booted>;
 
+/// What a session is on this side, once a client has said what it is.
+///
+/// **The disk is the session**, and the other two are what anything but an `exec` needs to
+/// know about it: how to put a machine back over it, and which of the paths on it are this
+/// backend's own rather than the session's work.
+struct Session {
+    boot: Factory,
+    /// Where the session's writes are. Outlives every machine started on it, and is what a
+    /// `snapshot` reads.
+    upper: Ext4,
+    /// Guest paths a snapshot must not carry, as the guest spells them: the agent's share,
+    /// and every mount point the boot made to hang a tree on. Making a directory is a
+    /// write, and a write lands on the upper -- so without these a snapshot would claim
+    /// directories nobody asked for. See [`Ext4::to_blob`].
+    skip: Vec<String>,
+}
+
 /// Answer a console session on stdin and stdout, until the client ends it.
 pub async fn run() -> anyhow::Result<()> {
     // Taken for the life of the process: from here on stdout carries frames and nothing else,
@@ -38,8 +56,9 @@ pub async fn run() -> anyhow::Result<()> {
 
     sweep();
 
-    // What to boot, once a client has said what.
-    let mut factory: Option<Factory> = None;
+    // What the session is, once a client has said. None until then, which is what every
+    // other call is answered against.
+    let mut session: Option<Session> = None;
     // Whatever it holds is dropped on `stop` and on the way out of this function whichever
     // way it leaves, which takes the machine down every time.
     let mut machine: Option<Machine> = None;
@@ -49,7 +68,7 @@ pub async fn run() -> anyhow::Result<()> {
             Message::Request {
                 id,
                 call: Call::Init(_),
-            } if factory.is_some() => {
+            } if session.is_some() => {
                 server
                     .respond(
                         id,
@@ -66,8 +85,8 @@ pub async fn run() -> anyhow::Result<()> {
                 call: Call::Init(init),
             } => {
                 let answered = match start(init).await {
-                    Ok((boot, started, answer)) => {
-                        factory = Some(boot);
+                    Ok((told, started, answer)) => {
+                        session = Some(told);
                         machine = Some(started);
                         Response::Init(answer)
                     }
@@ -76,9 +95,23 @@ pub async fn run() -> anyhow::Result<()> {
                 server.respond(id, answered).await?;
             }
 
+            // **The one call the guest does not answer.** What a snapshot is here is the
+            // disk, and the disk is this end's -- one root up from the agent, which is why
+            // the agent refuses this and says so. See [`snapshot`].
+            Message::Request {
+                id,
+                call: Call::Snapshot(_),
+            } => {
+                let answered = match snapshot(&mut machine, &session).await {
+                    Ok(blob) => Response::Snapshot(SnapshotResp { blob }),
+                    Err(e) => Response::Error(refused(&e)),
+                };
+                server.respond(id, answered).await?;
+            }
+
             // Everything else is the guest's to answer.
             Message::Request { id, call } => {
-                let (answered, lost) = match up(&mut machine, &factory).await {
+                let (answered, lost) = match up(&mut machine, &session).await {
                     // Whatever the guest said, verbatim.
                     Ok(up) => match up.call(call).await {
                         Ok(answer) => (answer, false),
@@ -101,12 +134,22 @@ pub async fn run() -> anyhow::Result<()> {
             // Nothing answers this, so a failure is only said here -- the next call that
             // needs a machine tries again and tells whoever asked for it.
             Message::Notification(Notification::Start) => {
-                if let Err(e) = up(&mut machine, &factory).await {
+                if let Err(e) = up(&mut machine, &session).await {
                     eprintln!("{}: booting: {e:#}", env!("CARGO_BIN_NAME"));
                 }
             }
 
-            Message::Notification(Notification::Stop) => machine = None,
+            // **Not merely dropping the machine.** A machine is stopped by killing it, and
+            // a guest killed with writes still in its page cache never put them on the
+            // disk -- so a bare drop here would lose whatever the session wrote last, both
+            // to the `start` that carries it on and to the `snapshot` that reads it. So
+            // the guest is asked to flush first, and the disk is left saying it was left
+            // cleanly. Nothing answers a notification, so a failure is only said here.
+            Message::Notification(Notification::Stop) => {
+                if let Err(e) = quiesce(&mut machine, &session).await {
+                    eprintln!("{}: stopping: {e:#}", env!("CARGO_BIN_NAME"));
+                }
+            }
 
             // The session is over.
             Message::Notification(Notification::Quit) => break,
@@ -134,25 +177,12 @@ pub async fn run() -> anyhow::Result<()> {
 /// What comes back is how to start another -- a `stop` hands the machine back and the call
 /// after it takes a second one, on the same disk -- the one that is up, and what the client
 /// has to know about it.
-async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
+async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // How far this session may reach, and which doors on this machine it is granted.
     // Settled before anything is built, because it is the one part of an `init` a client can
     // be told it got wrong while the answer still costs it nothing: a reach decides whether a
     // virtio-net device is attached, and a device is attached before a kernel comes up.
     let (network, host_ports) = reach(&init)?;
-
-    // **A session here is its disk**, which is a file this server keeps rather than bytes a
-    // frame carries -- see the guest's answer to `snapshot`. A client handing one back is
-    // describing a session this backend has no way to start from.
-    if init.snapshot.is_some() {
-        return Err(coded(
-            Error::INVALID_PARAMS,
-            anyhow::anyhow!(
-                "this server keeps a session in its own disk image, so it has no way to \
-                 start from a layer somebody else's session wrote"
-            ),
-        ));
-    }
 
     let image = init.image.clone().ok_or_else(|| {
         coded(
@@ -189,17 +219,35 @@ async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
     // which every later path is a lie -- see [`mounts`].
     let mounts = mounts(&init)?;
 
+    // The disk the session's own writes go on, which outlives every machine started on it --
+    // that file *is* the session. See [`crate::home`].
+    //
+    // Made here and not in the boot, because it is made **once**: a client that handed back
+    // an earlier session's writes gets them written into this file now, and a `stop` and the
+    // boot after it must find what is there rather than lay the layer down a second time.
+    let disk = sessions()
+        .join(std::process::id().to_string())
+        .join("session.ext4");
+    let upper = seeded(&disk, init.snapshot.as_deref())?;
+
+    // What a snapshot must leave out: this backend's own share, and every directory the boot
+    // made to hang one of the client's trees on.
+    let skip = std::iter::once(AGENT_PATH.to_string())
+        .chain(mounts.iter().map(|mount| mount.at.clone()))
+        .collect();
+
     // Cloned per boot rather than borrowed, because what this closure is for is outliving the
     // machine it makes.
+    let at = upper.path.clone();
     let boot: Factory = Box::new(move || {
-        let (booting, mounts, host_ports) = (booting.clone(), mounts.clone(), host_ports.clone());
+        let (booting, mounts, host_ports, at) = (
+            booting.clone(),
+            mounts.clone(),
+            host_ports.clone(),
+            at.clone(),
+        );
         Box::pin(async move {
-            // The disk the session's own writes go on, which outlives every machine started
-            // on it -- that file *is* the session. See [`crate::home`].
-            let disk = sessions()
-                .join(std::process::id().to_string())
-                .join("session.ext4");
-            let mut machine = Machine::boot(&booting, &disk, &mounts, network, &host_ports).await?;
+            let mut machine = Machine::boot(&booting, &at, &mounts, network, &host_ports).await?;
             let cwd = configure(&mut machine, &mounts).await?;
             Ok((machine, cwd))
         })
@@ -209,7 +257,45 @@ async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
     // the trees went is not answered at all: the client named the path each one appears at,
     // so there is nothing this end knows about them that the client did not say.
     let (started, cwd) = boot().await.map_err(|e| coded(Error::BOOT_FAILED, e))?;
-    Ok((boot, started, InitResp { cwd }))
+    Ok((Session { boot, upper, skip }, started, InitResp { cwd }))
+}
+
+/// The disk this session runs on: a fresh one, with `snapshot` already written into it when
+/// the client handed one back.
+///
+/// **What an `init` carrying a snapshot means here.** The blob is an OCI layer archive --
+/// the files an earlier session wrote, and, for each one it deleted, the whiteout that says
+/// so -- which is exactly what this backend's upper layer holds, so there is nothing to
+/// translate beyond the compression a client may have put on it. Gzip is recognised by what
+/// it is rather than by anything the client says, because the protocol carries no media type
+/// and both forms are a layer.
+///
+/// A blob that is not a layer is [`INVALID_PARAMS`](Error::INVALID_PARAMS): what has to
+/// change is what was sent, not this server.
+fn seeded(disk: &Path, snapshot: Option<&[u8]>) -> anyhow::Result<Ext4> {
+    // A file here is an earlier `init`'s that did not finish -- this runs only while the
+    // session has not been told what it is, and the sweep took every other process's on the
+    // way in. So it is nobody's session, and a client retrying an `init` that failed at the
+    // boot must not be refused over what that attempt left.
+    let _ = std::fs::remove_file(disk);
+
+    let Some(blob) = snapshot else {
+        return Ok(Ext4::at(disk, Ext4::SIZE)?);
+    };
+
+    /// What a gzip stream starts with, which is the whole of how one is told from a tar.
+    const GZIP: &[u8] = &[0x1f, 0x8b];
+
+    let mut tar = Vec::new();
+    cortex_krun::image::decompress_blob(
+        if blob.starts_with(GZIP) { "gzip" } else { "" },
+        blob,
+        &mut tar,
+    )
+    .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::Error::new(e)))?;
+
+    Ext4::seeded(disk, Ext4::SIZE, &mut std::io::Cursor::new(tar))
+        .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::Error::new(e)))
 }
 
 /// How much of the network this session gets, and which ports on this machine.
@@ -304,10 +390,10 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
 /// The machine that is up, booting one if a `stop` took the last.
 async fn up<'a>(
     machine: &'a mut Option<Machine>,
-    factory: &Option<Factory>,
+    session: &Option<Session>,
 ) -> anyhow::Result<&'a mut Machine> {
     if machine.is_none() {
-        let boot = factory.as_ref().ok_or_else(|| {
+        let boot = session.as_ref().map(|told| &told.boot).ok_or_else(|| {
             coded(
                 Error::INVALID_REQUEST,
                 anyhow::anyhow!("this session has not been told what it is"),
@@ -319,6 +405,126 @@ async fn up<'a>(
         *machine = Some(started);
     }
     Ok(machine.as_mut().expect("just booted"))
+}
+
+/// What the guest is asked to run before a machine is taken down -- see the guest's own note
+/// on it. The disk is read on this side, and a machine is stopped by killing it.
+pub(super) const SYNC: &str = "sync";
+
+/// Take the machine down, having asked the guest to put what it wrote on the disk first.
+///
+/// **The two halves of stopping, and neither is optional.** A machine is stopped by killing
+/// it, and a guest killed with writes still in its page cache never put them on the disk --
+/// so the guest is asked to flush before it goes. And the disk was never unmounted, because
+/// it is the root the guest pivoted onto, so its superblock is still saying "mounted" about
+/// a filesystem nothing is mounting; [`Ext4::settled`] is this end saying otherwise, which
+/// the flush is what makes true.
+///
+/// Both are what makes the disk of a stopped session readable -- by the boot that carries it
+/// on, and by the [`snapshot`] that reads it out.
+///
+/// Called with no machine up as well, because a stop that failed part-way leaves one down
+/// and unsettled, and the second call is what finishes it. Settling twice is settling once.
+async fn quiesce(machine: &mut Option<Machine>, session: &Option<Session>) -> anyhow::Result<()> {
+    let Some(told) = session else {
+        // Nothing has been told what it is, so there is no disk and nothing was written to
+        // it. Whatever is here goes down all the same.
+        *machine = None;
+        return Ok(());
+    };
+
+    if let Some(up) = machine.as_mut() {
+        let flushed = up
+            .call(Call::Exec(ExecCall {
+                cmd: vec![agent_program(), SYNC.into()],
+                timeout_ms: None,
+            }))
+            .await;
+
+        // Down whatever the flush said, and before it is read: a machine that would not
+        // answer this is not one to keep, and the disk is not to be read with it alive.
+        *machine = None;
+
+        match flushed? {
+            Response::Exec(done) if done.code == 0 => {}
+            Response::Exec(done) => {
+                anyhow::bail!("flushing the session's disk exited {}", done.code)
+            }
+            Response::Error(e) => anyhow::bail!("flushing the session's disk: {}", e.message),
+            other => anyhow::bail!("the guest answered a flush with {other:?}"),
+        }
+    }
+
+    Ok(told.upper.settled()?)
+}
+
+/// What this session has written, as the layer a client hands back to `init`.
+///
+/// **The machine goes down to answer this, every time.** What a snapshot is here is the
+/// disk, and what is on the disk is only the whole of what the session wrote once the guest
+/// has flushed and gone -- see [`quiesce`]. The call after this one boots again over the
+/// same file, which is what `stop` and `start` already do and costs a boot; a client that
+/// sent `stop` first pays nothing, there being no machine to take down.
+///
+/// An empty layer is an answer and not a failure: a session that wrote nothing has written
+/// nothing, and an archive saying so is what that is. A session that has not been told what
+/// it *is* is refused, because then there is no disk to have written on.
+///
+/// Gzipped, which is the form a layer travels in everywhere else, and the form the
+/// compression a client may have sent one under is read as.
+async fn snapshot(
+    machine: &mut Option<Machine>,
+    session: &Option<Session>,
+) -> anyhow::Result<Vec<u8>> {
+    let told = session.as_ref().ok_or_else(|| {
+        coded(
+            Error::INVALID_REQUEST,
+            anyhow::anyhow!(
+                "this session has not been told what it is, so there is no disk it could \
+                 have written on"
+            ),
+        )
+    })?;
+
+    quiesce(machine, session).await?;
+
+    // Onto a file beside the disk and not into memory, as a build's is: what comes off the
+    // upper is the session's whole work uncompressed, which is bounded by how large that
+    // disk may grow and not by what one frame carries. Only the gzip is held, and that is
+    // the thing about to be answered with anyway.
+    let tar = told.upper.path.with_extension("snapshot.tar");
+    let blob = layer(&told.upper, &told.skip, &tar);
+    let _ = std::fs::remove_file(&tar);
+    let blob = blob?;
+
+    // A result travels in one frame, and half a layer is not a smaller session's work but a
+    // filesystem that cannot be read -- so this is said rather than shortened. The reserve
+    // is for the rest of the frame: the method, the id and the keys around the blob.
+    const RESERVE: usize = 64 * 1024;
+    anyhow::ensure!(
+        blob.len() + RESERVE <= MAX_PAYLOAD,
+        "this session has written {} bytes, which is more than the {MAX_PAYLOAD} one frame \
+         carries -- and a layer cut in half is not a layer",
+        blob.len()
+    );
+
+    Ok(blob)
+}
+
+/// Read `upper` out onto `at`, and answer with it gzipped.
+///
+/// Its own function so that the file it writes is removed however this leaves -- the caller
+/// does that, and cannot if the failure is a `?` in the middle of it.
+fn layer(upper: &Ext4, skip: &[String], at: &Path) -> anyhow::Result<Vec<u8>> {
+    let skip: Vec<&str> = skip.iter().map(String::as_str).collect();
+
+    let written = std::fs::File::create(at)?;
+    upper.to_blob(&skip, &written)?;
+    drop(written);
+
+    let mut blob = Vec::new();
+    cortex_krun::image::compress_blob(std::fs::File::open(at)?, &mut blob)?;
+    Ok(blob)
 }
 
 /// Make sure `image` is in the cache, pulling it if it is not.

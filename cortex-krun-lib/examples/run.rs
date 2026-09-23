@@ -1,11 +1,16 @@
-//! Pull an OCI image and run a command in it, on a writable layer of its own.
+//! Run a command in an OCI image, on a writable layer of its own.
 //!
 //!   cargo run --example run
 //!   cargo run --example run -- alpine:3.21 'uname -srm'
 //!
-//! The first run pulls the image and stitches it into a disk; later ones find both in
-//! the cache. The session's writes go to `data/sessions/<image>.ext4`, so a second run
-//! sees what the first one did:
+//! The image is taken from the cache, and pulled only if it is not there -- so this runs
+//! an image a registry never served just as well as one it did:
+//!
+//!   cargo run --example run -- localhost/cortex-krun-build:<digest> 'jq --version'
+//!
+//! The first run of something not yet here pulls it and stitches it into a disk; later
+//! ones find both in the cache. The session's writes go to `data/sessions/<image>.ext4`,
+//! so a second run sees what the first one did:
 //!
 //!   cargo run --example run -- alpine:3.21 'echo hello > /root/note'
 //!   cargo run --example run -- alpine:3.21 'cat /root/note'
@@ -53,12 +58,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args.next();
     let share = args.next();
 
-    // The pull is the only async thing here, and the only thing that touches the
-    // network. A machine is entered on this thread, so the runtime is over before
-    // anything of libkrun's starts.
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(image::pull(reference.as_str(), None, None))?;
-    drop(runtime);
+    // **Provision first, and pull only if that says the image was never here.** The
+    // cache holds images a registry never served -- what a build left behind is one, and
+    // so is anything `commit` filed -- and reaching for a registry first would ask
+    // `localhost` for those and fail on an image that is sitting in the cache.
+    //
+    // `provision` is the question and the answer at once: it stitches the layers into the
+    // disk a boot attaches, and the one failure that means "nobody pulled this" is the one
+    // worth a round trip. Anything else it says is about this machine and is reported.
+    //
+    // The pull is the only async thing here, and the only thing that touches the network.
+    // A machine is entered on this thread, so the runtime is over before anything of
+    // libkrun's starts.
+    match image::provision(reference.as_str(), None) {
+        // Already here, and now stitched. The session below asks for the same disk and
+        // finds it made.
+        Ok(_) => {}
+        Err(image::Error::NotPulled(_)) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(image::pull(reference.as_str(), None, None))?;
+            drop(runtime);
+        }
+        // Anything else is about this machine rather than about the image being absent,
+        // and a pull would not answer it.
+        Err(e) => return Err(e.into()),
+    }
 
     // One session per image, kept between runs -- named after the image with the
     // characters a path cannot hold replaced, since a reference holds `/` and `:`.

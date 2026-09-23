@@ -44,7 +44,7 @@ use super::{Error, Result};
 
 /// The block size ext4 is written with. The only one [`arcbox_ext4`] accepts, and the
 /// one the guest kernel's page size makes natural anyway.
-const BLOCK_SIZE: u32 = 4096;
+pub(crate) const BLOCK_SIZE: u32 = 4096;
 
 /// A session's writable layer: one ext4 image, on the host, holding everything the
 /// session writes and nothing the image shipped.
@@ -204,6 +204,59 @@ impl Ext4 {
         )?)
     }
 
+    /// The upper layer at `path`, formatted with `tar` already written into it.
+    ///
+    /// **What a session that was handed its own writes back starts from.** `tar` is an
+    /// uncompressed OCI layer archive -- what [`to_blob`](Ext4::to_blob) wrote out of some
+    /// earlier session, handed back by the client that kept it -- and what comes back is
+    /// a disk holding exactly that, ready for a guest to stack an image under.
+    ///
+    /// It is read from its start and read twice, so it has to be the whole archive and it
+    /// has to be seekable.
+    ///
+    /// **A path that is already there is refused**, which is the one way this differs from
+    /// [`at`](Ext4::at). That one carries an existing disk on, because a session that comes
+    /// back to the same file is the same session. Seeding is the other thing: a layer is
+    /// what a session *starts* from, and writing one over a disk that already holds writes
+    /// would be two sessions' work in one filesystem with no way to tell which said what.
+    pub fn seeded(
+        path: impl Into<PathBuf>,
+        size: u64,
+        tar: &mut (impl std::io::Read + std::io::Seek),
+    ) -> Result<Ext4> {
+        let path = path.into();
+
+        match path.try_exists() {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(Error::io(
+                    format!("seeding {}", path.display()),
+                    std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "a layer is what a session starts from, and there is a disk here \
+                         already holding one session's writes",
+                    ),
+                ));
+            }
+            Err(e) => return Err(Error::io(format!("looking for {}", path.display()), e)),
+        }
+
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::io(format!("creating {}", parent.display()), e))?;
+        }
+
+        crate::image::blob_to_ext4(&path, Self::UPPER, size, tar)?;
+        Ok(Ext4 {
+            path,
+            size,
+            scratch: false,
+        })
+    }
+
     /// An upper layer for a session that named none: a fresh ext4 under the host's
     /// temporary directory, which nothing is going to find and nothing is going to carry
     /// on from.
@@ -287,9 +340,19 @@ const ERRORS: u16 = 0b10;
 const CREATOR_OS: u64 = 0x400 + 0x48;
 const LINUX: u32 = 0;
 
-/// Where an inode keeps its flags, and the one that has to come off.
+/// Where an inode keeps its flags, and the two that are acted on here: one that has to
+/// come off everything, and one that has to come off a node with no blocks at all.
 const INODE_FLAGS: u64 = 0x20;
 const HUGE_FILE: u32 = 0x4_0000;
+const EXTENTS: u32 = 0x8_0000;
+
+/// Where an inode's mode is, which is its first field.
+const INODE_MODE: u64 = 0x00;
+
+/// Where the sixty bytes an inode maps its blocks with are -- and, for a node that has no
+/// blocks, where the number of the device it is goes instead.
+const INODE_BLOCK: u64 = 0x28;
+const INODE_BLOCK_LEN: usize = 60;
 
 /// Correct the two things [`arcbox_ext4`] writes that describe this filesystem as
 /// something it is not.
@@ -377,6 +440,129 @@ pub(crate) fn corrected(path: &Path) -> Result<()> {
 
 /// The inode every ext4 filesystem's root directory is.
 const ROOT_INODE: u32 = 2;
+
+/// A node [`arcbox_ext4`]'s formatter has no way to write, as what it is and where it went.
+///
+/// Written as an empty regular file and named here, for [`special`] to turn into what it
+/// actually is.
+pub(crate) struct Special {
+    /// Where it is on the filesystem, spelled the way the formatter's own tree spells one
+    /// -- no leading separator, as in `upper/etc/gone`.
+    pub path: String,
+    /// The whole of `i_mode`, type bits included. What makes the inode a device or a pipe
+    /// rather than the empty file it was written as.
+    pub mode: u16,
+    /// The device it is, for a node that is one. Both zero for a pipe, and both zero for
+    /// the one device that means a deletion.
+    pub major: u32,
+    pub minor: u32,
+}
+
+/// Turn each of `nodes` from the empty file it was written as into the device or pipe it is.
+///
+/// **The one thing a layer holds that [`arcbox_ext4`] will not write.** Its formatter
+/// takes a directory, a regular file and a symlink, and answers `UnsupportedFiletype` to
+/// anything else -- which is understandable for a crate that writes OCI images, and
+/// impossible for one that writes an *upper* layer, where a deletion is a character device
+/// numbered 0:0 and nothing else says one.
+///
+/// So the inode is made as an empty file, with its ownership, its timestamps and its
+/// extended attributes already right, and only the three things that cannot be asked for
+/// are written here: the type bits of the mode, the flag that says the file's blocks are
+/// mapped by an extent tree -- which a node with no blocks must not carry -- and the
+/// number of the device, which lives in the sixty bytes an ordinary file would map its
+/// blocks with.
+///
+/// Called after [`corrected`], which walks every inode there is; this one only ever
+/// touches inodes that one has already been over.
+pub(crate) fn special(disk: &Path, nodes: &[Special]) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if nodes.is_empty() {
+        return Ok(());
+    }
+
+    let io = |context: String| move |e: std::io::Error| Error::io(context.clone(), e);
+    let unreadable = |e: arcbox_ext4::error::ReadError| {
+        Error::io(
+            format!("reading {}", disk.display()),
+            std::io::Error::other(e),
+        )
+    };
+
+    // Every one of them looked up before anything is written, because the reader holds the
+    // file open and what follows writes to it.
+    let mut reader = arcbox_ext4::Reader::new(disk).map_err(unreadable)?;
+    let sb = reader.superblock().clone();
+    let block_size = 1024u64 << sb.log_block_size;
+
+    let mut at = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let found = reader.tree().lookup(Path::new(&node.path)).ok_or_else(|| {
+            Error::io(
+                format!("reading {}", disk.display()),
+                std::io::Error::other(format!(
+                    "{} is not on it, having just been written to it",
+                    node.path
+                )),
+            )
+        })?;
+        let ino = reader.tree().node(found).inode;
+        let group = (ino - 1) / sb.inodes_per_group;
+        let within = u64::from((ino - 1) % sb.inodes_per_group);
+        let table = u64::from(reader.get_group_descriptor(group).map_err(unreadable)?.inode_table_lo);
+        at.push(table * block_size + within * u64::from(sb.inode_size));
+    }
+    drop(reader);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(disk)
+        .map_err(io(format!("opening {}", disk.display())))?;
+
+    let wrote = || format!("writing an inode of {}", disk.display());
+
+    for (node, offset) in nodes.iter().zip(at) {
+        file.seek(SeekFrom::Start(offset + INODE_MODE))
+            .and_then(|_| file.write_all(&node.mode.to_le_bytes()))
+            .map_err(io(wrote()))?;
+
+        let mut flags = [0u8; 4];
+        (|| {
+            file.seek(SeekFrom::Start(offset + INODE_FLAGS))?;
+            file.read_exact(&mut flags)
+        })()
+        .map_err(io(format!("reading an inode of {}", disk.display())))?;
+        let cleared = u32::from_le_bytes(flags) & !EXTENTS;
+        file.seek(SeekFrom::Start(offset + INODE_FLAGS))
+            .and_then(|_| file.write_all(&cleared.to_le_bytes()))
+            .map_err(io(wrote()))?;
+
+        let mut block = [0u8; INODE_BLOCK_LEN];
+        block[..4].copy_from_slice(&device(node.major, node.minor).0.to_le_bytes());
+        block[4..8].copy_from_slice(&device(node.major, node.minor).1.to_le_bytes());
+        file.seek(SeekFrom::Start(offset + INODE_BLOCK))
+            .and_then(|_| file.write_all(&block))
+            .map_err(io(wrote()))?;
+    }
+
+    file.sync_all().map_err(io(wrote()))
+}
+
+/// A device number, in the two spellings an inode has for one.
+///
+/// A device small enough to say the old way is said the old way, in the first of the
+/// sixty bytes, because that is the one a kernel reads first and the only one anything
+/// this writes has ever needed -- a whiteout is 0:0. The second is where the wider form
+/// goes, for a node a session made with `mknod` of something large.
+fn device(major: u32, minor: u32) -> (u32, u32) {
+    if major < 256 && minor < 256 {
+        ((major << 8) | minor, 0)
+    } else {
+        (0, (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
+    }
+}
 
 
 #[cfg(test)]
@@ -481,5 +667,89 @@ mod tests {
 
         Ext4::at(&path, 64 << 20).unwrap();
         assert!(path.is_file());
+    }
+
+    /// **The whole of what a client handing a session back and forth is.** A layer goes on
+    /// a disk gzipped, the disk is read back out, and what comes off it is the layer that
+    /// went on -- which is the round trip a `snapshot` answered and handed to the next
+    /// `init` makes, minus the wire between them.
+    #[test]
+    fn a_session_handed_back_is_the_session_that_was_handed_out() {
+        use std::io::Cursor;
+
+        let scratch = Scratch::new("handed");
+
+        // What a snapshot of some earlier session came to: a file it wrote, and the
+        // whiteout for one it deleted.
+        let mut archive = tar::Builder::new(Vec::new());
+        for (path, body) in [("home/user/notes", &b"kept\n"[..]), ("etc/.wh.gone", b"")] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(body.len() as u64);
+            header.set_mtime(1_700_000_000);
+            archive
+                .append_data(&mut header, path, Cursor::new(body.to_vec()))
+                .unwrap();
+        }
+        let sent = archive.into_inner().unwrap();
+
+        // Down the wire and back: gzipped by the server answering `snapshot`, and read as
+        // whatever it arrives as by the one taking an `init`.
+        let mut carried = Vec::new();
+        crate::image::compress_blob(&sent[..], &mut carried).unwrap();
+        let mut tar = Vec::new();
+        crate::image::decompress_blob("gzip", &carried[..], &mut tar).unwrap();
+        assert_eq!(tar, sent, "the layer did not survive being carried");
+
+        let upper = Ext4::seeded(
+            scratch.0.join("session.ext4"),
+            64 << 20,
+            &mut Cursor::new(tar),
+        )
+        .unwrap();
+
+        // No `settled` first: nothing has mounted this, so it is still saying it was left
+        // cleanly -- which is the one thing a disk fresh off a format can say honestly.
+        let mut back = Vec::new();
+        upper.to_blob(&[], &mut back).unwrap();
+
+        // By what it says and not byte for byte, because the two are not the same archive:
+        // a tar may leave the directories above an entry out and a filesystem cannot, so
+        // what comes off the disk names `home/` and `home/user/` as well. What has to
+        // survive is every statement the layer made.
+        let tree = crate::image::ingest(&mut Cursor::new(&back)).unwrap();
+        assert!(
+            matches!(
+                tree.get(b"home/user/notes"),
+                Some(crate::image::Node::File { .. })
+            ),
+            "the file the session wrote did not come back"
+        );
+        assert!(
+            matches!(
+                tree.get(b"etc/gone"),
+                Some(crate::image::Node::Device {
+                    block: false,
+                    major: 0,
+                    minor: 0,
+                    ..
+                })
+            ),
+            "the file the session deleted came back as something else"
+        );
+
+        // And the trip is a fixed point: what came off the disk, put on another one, comes
+        // off it again unchanged. A client carrying a session for as long as it likes is
+        // making this trip over and over.
+        let again = Ext4::seeded(
+            scratch.0.join("again.ext4"),
+            64 << 20,
+            &mut Cursor::new(back.clone()),
+        )
+        .unwrap();
+        let mut twice = Vec::new();
+        again.to_blob(&[], &mut twice).unwrap();
+        assert_eq!(twice, back, "carrying a session again changed it");
     }
 }

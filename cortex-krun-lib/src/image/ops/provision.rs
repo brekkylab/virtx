@@ -100,20 +100,9 @@ fn stitch(image: &Image, cache: &Cache) -> Result<Disk> {
         ));
     }
 
-    // What the disk is called: the ordered layers it is made of, and so a name two
-    // images with the same layers share. The order counts -- the same layers stacked
-    // the other way up are a different filesystem -- and the tag is its own, so that a
-    // change to how a disk is put together does not read an old one as a new one. Not
-    // kept on the `Disk`: a boot has no use for it, and it is in the cache for
-    // anything that does.
-    let stack = {
-        let mut text = String::from("cortex-krun/erofs-stack/1\n");
-        for layer in &image.layers {
-            text.push_str(&layer.digest.to_string());
-            text.push('\n');
-        }
-        Digest::of(text)
-    };
+    // What the disk is called -- see [`stack::digest`]. Not kept on the `Disk`: a boot has
+    // no use for it, and it is in the cache for anything that does.
+    let stack = stack::digest(&image.layers);
     let disk = Disk {
         path: cache.disk_path(&stack),
         config: image.config.clone(),

@@ -58,6 +58,26 @@ pub fn decompress_blob(media_type: &str, mut blob: impl Read, out: impl Write) -
     Ok(sink.digest())
 }
 
+/// Write the uncompressed layer archive `blob` onto `out` gzipped.
+///
+/// The other direction of [`decompress_blob`], and the one a layer leaves here by: a
+/// registry serves them compressed and so does this, because what a layer costs to carry is
+/// the one thing about it a caller cannot do anything about. Gzip and not zstd, for the same
+/// reason the reader takes gzip and refuses zstd -- it is what everything that reads one of
+/// these already has.
+///
+/// Default compression, which is what "gzip" means to everyone who has not said otherwise.
+/// A layer is mostly a filesystem's text and metadata, and the levels either side of the
+/// default trade a great deal of time for very little of it.
+pub fn compress_blob(blob: impl Read, out: impl Write) -> Result<()> {
+    let mut gzip = flate2::write::GzEncoder::new(out, flate2::Compression::default());
+    let mut blob = blob;
+    std::io::copy(&mut blob, &mut gzip).map_err(|e| Error::io("compressing a layer blob", e))?;
+    gzip.finish()
+        .map_err(|e| Error::io("compressing a layer blob", e))?;
+    Ok(())
+}
+
 /// Read the uncompressed layer archive `tar` and write it to `out` as an EROFS image.
 ///
 /// `tar` is read from its start and read twice, so it has to be the whole archive and

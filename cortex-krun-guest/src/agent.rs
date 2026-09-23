@@ -198,24 +198,24 @@ pub async fn serve(port: std::fs::File) -> anyhow::Result<()> {
                     server.respond(id, answered).await?;
                 }
 
-                // **A session here is its disk, and a disk is not a thing a frame can carry.**
+                // **The one call that is not this end's to answer, and never reaches it.**
                 //
-                // On a backend that stacks an overlay itself, a snapshot is the upperdir as a
-                // tar -- the files the session wrote and the whiteouts for what it deleted --
-                // and that is small enough to answer with. Here the stacking is libkrun's
-                // init, one root up from this process: the upperdir is on the ext4 the server
-                // attached and is under no path this agent can reach once the pivot is done.
+                // A snapshot is the upperdir as a tar -- the files the session wrote and the
+                // whiteouts for what it deleted. On a backend that stacks the overlay itself
+                // that is a directory this process could walk. Here the stacking is libkrun's
+                // init, one root up: the upperdir is on the ext4 the server attached, and once
+                // the pivot is done it is under no path this agent can reach.
                 //
-                // What takes its place is the file itself. That ext4 is the server's, it
-                // outlives every machine started on it, and keeping it is what carries a
-                // session on -- so a client that wants this session again asks the server for
-                // it rather than carrying its bytes there and back.
+                // So the server answers it, off the disk, with the machine stopped -- which is
+                // the only state that file is the whole of what the session wrote. It never
+                // forwards one, and this is what anything talking to the agent directly is
+                // told.
                 Call::Snapshot(_) => {
                     let answered = Response::Error(refused(
                         Error::METHOD_NOT_FOUND,
-                        "this backend keeps a session in its own disk image on the host, \
-                         which is not something a frame can carry -- ask the server for the \
-                         session again instead",
+                        "this backend keeps a session on a disk the host attached, which is \
+                         one root up from this agent and not something it can read -- the \
+                         server answers a snapshot off that disk instead",
                     ));
                     server.respond(id, answered).await?;
                 }

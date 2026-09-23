@@ -43,13 +43,16 @@
 //! them; see [`export`].
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use arcbox_ext4::{FileTimestamps, Formatter};
 use ext4::{Checksums, Enhanced, Options, SuperBlock};
 
 use crate::image::layer::Hashing;
+use crate::image::tree::{Directory, InodeId, Meta, Node};
 use crate::image::{Digest, Error, Result};
+use crate::session::ext4::Special;
 
 /// The AUFS marker for a path a layer deletes. The other half of
 /// [`blob`](crate::image::blob)'s constant of the same name.
@@ -418,6 +421,243 @@ fn wrote(path: &str, e: std::io::Error) -> Error {
     Error::io(format!("writing {path} into a layer archive"), e)
 }
 
+/// Write the layer archive `tar` onto a **fresh** ext4 image at `disk`, with what the layer
+/// holds under `to`.
+///
+/// The inverse of [`to_blob`], and the other half of what a session that is handed its
+/// upper layer needs: that one reads a disk out as a layer, this one writes a layer in as a
+/// disk. The two markers are translated back the way they came --
+/// [`ingest`](crate::image::ingest) reads `.wh.<name>` as the character device numbered 0:0
+/// that overlayfs deletes with, and `.wh..wh..opq` as the xattr it empties a directory with
+/// -- so a layer that went out through `to_blob` comes back as the filesystem it was read
+/// from.
+///
+/// `tar` is read from its start and read twice -- once for the shape of the filesystem and
+/// once for the bytes -- so it has to be the whole archive and it has to be seekable.
+///
+/// `size` is the ceiling the filesystem is formatted to, as in
+/// [`Ext4::at`](crate::session::Ext4::at). It bounds what the guest may go on to write and
+/// not what the layer costs: the file is sparse.
+///
+/// **A fresh image and never an existing one.** [`arcbox_ext4`]'s formatter writes a
+/// filesystem in one pass and has no way to open one, so this is what a session *starts*
+/// from rather than something applied to a session already under way. A failure leaves no
+/// file behind, for the same reason formatting an empty one does: the run after it would
+/// find a path that exists, carry on from it, and mount garbage.
+pub fn from_blob<D: Read + Seek>(disk: &Path, to: &str, size: u64, tar: &mut D) -> Result<()> {
+    let written = seed(disk, to, size, tar);
+    if written.is_err() {
+        let _ = std::fs::remove_file(disk);
+    }
+    written
+}
+
+fn seed<D: Read + Seek>(disk: &Path, to: &str, size: u64, tar: &mut D) -> Result<()> {
+    tar.rewind()
+        .map_err(|e| Error::io("rewinding a layer archive", e))?;
+    let tree = crate::image::ingest(&mut *tar)?;
+
+    let mut fs = Formatter::new(disk, crate::session::ext4::BLOCK_SIZE, size)
+        .map_err(|e| failed(disk, "formatting", e))?;
+
+    // Every path this writes hangs off it, and the layer's own root is what says what it
+    // is -- its mode and its ownership are the archive's `./`, when the archive named one.
+    let to = to.trim_end_matches('/');
+    directory(&mut fs, disk, to, &tree.root.meta)?;
+
+    // The first name each inode was written under, so that a second one is a link and not
+    // a copy; and the nodes the formatter would not take, for `special` to finish.
+    let mut linked: HashMap<InodeId, String> = HashMap::new();
+    let mut deferred: Vec<Special> = Vec::new();
+    plant(&mut fs, disk, &tree.root, to, tar, &mut linked, &mut deferred)?;
+
+    fs.close().map_err(|e| failed(disk, "formatting", e))?;
+
+    // In this order and not the other: the first walks every inode on the image, and the
+    // second only ever touches ones it has already been over.
+    let fixed = |e: crate::session::Error| Error::Ext4(format!("{e}"));
+    crate::session::ext4::corrected(disk).map_err(fixed)?;
+    crate::session::ext4::special(disk, &deferred).map_err(fixed)
+}
+
+/// Write one directory's entries onto the image, and recurse into the directories among
+/// them.
+///
+/// `at` is where this directory is on the image, which for the layer's own root is `to`.
+fn plant<D: Read + Seek>(
+    fs: &mut Formatter,
+    disk: &Path,
+    dir: &Directory,
+    at: &str,
+    tar: &mut D,
+    linked: &mut HashMap<InodeId, String>,
+    deferred: &mut Vec<Special>,
+) -> Result<()> {
+    for (name, node) in &dir.entries {
+        // A path on the image is a `&str`, and a name in a tar is bytes. Refused rather
+        // than made printable: a lossy name is a file under a name nobody asked for, and
+        // the session that comes back would not hold what the layer said.
+        let name = std::str::from_utf8(name).map_err(|_| {
+            Error::Ext4(format!(
+                "{:?} is not a name this can write onto an ext4 image",
+                String::from_utf8_lossy(name)
+            ))
+        })?;
+        let path = format!("{at}/{name}");
+        let meta = node.meta();
+
+        match node {
+            Node::Directory(child) => {
+                directory(fs, disk, &path, &child.meta)?;
+                plant(fs, disk, child, &path, tar, linked, deferred)?;
+            }
+
+            Node::File { id, data, .. } => {
+                // A second path onto an inode already written is a hard link, and is
+                // written as one: two copies would be two files on the disk, and the layer
+                // said they are one.
+                if let Some(first) = linked.get(id) {
+                    fs.link(&path, first)
+                        .map_err(|e| failed(disk, &format!("linking {path} onto"), e))?;
+                    continue;
+                }
+
+                // Streamed out of the archive rather than held: a layer may carry a file
+                // larger than this process wants to keep.
+                tar.seek(SeekFrom::Start(data.offset))
+                    .map_err(|e| Error::io(format!("reading {path} out of a layer archive"), e))?;
+                let mut contents = (&mut *tar).take(data.len);
+                fs.create(
+                    &path,
+                    node.mode(),
+                    None,
+                    Some(stamps(meta.mtime)),
+                    Some(&mut contents),
+                    Some(meta.uid),
+                    Some(meta.gid),
+                    xattrs(meta)?.as_ref(),
+                )
+                .map_err(|e| failed(disk, &format!("writing {path} onto"), e))?;
+
+                linked.insert(*id, path);
+            }
+
+            Node::Symlink { target, .. } => {
+                let target = std::str::from_utf8(target).map_err(|_| {
+                    Error::Ext4(format!(
+                        "{path} points at {:?}, which is not a target this can write",
+                        String::from_utf8_lossy(target)
+                    ))
+                })?;
+                fs.create(
+                    &path,
+                    node.mode(),
+                    Some(target),
+                    Some(stamps(meta.mtime)),
+                    None,
+                    Some(meta.uid),
+                    Some(meta.gid),
+                    xattrs(meta)?.as_ref(),
+                )
+                .map_err(|e| failed(disk, &format!("writing {path} onto"), e))?;
+            }
+
+            // **The two the formatter will not write.** Made as the empty file it can
+            // write -- which is what one of these is, every field but the mode and the
+            // sixty bytes that hold a device number -- and named for [`special`] to
+            // finish once the image is closed. A whiteout is one of these, so this is not
+            // a corner: it is every deletion the layer carries.
+            Node::Device { .. } | Node::Fifo(_) => {
+                fs.create(
+                    &path,
+                    crate::image::tree::S_IFREG,
+                    None,
+                    Some(stamps(meta.mtime)),
+                    None,
+                    Some(meta.uid),
+                    Some(meta.gid),
+                    xattrs(meta)?.as_ref(),
+                )
+                .map_err(|e| failed(disk, &format!("writing {path} onto"), e))?;
+
+                let (major, minor) = match node {
+                    Node::Device { major, minor, .. } => (*major, *minor),
+                    // A pipe is no device, and says so with the number that is not one.
+                    _ => (0, 0),
+                };
+                deferred.push(Special {
+                    path: path.trim_start_matches('/').to_string(),
+                    mode: node.mode(),
+                    major,
+                    minor,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// One directory, with what the layer said about it.
+fn directory(fs: &mut Formatter, disk: &Path, at: &str, meta: &Meta) -> Result<()> {
+    fs.create(
+        at,
+        crate::image::tree::S_IFDIR | (meta.mode & 0o7777),
+        None,
+        Some(stamps(meta.mtime)),
+        None,
+        Some(meta.uid),
+        Some(meta.gid),
+        xattrs(meta)?.as_ref(),
+    )
+    .map_err(|e| failed(disk, &format!("writing {at} onto"), e))
+}
+
+/// A node's extended attributes, in the shape the formatter takes them.
+///
+/// `None` rather than an empty map for a node with none, because the formatter writes a
+/// sentinel attribute beside whatever it is given and an empty map would put one on every
+/// inode on the image.
+fn xattrs(meta: &Meta) -> Result<Option<HashMap<String, Vec<u8>>>> {
+    if meta.xattrs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut named = HashMap::with_capacity(meta.xattrs.len());
+    for xattr in &meta.xattrs {
+        let name = std::str::from_utf8(&xattr.name).map_err(|_| {
+            Error::Ext4(format!(
+                "{:?} is not the name of an extended attribute",
+                String::from_utf8_lossy(&xattr.name)
+            ))
+        })?;
+        named.insert(name.to_string(), xattr.value.clone());
+    }
+    Ok(Some(named))
+}
+
+/// What the layer said the file was last written at, as the four timestamps an inode has.
+///
+/// All four and not the one, because the other three would otherwise be read off this
+/// host's clock -- and then the same layer would make a different image every time it was
+/// written, which is the one thing a layer's digest promises it does not.
+///
+/// A time before the epoch is not one a tar carries; what arrives as one is written as the
+/// epoch rather than as a number that would read as the far future.
+fn stamps(mtime: i64) -> FileTimestamps {
+    let seconds = u32::try_from(mtime).unwrap_or(0);
+    FileTimestamps {
+        access_lo: seconds,
+        access_hi: 0,
+        modification_lo: seconds,
+        modification_hi: 0,
+        creation_lo: seconds,
+        creation_hi: 0,
+        now_lo: seconds,
+        now_hi: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -653,5 +893,113 @@ mod tests {
         let (_, first) = exported(&disk);
         let (_, again) = exported(&disk);
         assert_eq!(first, again);
+    }
+
+    /// **The whole of what seeding is for.** A layer written onto a disk and read back off
+    /// it is the same layer, byte for byte -- which is what a client handing a session its
+    /// own writes back is relying on. The digest says it for every entry at once: a file
+    /// whose mode or owner moved, a deletion that came back as an empty file, an opaque
+    /// directory that lost its marker, are each a different archive.
+    #[test]
+    fn a_layer_written_onto_a_disk_comes_back_as_itself() {
+        let scratch = Scratch::new("roundtrip-in");
+        let (sent, digest) = {
+            let disk = upper(&scratch.0);
+            let mut blob = Vec::new();
+            let diff_id = to_blob(&disk, "/upper", &["/.cortex"], &mut blob).unwrap();
+            (blob, diff_id)
+        };
+
+        let seeded = scratch.0.join("seeded.ext4");
+        from_blob(&seeded, "/upper", 16 << 20, &mut Cursor::new(&sent)).unwrap();
+
+        let mut back = Vec::new();
+        let again = to_blob(&seeded, "/upper", &[], &mut back).unwrap();
+        assert_eq!(again, digest, "what came back is not the layer that went on");
+        assert_eq!(back, sent);
+    }
+
+    /// The three kinds of node [`arcbox_ext4`]'s formatter answers
+    /// `UnsupportedFiletype` to, and the one kind it writes as a copy unless it is told
+    /// otherwise. Each is written by hand here because a layer carries all four and a
+    /// session that lost any of them would be a session that lost work.
+    #[test]
+    fn the_nodes_a_formatter_will_not_write_survive_seeding() {
+        let scratch = Scratch::new("special");
+
+        let mut archive = tar::Builder::new(Vec::new());
+        let entry = |kind: tar::EntryType, size: u64| {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_mode(0o644);
+            header.set_size(size);
+            header.set_mtime(1_700_000_000);
+            header
+        };
+
+        let mut header = entry(tar::EntryType::Regular, 3);
+        archive
+            .append_data(&mut header, "bin/busybox", Cursor::new(b"hi\n".to_vec()))
+            .unwrap();
+
+        // A second name for the same inode, which has to stay one file and not two.
+        let mut header = entry(tar::EntryType::Link, 0);
+        archive.append_link(&mut header, "bin/sh", "bin/busybox").unwrap();
+
+        let mut header = entry(tar::EntryType::Fifo, 0);
+        archive
+            .append_data(&mut header, "run/pipe", std::io::empty())
+            .unwrap();
+
+        let mut header = entry(tar::EntryType::Char, 0);
+        header.set_device_major(1).unwrap();
+        header.set_device_minor(3).unwrap();
+        archive
+            .append_data(&mut header, "dev/null", std::io::empty())
+            .unwrap();
+
+        // A deletion, which is the one of these that every layer carries.
+        let mut header = entry(tar::EntryType::Regular, 0);
+        archive
+            .append_data(&mut header, "etc/.wh.gone", std::io::empty())
+            .unwrap();
+
+        let sent = archive.into_inner().unwrap();
+
+        let seeded = scratch.0.join("special.ext4");
+        from_blob(&seeded, "/upper", 16 << 20, &mut Cursor::new(&sent)).unwrap();
+
+        let mut back = Vec::new();
+        to_blob(&seeded, "/upper", &[], &mut back).unwrap();
+        let tree = crate::image::ingest(&mut Cursor::new(&back)).unwrap();
+
+        match tree.get(b"dev/null") {
+            Some(Node::Device { block: false, major: 1, minor: 3, .. }) => {}
+            other => panic!("dev/null came back as {other:?}"),
+        }
+        match tree.get(b"run/pipe") {
+            Some(Node::Fifo(_)) => {}
+            other => panic!("run/pipe came back as {other:?}"),
+        }
+        match tree.get(b"etc/gone") {
+            Some(Node::Device { block: false, major: 0, minor: 0, .. }) => {}
+            other => panic!("the deletion came back as {other:?}"),
+        }
+
+        let counts = tree.link_counts();
+        let linked = counts.values().filter(|links| **links == 2).count();
+        assert_eq!(linked, 1, "the hard link came back as two files: {counts:?}");
+    }
+
+    /// A disk that is already somebody's session is not a disk to write a layer onto.
+    #[test]
+    fn seeding_refuses_a_disk_that_is_already_there() {
+        let scratch = Scratch::new("occupied");
+        let disk = upper(&scratch.0);
+
+        let refused = crate::session::Ext4::seeded(&disk, 16 << 20, &mut Cursor::new(Vec::new()));
+        assert!(refused.is_err(), "a session's disk was written over");
+        // And the refusal left it alone, which is the whole reason for it.
+        assert!(disk.exists());
     }
 }

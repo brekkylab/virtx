@@ -130,3 +130,28 @@ pub fn crc32c(seed: u32, data: &[u8]) -> u32 {
 pub fn align_block(offset: u64) -> u64 {
     offset.div_ceil(BLOCK_SIZE) * BLOCK_SIZE
 }
+
+/// Put an xattr's name back together from the prefix index and suffix an inode
+/// stores. `None` for an index the format does not define, which is a name this
+/// cannot spell rather than a name that was not there.
+pub fn xattr_name(index: u8, suffix: &[u8]) -> Option<Vec<u8>> {
+    let prefix: &[u8] = match index {
+        XATTR_INDEX_USER => b"user.",
+        XATTR_INDEX_POSIX_ACL_ACCESS => b"system.posix_acl_access",
+        XATTR_INDEX_POSIX_ACL_DEFAULT => b"system.posix_acl_default",
+        XATTR_INDEX_TRUSTED => b"trusted.",
+        XATTR_INDEX_SECURITY => b"security.",
+        _ => return None,
+    };
+
+    let mut name = prefix.to_vec();
+    name.extend_from_slice(suffix);
+    Some(name)
+}
+
+/// The kernel's `new_decode_dev`, which is [`encode_dev`] backwards.
+pub fn decode_dev(dev: u32) -> (u32, u32) {
+    let major = (dev & 0x000F_FF00) >> 8;
+    let minor = (dev & 0xFF) | ((dev >> 12) & 0x000F_FF00);
+    (major, minor)
+}

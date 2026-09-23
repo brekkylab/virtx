@@ -46,6 +46,8 @@ fn cache_root() -> PathBuf {
 ///   images.json            one entry per reference pulled here
 ///   images.lock            guards `image.json`
 ///   erofs/sha256/<hex>     one EROFS per layer, named by its digest
+///   fsmeta/sha256/<hex>.erofs   one stack's layers merged, metadata alone
+///   disk/sha256/<hex>.vmdk      what reads that and those layers as one disk
 ///   tmp/                   what is being written
 /// ```
 ///
@@ -69,6 +71,13 @@ fn cache_root() -> PathBuf {
 ///   }
 /// }
 /// ```
+///
+/// ## `fsmeta/` and `disk/`
+/// The other two content-addressed shelves, named by the *stack* -- the ordered layers
+/// of one image -- rather than by a layer. `fsmeta/` holds those layers' trees merged
+/// and written as metadata alone, and `disk/` the descriptor that reads it and them as
+/// one block device. Neither holds a byte of any layer's contents, so two images over
+/// one base cost one copy of the base.
 ///
 /// ## `erofs/`
 /// Content-addressed, so it needs no invalidation and a name that exists is a whole
@@ -106,6 +115,35 @@ impl Cache {
     /// anything is fetched, because the config names every layer's `diff_id`.
     pub fn has_erofs(&self, digest: &Digest) -> bool {
         self.erofs_path(digest).is_file()
+    }
+
+    /// Where a stack's merged metadata lies, whether or not anything is there.
+    ///
+    /// Named by the stack rather than by any of the layers in it: what is in the file
+    /// is every one of their trees merged, so it belongs to the ordered set and not to
+    /// a member of it.
+    pub fn fsmeta_path(&self, stack: &Digest) -> PathBuf {
+        let mut path = self.root.join("fsmeta").join(stack.path());
+        path.set_extension("erofs");
+        path
+    }
+
+    /// Where the descriptor that reads a stack as one disk lies.
+    ///
+    /// A few hundred bytes of text naming the files it is made of, which is why it is
+    /// kept rather than made afresh: what it names is where those files are on *this*
+    /// host, and a disk whose descriptor is here is one a VM can be handed.
+    pub fn disk_path(&self, stack: &Digest) -> PathBuf {
+        let mut path = self.root.join("disk").join(stack.path());
+        path.set_extension("vmdk");
+        path
+    }
+
+    /// Whether a stack has already been put together. Both halves, because a
+    /// descriptor names its metadata image and a descriptor without one reads a disk
+    /// that is not there.
+    pub fn has_disk(&self, stack: &Digest) -> bool {
+        self.disk_path(stack).is_file() && self.fsmeta_path(stack).is_file()
     }
 
     /// Somewhere to write `to` before it is `to`.

@@ -29,58 +29,12 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use super::format::*;
+use super::{Error, Layout, Result};
 use crate::image::tree::{Directory, Extent, InodeId, Meta, Node, Tree, Xattr};
 use crate::image::tree::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFMT};
 
 /// The block the metadata area starts at, and so `meta_blkaddr`.
 const META_BLOCK: u64 = 1;
-
-#[derive(Debug)]
-pub enum Error {
-    Io(std::io::Error),
-    /// A directory entry whose name cannot fit in a block beside its dirent.
-    NameTooLong(Vec<u8>),
-    /// An inode whose inline xattrs leave it unable to fit in one block.
-    XattrsTooLarge,
-    /// The tar held fewer bytes than the tree says a file has, which means the tree
-    /// and the archive it was read from have come apart.
-    ShortRead,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "{e}"),
-            Error::NameTooLong(name) => {
-                write!(
-                    f,
-                    "{} is too long to name a directory entry",
-                    String::from_utf8_lossy(name)
-                )
-            }
-            Error::XattrsTooLarge => write!(f, "an inode's xattrs do not fit beside it"),
-            Error::ShortRead => write!(f, "the layer archive ended before a file it describes"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<std::io::Error> for Error {
-    fn from(source: std::io::Error) -> Error {
-        Error::Io(source)
-    }
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-/// What an image came out as.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layout {
-    pub blocks: u32,
-    pub bytes: u64,
-    pub inodes: u64,
-}
 
 /// Write `tree` as an EROFS image on `out`.
 ///
@@ -93,11 +47,53 @@ where
     D: Read + Seek,
     W: Write + Seek,
 {
-    let planner = Planner::plan(tree)?;
+    let planner = Planner::plan(tree, Bodies::Carried)?;
+    let blocks = planner.blocks();
+    emit(&planner, data, blocks, out)
+}
 
+/// How long the image [`write_meta`] would write for `tree` is, in blocks.
+///
+/// Asked before the tree is addressed, because the two depend on each other in one
+/// direction only: where a file's blocks sit on the disk depends on how much of the
+/// front of it this image takes, and how much it takes depends on how many inodes and
+/// directory blocks there are -- not on what any of them point at. So the length is
+/// settled first, the tree is moved past it, and then it is written.
+pub fn meta_blocks(tree: &Tree) -> Result<u32> {
+    Ok(Planner::plan(tree, Bodies::Elsewhere)?.blocks())
+}
+
+/// Write `tree` as an EROFS image holding no file data, on a disk `disk_blocks` long.
+///
+/// Every file's [`Extent`] is read as *where on that disk its bytes already are*
+/// rather than as where to copy them from: the offset becomes the inode's data
+/// address and nothing is written for it. What the image does carry is its own
+/// directories, which are contents like any other and have nowhere else to be.
+///
+/// The disk is longer than the image and the superblock says so, so an address past
+/// this image's own end is the ordinary case here rather than a corrupt one. Every
+/// offset has to be a whole block, because a data address is a block number and half
+/// of one has no spelling.
+pub fn write_meta<W>(tree: &Tree, disk_blocks: u32, out: &mut W) -> Result<Layout>
+where
+    W: Write + Seek,
+{
+    let planner = Planner::plan(tree, Bodies::Elsewhere)?;
+    // Nowhere to read a body from: a tree planned this way has no body that comes out
+    // of a tar, and one that did would end as a `ShortRead` rather than a wrong image.
+    let mut nothing = std::io::Cursor::new(&[][..]);
+    emit(&planner, &mut nothing, disk_blocks, out)
+}
+
+/// Put a planned image down, with `sb_blocks` as the length its superblock states.
+fn emit<D, W>(planner: &Planner, data: &mut D, sb_blocks: u32, out: &mut W) -> Result<Layout>
+where
+    D: Read + Seek,
+    W: Write + Seek,
+{
     let meta_end = align_block(planner.meta);
     let data_start = (meta_end / BLOCK_SIZE) as u32;
-    let blocks = data_start + planner.block;
+    let blocks = planner.blocks();
 
     // Block 0 is the boot sector. The superblock goes in it, but only once the
     // totals below are known, so it is left as zeros and patched at the end.
@@ -136,7 +132,7 @@ where
     }
 
     out.seek(SeekFrom::Start(SUPER_OFFSET))?;
-    out.write_all(&superblock(&planner, blocks))?;
+    out.write_all(&superblock(planner, sb_blocks))?;
     out.flush()?;
 
     Ok(Layout {
@@ -185,6 +181,19 @@ enum Body {
     Bytes(Vec<u8>),
     /// Directory entries, which are serialised once every nid is known.
     Dir(usize),
+    /// Not here at all: the block on the disk this image is the front of where the
+    /// bytes already are. Written as an address and nothing else.
+    Elsewhere(u32),
+}
+
+/// Where the planner should look for a file's bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bodies {
+    /// In the archive the tree was read from, to be copied into a data area of this
+    /// image's own. A layer.
+    Carried,
+    /// Already on the disk, at the block a file's [`Extent`] gives. Metadata alone.
+    Elsewhere,
 }
 
 /// A directory, held apart from its [`Plan`] because its contents cannot be built
@@ -209,10 +218,13 @@ struct Planner {
     meta: u64,
     /// Running block in the data area.
     block: u32,
+    /// Where file bodies come from, which is the whole of the difference between an
+    /// image that carries its layer and one that only addresses several.
+    bodies: Bodies,
 }
 
 impl Planner {
-    fn plan(tree: &Tree) -> Result<Planner> {
+    fn plan(tree: &Tree, bodies: Bodies) -> Result<Planner> {
         let mut planner = Planner {
             plans: Vec::new(),
             dirs: Vec::new(),
@@ -220,6 +232,7 @@ impl Planner {
             placed: HashMap::new(),
             meta: META_BLOCK * BLOCK_SIZE,
             block: 0,
+            bodies,
         };
 
         // The root's parent is the root, which is plan 0 -- the first thing placed.
@@ -227,6 +240,12 @@ impl Planner {
         planner.pack();
 
         Ok(planner)
+    }
+
+    /// How long the image is: the metadata, rounded up to a block, and the data area
+    /// behind it.
+    fn blocks(&self) -> u32 {
+        (align_block(self.meta) / BLOCK_SIZE) as u32 + self.block
     }
 
     /// Decide where one inode goes, and how much of its body travels with it.
@@ -266,7 +285,13 @@ impl Planner {
         let remainder = size % BLOCK_SIZE;
         let tail = if inline { remainder } else { 0 };
 
-        let in_blocks = size - tail;
+        // A body that is already on the disk is addressed and not written, so it
+        // takes nothing of this image -- which is what makes a metadata image the
+        // length of its inodes and its directories and no more.
+        let in_blocks = match body {
+            Body::Elsewhere(_) => 0,
+            _ => size - tail,
+        };
         let blocks = in_blocks.div_ceil(BLOCK_SIZE) as u32;
         let first_block = self.block;
         self.block += blocks;
@@ -357,7 +382,11 @@ impl Planner {
                     return Ok(*placed);
                 }
                 let nlink = self.links.get(id).copied().unwrap_or(1);
-                let plan = self.place(mode, meta, data.len, 0, nlink, Body::Tar(*data))?;
+                let body = match self.bodies {
+                    Bodies::Carried => Body::Tar(*data),
+                    Bodies::Elsewhere => Body::Elsewhere(address(data)?),
+                };
+                let plan = self.place(mode, meta, data.len, 0, nlink, body)?;
                 self.placed.insert(*id, plan);
                 Ok(plan)
             }
@@ -512,8 +541,9 @@ fn inode(plan: &Plan, data_start: u32) -> [u8; INODE_SIZE as usize] {
     // `i_u` is a device number for a device and a data address for everything else.
     // A whiteout is a character device numbered 0:0, so this has to be by type and
     // not by whether the number looks empty.
-    let u = match plan.mode & S_IFMT {
-        S_IFCHR | S_IFBLK => plan.rdev,
+    let u = match (plan.mode & S_IFMT, &plan.body) {
+        (S_IFCHR | S_IFBLK, _) => plan.rdev,
+        (_, Body::Elsewhere(block)) => *block,
         _ => data_start + plan.first_block,
     };
 
@@ -529,6 +559,24 @@ fn inode(plan: &Plan, data_start: u32) -> [u8; INODE_SIZE as usize] {
     inode[44..48].copy_from_slice(&plan.nlink.to_le_bytes());
 
     inode
+}
+
+/// The block a file's bytes start at, from an extent that says where they are on the
+/// disk rather than where to copy them from.
+///
+/// A data address is a block number, so an extent that starts part-way into one names
+/// bytes no inode can point at. That is a tree that was never moved onto the disk it
+/// is being written for, and it is caught here rather than mounted crooked.
+fn address(data: &Extent) -> Result<u32> {
+    if !data.offset.is_multiple_of(BLOCK_SIZE) {
+        return Err(Error::Malformed(format!(
+            "a file's bytes are at byte {}, which is not the start of a block",
+            data.offset
+        )));
+    }
+
+    u32::try_from(data.offset / BLOCK_SIZE)
+        .map_err(|_| Error::Malformed(format!("byte {} is past the end of a disk", data.offset)))
 }
 
 fn superblock(planner: &Planner, blocks: u32) -> [u8; SUPER_SIZE] {
@@ -583,7 +631,9 @@ where
     };
 
     match &plan.body {
-        Body::Empty => return Err(Error::ShortRead),
+        // Neither has bytes here to give: an empty body has none at all, and one that
+        // is elsewhere was addressed rather than written, so nothing should have asked.
+        Body::Empty | Body::Elsewhere(_) => return Err(Error::ShortRead),
         Body::Bytes(bytes) => out.write_all(&held(bytes)?)?,
         Body::Dir(index) => out.write_all(&held(&dirs[*index].bytes)?)?,
         Body::Tar(extent) => {

@@ -1,35 +1,43 @@
-//! OCI images, pulled from a registry and turned into something a guest can mount.
+//! VM image handling logic.
 //!
-//! [`Registry`] is the remote side and [`Cache`] the local one. A [`pull`] goes from one
-//! to the other in three steps per layer, none of which keeps what the step before it
-//! read: [`decompress_blob`] inflates the blob a registry served, [`blob_to_erofs`]
-//! reads that archive and writes an EROFS image, and the cache keeps the image under
-//! the layer's `diff_id`. The compressed bytes are never on disk, and the archive is
-//! never on disk.
+//! # Terminologies
 //!
-//! What every side of that speaks is a [`Tree`], the shape of a filesystem held in
-//! memory: [`ingest`] reads one out of a layer archive and the EROFS writer puts one
-//! down. Neither knows about the other.
+//! TODO
+//!
+//! # Operations
+//!
+//! This module supports `pull`, `provision`, and `commit`.
+//!
+//! - `pull``: downloads an image from a registry and stores it in the cache
+//! - `provision``: prepares a cached image so that it can be booted
+//! - `commit``: writes changes back into the local cache
+//!
+//! See the individual function docs for details on each of them.
+//!
 
 mod blob;
 mod cache;
 mod digest;
+mod disk;
 mod erofs;
 mod image;
 mod layer;
 mod ops;
 mod registry;
+mod stack;
 mod tree;
 
 pub use blob::ingest;
 pub use cache::{Cache, ImageIndex, Staged};
 pub use digest::Digest;
+pub use disk::Disk;
 pub use erofs::Layout;
+pub use erofs::read as read_erofs;
 pub use image::{Image, ImageConfig, ImageManifest, ImageState};
 pub use layer::{Layer, blob_to_erofs, decompress_blob};
-pub use ops::{provision, pull};
+pub use ops::{commit, provision, pull};
 pub use registry::Registry;
-pub use tree::Tree;
+pub use tree::{Directory, Node, Tree};
 
 /// How an image is named, being a registry, a repository, and a tag or a digest.
 ///
@@ -61,6 +69,17 @@ pub enum Error {
 
     #[error("writing an EROFS image: {0}")]
     Erofs(#[source] erofs::Error),
+
+    #[error("reading {0}: {1}")]
+    Layer(String, #[source] erofs::Error),
+
+    /// A disk that cannot be put together or cannot be described: a layer that is not
+    /// whole blocks, a path a descriptor has no way to spell.
+    #[error("{0}")]
+    Disk(String),
+
+    #[error("{0} is not in the cache; pull it first")]
+    NotPulled(String),
 
     #[error("{context}: {source}")]
     Io {

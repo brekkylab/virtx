@@ -5,23 +5,50 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# The process that becomes a micro-VM. A binary and nothing else: `cortex-krun`
-# never links it, it spawns the file next to itself.
+# The process that becomes a micro-VM -- and, as its library half, the arguments a console
+# server starts one with.
 #
-# Its own package rather than a mode of `cortex-krun`, and either reason alone
-# would be enough. **It has to be signed**: on macOS, Hypervisor.framework needs
-# the `com.apple.security.hypervisor` entitlement, an entitlement is carried by a
-# code signature, and a signature is read at `exec`. **It becomes the VM**:
-# entering a guest does not return, so whatever holds a hypervisor stops being
-# able to answer anything else.
+# Two halves in one package because they are one contract. [`BootArgs`] is written by
+# `cortex-krun` and parsed here, and a value added to one side is a value the other stops
+# compiling without; splitting them into two packages would only put a crate boundary between
+# a `to_args` and the `parse` that has to match it. The library half links no hypervisor --
+# that is what the `vm` feature is for -- so the server takes this package without taking a
+# VMM through it.
+#
+# The binary is its own process rather than a mode of the server's, and either reason alone
+# would be enough. **It has to be signed**: on macOS, Hypervisor.framework needs the
+# `com.apple.security.hypervisor` entitlement, an entitlement is carried by a code signature,
+# and a signature is read at `exec`. **It becomes the VM**: entering a guest does not return,
+# so whatever holds a hypervisor stops being able to answer anything else.
+
+[lib]
+name = "cortex_krun_host"
+path = "src/lib.rs"
+
+# `required-features` so that `--no-default-features` -- which is how `cortex-krun-guest`
+# takes this package, for the two names it has to spell on the wire -- builds the library and
+# nothing else.
 [[bin]]
 name = "cortex-krun-host"
 path = "src/main.rs"
-
-[dependencies]
-# The sessions this binary exists to enter, and the disks they are stitched from.
-cortex-krun-lib = { workspace = true }
+required-features = ["vm"]
 
 [features]
-# Built-in virtio-gpu with venus (Vulkan), passed through to the session layer.
-gpu = ["cortex-krun-lib/gpu"]
+# Everything the binary is, behind one name. On by default, so that a `cargo build` of this
+# workspace produces the file `cortex-krun` looks for beside itself.
+#
+# What it buys is not a smaller workspace build -- `cortex-krun-lib` is a member and is built
+# either way -- but that a consumer taking this package *for its library half* says so in one
+# word, and gets no VMM.
+default = ["vm"]
+vm = ["dep:cortex-krun-lib"]
+# virtio-gpu with venus, passed through to the session layer. Its own feature because what it
+# costs is a C library this tree neither ships nor builds: a host without virglrenderer fails
+# at the linker, which is the one place a message explaining what to install cannot be given.
+gpu = ["vm", "cortex-krun-lib/gpu"]
+
+[dependencies]
+anyhow = { workspace = true }
+# The machine this binary becomes: `Session` assembles it and `Ext4` is the disk it writes to.
+# Optional, and that is the point -- see the `vm` feature.
+cortex-krun-lib = { workspace = true, optional = true }

@@ -5,16 +5,34 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# What a user runs: it answers a console session and tends the images a session
-# boots from. It does not become a VM -- `cortex-krun-host` does, spawned as a
-# file beside this binary rather than taken as a dependency, so that the signed
-# artefact stays a VMM instead of the whole of a console server.
+# What a user runs: it answers a console session, and what it does with one is to run it
+# inside a micro-VM. The VM is not in this process -- a session spawns `cortex-krun-host`, the
+# signed binary sitting beside this one, and talks to the guest down a socket that boot turns
+# into a console port. See `session::halves` for why the hypervisor is somewhere else and how
+# the three files find each other.
 [[bin]]
 name = "cortex-krun"
 path = "src/main.rs"
 
+[build-dependencies]
+anyhow = { workspace = true }
+
 [dependencies]
-# Images: pulling, stitching and naming them. The session half of this crate
-# comes with a hypervisor attached, which is not wanted here -- splitting it out
-# is what would let this binary link none.
+anyhow = { workspace = true }
+# The protocol this server answers on stdin and stdout.
+cortex = { workspace = true }
+# The boot's command line -- its library half, which links no hypervisor.
+cortex-krun-host = { workspace = true }
+# Putting the image a session names into the cache. The machine itself is the boot's: what
+# this binary wants from the library is the store.
 cortex-krun-lib = { workspace = true }
+# `kill(pid, 0)`, to ask whether the pid a leftover session path is named for is still alive.
+libc = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+] }

@@ -25,6 +25,7 @@
 //! virtio-blk /dev/vda    the image's disk, read-only -- the overlay's lower
 //! virtio-blk /dev/vdb    this session's ext4 -- the overlay's upper layer
 //! virtio-con hvc0        the guest's console, on this process's own stdin and stdout
+//! virtio-net eth0        the guest's network, on a session that asked for one -- see below
 //! virtio-fs  mnt0, mnt1  one per [`Mount`], mounted by tag on the root after the pivot
 //! ```
 //!
@@ -38,6 +39,19 @@
 //! which by name: the lower goes on first and is `/dev/vda`, the upper layer second and
 //! `/dev/vdb`. The pair of constants below and the order [`Session::enter`] adds them in
 //! are one statement made in two places, which is why they are next to each other.
+//!
+//! # The network, and where it actually is
+//!
+//! On a thread of this process, behind a socketpair: the device puts the guest's ethernet
+//! frames down one end and [`net`](super::net) is what reads them. So a session's network
+//! is not a thing the host has and the guest is let onto -- it is made, per session, out
+//! of host sockets, and what a level like [`Network::Public`] means is which of those
+//! sockets ever get opened.
+//!
+//! The guest configures itself over DHCP before the workload starts, which is how an
+//! image that was never prepared for any of this gets an address, a route and a resolver.
+//! A session that asked for no network gets no device, and there is nothing in the guest
+//! that can put one back. See [`Session::network`].
 //!
 //! # The console is the one thing that differs per host
 //!
@@ -69,7 +83,10 @@ use krun::{
 
 use crate::image::{Cache, ImageState, provision};
 
-use super::{Error, Ext4, Mount, Result};
+use super::{Error, Ext4, Mount, Network, Result};
+
+#[cfg(unix)]
+use super::net;
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
 /// with `rootfstype=virtiofs`.
@@ -138,8 +155,17 @@ pub struct Session {
     mounts: Vec<Mount>,
     vcpus: u8,
     ram_mib: u32,
+    network: Network,
+    host_ports: Vec<u16>,
     gpu: bool,
+    /// A named virtio-console port, and the descriptor behind it -- see
+    /// [`port`](Session::port). Held as a number rather than a borrow so that a
+    /// [`Session`] stays a plain value; keeping the descriptor open is the caller's.
+    port: Option<(String, i32)>,
     command: Vec<String>,
+    /// The whole argv, for a caller who is not running the image's program at all -- see
+    /// [`exec`](Session::exec). When set it is what runs, and `command` is not consulted.
+    exec: Option<Vec<String>>,
     env: Vec<String>,
 }
 
@@ -164,8 +190,14 @@ impl Session {
             vcpus: 2,
             // Enough for a package install, which is the first thing anyone does.
             ram_mib: 2048,
+            // What a session that said nothing about it gets, and the only level that
+            // needs nothing of the host -- see `Session::network`.
+            network: Network::Disabled,
+            host_ports: Vec::new(),
             gpu: false,
+            port: None,
             command: Vec::new(),
+            exec: None,
             env: Vec::new(),
         }
     }
@@ -236,6 +268,49 @@ impl Session {
         self
     }
 
+    /// How much of the network the guest can reach, which by default is none of it.
+    ///
+    /// **`Disabled` is an isolation nothing in the guest can undo**, because what it
+    /// leaves out is a device. There is no interface to bring up, no route to add and no
+    /// address to claim -- a socket the guest opens to anywhere but itself has nowhere to
+    /// go. It is the default because it is the only level that asks nothing of the host,
+    /// and because a session that did not say it wanted to reach the network should not.
+    ///
+    /// Every other level is a device, and with it an address, a default route, an MTU and
+    /// a `/etc/resolv.conf`, all of which arrive over DHCP before the workload starts. An
+    /// image needs nothing in it for that: libkrun's init is the client, and
+    /// [`session::net`](super::net) is the server.
+    ///
+    /// | level | what it reaches |
+    /// |---|---|
+    /// | [`Disabled`](Network::Disabled) | nothing, there being no device |
+    /// | [`HostOnly`](Network::HostOnly) | names, and the ports [`host_ports`](Session::host_ports) granted |
+    /// | [`Public`](Network::Public) | the internet, and the grant -- not this machine, not its LAN |
+    /// | [`Full`](Network::Full) | every address, and the grant |
+    ///
+    /// **Reaching this machine is never a level.** It is
+    /// [`host_ports`](Session::host_ports) at all four, which is what keeps widening a
+    /// session's reach outward from widening it inward by accident.
+    pub fn network(mut self, network: Network) -> Session {
+        self.network = network;
+        self
+    }
+
+    /// TCP ports on this host the guest may connect to, at the gateway address its
+    /// default route already names. Appends, so several calls are several ports.
+    ///
+    /// Opened on loopback and nowhere else: a granted port is a service on *this*
+    /// machine, and one resolved through an interface would be whatever answers that port
+    /// on whichever network the host is attached to.
+    ///
+    /// Granted at every [`network`](Session::network) level but
+    /// [`Disabled`](Network::Disabled), which has no device to carry it -- see that
+    /// method on why the host is a grant rather than a level.
+    pub fn host_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Session {
+        self.host_ports.extend(ports);
+        self
+    }
+
     /// Give the guest a virtio-gpu device carrying Vulkan, by way of
     /// [venus](https://docs.mesa3d.org/drivers/venus.html).
     ///
@@ -251,6 +326,32 @@ impl Session {
         self
     }
 
+    /// A named virtio-console port beside the guest's console, carrying whatever `fd` is
+    /// the host end of.
+    ///
+    /// The console itself is this process's terminal and is the kernel's: it is where a
+    /// panic and every `printk` land, so a protocol on it is one a single kernel warning
+    /// would corrupt. A port is a second channel on the same device, found in the guest by
+    /// the name given here -- `/dev/virtio-ports/<name>` where the guest has udev rules,
+    /// and the `name` attribute under `/sys/class/virtio-ports` where it does not.
+    ///
+    /// **The same descriptor both ways.** A socket is bidirectional and the port the guest
+    /// opens is one thing rather than a pair, so `fd` is used for input and output alike.
+    ///
+    /// `fd` is borrowed and not taken: it has to stay open for as long as the machine runs,
+    /// which is the rest of the process -- see [`enter`](Session::enter). Replaces what an
+    /// earlier call said.
+    ///
+    /// **A port is written to a queue nothing is reading until the guest opens it**, and
+    /// the driver discards what arrives before then rather than queueing it. So a caller
+    /// on the other end of `fd` cannot speak first: something in the guest has to say it
+    /// is there.
+    #[cfg(unix)]
+    pub fn port(mut self, name: impl Into<String>, fd: std::os::fd::RawFd) -> Session {
+        self.port = Some((name.into(), fd));
+        self
+    }
+
     /// What to run, in place of what the image states as its `Cmd`.
     ///
     /// **The image's `Entrypoint` still goes in front of it**, which is what docker does
@@ -262,6 +363,25 @@ impl Session {
     /// one argv and not a list of them.
     pub fn command<S: Into<String>>(mut self, command: impl IntoIterator<Item = S>) -> Session {
         self.command = command.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Run exactly this, in place of the image's `Entrypoint` **and** its `Cmd`.
+    ///
+    /// The difference from [`command`](Session::command) is the entrypoint, and it is the
+    /// whole difference: `command` is docker's rule -- an image whose entrypoint is
+    /// `/usr/bin/tini --` runs its entrypoint whatever it is asked for -- and this is for a
+    /// caller running something that is not the image's program at all. An agent put into
+    /// the guest over a share is the case it exists for: an image stating
+    /// `ENTRYPOINT ["python"]` would otherwise run it as python's argument.
+    ///
+    /// The image's environment and working directory still apply. What is replaced is what
+    /// runs, not the root it runs on.
+    ///
+    /// Replaces what an earlier call said, and takes precedence over
+    /// [`command`](Session::command) whichever order the two were called in.
+    pub fn exec<S: Into<String>>(mut self, argv: impl IntoIterator<Item = S>) -> Session {
+        self.exec = Some(argv.into_iter().map(Into::into).collect());
         self
     }
 
@@ -352,7 +472,10 @@ impl Session {
         // The two devices go in as environment because that is how libkrun's init is told
         // where its root is -- see `patches/libkrun-85bed71-overlay-root.patch`. They
         // reach the workload's environment too, the way `KRUN_BLOCK_ROOT_*` already does.
-        let argv = argv(&disk.config, &self.command);
+        let argv = match &self.exec {
+            Some(exact) => exact.clone(),
+            None => argv(&disk.config, &self.command),
+        };
         let env = env(&disk.config, &self.env);
         let mut init = krun_init::Config::builder()
             .args(&argv.iter().map(String::as_str).collect::<Vec<_>>())
@@ -362,6 +485,14 @@ impl Session {
             .env_var(&format!("KRUN_BLOCK_LOWER_FSTYPE={LOWER_FSTYPE}"))
             .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
             .env_var(&format!("KRUN_BLOCK_UPPER_FSTYPE={UPPER_FSTYPE}"));
+
+        // What makes libkrun's init run a DHCP client on `eth0` -- and so what gets the
+        // guest its address, its route and its `/etc/resolv.conf`, none of which an image
+        // has anything in it to set up. The server answering is `net`.
+        #[cfg(unix)]
+        if self.network.attached() {
+            init = init.env_var(&format!("{}=1", net::DHCP_ENV));
+        }
 
         // One config entry per mount, saying which tag goes where. The devices carrying
         // those tags are attached below, and the init mounts them after the pivot.
@@ -410,6 +541,21 @@ impl Session {
             .add_default_console(streams.0, streams.1, streams.2)
             .map_err(|e| Error::vmm("wiring the guest console to this terminal", e))?;
 
+        // After the default console and never before: `add_default_console` is what makes
+        // port 0 the console the kernel prints on, and port 0 is the first one added.
+        #[cfg(unix)]
+        if let Some((name, fd)) = &self.port {
+            use std::os::fd::BorrowedFd;
+
+            // SAFETY: the descriptor is the caller's and is promised to outlive the machine
+            // -- see [`port`]. libkrun `dup`s it here, so what is borrowed is borrowed only
+            // for the length of this call.
+            let fd = unsafe { BorrowedFd::borrow_raw(*fd) };
+            console
+                .add_inout_port(name, Some(fd), Some(fd))
+                .map_err(|e| Error::vmm(format!("attaching the {name} console port"), e))?;
+        }
+
         // Read-only at the device and not merely in the guest's mount flags. What is
         // behind this descriptor is the layer files, shared with every other image stacked
         // over them, so a guest allowed to write to it would be writing into those.
@@ -429,6 +575,17 @@ impl Session {
         );
         devices.add(RngDevice::new().map_err(|e| Error::vmm("attaching an entropy source", e))?);
         devices.add(BalloonDevice::new().map_err(|e| Error::vmm("attaching a balloon", e))?);
+
+        // The whole of what a network is here, and the whole of what having none is: the
+        // device is attached or it is not -- see [`net`].
+        #[cfg(unix)]
+        if self.network.attached() {
+            devices.add(self.net_device()?);
+        }
+        #[cfg(not(unix))]
+        if self.network.attached() {
+            return Err(Error::NoNetwork(self.network.as_str()));
+        }
 
         // Nothing at all without the feature, which is what `gpu` promises: a build that
         // cannot serve Vulkan runs the session without it rather than refusing it.
@@ -478,6 +635,34 @@ impl Session {
         // itself broke, which libkrun logs and then swallows. There is nothing left of the
         // machine to say more about it, which is why this error carries no source.
         Err(Error::EventLoop)
+    }
+}
+
+#[cfg(unix)]
+impl Session {
+    /// The virtio-net device, with this session's network already running behind it.
+    ///
+    /// The stack is started first and on purpose: the guest's DHCP client gives up after
+    /// a tenth of a second, and a server that came up when the machine did would be
+    /// racing a kernel. By the time this returns, the thread answering is already there.
+    fn net_device(&self) -> Result<krun::NetDevice> {
+        let policy = net::Policy {
+            network: self.network,
+            host_ports: self.host_ports.clone(),
+        };
+        let wire = net::Stack::start(policy)?;
+
+        krun::NetDevice::new_unixgram_fd(
+            "net0",
+            wire,
+            &net::GUEST_MAC,
+            // No offloads and no extra queues: everything on the other side of this
+            // device is one thread doing one frame at a time, and a feature it does not
+            // implement is one the guest would be told it had.
+            0,
+            krun::NetFlags::empty(),
+        )
+        .map_err(|e| Error::vmm("attaching the guest's network device", e))
     }
 }
 
@@ -583,6 +768,13 @@ mod tests {
         let session = Session::new();
         assert_eq!(session.vcpus, 2);
         assert_eq!(session.ram_mib, 2048);
+        assert_eq!(
+            session.network,
+            Network::Disabled,
+            "a session that said nothing got a network"
+        );
+        assert!(session.host_ports.is_empty());
+        assert!(!session.gpu);
         assert!(session.image.is_none());
         assert!(session.cache.is_none());
         assert!(session.rootfs.is_none());

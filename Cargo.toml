@@ -29,7 +29,23 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
 [workspace.dependencies]
+anyhow = "1"
+# The console protocol the server answers and the guest speaks: the frames, the calls and
+# the codes a refusal carries. A path to the sibling checkout, because the two repositories
+# are developed together -- `cortex` is what decides what a session *is*, and this one is one
+# backend for it.
+#
+# No default features: what is wanted is the console, and every binding cortex offers brings
+# a libfuse provider or an HTTP stack with it.
+cortex = { path = "../cortex/cortex", default-features = false }
+cortex-krun-host = { path = "cortex-krun-host", default-features = false }
 cortex-krun-lib = { path = "cortex-krun-lib" }
+# The wire's codec, which `cortex` already carries in its public API: two versions of it in
+# one build would be a type error nobody could read.
+bson = { version = "3", features = ["serde"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+tokio = "1"
 
 # rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
 # 2026-09-02) and routes macOS to a stub backend that panics at runtime.

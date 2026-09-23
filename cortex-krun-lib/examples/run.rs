@@ -16,6 +16,19 @@
 //!
 //!   cargo run --example run -- alpine:3.21 'ls /mnt' ./scripts
 //!
+//! A session reaches nothing by default. `CORTEX_NET` is how much of the network it
+//! gets -- `none`, `host`, `public` or `full` -- and the guest is configured over DHCP
+//! before the command runs, so an image needs nothing in it:
+//!
+//!   CORTEX_NET=public cargo run --example run -- alpine:3.21 'wget -qO- http://example.com'
+//!   CORTEX_NET=public cargo run --example run -- alpine:3.21 'apk add curl'
+//!
+//! `CORTEX_HOST_PORTS` is a comma-separated grant of TCP ports on this machine, reached
+//! at the gateway the guest's default route already names:
+//!
+//!   CORTEX_HOST_PORTS=8080 CORTEX_NET=host cargo run --example run -- \
+//!       alpine:3.21 'wget -qO- http://10.0.2.1:8080'
+//!
 //! `CORTEX_GPU=1` asks for guest Vulkan, which needs the `gpu` feature to be anything
 //! more than a flag and an image carrying Mesa's venus driver:
 //!
@@ -32,7 +45,7 @@
 use std::path::PathBuf;
 
 use cortex_krun::image;
-use cortex_krun::session::{Ext4, Mount, Session};
+use cortex_krun::session::{Ext4, Mount, Network, Session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -86,6 +99,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(dir) = share {
         eprintln!("mount: {dir} -> /mnt (read-only)");
         session = session.mount(Mount::new(dir, "/mnt").read_only());
+    }
+
+    // A level rather than a switch: what the guest may reach, and never how it reaches
+    // it. An unknown word is refused rather than guessed at -- deciding a sandbox's
+    // egress on the caller's behalf is the one thing this must not do.
+    let asked = std::env::var("CORTEX_NET").unwrap_or_else(|_| "none".to_string());
+    let network = match asked.as_str() {
+        "none" => Network::Disabled,
+        "host" => Network::HostOnly,
+        "public" => Network::Public,
+        "full" => Network::Full,
+        other => {
+            return Err(format!("CORTEX_NET={other} is not none, host, public or full").into());
+        }
+    };
+    eprintln!("network: {}", network.as_str());
+    session = session.network(network);
+
+    if let Ok(granted) = std::env::var("CORTEX_HOST_PORTS") {
+        let ports = granted
+            .split(',')
+            .map(str::trim)
+            .filter(|port| !port.is_empty())
+            .map(str::parse::<u16>)
+            .collect::<Result<Vec<_>, _>>()?;
+        eprintln!("host ports: {ports:?}");
+        session = session.host_ports(ports);
     }
 
     // Ignored by a build without the `gpu` feature, which is what makes it safe to read

@@ -931,10 +931,11 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 ```
 cortex-krun-lib/            the machinery: images, disks, sessions (lib `cortex_krun`)
-cortex-krun/                the console server a user runs; holds no hypervisor
-cortex-krun-host/           the process that becomes a VM; signed, spawned by the above
-cortex-krun-guest/          the init inside the VM; its own workspace, built for musl
-guest/                      sources compiled and run inside the VM
+cortex-krun/                the console server a user runs; spawns the VM, is not one
+cortex-krun-host/           the process that becomes a VM, and -- as its library half --
+                            the command line the server starts one with; signed on macOS
+cortex-krun-guest/          the agent inside the VM; its own workspace, built for musl
+guest/                      C sources compiled and run inside the VM by the examples
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to 1.3.0
@@ -946,3 +947,9 @@ data/                       untracked: rootfs, sessions, models, build outputs
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the
 scripts.
+
+`cargo build --workspace` is what puts all three binaries in one directory:
+`cortex-krun` finds the other two by looking beside itself, and a `-p cortex-krun`
+builds only the guest -- which is its build script's -- and not the boot. On macOS
+the boot needs the hypervisor entitlement, which `scripts/macos-run.sh` applies to
+it as well as to whatever `cargo run` was asked for.

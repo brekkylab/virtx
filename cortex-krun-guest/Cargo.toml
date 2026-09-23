@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
-# The half that runs inside the micro-VM. Its own workspace root rather than a
-# member of the one above: it is cross-compiled to `*-unknown-linux-musl`, and a
-# member would be built for the host by a bare `cargo build` -- for a target that
-# has no host to run on.
+# The half that runs inside the micro-VM. Its own workspace root rather than a member of the
+# one above: it is cross-compiled to `*-unknown-linux-musl`, and a member would be built for
+# the host by a bare `cargo build` -- for a target that has no host to run on.
+#
+# It does not build a root. libkrun's own init -- patched by this tree, see
+# `patches/libkrun-85bed71-overlay-root.patch` -- mounts the image under this session's ext4,
+# pivots onto the overlay, mounts the shares and only then execs this binary. So what is left
+# here is the agent and nothing else: a port, a protocol, and commands run on a root that was
+# ready before this process existed.
 [workspace]
 
 [[bin]]
@@ -15,6 +20,24 @@ name = "cortex-krun-guest"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+# The protocol this agent answers. No default features: what is wanted is the console, and
+# every binding cortex offers brings a libfuse provider or an HTTP stack with it.
+cortex = { path = "../../cortex/cortex", default-features = false }
+# The two names that are the wire's rather than either end's -- the port to find and the
+# handshake to send. No features, so nothing of the boot's other half is in this graph.
+cortex-krun-host = { path = "../cortex-krun-host", default-features = false }
+# Reaping, process groups and the signal a timeout is.
+libc = "0.2"
+tokio = { version = "1", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    # `timeout`, which is what makes an `exec`'s `timeout_ms` a kill.
+    "time",
+] }
 
 [profile.release]
 opt-level = "z"

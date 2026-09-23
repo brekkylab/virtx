@@ -22,9 +22,11 @@ gpu = ["krun/gpu", "dep:krun_display"]
 # libkrun 2.0-dev, pinned via the `3rdparty/libkrun` submodule.
 # The package is named `libkrun`; its lib target is `krun`.
 # `blk` is off by default in libkrun; without it there is no `BlockDevice` and
-# so no way to hand the guest an EROFS image to mount.
+# so no way to hand the guest an EROFS image to mount. `net` is off by default
+# too, and is what `NetDevice` is behind -- see `session::net`.
 krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = [
     "blk",
+    "net",
 ] }
 
 # Guest init binary + config builder, split out of libkrun in 2.0.
@@ -76,3 +78,20 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+smoltcp = { version = "0.12.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
+
+# The two ends of the guest's network wire, which is a socket and so is the host's to
+# name -- see `session::net::wire`. Only the platform that has one takes the crate that
+# names it: a `socketpair` and its options are libc's, and a Windows host's resolvers are
+# `GetAdaptersAddresses`'s.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The same release libkrun's own Windows code takes, so one version is resolved rather
+# than two compiled.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+] }

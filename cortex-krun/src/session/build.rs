@@ -111,8 +111,11 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
 
     run(&recipe.base, &upper, &script, network).await?;
 
-    // Only now that the machine is down and has flushed. `to_blob` reads the file, and
-    // nothing it can see would tell it that a guest still had the answer in memory.
+    // Only now that the machine is down and has flushed -- `run` took it down on its way
+    // out, and the last thing it asked the guest for was a flush. Saying so is this end's
+    // to do: the disk was never unmounted, because it was the root.
+    upper.settled()?;
+
     let written = std::fs::File::create(&blob)?;
     let diff_id = upper.to_blob(&[AGENT_PATH], &written)?;
     written.sync_all()?;

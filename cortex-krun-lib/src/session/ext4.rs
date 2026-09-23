@@ -123,6 +123,60 @@ impl Ext4 {
         })
     }
 
+    /// Record that this filesystem is no longer mounted, having been flushed.
+    ///
+    /// **Call this only once the machine is down and was told to flush first.** Nothing
+    /// here can check either; the caller is what stopped the machine.
+    ///
+    /// A Linux kernel clears `s_state`'s "valid" bit when it mounts a filesystem for
+    /// writing and sets it again when it unmounts. This one is never unmounted: it is the
+    /// upper half of the overlay the guest pivoted onto, so it is the root -- and a root
+    /// cannot be unmounted by the system standing on it. The machine is stopped by killing
+    /// it, and the bit is still clear afterwards.
+    ///
+    /// So the state on disk says "still mounted" about a filesystem nothing is mounting,
+    /// and a reader is right to refuse that. What makes it safe to say otherwise is the
+    /// flush: there is no journal on this filesystem -- [`arcbox_ext4`] writes none -- so
+    /// once `sync(2)` has returned in the guest and nothing has run since, what is in the
+    /// file is the whole of what the guest wrote.
+    ///
+    /// The other bit is left alone and refused. "Errors detected" is the kernel saying it
+    /// found this filesystem inconsistent while it was using it, which no amount of
+    /// flushing answers -- and a layer built out of one would be wrong in a way nothing
+    /// downstream could notice.
+    pub fn settled(&self) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let io = |context: String| move |e: std::io::Error| Error::io(context.clone(), e);
+        let named = || format!("the superblock of {}", self.path.display());
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .map_err(io(format!("opening {}", self.path.display())))?;
+
+        let mut state = [0u8; 2];
+        file.seek(SeekFrom::Start(STATE))
+            .and_then(|_| file.read_exact(&mut state))
+            .map_err(io(format!("reading {}", named())))?;
+        let state = u16::from_le_bytes(state);
+
+        if state & ERRORS != 0 {
+            return Err(Error::io(
+                format!("reading {}", named()),
+                std::io::Error::other(
+                    "the guest kernel found this filesystem inconsistent while it was                      running, so what it holds is not a changeset to keep",
+                ),
+            ));
+        }
+
+        file.seek(SeekFrom::Start(STATE))
+            .and_then(|_| file.write_all(&(state | VALID).to_le_bytes()))
+            .and_then(|_| file.sync_all())
+            .map_err(io(format!("writing {}", named())))
+    }
+
     /// Write what this session wrote onto `out` as a layer blob, and answer with the
     /// blob's digest -- which is the layer's `diff_id`.
     ///
@@ -221,6 +275,12 @@ fn format(path: &Path, size: u64) -> Result<()> {
         let _ = std::fs::remove_file(path);
     })
 }
+
+/// Where the superblock records how the filesystem was left, and the two bits of it that
+/// mean anything here: cleanly unmounted, and found inconsistent while mounted.
+const STATE: u64 = 0x400 + 0x3a;
+const VALID: u16 = 0b01;
+const ERRORS: u16 = 0b10;
 
 /// Where the superblock records which operating system made the filesystem, and the value
 /// that means Linux.

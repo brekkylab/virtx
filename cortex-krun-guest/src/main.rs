@@ -54,7 +54,27 @@ fn main() -> ExitCode {
     }
 }
 
+/// The one argument this binary takes, and the one thing it does that is not a session.
+///
+/// A build reads the machine's disk **on the host**, after the machine is gone. What the
+/// guest has written is not on that disk until the guest has flushed it, and the server
+/// takes a machine down by killing it -- so something inside has to flush first, and the
+/// only thing certain to be in there is this binary. The server runs it as a command,
+/// through the same `exec` a client's commands go through.
+///
+/// Not `sync(1)`: an image is not obliged to carry coreutils, and a build that failed
+/// because the base was slim would be failing for the wrong reason.
+const SYNC: &str = "sync";
+
 fn run() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some(SYNC) {
+        // SAFETY: `sync(2)` takes no arguments, returns nothing, cannot fail and changes
+        // nothing about this process. It returns once the writes have reached the device,
+        // which is what the host is waiting for.
+        unsafe { libc::sync() };
+        return Ok(());
+    }
+
     let port = port::open()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

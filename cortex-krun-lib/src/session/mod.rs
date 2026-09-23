@@ -40,7 +40,7 @@
 //! a caller is unreachable. That is also why a session has one operation and not two --
 //! nothing can run after a session starts, so nothing can ask a second thing of it.
 
-mod ext4;
+pub(crate) mod ext4;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod mount;

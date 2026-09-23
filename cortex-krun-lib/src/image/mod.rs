@@ -20,6 +20,7 @@ mod cache;
 mod digest;
 mod disk;
 mod erofs;
+mod ext4;
 mod image;
 mod layer;
 mod ops;
@@ -33,6 +34,7 @@ pub use digest::Digest;
 pub use disk::Disk;
 pub use erofs::Layout;
 pub use erofs::read as read_erofs;
+pub use ext4::to_blob as ext4_to_blob;
 pub use image::{Image, ImageConfig, ImageManifest, ImageState};
 pub use layer::{Layer, blob_to_erofs, decompress_blob};
 pub use ops::{commit, provision, pull};
@@ -69,6 +71,11 @@ pub enum Error {
 
     #[error("{0}")]
     Archive(String),
+
+    /// A session's writable layer could not be read back. Either the filesystem on it is
+    /// not one this can read, or what is on it is not what a layer is made of.
+    #[error("{0}")]
+    Ext4(String),
 
     #[error("writing an EROFS image: {0}")]
     Erofs(#[source] erofs::Error),

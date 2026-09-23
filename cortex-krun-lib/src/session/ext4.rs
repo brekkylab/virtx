@@ -74,6 +74,15 @@ impl Ext4 {
     /// another.
     pub const SIZE: u64 = 2 << 30;
 
+    /// Where overlayfs's upperdir is on this filesystem.
+    ///
+    /// The guest's init makes it, and makes `work/` beside it -- a workdir has to be on
+    /// the same filesystem as the upperdir, and this is the only one here that is
+    /// writable and outlives the boot. So the filesystem's own root is not the layer:
+    /// what a session wrote is one directory down, and `work/` next to it is overlayfs's
+    /// own and is nobody's changeset.
+    const UPPER: &'static str = "/upper";
+
     /// The upper layer at `path`, formatted if there is nothing there yet.
     ///
     /// **An existing file is carried on rather than reformatted.** That is what makes a
@@ -112,6 +121,33 @@ impl Ext4 {
             size,
             scratch: false,
         })
+    }
+
+    /// Write what this session wrote onto `out` as a layer blob, and answer with the
+    /// blob's digest -- which is the layer's `diff_id`.
+    ///
+    /// The whole of what a build is for: a machine boots on an image, writes on this, and
+    /// what it wrote becomes a layer over that image. What comes out is an uncompressed
+    /// OCI layer archive, which is what [`ingest`](crate::image::ingest) reads and so what
+    /// every other part of the image side already knows how to take.
+    ///
+    /// `skip` names guest paths that are not the session's work, as the guest spells them.
+    /// A share is mounted over a directory and making that directory is a write, so every
+    /// mount point the boot created is recorded here -- and a layer claiming an empty
+    /// `/.cortex` would be claiming something nobody asked for. What those paths are is
+    /// the caller's to say, since the mounts were.
+    ///
+    /// **The machine has to be down, and to have synced before it went.** This reads the
+    /// file, and a guest killed with writes still in its page cache has not put them in
+    /// the file. Nothing here can check that; it is why the caller stops the machine
+    /// rather than this.
+    pub fn to_blob(&self, skip: &[&str], out: impl std::io::Write) -> Result<crate::image::Digest> {
+        Ok(crate::image::ext4_to_blob(
+            &self.path,
+            Self::UPPER,
+            skip,
+            out,
+        )?)
     }
 
     /// An upper layer for a session that named none: a fresh ext4 under the host's
@@ -179,8 +215,109 @@ fn format(path: &Path, size: u64) -> Result<()> {
             path: path.display().to_string(),
             source,
         }
+    })?;
+
+    corrected(path).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
     })
 }
+
+/// Where the superblock records which operating system made the filesystem, and the value
+/// that means Linux.
+const CREATOR_OS: u64 = 0x400 + 0x48;
+const LINUX: u32 = 0;
+
+/// Where an inode keeps its flags, and the one that has to come off.
+const INODE_FLAGS: u64 = 0x20;
+const HUGE_FILE: u32 = 0x4_0000;
+
+/// Correct the two things [`arcbox_ext4`] writes that describe this filesystem as
+/// something it is not.
+///
+/// Neither stops a guest mounting it: Linux ignores the first and does not act on the
+/// second. Both matter because the filesystem is read again **on the host** -- see
+/// [`Ext4::to_blob`] -- and a reader is right to believe what the metadata says about
+/// itself.
+///
+/// `s_creator_os` is written as 3, FreeBSD. The field is what says how the twelve bytes of
+/// `osd2` in every inode are laid out, and the high halves of an owner's uid and gid are in
+/// there; this filesystem's inodes are Linux's, because a Linux guest is what fills it.
+///
+/// `EXT4_HUGE_FILE_FL` is set on every inode the formatter makes, including the root
+/// directory. It means "`i_blocks` counts filesystem blocks and not 512-byte sectors",
+/// which is a statement about files too large to count in sectors -- and a one-block root
+/// directory is not one. The inodes that matter later are the guest's own and carry it
+/// only when it is true, so this is only ever clearing it off what was written here.
+pub(crate) fn corrected(path: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let io = |context: String| move |e: std::io::Error| Error::io(context.clone(), e);
+
+    // Every inode there is, which at this point is the root and whatever the formatter
+    // put beside it. Read through the crate that wrote them, which is the one case its
+    // reader is exactly right for.
+    let mut reader = arcbox_ext4::Reader::new(path)
+        .map_err(|e| Error::io(format!("reading {}", path.display()), std::io::Error::other(e)))?;
+    let mut inodes = vec![ROOT_INODE];
+    let mut walking = vec![reader.tree().root()];
+    while let Some(index) = walking.pop() {
+        let node = reader.tree().node(index);
+        inodes.push(node.inode);
+        walking.extend(node.children.iter().copied());
+    }
+
+    let sb = reader.superblock().clone();
+    let block_size = 1024u64 << sb.log_block_size;
+    let mut at = Vec::with_capacity(inodes.len());
+    for ino in inodes {
+        let group = (ino - 1) / sb.inodes_per_group;
+        let within = u64::from((ino - 1) % sb.inodes_per_group);
+        let table = u64::from(
+            reader
+                .get_group_descriptor(group)
+                .map_err(|e| {
+                    Error::io(
+                        format!("reading {}", path.display()),
+                        std::io::Error::other(e),
+                    )
+                })?
+                .inode_table_lo,
+        );
+        at.push(table * block_size + within * u64::from(sb.inode_size));
+    }
+    drop(reader);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io(format!("opening {}", path.display())))?;
+
+    file.seek(SeekFrom::Start(CREATOR_OS))
+        .and_then(|_| file.write_all(&LINUX.to_le_bytes()))
+        .map_err(io(format!("writing the superblock of {}", path.display())))?;
+
+    for offset in at {
+        let mut flags = [0u8; 4];
+        let read = (|| {
+            use std::io::Read;
+            file.seek(SeekFrom::Start(offset + INODE_FLAGS))?;
+            file.read_exact(&mut flags)
+        })();
+        read.map_err(io(format!("reading an inode of {}", path.display())))?;
+
+        let cleared = u32::from_le_bytes(flags) & !HUGE_FILE;
+        file.seek(SeekFrom::Start(offset + INODE_FLAGS))
+            .and_then(|_| file.write_all(&cleared.to_le_bytes()))
+            .map_err(io(format!("writing an inode of {}", path.display())))?;
+    }
+
+    Ok(())
+}
+
+/// The inode every ext4 filesystem's root directory is.
+const ROOT_INODE: u32 = 2;
+
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,446 @@
+//! Building an image: booting the base, running what a recipe declares, and keeping what
+//! the boot wrote.
+//!
+//! # Why this is here and not in the library
+//!
+//! Because a build is a machine, and a machine is a *process* here. Creating one on macOS
+//! needs an entitlement, an entitlement is carried by a code signature, and a signature is
+//! read at `exec` -- so the thing that makes a VM is `cortex-krun-host`, spawned as a file
+//! beside this binary. `cortex-krun-lib` holds everything a build needs except the one
+//! thing it cannot be: something that spawns that file and lives to read the result.
+//!
+//! So the split is the same one the rest of this server has. The library knows what a
+//! layer is, what a cache is, and how to read a session's disk back out
+//! ([`Ext4::to_blob`]) and file the result ([`commit`]). This module knows how to get a
+//! machine to do some work first.
+//!
+//! # What a build is
+//!
+//! One boot, and one layer over the base. Not one layer per step: a step is cheap and a
+//! boot is not, so every `RUN` a recipe declares runs on one machine and what they all
+//! left behind is taken together.
+//!
+//! ```text
+//! recipe ── base ──► pull, provision ──► disk
+//!        └─ steps ──► RUN      ──► one shell line each, in order
+//!                     ENV      ──► exported before the RUNs after it, and stated
+//!                     WORKDIR  ──► cd'd into before the RUNs after it, and stated
+//!
+//!   boot(disk, a fresh ext4) ──► exec each line ──► sync ──► kill
+//!                                                            │
+//!                            the ext4 ── to_blob ──► commit ─┘
+//! ```
+//!
+//! # Naming, and why a second build of the same recipe is free
+//!
+//! An image built here is filed under the digest of **what was declared** -- the base's
+//! manifest and the steps as the caller wrote them. So the second `init` naming the same
+//! recipe finds the image in the index and never boots anything. That is also why the
+//! steps are hashed in their declared form rather than as the shell lines they become:
+//! two callers who declared the same thing get the same image whatever this module does
+//! with it on the way.
+
+
+use cortex::console::{Call, Error, ExecCall, InitCall, Response};
+use cortex::image::{Image as Recipe, Step};
+use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
+use cortex_krun::session::{Ext4, Network};
+use cortex_krun_host::{AGENT_PATH, agent_program};
+
+use super::machine::Machine;
+use super::{coded, pulled};
+
+/// How a build's name is spelled, so that a change to what goes into the digest cannot be
+/// read as an image somebody once built.
+const RECIPE: &str = "cortex-krun/build/1\n";
+
+/// Where a built image is filed. Not a registry anybody can reach: an image made here has
+/// no home but this cache, and a name that looked pullable would be a lie.
+const REPOSITORY: &str = "localhost/cortex-krun-build";
+
+/// What the guest is asked to run before the machine is taken down -- see the guest's own
+/// note on it. The disk is read on this side, and a machine is stopped by killing it.
+const SYNC: &str = "sync";
+
+/// Build what `recipe` declares, and answer with the name the built image is filed under.
+///
+/// That name is what a session then boots on, so a caller treats the answer exactly as it
+/// would have treated `recipe.base` had there been no steps.
+///
+/// `network` is the reach the session asked for, and the build gets the same one. It has
+/// to: the commonest first step of any recipe fetches packages, and a build that could not
+/// reach a mirror when the session it is for can would fail for a reason the client has no
+/// way to read. No host ports, because a build serves nothing.
+///
+/// Nothing is booted for a recipe whose steps are all `ENV` and `WORKDIR`. Those change
+/// what the image states and not what is in it, and there is nothing for a machine to do.
+pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> {
+    anyhow::ensure!(!recipe.base.is_empty(), "the image named no base");
+
+    // The base has to be in the cache and stitchable before anything can boot on it, and a
+    // name nobody can pull is a failure about what was asked for rather than about this
+    // machine -- which is why it is answered here, before any of the rest.
+    pulled(&recipe.base).await?;
+
+    let cache = Cache::new();
+    let base = based(&recipe.base, &cache)?;
+    let named = name(&base, recipe)?;
+
+    // The same recipe over the same base is the same image. Answered before a machine is
+    // made, which is the whole reason the name is the digest of the declaration.
+    if cache.image_index()?.contains_key(&named) {
+        return Ok(named);
+    }
+
+    let (script, config) = plan(recipe, &base.config)?;
+
+    if script.is_empty() {
+        commit(&base, None, config, named.as_str(), Some(cache))
+            .map_err(|e| coded(Error::INTERNAL_ERROR, anyhow::Error::new(e)))?;
+        return Ok(named);
+    }
+
+    // The disk the build writes on. Its own, and never the session's: what a session wrote
+    // is not what this recipe declared, and a layer holding both would be an image nobody
+    // asked for. Under this process's directory, so a server that dies leaves it for the
+    // next one's sweep.
+    let at = super::sessions().join(std::process::id().to_string());
+    std::fs::create_dir_all(&at)?;
+    let upper = Ext4::at(at.join("build.ext4"), Ext4::SIZE)?;
+    let blob = at.join("build.tar");
+
+    run(&recipe.base, &upper, &script, network).await?;
+
+    // Only now that the machine is down and has flushed. `to_blob` reads the file, and
+    // nothing it can see would tell it that a guest still had the answer in memory.
+    let written = std::fs::File::create(&blob)?;
+    let diff_id = upper.to_blob(&[AGENT_PATH], &written)?;
+    written.sync_all()?;
+    drop(written);
+
+    let built = commit(
+        &base,
+        Some((&blob, &diff_id)),
+        config,
+        named.as_str(),
+        Some(cache),
+    );
+
+    // Both are this build's alone and neither is worth keeping: the layer is in the cache
+    // by now, and the disk it came off is a filesystem nothing will mount again.
+    let _ = std::fs::remove_file(&blob);
+    let _ = std::fs::remove_file(&upper.path);
+
+    built.map_err(|e| coded(Error::INTERNAL_ERROR, anyhow::Error::new(e)))?;
+    Ok(named)
+}
+
+/// Boot on `base`, run every line of `script` in order, and flush before coming back.
+///
+/// The machine is dropped on the way out however this leaves, which kills it -- so a step
+/// that failed takes the machine with it and the disk is left holding whatever the steps
+/// before it wrote.
+async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> anyhow::Result<()> {
+    let mut machine = Machine::boot(base, &upper.path, &[], network, &[])
+        .await
+        .map_err(|e| coded(Error::BOOT_FAILED, e))?;
+
+    // The guest answers nothing until it has been told what the session is. A build's
+    // session has no trees in it: what a step may read is what the image shipped and what
+    // an earlier step wrote, and a share would put this host's files in the image.
+    match machine.call(Call::Init(InitCall::default())).await? {
+        Response::Init(_) => {}
+        Response::Error(e) => anyhow::bail!("the guest refused the build: {}", e.message),
+        other => anyhow::bail!("the guest answered an init with {other:?}"),
+    }
+
+    for (index, line) in script.iter().enumerate() {
+        let answered = machine
+            .call(Call::Exec(ExecCall {
+                // Through `sh`, which is what a `RUN` is declared to be -- see the
+                // protocol's own note on the step. No timeout: a build has no deadline
+                // this end could invent that would not be wrong for somebody.
+                cmd: vec!["sh".into(), "-c".into(), line.clone()],
+                timeout_ms: None,
+            }))
+            .await?;
+
+        match answered {
+            Response::Exec(done) if done.code == 0 => {}
+            Response::Exec(done) => {
+                // What the step said, because that is the whole of why it failed and the
+                // client has no other way to see it -- the machine is about to be killed.
+                let said = String::from_utf8_lossy(&done.stderr);
+                let said = said.trim();
+                return Err(coded(
+                    Error::UNSUPPORTED_IMAGE,
+                    anyhow::anyhow!(
+                        "step {} exited {}{}",
+                        index + 1,
+                        done.code,
+                        if said.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {said}")
+                        }
+                    ),
+                ));
+            }
+            Response::Error(e) => anyhow::bail!("step {}: {}", index + 1, e.message),
+            other => anyhow::bail!("the guest answered step {} with {other:?}", index + 1),
+        }
+    }
+
+    // **The one call that is not the recipe's.** What the guest wrote is on its way to the
+    // disk and not necessarily on it; the machine is stopped by killing it, which flushes
+    // nothing; and the file is about to be read on this side.
+    match machine
+        .call(Call::Exec(ExecCall {
+            cmd: vec![agent_program(), SYNC.into()],
+            timeout_ms: None,
+        }))
+        .await?
+    {
+        Response::Exec(done) if done.code == 0 => Ok(()),
+        Response::Exec(done) => {
+            anyhow::bail!("flushing the build's disk exited {}", done.code)
+        }
+        Response::Error(e) => anyhow::bail!("flushing the build's disk: {}", e.message),
+        other => anyhow::bail!("the guest answered a flush with {other:?}"),
+    }
+}
+
+/// What a recipe's steps come to: the shell lines to run, and what the image ends up
+/// stating about running.
+///
+/// `ENV` and `WORKDIR` are both, which is what makes this one pass and not two. They change
+/// what the image states *and* how every later `RUN` is spelled -- a variable is exported
+/// in front of the commands after it, and a directory is `cd`'d into before them.
+///
+/// The environment the *base* states is not exported here. The guest's init already
+/// started the agent with it, and a command the agent spawns inherits it -- so exporting it
+/// again would be this end repeating something that is already true.
+fn plan(recipe: &Recipe, base: &ImageState) -> anyhow::Result<(Vec<String>, ImageState)> {
+    let mut config = base.clone();
+    let mut script = Vec::new();
+    // Only what the recipe added, in declaration order, which is what a later `RUN` needs
+    // in front of it.
+    let mut exported: Vec<(String, String)> = Vec::new();
+    let mut workdir = base.working_dir.clone();
+
+    for step in &recipe.steps {
+        match step {
+            Step::Run(command) => {
+                anyhow::ensure!(!command.trim().is_empty(), "a RUN step names no command");
+                script.push(line(&workdir, &exported, command));
+            }
+
+            Step::Env { key, value } => {
+                anyhow::ensure!(
+                    !key.is_empty() && !key.contains(['=', ' ']),
+                    "{key:?} is not a name a variable can have"
+                );
+                set(&mut exported, key, value);
+                let stated = config.env.get_or_insert_with(Vec::new);
+                stated.retain(|pair| !pair.starts_with(&format!("{key}=")));
+                stated.push(format!("{key}={value}"));
+            }
+
+            Step::Workdir(dir) => {
+                anyhow::ensure!(!dir.is_empty(), "a WORKDIR step names no directory");
+                workdir = Some(dir.clone());
+                config.working_dir = Some(dir.clone());
+            }
+
+            // **The one step this server has no way to realize.** `src` is a path in a
+            // build context, and the protocol carries no context: `init` says what the
+            // image is and where the session's trees are, and neither of those is a
+            // directory the copy is to be read from. There is nothing to guess at here --
+            // any directory this picked would be this host's and not the caller's.
+            Step::Copy { src, dst } => {
+                return Err(coded(
+                    Error::UNSUPPORTED_IMAGE,
+                    anyhow::anyhow!(
+                        "COPY {} {dst}: a copy reads from a build context, and an init \
+                         carries none -- so there is no directory this server could read \
+                         {} out of",
+                        src.display(),
+                        src.display()
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok((script, config))
+}
+
+/// One `RUN`, as the line a shell is handed.
+fn line(workdir: &Option<String>, exported: &[(String, String)], command: &str) -> String {
+    let mut line = String::new();
+
+    if let Some(dir) = workdir {
+        line.push_str(&format!("cd {} && ", quote(dir)));
+    }
+    if !exported.is_empty() {
+        line.push_str("export");
+        for (key, value) in exported {
+            // The key unquoted because it is a name and has been checked as one; the value
+            // quoted because it is anything at all.
+            line.push_str(&format!(" {key}={}", quote(value)));
+        }
+        line.push_str(" && ");
+    }
+    line.push_str(command);
+    line
+}
+
+/// `text`, so that a shell reads it as exactly these bytes.
+///
+/// Single quotes, which is the one quoting in `sh` with no escapes inside it -- so the
+/// only thing to handle is a single quote itself, which ends the string, is escaped
+/// outside it, and starts a new one.
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// Add or replace a variable, keeping the order the recipe declared them in.
+fn set(exported: &mut Vec<(String, String)>, key: &str, value: &str) {
+    match exported.iter_mut().find(|(name, _)| name == key) {
+        Some(existing) => existing.1 = value.to_string(),
+        None => exported.push((key.to_string(), value.to_string())),
+    }
+}
+
+/// The image a recipe builds over, which a pull has just made sure is here.
+fn based(base: &str, cache: &Cache) -> anyhow::Result<Image> {
+    let reference: cortex_krun::image::Reference = base
+        .parse()
+        .map_err(|e| coded(Error::UNKNOWN_IMAGE, anyhow::anyhow!("{base}: {e}")))?;
+    let name = reference.to_string();
+
+    cache.image_index()?.get(&name).cloned().ok_or_else(|| {
+        coded(
+            Error::UNKNOWN_IMAGE,
+            anyhow::anyhow!("{name} is not in the cache, having just been pulled into it"),
+        )
+    })
+}
+
+/// What a built image is filed under: the digest of what was declared.
+///
+/// The base by the manifest it resolved to rather than by the string that named it, so
+/// that a tag somebody moved is a different build -- and the steps by their declared form,
+/// which is what [`Step`]'s own `Display` is for.
+fn name(base: &Image, recipe: &Recipe) -> anyhow::Result<String> {
+    let mut text = String::from(RECIPE);
+    text.push_str(&base.manifest.to_string());
+    text.push('\n');
+    for step in &recipe.steps {
+        text.push_str(&step.to_string());
+        text.push('\n');
+    }
+
+    let named = format!("{REPOSITORY}:{}", Digest::of(text).hex());
+    // Through a `Reference` and back, because the index is keyed by the canonical spelling
+    // and a lookup against anything else would miss what this very function filed.
+    let reference: cortex_krun::image::Reference = named
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{named} is not a name an image can have: {e}"))?;
+    Ok(reference.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipe(steps: Vec<Step>) -> Recipe {
+        Recipe::new().base("alpine:3.21").steps(steps)
+    }
+
+    /// The two steps that are not commands still reach every command after them, and only
+    /// the ones after them.
+    #[test]
+    fn env_and_workdir_apply_to_the_steps_that_follow() {
+        let declared = recipe(vec![
+            Step::run("first"),
+            Step::env("TZ", "UTC"),
+            Step::workdir("/work"),
+            Step::run("second"),
+        ]);
+
+        let (script, config) = plan(&declared, &ImageState::default()).unwrap();
+
+        assert_eq!(script.len(), 2);
+        assert_eq!(script[0], "first", "a later ENV reached an earlier RUN");
+        assert_eq!(script[1], "cd '/work' && export TZ='UTC' && second");
+
+        assert_eq!(config.working_dir.as_deref(), Some("/work"));
+        assert_eq!(config.env.as_deref(), Some(&["TZ=UTC".to_string()][..]));
+    }
+
+    /// A value is anything at all, and a shell must read it as exactly what was declared.
+    #[test]
+    fn a_value_cannot_escape_the_line_it_is_in() {
+        let declared = recipe(vec![
+            Step::env("EVIL", "'; rm -rf /; echo '"),
+            Step::run("echo $EVIL"),
+        ]);
+
+        let (script, _) = plan(&declared, &ImageState::default()).unwrap();
+        assert_eq!(
+            script[0],
+            r"export EVIL=''\''; rm -rf /; echo '\''' && echo $EVIL"
+        );
+    }
+
+    /// Restating a variable replaces it rather than stacking a second one an image would
+    /// have to pick between.
+    #[test]
+    fn a_variable_stated_twice_is_one_variable() {
+        let declared = recipe(vec![
+            Step::env("TZ", "UTC"),
+            Step::env("TZ", "Asia/Seoul"),
+            Step::run("date"),
+        ]);
+
+        let (script, config) = plan(&declared, &ImageState::default()).unwrap();
+        assert_eq!(script[0], "export TZ='Asia/Seoul' && date");
+        assert_eq!(config.env.as_deref(), Some(&["TZ=Asia/Seoul".to_string()][..]));
+    }
+
+    /// The base's own environment is already in the machine, and repeating it here would
+    /// be this end asserting something it did not learn.
+    #[test]
+    fn what_the_base_states_is_not_exported_again() {
+        let base = ImageState {
+            env: Some(vec!["PATH=/usr/bin".to_string()]),
+            working_dir: Some("/srv".to_string()),
+            ..Default::default()
+        };
+        let (script, config) = plan(&recipe(vec![Step::run("build")]), &base).unwrap();
+
+        assert_eq!(script[0], "cd '/srv' && build", "{script:?}");
+        assert_eq!(config.env.as_deref(), Some(&["PATH=/usr/bin".to_string()][..]));
+    }
+
+    /// Nothing to run is nothing to boot, and the caller reads that off an empty script.
+    #[test]
+    fn a_recipe_of_statements_alone_runs_nothing() {
+        let declared = recipe(vec![Step::env("TZ", "UTC"), Step::workdir("/work")]);
+        let (script, config) = plan(&declared, &ImageState::default()).unwrap();
+
+        assert!(script.is_empty(), "{script:?}");
+        assert_eq!(config.working_dir.as_deref(), Some("/work"));
+    }
+
+    /// Refused where it is read, and by a code that says the image is what has to change.
+    #[test]
+    fn a_copy_is_refused_for_want_of_a_context() {
+        let declared = recipe(vec![Step::copy("app", "/srv/app")]);
+        let refused = plan(&declared, &ImageState::default()).unwrap_err();
+
+        assert_eq!(super::super::refused(&refused).code, Error::UNSUPPORTED_IMAGE);
+        assert!(format!("{refused:#}").contains("build context"), "{refused:#}");
+    }
+}

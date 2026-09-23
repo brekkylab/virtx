@@ -1,5 +1,6 @@
 //! Answering a console session: the wire, and what is run at the far end of it.
 
+mod build;
 mod halves;
 mod machine;
 
@@ -153,32 +154,35 @@ async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
         ));
     }
 
-    let rootfs = init.rootfs.clone().ok_or_else(|| {
+    let image = init.image.clone().ok_or_else(|| {
         coded(
             Error::INVALID_PARAMS,
             anyhow::anyhow!(
-                "a session here runs in a micro-VM, which boots on a rootfs, and this one \
+                "a session here runs in a micro-VM, which boots on an image, and this one \
                  named none"
             ),
         )
     })?;
-    if !rootfs.steps.is_empty() {
-        return Err(coded(
-            Error::UNSUPPORTED_IMAGE,
-            anyhow::anyhow!(
-                "this server boots the base it is given and builds nothing over it: {} \
-                 step(s) were declared",
-                rootfs.steps.len()
-            ),
-        ));
-    }
-    anyhow::ensure!(!rootfs.base.is_empty(), "the rootfs named no base");
+    anyhow::ensure!(!image.base.is_empty(), "the image named no base");
+
+    // What this session actually boots on. The base itself when that is all the client
+    // declared, and otherwise an image built here over it -- which is a machine of its own,
+    // run and finished before the session's is started. Either way what comes back is a name
+    // in the cache, and everything after this point cannot tell the two apart.
+    //
+    // A build gets the session's own reach, because the commonest first step of any recipe
+    // fetches packages.
+    let booting = if image.steps.is_empty() {
+        image.base.clone()
+    } else {
+        build::build(&image, network).await?
+    };
 
     // Into the cache, so that the boot -- which asks no registry anything -- finds it. Done
     // here and not there because this is the end with a client to tell, and a name nobody can
     // pull is the one failure at `init` that is about what was asked for rather than about
     // this machine.
-    pulled(&rootfs.base).await?;
+    pulled(&booting).await?;
 
     // Where each tree is on this side, against the one path in the guest that names it. Read
     // before anything is built, because a session whose trees can never be there is one in
@@ -187,11 +191,15 @@ async fn start(init: InitCall) -> anyhow::Result<(Factory, Machine, InitResp)> {
 
     // Cloned per boot rather than borrowed, because what this closure is for is outliving the
     // machine it makes.
-    let image = rootfs.base.clone();
     let boot: Factory = Box::new(move || {
-        let (image, mounts, host_ports) = (image.clone(), mounts.clone(), host_ports.clone());
+        let (booting, mounts, host_ports) = (booting.clone(), mounts.clone(), host_ports.clone());
         Box::pin(async move {
-            let mut machine = Machine::boot(&image, &mounts, network, &host_ports).await?;
+            // The disk the session's own writes go on, which outlives every machine started
+            // on it -- that file *is* the session. See [`crate::home`].
+            let disk = sessions()
+                .join(std::process::id().to_string())
+                .join("session.ext4");
+            let mut machine = Machine::boot(&booting, &disk, &mounts, network, &host_ports).await?;
             let cwd = configure(&mut machine, &mounts).await?;
             Ok((machine, cwd))
         })
@@ -280,9 +288,9 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
                 })
             })
             .collect::<Result<_, cortex::console::InvalidMount>>()?,
-        // None of these reaches the guest: a rootfs is what this end booted, a network is a
+        // None of these reaches the guest: an image is what this end booted, a network is a
         // device that either is or is not attached by now, and a snapshot is refused above.
-        rootfs: None,
+        image: None,
         network: None,
         snapshot: None,
     };

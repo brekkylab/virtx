@@ -97,6 +97,10 @@ impl Machine {
     /// there is nothing a caller can do with the time in between.
     pub async fn boot(
         image: &str,
+        // The writable disk the overlay's upper layer goes on, which is what parts a
+        // session's machine from a build's: a session's is kept and carried on, a
+        // build's is read once and thrown away.
+        session: &Path,
         mounts: &[Mount],
         network: Network,
         // Beside the reach rather than folded into it, because widening the one must never
@@ -117,8 +121,9 @@ impl Machine {
         // One name and not a counter per boot, because there is never more than one machine
         // here at a time: dropping the last one kills it, reaps it and removes this directory
         // before anything asks for another, all of it before the drop returns.
-        let owner = super::sessions().join(std::process::id().to_string());
-        let dir = owner.join("machine");
+        let dir = super::sessions()
+            .join(std::process::id().to_string())
+            .join("machine");
         let agent_dir = dir.join("agent");
         std::fs::create_dir_all(&agent_dir)?;
 
@@ -137,14 +142,7 @@ impl Machine {
         let listener = std::os::unix::net::UnixListener::bind(&socket)
             .map_err(|e| anyhow::anyhow!("binding the console channel: {e}"))?;
 
-        let mut told = told(
-            image,
-            &owner.join("session.ext4"),
-            &agent_dir,
-            &socket,
-            network,
-            host_ports,
-        );
+        let mut told = told(image, session, &agent_dir, &socket, network, host_ports);
         // In the order the client named them, which is the order the protocol says they are
         // realized in -- so a boot is handed the list as it stands and nothing here sorts or
         // merges it.

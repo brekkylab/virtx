@@ -66,6 +66,15 @@ tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "macros
 tar = "0.4"
 flate2 = "1"
 
+# Reading that layer back out again, which is what turns what a build wrote
+# into a layer. A reader rather than the formatter above, and a different crate
+# because they are different jobs: what this one answers is what an OCI layer is
+# made of -- the extended attributes on a file, the major and minor of a device
+# node, and which inode a name points at, so that a hard link is one and not a
+# copy. Without those three a layer cannot say "this directory hides what is
+# under it", "this deletion happened", or "these two names are one file".
+ext4 = "0.9"
+
 # The writable layer a session runs on. An ext4 image has to be made on the host, and
 # macOS has no `mke2fs` -- nor does Windows -- so a formatter that is a library rather
 # than a program is the only form that works on the hosts this runs on. Pure Rust, so it

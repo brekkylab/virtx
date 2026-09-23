@@ -76,20 +76,20 @@ where
 
 /// A writer that hashes what goes through it, so decompressing a blob and learning
 /// its `diff_id` are one pass and not two.
-struct Hashing<W> {
+pub(crate) struct Hashing<W> {
     inner: W,
     hasher: Sha256,
 }
 
 impl<W> Hashing<W> {
-    fn new(inner: W) -> Self {
+    pub(crate) fn new(inner: W) -> Self {
         Hashing {
             inner,
             hasher: Sha256::new(),
         }
     }
 
-    fn digest(self) -> Digest {
+    pub(crate) fn digest(self) -> Digest {
         Digest::from_sha256(self.hasher.finalize().into())
     }
 }

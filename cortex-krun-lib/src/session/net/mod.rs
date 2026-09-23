@@ -17,9 +17,9 @@
 //!                               │            │      └─ Policy
 //! ```
 //!
-//! The socket is a `socketpair`, so no path is created, nothing else can connect to it,
-//! and the whole network dies with the process holding it. One datagram is one ethernet
-//! frame -- see [`device`].
+//! What that socket is, and how a frame is marked off on it, is the one thing here that
+//! differs between hosts -- see [`wire`]. Everything above it is the same network on
+//! every platform.
 //!
 //! # What the guest does not get
 //!
@@ -42,19 +42,31 @@
 //! in the guest that can route around it, because the only way out of the guest is the
 //! queue this reads.
 
-mod device;
 mod dhcp;
 mod policy;
 mod proxy;
 mod resolver;
 mod stack;
+mod wire;
 
 use std::net::Ipv4Addr;
 
+use policy::Policy;
+use stack::Stack;
+
 use super::{Error, Result};
 
-pub(crate) use policy::Policy;
-pub(crate) use stack::Stack;
+/// Start this session's network and hand back the device that is its near end.
+///
+/// The stack comes up first and on purpose: the guest's DHCP client gives up after a
+/// tenth of a second, and a server that came up when the machine did would be racing a
+/// kernel. By the time this returns, the thread answering is already there.
+pub(crate) fn attach(network: Network, host_ports: Vec<u16>) -> Result<krun::NetDevice> {
+    Stack::start(Policy {
+        network,
+        host_ports,
+    })
+}
 
 /// How much of the network a session may reach.
 ///

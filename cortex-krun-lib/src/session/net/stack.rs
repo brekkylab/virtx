@@ -46,7 +46,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant as HostInstant};
 
@@ -58,12 +57,11 @@ use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, HardwareAddress, IpAddress,
     IpCidr, IpProtocol, Ipv4Cidr, Ipv4Packet, Ipv4Repr, TcpPacket, UdpPacket, UdpRepr,
 };
-use tokio::net::UnixDatagram;
 use tokio::sync::Notify;
 
-use super::device::{FRAME_BUF, Pair};
 use super::policy::{DNS_PORT, Policy, Reach};
 use super::proxy::{self, FromHost, Host, MAX_DATAGRAM};
+use super::wire::{self, Wire};
 use super::{
     Error, GATEWAY, GATEWAY_MAC, GUEST, GUEST_MAC, MTU, Result, SUBNET_PREFIX, dhcp, resolver,
 };
@@ -87,19 +85,15 @@ const MAX_IDLE: Duration = Duration::from_secs(1);
 pub(crate) struct Stack;
 
 impl Stack {
-    /// Start one, and hand back the descriptor the virtio-net device is built on.
+    /// Start one, and hand back the virtio-net device on the other end of its wire.
     ///
     /// The thread is not joined and there is no handle to stop it, because there is
     /// nothing that could: [`enter`](crate::session::Session::enter) becomes the machine
     /// and the machine's exit is this process's. A network that outlived its guest would
     /// have to be a network something could still reach, and nothing can -- the other end
-    /// of the pair is held by the device and by nothing else.
-    pub(crate) fn start(policy: Policy) -> Result<OwnedFd> {
-        let pair = Pair::new()?;
-        pair.host
-            .set_nonblocking(true)
-            .map_err(|e| Error::io("putting the network socket in non-blocking mode", e))?;
-
+    /// of the wire is held by the device and by nothing else.
+    pub(crate) fn start(policy: Policy) -> Result<krun::NetDevice> {
+        let (pending, device) = wire::pair()?;
         let resolvers = resolver::host_resolvers();
 
         std::thread::Builder::new()
@@ -114,15 +108,12 @@ impl Stack {
                     // Inside the runtime and not before it: registering a socket is the
                     // reactor's, and the reactor is only there once something is running
                     // on it.
-                    let host = UnixDatagram::from_std(pair.host)
-                        .expect("a non-blocking socket, on the runtime that will drive it");
-
-                    run(host, policy, resolvers).await
+                    run(Wire::new(pending), policy, resolvers).await
                 });
             })
             .map_err(|e| Error::io("starting the thread the guest's network runs on", e))?;
 
-        Ok(pair.krun)
+        Ok(device)
     }
 }
 
@@ -223,7 +214,7 @@ struct UdpFlow {
     last: HostInstant,
 }
 
-async fn run(socket: UnixDatagram, policy: Policy, resolvers: Vec<Ipv4Addr>) {
+async fn run(mut wire: Wire, policy: Policy, resolvers: Vec<Ipv4Addr>) {
     let started = HostInstant::now();
     let now = || Instant::from_micros(started.elapsed().as_micros() as i64);
 
@@ -257,14 +248,15 @@ async fn run(socket: UnixDatagram, policy: Policy, resolvers: Vec<Ipv4Addr>) {
     let mut udp_flows: HashMap<UdpKey, UdpFlow> = HashMap::new();
 
     let wake = Arc::new(Notify::new());
-    let mut buf = vec![0u8; FRAME_BUF];
+    let mut arrived: VecDeque<Vec<u8>> = VecDeque::new();
 
     loop {
         // 1. Everything the guest has said since the last pass, classified -- and, for a
         //    SYN, its flow opened before the frame goes any further.
-        while let Ok(read) = socket.try_recv(&mut buf) {
+        wire.drain(&mut arrived);
+        while let Some(frame) = arrived.pop_front() {
             classify(
-                &buf[..read],
+                &frame,
                 &policy,
                 &resolvers,
                 &wake,
@@ -285,13 +277,13 @@ async fn run(socket: UnixDatagram, policy: Policy, resolvers: Vec<Ipv4Addr>) {
         // 4. Answers to datagrams, which go straight onto the wire.
         pump_udp(&mut udp_flows, &mut queues);
 
-        // 5. Whatever any of that produced.
+        // 5. Whatever any of that produced. A frame the wire will not take is dropped
+        //    rather than retried, which is what every ethernet has always done with one
+        //    -- and what the protocols on top of it are already written to survive.
         while let Some(frame) = queues.tx.pop_front() {
-            // A frame that cannot be sent is dropped rather than retried, which is what
-            // every ethernet has always done with one -- and what the protocols on top of
-            // it are already written to survive.
-            let _ = socket.try_send(&frame);
+            wire.send(&frame);
         }
+        wire.flush();
 
         // 6. Sleep until something happens: a frame, a host socket, or smoltcp's own
         //    timer. `MAX_IDLE` is the ceiling, so an idle flow is reaped on time.
@@ -302,7 +294,7 @@ async fn run(socket: UnixDatagram, policy: Policy, resolvers: Vec<Ipv4Addr>) {
             .min(MAX_IDLE);
 
         tokio::select! {
-            _ = socket.readable() => {}
+            _ = wire.ready() => {}
             _ = wake.notified() => {}
             _ = tokio::time::sleep(delay) => {}
         }

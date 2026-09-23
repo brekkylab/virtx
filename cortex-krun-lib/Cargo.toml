@@ -94,4 +94,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_NetworkManagement_IpHelper",
+    # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an
+    # adapter's shape is NDIS's, and windows-sys gates the whole call on it.
+    "Win32_NetworkManagement_Ndis",
 ] }

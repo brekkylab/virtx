@@ -1,24 +1,5 @@
-//! Where the guest's name lookups actually go.
-//!
-//! # Not a resolver
-//!
-//! Nothing here resolves anything. The guest is told the gateway is its nameserver, and
-//! what the gateway does with a query is send it, unread, to whatever this host asks --
-//! and send the answer back the same way. So the guest gets the same names this machine
-//! gets, including whatever a VPN or a corporate resolver is serving, without any of it
-//! being configured twice.
-//!
-//! **A query is forwarded, not inspected.** That means a name is a way of saying
-//! something outward even for a session whose packets reach nothing -- see
-//! [`Network::HostOnly`](super::Network::HostOnly), which says so where a caller choosing
-//! a level will read it.
-//!
-//! # Read once, at the start
-//!
-//! `/etc/resolv.conf` is read when the stack starts and not again. A host whose resolver
-//! changes mid-session -- a VPN coming up, a laptop changing networks -- leaves a session
-//! pointed at the old one, which is the same thing that happens to every process on this
-//! machine that read the file when it started.
+//! What a unix host has: one file, listing the resolvers every process on this machine
+//! reads when it starts.
 //!
 //! # macOS, and what this file is not
 //!
@@ -34,26 +15,13 @@ const RESOLV_CONF: &str = "/etc/resolv.conf";
 
 /// The host's resolvers, in the order the file names them.
 ///
-/// Empty is a real answer and not a failure: a host with no resolver configured is one
-/// whose guest cannot look up names either, and that is a network which works by address
-/// rather than one that failed to start. The stack says so once, on stderr, because a
-/// session whose names silently do not resolve is the hardest kind of broken to read from
-/// inside the guest.
-pub(crate) fn host_resolvers() -> Vec<Ipv4Addr> {
-    let Ok(conf) = std::fs::read_to_string(RESOLV_CONF) else {
-        eprintln!(
-            "cortex-krun: {RESOLV_CONF} could not be read; the session's names will not resolve"
-        );
-        return Vec::new();
-    };
-
-    let resolvers = nameservers(&conf);
-    if resolvers.is_empty() {
-        eprintln!(
-            "cortex-krun: {RESOLV_CONF} names no IPv4 resolver; the session's names will not resolve"
-        );
-    }
-    resolvers
+/// A file that is not there and a file that names none are the same answer -- none --
+/// and what that means for a session is [`resolver`](super)'s to say rather than this
+/// file's.
+pub(crate) fn resolvers() -> Vec<Ipv4Addr> {
+    std::fs::read_to_string(RESOLV_CONF)
+        .map(|conf| nameservers(&conf))
+        .unwrap_or_default()
 }
 
 /// The `nameserver` lines of a `resolv.conf`, as far as they are IPv4 addresses.

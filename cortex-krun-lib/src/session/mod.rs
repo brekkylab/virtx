@@ -44,13 +44,11 @@ mod ext4;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod mount;
-#[cfg(unix)]
 mod net;
 mod session;
 
 pub use ext4::Ext4;
 pub use mount::Mount;
-#[cfg(unix)]
 pub use net::Network;
 pub use session::Session;
 
@@ -90,14 +88,6 @@ pub enum Error {
     /// The guest init could not be laid over the root, which is a machine with no PID 1.
     #[error("preparing the guest init: {0}")]
     Init(#[source] krun_init::ApplyError),
-
-    /// A network this host cannot give. libkrun's virtio-net device is built on a unix
-    /// socket, and Windows has no `socketpair` to make one of -- so a session there gets
-    /// [`Network::Disabled`](net::Network::Disabled) or nothing, and is told which rather
-    /// than started without the network it asked for.
-    #[cfg(not(unix))]
-    #[error("a network needs a unix socket, which this host has none of; {0} was asked for")]
-    NoNetwork(&'static str),
 
     /// The machine started and its event loop then broke -- the one failure that can
     /// arrive after a guest is running, and the only way [`enter`] comes back at all.

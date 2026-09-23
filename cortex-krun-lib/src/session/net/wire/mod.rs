@@ -43,10 +43,12 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+// `Pending` is not among them: it travels from `pair` to `Wire::new` without anything in
+// between having to name it, which is the whole of what it is for.
 #[cfg(unix)]
-pub(crate) use unix::{Pending, Wire, pair};
+pub(crate) use unix::{Wire, pair};
 #[cfg(windows)]
-pub(crate) use windows::{Pending, Wire, pair};
+pub(crate) use windows::{Wire, pair};
 
 use super::MTU;
 

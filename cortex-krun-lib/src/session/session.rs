@@ -83,10 +83,7 @@ use krun::{
 
 use crate::image::{Cache, ImageState, provision};
 
-use super::{Error, Ext4, Mount, Network, Result};
-
-#[cfg(unix)]
-use super::net;
+use super::{Error, Ext4, Mount, Network, Result, net};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
 /// with `rootfstype=virtiofs`.
@@ -489,7 +486,6 @@ impl Session {
         // What makes libkrun's init run a DHCP client on `eth0` -- and so what gets the
         // guest its address, its route and its `/etc/resolv.conf`, none of which an image
         // has anything in it to set up. The server answering is `net`.
-        #[cfg(unix)]
         if self.network.attached() {
             init = init.env_var(&format!("{}=1", net::DHCP_ENV));
         }
@@ -578,13 +574,8 @@ impl Session {
 
         // The whole of what a network is here, and the whole of what having none is: the
         // device is attached or it is not -- see [`net`].
-        #[cfg(unix)]
         if self.network.attached() {
-            devices.add(self.net_device()?);
-        }
-        #[cfg(not(unix))]
-        if self.network.attached() {
-            return Err(Error::NoNetwork(self.network.as_str()));
+            devices.add(net::attach(self.network, self.host_ports.clone())?);
         }
 
         // Nothing at all without the feature, which is what `gpu` promises: a build that
@@ -635,34 +626,6 @@ impl Session {
         // itself broke, which libkrun logs and then swallows. There is nothing left of the
         // machine to say more about it, which is why this error carries no source.
         Err(Error::EventLoop)
-    }
-}
-
-#[cfg(unix)]
-impl Session {
-    /// The virtio-net device, with this session's network already running behind it.
-    ///
-    /// The stack is started first and on purpose: the guest's DHCP client gives up after
-    /// a tenth of a second, and a server that came up when the machine did would be
-    /// racing a kernel. By the time this returns, the thread answering is already there.
-    fn net_device(&self) -> Result<krun::NetDevice> {
-        let policy = net::Policy {
-            network: self.network,
-            host_ports: self.host_ports.clone(),
-        };
-        let wire = net::Stack::start(policy)?;
-
-        krun::NetDevice::new_unixgram_fd(
-            "net0",
-            wire,
-            &net::GUEST_MAC,
-            // No offloads and no extra queues: everything on the other side of this
-            // device is one thread doing one frame at a time, and a feature it does not
-            // implement is one the guest would be told it had.
-            0,
-            krun::NetFlags::empty(),
-        )
-        .map_err(|e| Error::vmm("attaching the guest's network device", e))
     }
 }
 

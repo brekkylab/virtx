@@ -103,9 +103,9 @@ pub async fn pull(
         // `Cursor` because the conversion reads the archive twice -- once for the
         // shape of the filesystem, once for the bytes -- and so needs it seekable.
         let mut erofs = cache.staged_writer(cache.erofs_path(&diff_id))?;
-        let (layout, erofs) = tokio::task::spawn_blocking(move || {
-            let layout = blob_to_erofs(&mut Cursor::new(blob), &mut erofs)?;
-            Ok::<_, Error>((layout, erofs))
+        let erofs = tokio::task::spawn_blocking(move || {
+            blob_to_erofs(&mut Cursor::new(blob), &mut erofs)?;
+            Ok::<_, Error>(erofs)
         })
         .await
         .map_err(|e| Error::io("writing a layer image", std::io::Error::other(e)))??;

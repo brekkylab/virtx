@@ -6,6 +6,7 @@
 	url = https://github.com/libkrun/libkrun.git
 [submodule "virglrenderer"]
 	path = 3rdparty/virglrenderer
+	ignore = dirty
 	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
 [submodule "rutabaga_gfx"]
 	path = 3rdparty/rutabaga_gfx
@@ -18,3 +19,6 @@
 	# Built by scripts/build-virglrenderer-windows.ps1 only: virglrenderer
 	# requires epoxy unconditionally, and Windows has no package manager here.
 	url = https://github.com/anholt/libepoxy.git
+[submodule "MoltenVK"]
+	path = 3rdparty/MoltenVK
+	url = https://github.com/KhronosGroup/MoltenVK.git

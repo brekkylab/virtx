@@ -22,7 +22,10 @@ members = ["cortex-krun", "cortex-krun-host", "cortex-krun-lib"]
 # not merely left out of `members`: a package under this directory that is neither
 # resolves against this root, and the ones in `cortex-abins/` inherit dependencies
 # this workspace has no reason to declare.
-exclude = ["3rdparty/libkrun", "cortex-krun-guest", "cortex-abins"]
+#
+# `virglrenderer-sys/` builds virglrenderer with meson, and is reached only through
+# rutabaga_gfx under the `gpu` feature. As a member a bare `cargo build` would run it.
+exclude = ["3rdparty/libkrun", "cortex-krun-guest", "cortex-abins", "virglrenderer-sys"]
 
 [workspace.package]
 version = "0.1.0"

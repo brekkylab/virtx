@@ -1,0 +1,29 @@
+[package]
+name = "virglrenderer-sys"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.89"
+publish = false
+
+# Nothing to call: rutabaga_gfx carries its own bindings. What this package is for is its
+# build script, which builds the pinned `3rdparty/virglrenderer` and hands the result to
+# the one package that links it.
+#
+# `links` is what makes that possible. A build script's `cargo:KEY=VALUE` reaches only the
+# build scripts of the packages that depend on it directly, as `DEP_VIRGLRENDERER_KEY` --
+# so rutabaga_gfx depends on this package (see
+# `3rdparty/patches/rutabaga_gfx-8cb133e-virglrenderer-sys.patch`), which also orders this
+# build before its `pkg-config` probe. `cortex-krun-lib` depending on it would not: its
+# dependencies, rutabaga_gfx among them, are built before anything of its own runs.
+#
+# Not a workspace member, for the same reason `gpu` is a feature: a bare `cargo build`
+# must not need meson, MoltenVK and the network.
+links = "virglrenderer"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+pkg-config = "0.3"

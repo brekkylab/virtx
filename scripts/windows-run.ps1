@@ -28,8 +28,7 @@ $env:PATH = "$krunfw;$env:PATH"
 # The `gpu` feature links virglrenderer, which loads as a DLL and pulls epoxy in
 # with it. Both are built into data/ by scripts/build-virglrenderer-windows.ps1
 # and neither is anywhere the loader looks. Harmless when the feature is off.
-foreach ($dir in @((Join-Path $root 'data\virglrenderer\bin'),
-                   (Join-Path $root 'data\epoxy\bin'))) {
+foreach ($dir in @((Join-Path $root 'build\epoxy\bin'))) {
     if (Test-Path $dir) { $env:PATH = "$dir;$env:PATH" }
 }
 

@@ -261,8 +261,8 @@ issues ([MoltenVK#2507](https://github.com/KhronosGroup/MoltenVK/issues/2507),
 [SPIRV-Cross#2478](https://github.com/KhronosGroup/SPIRV-Cross/issues/2478))
 have been idle since May 2025. `VK_KHR_cooperative_matrix` is missing for the
 same reason; `VK_KHR_shader_float16_int8` (fp16) is available. Both are patched
-in here (`MoltenVK-0566aa3-cooperative-matrix.patch`,
-`SPIRV-Cross-6c09849-cooperative-matrix-tiling.patch`), on Apple7 and later.
+in here (`MoltenVK-0566aa3-cooperative-matrix-bfloat16.patch`,
+`SPIRV-Cross-6c09849-cooperative-matrix-bfloat16.patch`), on Apple7 and later.
 
 **The guest needs Mesa 26.0 or later.** Venus passes neither extension through
 before that: Debian trixie's 25.0 shows the device without them, and

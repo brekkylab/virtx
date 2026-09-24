@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 # the host by a bare `cargo build` -- for a target that has no host to run on.
 #
 # It does not build a root. libkrun's own init -- patched by this tree, see
-# `3rdparty/patches/libkrun-85bed71-overlay-root.patch` -- mounts the image under this session's ext4,
+# `3rdparty/_patches/libkrun-85bed71-overlay-root.patch` -- mounts the image under this session's ext4,
 # pivots onto the overlay, mounts the shares and only then execs this binary. So what is left
 # here is the session and nothing else: a port, a protocol, and commands run on a root that was
 # ready before this process existed.

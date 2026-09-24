@@ -33,7 +33,7 @@
 //! disks went on and a share takes no name from it. What tells the guest to mount them is
 //! the init's config rather than a device: the host says `mnt0` goes at `/data`, and the
 //! init mounts it there once the overlay is the root -- see
-//! `3rdparty/patches/libkrun-85bed71-session-mounts.patch`.
+//! `3rdparty/_patches/libkrun-85bed71-session-mounts.patch`.
 //!
 //! **Attach order is what fixes the two disk names**, and the guest is told which is
 //! which by name: the lower goes on first and is `/dev/vda`, the upper layer second and
@@ -467,7 +467,7 @@ impl Session {
         // `init=/init.krun` to the kernel cmdline.
         //
         // The two devices go in as environment because that is how libkrun's init is told
-        // where its root is -- see `3rdparty/patches/libkrun-85bed71-overlay-root.patch`. They
+        // where its root is -- see `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`. They
         // reach the workload's environment too, the way `KRUN_BLOCK_ROOT_*` already does.
         let argv = match &self.exec {
             Some(exact) => exact.clone(),

@@ -52,7 +52,7 @@ fn build_macos() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.parent().unwrap();
     let submodule = root.join("3rdparty/virglrenderer");
-    let patch = root.join("3rdparty/patches").join(PATCH);
+    let patch = root.join("3rdparty/_patches").join(PATCH);
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let src = out.join("src");
     let prefix = out.join("install");

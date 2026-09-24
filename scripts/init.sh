@@ -38,14 +38,14 @@ apply_patch() {
     echo "$submodule: applied $(basename "$patch_file")"
 }
 
-apply_patch libkrun "$ROOT/3rdparty/patches/libkrun-85bed71-overlay-root.patch"
-apply_patch libkrun "$ROOT/3rdparty/patches/libkrun-85bed71-session-mounts.patch"
-apply_patch libkrun "$ROOT/3rdparty/patches/libkrun-85bed71-gpu.patch"
-apply_patch libkrun "$ROOT/3rdparty/patches/libkrun-85bed71-windows-virtiofs.patch"
-apply_patch libkrun "$ROOT/3rdparty/patches/libkrun-85bed71-windows-vsock.patch"
-apply_patch rutabaga_gfx "$ROOT/3rdparty/patches/rutabaga_gfx-8cb133e-virgl-renderer.patch"
+apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-overlay-root.patch"
+apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-session-mounts.patch"
+apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-gpu.patch"
+apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-windows-virtiofs.patch"
+apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-windows-vsock.patch"
+apply_patch rutabaga_gfx "$ROOT/3rdparty/_patches/rutabaga_gfx-8cb133e-virgl-renderer.patch"
 if [ "$(uname -s)" = Darwin ]; then
-    apply_patch virglrenderer "$ROOT/3rdparty/patches/virglrenderer-8167744-macos.patch"
+    apply_patch virglrenderer "$ROOT/3rdparty/_patches/virglrenderer-8167744-macos.patch"
 fi
 
 if [ "$(uname -s)" = Darwin ]; then

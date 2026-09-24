@@ -13,7 +13,7 @@ publish = false
 # `links` is what makes that possible. A build script's `cargo:KEY=VALUE` reaches only the
 # build scripts of the packages that depend on it directly, as `DEP_VIRGLRENDERER_KEY` --
 # so rutabaga_gfx depends on this package (see
-# `3rdparty/patches/rutabaga_gfx-8cb133e-virglrenderer-sys.patch`), which also orders this
+# `3rdparty/_patches/rutabaga_gfx-8cb133e-virglrenderer-sys.patch`), which also orders this
 # build before its `pkg-config` probe. `cortex-krun-lib` depending on it would not: its
 # dependencies, rutabaga_gfx among them, are built before anything of its own runs.
 #

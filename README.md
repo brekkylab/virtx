@@ -95,7 +95,7 @@ is not on that path, so the binary that calls `hv_vm_create` has to come out of
 a plain `cargo build` already entitled. Nothing else linked for this target is
 touched.
 
-## Sessions — `3rdparty/patches/libkrun-85bed71-overlay-root.patch`
+## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
 
 [`image`](cortex-krun-lib/src/image/) answers with a disk: the layers stitched into one
 read-only EROFS filesystem, shared by every machine ever booted from that image.
@@ -142,7 +142,7 @@ also what lets it pick up a disk an earlier session left.
 
 [arcbox]: https://docs.rs/arcbox-ext4
 
-## Mounts — `3rdparty/patches/libkrun-85bed71-session-mounts.patch`
+## Mounts — `3rdparty/_patches/libkrun-85bed71-session-mounts.patch`
 
 A session can see host directories, each one a virtio-fs share:
 
@@ -267,7 +267,7 @@ Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping
 because none of it is obvious from the symptoms.
 
-### virglrenderer — `3rdparty/patches/virglrenderer-8167744-macos.patch`
+### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-macos.patch`
 
 The submodule is pinned to upstream main (`8167744`), not to a release. 1.3.0 —
 the minimum rutabaga_gfx accepts — forced the render server on with venus and
@@ -317,7 +317,7 @@ library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
 environment wins — if you set one, add `data/virglrenderer/lib/pkgconfig` to it.
 
-### rutabaga_gfx — `3rdparty/patches/rutabaga_gfx-8cb133e-virgl-renderer.patch`
+### rutabaga_gfx — `3rdparty/_patches/rutabaga_gfx-8cb133e-virgl-renderer.patch`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
 soon as anything asks for a descriptor. A Darwin backend built on Mach ports
@@ -343,7 +343,7 @@ exports blobs through, and `map()` has to fall back to
 moment**: it was dropped when the patches moved under `3rdparty/` (`938bb44`),
 and has to come back before a Windows `gpu` build links.
 
-### libkrun — `3rdparty/patches/libkrun-85bed71-gpu.patch`
+### libkrun — `3rdparty/_patches/libkrun-85bed71-gpu.patch`
 
 One patch for both hosts, because they share the files. The macOS half:
 
@@ -512,7 +512,7 @@ it in a throwaway `ubuntu:24.04` container and copies the DLL back into
 `data/krunfw/`. It pins libkrunfw to a tag for the same reason the submodules
 are pinned. Expect 10–20 minutes on the first run; it is a full kernel build.
 
-### libkrun — `3rdparty/patches/libkrun-85bed71-windows-virtiofs.patch`
+### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-virtiofs.patch`
 
 Four bugs in the Windows virtio-fs passthrough, all invisible to a CI job that
 never boots a guest. The first two are on the path every `execve` takes.
@@ -558,7 +558,7 @@ never boots a guest. The first two are on the path every `execve` takes.
 Ownership is uniformly root here and the install completes, so it is a wart
 rather than a blocker.
 
-### libkrun — `3rdparty/patches/libkrun-85bed71-windows-vsock.patch`
+### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-vsock.patch`
 
 Three stalls in TSI, all of them credit mistaken for something else, and all of
 them made permanent by the same property of this epoll: it is
@@ -698,7 +698,7 @@ follow from that: meson resolves `python3` off `PATH` — a native-file
 `[binaries] python3` entry does *not* steer the python module — and a Windows
 venv never creates that name, so the script makes one.
 
-### virglrenderer — `3rdparty/patches/virglrenderer-8167744-windows.patch`
+### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 
 **Rebased onto `8167744` without a Windows host to build it on**: it applies,
 and its non-Windows half builds on macOS in both `render-server-mode=none` and
@@ -841,7 +841,7 @@ cortex-abins/               the programs in the guest's /abin -- index and mem, 
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at 8167744
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-3rdparty/patches/           applied to the two submodules above by scripts/apply-patches.sh;
+3rdparty/_patches/           applied to the two submodules above by scripts/apply-patches.sh;
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner and linker,
                             the musl cc/ar that cortex-abins/ cross-compiles with, and

@@ -36,7 +36,7 @@ function Invoke-Checked([string] $what, [scriptblock] $block) {
     if ($LASTEXITCODE -ne 0) { Write-Error "$what failed ($LASTEXITCODE)" }
 }
 
-$patches = Join-Path $root '3rdparty\patches'
+$patches = Join-Path $root '3rdparty\_patches'
 
 Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-overlay-root.patch')
 Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-session-mounts.patch')

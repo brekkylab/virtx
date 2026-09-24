@@ -56,7 +56,7 @@ index c0626a5a..622266c8 100644
              self.export_table.take(),
              self.displays.clone(),
 diff --git a/src/devices/src/virtio/gpu/virtio_gpu.rs b/src/devices/src/virtio/gpu/virtio_gpu.rs
-index fa09f59b..d3a908a8 100644
+index fa09f59..76212a8 100644
 --- a/src/devices/src/virtio/gpu/virtio_gpu.rs
 +++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
 @@ -12,16 +12,13 @@ use super::protocol::{
@@ -141,7 +141,7 @@ index fa09f59b..d3a908a8 100644
      pub fn resource_map_blob(
          &mut self,
          resource_id: u32,
-@@ -943,41 +946,47 @@ impl VirtioGpu {
+@@ -943,45 +946,58 @@ impl VirtioGpu {
              .get_mut(&resource_id)
              .ok_or(ErrInvalidResourceId)?;
  
@@ -220,10 +220,21 @@ index fa09f59b..d3a908a8 100644
 +            ))
 +            .unwrap();
 +        if !reply_receiver.recv().unwrap() {
++            // Nothing aliases the host mapping, so it goes now rather than at unref.
++            let _ = self.rutabaga.unmap(resource_id);
              return Err(ErrUnspec);
          }
  
-@@ -1023,7 +1032,7 @@ impl VirtioGpu {
+         resource.shmem_offset = Some(offset);
++        // `rutabaga.map` mapped the blob into this process, and nothing else unmaps it:
++        // virglrenderer closes a resource's fd on unref but leaves a mapping of it in
++        // place, which keeps the memory behind it -- for venus on macOS, the whole shm
++        // allocation -- alive until the VMM exits.
++        resource.rutabaga_external_mapping = true;
+         // Access flags not a part of the virtio-gpu spec.
+         Ok(OkMapInfo {
+             map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
+@@ -1023,7 +1039,7 @@ impl VirtioGpu {
  
          Ok(OkNoData)
      }
@@ -232,6 +243,20 @@ index fa09f59b..d3a908a8 100644
      pub fn resource_unmap_blob(
          &mut self,
          resource_id: u32,
+@@ -1055,6 +1071,13 @@ impl VirtioGpu {
+             return Err(ErrUnspec);
+         }
+ 
++        // The guest no longer sees it, so neither need this process: the memory goes as
++        // soon as the guest lets go of it, not only when the resource does.
++        if resource.rutabaga_external_mapping {
++            self.rutabaga.unmap(resource_id)?;
++            resource.rutabaga_external_mapping = false;
++        }
++
+         resource.shmem_offset = None;
+ 
+         Ok(OkNoData)
 diff --git a/src/devices/src/virtio/gpu/worker.rs b/src/devices/src/virtio/gpu/worker.rs
 index 9d19c103..8436cd03 100644
 --- a/src/devices/src/virtio/gpu/worker.rs

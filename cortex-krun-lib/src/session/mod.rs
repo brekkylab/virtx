@@ -52,6 +52,24 @@ pub use mount::Mount;
 pub use net::Network;
 pub use session::Session;
 
+/// libkrun's logger at the level `KRUN_LOG` names (`error`, `warn`, `info`, `debug` or
+/// `trace`), on stderr -- which for a boot is its console log. It carries what rutabaga
+/// forwards from virglrenderer as well. Nothing is logged at all without it, since libkrun
+/// sets up no logger of its own: call it once, before the machine is built.
+pub fn log_from_env() {
+    use krun::{LogLevel, LogOptions, LogStyle};
+    let level = match std::env::var("KRUN_LOG").as_deref() {
+        Ok("error") => LogLevel::Error,
+        Ok("warn") => LogLevel::Warn,
+        Ok("info") => LogLevel::Info,
+        Ok("debug") => LogLevel::Debug,
+        Ok("trace") => LogLevel::Trace,
+        _ => return,
+    };
+    // A second call finds a logger in place, which is all it would have set up.
+    let _ = krun::init_log(None, level, LogStyle::Auto, LogOptions::NO_ENV);
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A session entered without an image, which is the one thing about it that has no

@@ -121,6 +121,8 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    cortex_krun::session::log_from_env();
+
     match Args::parse(argv).and_then(enter) {
         // `enter` only returns on success by not returning at all: the `Ok` holds an
         // `Infallible`, and the empty match is what says so.

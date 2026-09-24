@@ -47,6 +47,15 @@ fi
 case "${out##*/}" in
 cortex-krun-host | cortex_krun_host-*)
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Stripped here and not by rustc, which would strip *after* this script returns
+    # and rewrite the signature below without its entitlement. `-S` drops debug info
+    # only, what rustc's release default (`strip = "debuginfo"`) does; the workspace
+    # manifest turns rustc's own strip off for this package. Not under `debug/`,
+    # whose debug map is what its backtraces read line numbers from.
+    case "$out" in
+    */debug/*) ;;
+    *) strip -S "$out" ;;
+    esac
     # Ad-hoc -- `-s -` -- because what matters is the entitlement and not who
     # signed it. Its output is held back unless it fails: codesign says
     # "replacing existing signature" on every relink, and cargo reports anything

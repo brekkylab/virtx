@@ -9,19 +9,19 @@
 #                  MSVC ABI, so the DLL still links with the msvc Rust
 #                  toolchain.
 #
-#   libepoxy       virglrenderer requires it unconditionally: `virgl_sources +=
-#                  vrend_sources` has no guard, and epoxy is in that target's
-#                  dependency list. There is no venus-only build to opt into,
-#                  so the submodule is built here first. Windows has no EGL or
-#                  GLX, so only the WGL half is built and no GL winsys backend
-#                  ends up in virglrenderer.
+#   libepoxy       vrend needs it, and vrend is still built: upstream has
+#                  since grown a `vrend` option that a venus-only build could
+#                  turn off, but the patch below was ported with vrend in and
+#                  has not been tried without it. So the submodule is built
+#                  here first. Windows has no EGL or GLX, so only the WGL half
+#                  is built and no GL winsys backend ends up in virglrenderer.
 #
-#   two patches    3rdparty/patches/virglrenderer-1.3.0-macos-venus.patch carries the
-#                  in-process venus context, which is needed on any host
-#                  without the out-of-process render server (fork, epoll,
-#                  seccomp) -- Windows included, despite the name. The Windows
-#                  patch is cut against a tree that already has it, so the
-#                  order below is not optional.
+#   one patch      3rdparty/patches/virglrenderer-8167744-windows.patch carries
+#                  the in-process venus context -- there is no render server
+#                  here, in either of the forms upstream builds, since both
+#                  pass descriptors over a unix socket -- and the Windows port
+#                  itself. macOS takes neither: it runs upstream's render
+#                  server as a thread.
 #
 # Everything lands under data/, which is untracked; the submodules stay
 # pristine, the same way scripts/build-virglrenderer.sh keeps them.
@@ -73,7 +73,8 @@ if (-not $env:VULKAN_SDK) { Write-Error 'VULKAN_SDK is not set; install the Vulk
 
 # --- meson, in a venv of its own ----------------------------------------
 # Not installed into whatever Python happens to be on PATH: this needs pyyaml
-# for gallium's codegen, and that is this build's business, not the system's.
+# for gallium's codegen and mako for venus-protocol's, and that is this build's
+# business, not the system's.
 if (-not (Test-Path $meson)) {
     $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
     if (-not $python -or -not (& $python --version 2>$null)) {
@@ -81,7 +82,12 @@ if (-not (Test-Path $meson)) {
     }
     Write-Output '==> creating the meson venv'
     & $python -m venv $venv
-    & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet --upgrade pip meson pyyaml
+    & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet --upgrade pip meson pyyaml mako
+}
+# A venv made before venus-protocol became a subproject has no mako.
+& (Join-Path $venv 'Scripts\python.exe') -c 'import mako' 2>$null
+if ($LASTEXITCODE -ne 0) {
+    & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet mako
 }
 # gallium's codegen is found as `python3`, which meson resolves off PATH -- a
 # native-file [binaries] entry does not steer the python module -- and a
@@ -127,12 +133,10 @@ if (-not (Test-Path (Join-Path $src '.git'))) {
     $global:LASTEXITCODE = 0
 
     & git -C $src init -q
-    foreach ($patch in @('virglrenderer-1.3.0-macos-venus.patch',
-                         'virglrenderer-1.3.0-windows.patch')) {
-        Write-Output "==> applying $patch"
-        & git -C $src apply (Join-Path $root "patches\$patch")
-        if ($LASTEXITCODE -ne 0) { Write-Error "$patch does not apply" }
-    }
+    $patch = 'virglrenderer-8167744-windows.patch'
+    Write-Output "==> applying $patch"
+    & git -C $src apply (Join-Path $root "3rdparty\patches\$patch")
+    if ($LASTEXITCODE -ne 0) { Write-Error "$patch does not apply" }
 }
 
 # --- pkg-config ---------------------------------------------------------
@@ -158,11 +162,13 @@ $virglBuild = Join-Path $build 'virglrenderer'
 if (-not (Test-Path (Join-Path $virglBuild 'build.ninja'))) {
     Write-Output '==> configuring virglrenderer'
     # -Dplatforms= keeps EGL and GLX out: neither exists here, and venus wants
-    # neither. -Drender-server=false is what the venus patch restores the
-    # option for. -Dvulkan-dload=false because the in-process venus context
-    # calls vkMapMemory directly and so needs Vulkan linked.
+    # neither. -Drender-server-mode=none is the choice the patch adds, and
+    # builds the in-process venus context instead of a render server.
+    # -Dvulkan-dload=false because that context calls vkMapMemory directly and
+    # so needs Vulkan linked. venus-protocol is a meson subproject that is
+    # cloned here at configure time, so this step needs git and the network.
     & $meson setup $virglBuild $src --prefix $prefix --buildtype release --native-file $native `
-        -Dvenus=true -Drender-server=false -Dvulkan-dload=false -Dplatforms= | Out-Null
+        -Dvenus=true -Drender-server-mode=none -Dvulkan-dload=false -Dplatforms= | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Error 'virglrenderer configure failed' }
 }
 

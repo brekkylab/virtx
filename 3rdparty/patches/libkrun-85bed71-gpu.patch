@@ -178,10 +178,10 @@ index fa09f59b..d3a908a8 100644
 +
 +        // The mapping below consumes only the host pointer plus the hypervisor
 +        // aliasing it into the guest shm window; the export handle is never
-+        // used, it was a validity gate. A venus blob on macOS is host-visible
-+        // VkDeviceMemory, which MoltenVK cannot export as a descriptor, so it
-+        // has a usable map_ptr and no handle at all. Requiring a dmabuf export
-+        // here rejects every blob the macOS path can actually produce.
++        // used, it was a validity gate. No blob here is a dmabuf: on macOS
++        // virglrenderer exports venus memory as shm, and on Windows it exports
++        // nothing a descriptor could hold. Requiring a dmabuf export here
++        // rejects every blob either host can actually produce.
 +        let guest_addr = checked_blob_map_addr(
 +            shm_region.guest_addr,
 +            offset,

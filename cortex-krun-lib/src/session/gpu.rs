@@ -25,6 +25,15 @@
 //! virglrenderer bring up an OpenGL context -- there is no EGL on macOS and it segfaults
 //! in `create_gl_context`. venus needs none of it. libkrun does not expose the bit in its
 //! own flag set, hence `from_bits_retain`.
+//!
+//! # `RENDER_SERVER`, on macOS only
+//!
+//! Upstream virglrenderer serves venus only through its render server, and initialises
+//! venus at all only when this bit is set. The macOS build runs that server as a thread
+//! of this process (`render-server-mode=thread`), so the bit starts nothing. The Windows
+//! build has no render server and carries an in-process venus context instead, which
+//! answers to `VENUS` alone -- with this bit set there it would look for a server that
+//! was never built.
 
 use krun::{DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
 use krun_display::{
@@ -58,13 +67,15 @@ pub(crate) fn device() -> Result<GpuDevice> {
 
     backend.add_display(DisplayInfoBuilder::new(SCANOUT.0, SCANOUT.1));
 
-    Ok(GpuDevice::new(
-        VirglRendererFlags::VENUS
-            | VirglRendererFlags::THREAD_SYNC
-            | VirglRendererFlags::USE_ASYNC_FENCE_CB
-            | NO_VIRGL,
-        backend,
-    ))
+    let flags = VirglRendererFlags::VENUS
+        | VirglRendererFlags::THREAD_SYNC
+        | VirglRendererFlags::USE_ASYNC_FENCE_CB
+        | NO_VIRGL;
+    // See the module doc.
+    #[cfg(target_os = "macos")]
+    let flags = flags | VirglRendererFlags::RENDER_SERVER;
+
+    Ok(GpuDevice::new(flags, backend))
 }
 
 /// A display backend that exists so the device can come up, and does nothing else. See

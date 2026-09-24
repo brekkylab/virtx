@@ -38,22 +38,17 @@ apply_patch() {
     echo "$submodule: applied $(basename "$patch_file")"
 }
 
-apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-overlay-root.patch"
-apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-session-mounts.patch"
-apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-gpu.patch"
-apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-windows-virtiofs.patch"
-apply_patch libkrun "$ROOT/3rdparty/_patches/libkrun-85bed71-windows-vsock.patch"
-apply_patch rutabaga_gfx "$ROOT/3rdparty/_patches/rutabaga_gfx-8cb133e-virgl-renderer.patch"
-if [ "$(uname -s)" = Darwin ]; then
-    apply_patch virglrenderer "$ROOT/3rdparty/_patches/virglrenderer-8167744-macos.patch"
-fi
+for patch_file in "$ROOT"/3rdparty/_patches/*.patch; do
+    patch_name="$(basename "$patch_file")"
+    apply_patch "${patch_name%%-*}" "$patch_file"
+done
 
 if [ "$(uname -s)" = Darwin ]; then
+    echo "Setting up MoltenVK"
+
     MoltenVK_src="$ROOT/3rdparty/MoltenVK"
     MoltenVK_lib="$MoltenVK_src/Package/Release/MoltenVK/static/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a"
     MoltenVK_stamp="$MoltenVK_src/Package/.cortex-stamp"
-
-    echo "Setting up MoltenVK"
 
     if [ ! -f "$MoltenVK_src/Makefile" ]; then
         echo "MoltenVK is not checked out; run: git submodule update --init" >&2

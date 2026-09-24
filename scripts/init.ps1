@@ -38,13 +38,9 @@ function Invoke-Checked([string] $what, [scriptblock] $block) {
 
 $patches = Join-Path $root '3rdparty\_patches'
 
-Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-overlay-root.patch')
-Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-session-mounts.patch')
-Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-gpu.patch')
-Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-windows-virtiofs.patch')
-Apply-Patch libkrun (Join-Path $patches 'libkrun-85bed71-windows-vsock.patch')
-Apply-Patch rutabaga_gfx (Join-Path $patches 'rutabaga_gfx-8cb133e-virgl-renderer.patch')
-Apply-Patch virglrenderer (Join-Path $patches 'virglrenderer-8167744-windows.patch')
+Get-ChildItem -Path $patches -Filter '*.patch' | Sort-Object Name | ForEach-Object {
+    Apply-Patch ($_.Name -split '-', 2)[0] $_.FullName
+}
 
 Write-Output 'Setting up the MSVC environment'
 

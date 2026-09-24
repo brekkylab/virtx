@@ -39,7 +39,7 @@ function Invoke-Checked([string] $what, [scriptblock] $block) {
 $patches = Join-Path $root '3rdparty\_patches'
 
 Get-ChildItem -Path $patches -Filter '*.patch' | Sort-Object Name | ForEach-Object {
-    Apply-Patch ($_.Name -split '-', 2)[0] $_.FullName
+    Apply-Patch ($_.Name -creplace '-[0-9a-f]{7,40}-.*$', '') $_.FullName
 }
 
 Write-Output 'Setting up the MSVC environment'

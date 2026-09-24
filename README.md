@@ -251,17 +251,34 @@ notes the coupling is for "code simplicity", so a headless Mesa build
 (`-Dplatforms= -Dvulkan-drivers=virtio`) would take the compile-time `true`
 branch and lift the cap to 1.3. Nothing here needs it so far.
 
-### bfloat16 is not available, and the version is not why
+### bfloat16 and cooperative matrices
 
 `VK_KHR_shader_bfloat16` is an extension that depends only on Vulkan 1.1, so
-the version cap above is irrelevant to it. The guest is ready — Mesa venus passes
-it through — but **MoltenVK does not implement it**, and neither does
-SPIRV-Cross, which would have to translate the SPIR-V types to MSL first.
-Metal itself has had bfloat since MSL 3.1. Both upstream issues
-([MoltenVK#2507](https://github.com/KhronosGroup/MoltenVK/issues/2507),
+the version cap above is irrelevant to it. Upstream **MoltenVK does not implement
+it**, and neither does SPIRV-Cross, which would have to translate the SPIR-V
+types to MSL first. Metal itself has had bfloat since MSL 3.1. Both upstream
+issues ([MoltenVK#2507](https://github.com/KhronosGroup/MoltenVK/issues/2507),
 [SPIRV-Cross#2478](https://github.com/KhronosGroup/SPIRV-Cross/issues/2478))
 have been idle since May 2025. `VK_KHR_cooperative_matrix` is missing for the
-same reason; `VK_KHR_shader_float16_int8` (fp16) is available.
+same reason; `VK_KHR_shader_float16_int8` (fp16) is available. Both are patched
+in here (`MoltenVK-0566aa3-cooperative-matrix.patch`,
+`SPIRV-Cross-6c09849-cooperative-matrix-tiling.patch`), on Apple7 and later.
+
+**The guest needs Mesa 26.0 or later.** Venus passes neither extension through
+before that: Debian trixie's 25.0 shows the device without them, and
+trixie-backports' 26.1 with both.
+
+**A cooperative matrix's dimensions can be specialization constants**, and are
+in ncnn, whose `gemm_cm` declares `coopmat<…, M, N, …>` with `M`, `N`, `K` set
+per pipeline. A simdgroup matrix's shape is a template argument in MSL, so the
+patch declares such a constant the way SPIRV-Cross already declares one used as
+an array length — as a macro — and MoltenVK compiles the variant with the
+pipeline's values defined, as it does for those. Two things follow. The
+library is first compiled with the constants' defaults (`1` in ncnn), so
+`spvCoopMatrix` has to compile for any shape and cannot `static_assert` a
+multiple of 8. And a failed conversion does not fail `vkCreateComputePipelines`
+loudly enough for ncnn: it loads the net and the guest aborts at dispatch, with
+the reason only in the boot's `console.log`.
 
 Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping

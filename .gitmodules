@@ -19,6 +19,12 @@
 	# Built by scripts/build-virglrenderer-windows.ps1 only: virglrenderer
 	# requires epoxy unconditionally, and Windows has no package manager here.
 	url = https://github.com/anholt/libepoxy.git
+	ignore = dirty
 [submodule "MoltenVK"]
 	path = 3rdparty/MoltenVK
 	url = https://github.com/KhronosGroup/MoltenVK.git
+	ignore = dirty
+[submodule "SPIRV-Cross"]
+	path = 3rdparty/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	ignore = dirty

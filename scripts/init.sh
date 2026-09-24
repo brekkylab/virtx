@@ -40,7 +40,7 @@ apply_patch() {
 
 for patch_file in "$ROOT"/3rdparty/_patches/*.patch; do
     patch_name="$(basename "$patch_file")"
-    apply_patch "${patch_name%%-*}" "$patch_file"
+    apply_patch "$(printf '%s' "$patch_name" | sed -E 's/-[0-9a-f]{7,40}-.*$//')" "$patch_file"
 done
 
 if [ "$(uname -s)" = Darwin ]; then
@@ -65,15 +65,23 @@ if [ "$(uname -s)" = Darwin ]; then
         rm -f "$MoltenVK_stamp"
     fi
 
-    MoltenVK_want="$(cd "$MoltenVK_src" && {
+    SPIRV_Cross_src="$ROOT/3rdparty/SPIRV-Cross"
+    SPIRV_Cross_pin="$(cat "$MoltenVK_src/ExternalRevisions/SPIRV-Cross_repo_revision")"
+    if [ "$(git -C "$SPIRV_Cross_src" rev-parse HEAD)" != "$SPIRV_Cross_pin" ]; then
+        echo "3rdparty/SPIRV-Cross is not at the revision MoltenVK pins ($SPIRV_Cross_pin)." >&2
+        echo "Move the submodule there and refresh its patches." >&2
+        exit 1
+    fi
+
+    MoltenVK_want="$(for dir in "$MoltenVK_src" "$SPIRV_Cross_src"; do (cd "$dir" && {
         git rev-parse HEAD
         { git diff HEAD; git ls-files -o --exclude-standard -z | xargs -0 git hash-object; } | shasum | cut -d' ' -f1
-    })"
+    }); done)"
     if [ -f "$MoltenVK_lib" ] && [ "$(cat "$MoltenVK_stamp" 2>/dev/null)" = "$MoltenVK_want" ]; then
         echo "MoltenVK up to date ($(git -C "$MoltenVK_src" rev-parse --short HEAD))"
     else
         echo "Fetching MoltenVK dependencies ($(git -C "$MoltenVK_src" rev-parse --short HEAD))"
-        (cd "$MoltenVK_src" && ./fetchDependencies --macos >/dev/null)
+        (cd "$MoltenVK_src" && ./fetchDependencies --macos --spirv-cross-root "$SPIRV_Cross_src" >/dev/null)
 
         echo "Compiling MoltenVK "
         make -C "$MoltenVK_src" macos

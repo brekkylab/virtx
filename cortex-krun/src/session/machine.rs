@@ -45,6 +45,7 @@ pub const HOST_PORTS_ENV: &str = "CORTEX_KRUN_HOST_PORTS";
 pub const VCPUS_ENV: &str = "CORTEX_KRUN_VCPUS";
 pub const MEMORY_ENV: &str = "CORTEX_KRUN_MEMORY_MIB";
 pub const GPU_ENV: &str = "CORTEX_KRUN_GPU";
+pub const GPU_MEMORY_ENV: &str = "CORTEX_KRUN_GPU_MEMORY_MIB";
 
 /// How long to wait for the guest to come up before saying it did not.
 const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -77,6 +78,8 @@ pub struct Shape {
     pub vcpus: Option<u8>,
     pub memory_mib: Option<u32>,
     pub gpu: bool,
+    /// What the GPU may hold, in mebibytes -- only ever `Some` beside a `gpu` of `true`.
+    pub gpu_memory_mib: Option<u32>,
 }
 
 impl Shape {
@@ -90,6 +93,7 @@ impl Shape {
             vcpus: number::<u8>(VCPUS_ENV).filter(|vcpus| *vcpus > 0),
             memory_mib: number::<u32>(MEMORY_ENV).filter(|mib| *mib > 0),
             gpu: flag(GPU_ENV),
+            gpu_memory_mib: number::<u32>(GPU_MEMORY_ENV).filter(|mib| *mib > 0),
         }
     }
 }
@@ -405,6 +409,12 @@ fn told(
     }
     if shape.gpu {
         told.push("--gpu".into());
+        if let Some(memory) = shape.gpu_memory_mib {
+            told.extend([
+                "--gpu-memory-mib".into(),
+                OsString::from(memory.to_string()),
+            ]);
+        }
     }
     told
 }
@@ -508,11 +518,13 @@ mod tests {
         assert!(!quiet.iter().any(|arg| arg == "--vcpus"));
         assert!(!quiet.iter().any(|arg| arg == "--memory-mib"));
         assert!(!quiet.iter().any(|arg| arg == "--gpu"));
+        assert!(!quiet.iter().any(|arg| arg == "--gpu-memory-mib"));
 
         let asked = line(Shape {
             vcpus: Some(4),
             memory_mib: Some(4096),
             gpu: true,
+            gpu_memory_mib: Some(8192),
         });
         let after = |flag: &str| {
             asked
@@ -523,5 +535,6 @@ mod tests {
         assert_eq!(after("--vcpus").as_deref(), Some("4"));
         assert_eq!(after("--memory-mib").as_deref(), Some("4096"));
         assert!(asked.iter().any(|arg| arg == "--gpu"));
+        assert_eq!(after("--gpu-memory-mib").as_deref(), Some("8192"));
     }
 }

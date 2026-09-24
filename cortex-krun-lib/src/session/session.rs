@@ -155,6 +155,7 @@ pub struct Session {
     network: Network,
     host_ports: Vec<u16>,
     gpu: bool,
+    gpu_memory_mib: Option<u32>,
     /// A named virtio-console port, and the descriptor behind it -- see
     /// [`port`](Session::port). Held as a number rather than a borrow so that a
     /// [`Session`] stays a plain value; keeping the descriptor open is the caller's.
@@ -173,6 +174,9 @@ impl Default for Session {
 }
 
 impl Session {
+    /// The guest's RAM when [`ram_mib`](Session::ram_mib) is not said.
+    pub const DEFAULT_RAM_MIB: u32 = 2048;
+
     /// A default machine, over a rootfs nobody keeps -- and over no image, which
     /// [`image`](Session::image) has to say before [`enter`](Session::enter) will start
     /// anything.
@@ -186,12 +190,13 @@ impl Session {
             // the processor at once, and one vCPU turns that into a queue.
             vcpus: 2,
             // Enough for a package install, which is the first thing anyone does.
-            ram_mib: 2048,
+            ram_mib: Self::DEFAULT_RAM_MIB,
             // What a session that said nothing about it gets, and the only level that
             // needs nothing of the host -- see `Session::network`.
             network: Network::Disabled,
             host_ports: Vec::new(),
             gpu: false,
+            gpu_memory_mib: None,
             port: None,
             command: Vec::new(),
             exec: None,
@@ -320,6 +325,18 @@ impl Session {
     /// mesa-vulkan-virtio vulkan-loader`; an image without it boots and finds no device.
     pub fn gpu(mut self, gpu: bool) -> Session {
         self.gpu = gpu;
+        self
+    }
+
+    /// How much memory the guest's GPU may hold, in mebibytes: the host-visible window its
+    /// Vulkan memory is mapped through, and the heap size the device reports to the guest --
+    /// see [`gpu`'s module doc](super::gpu). `None` is the 8 GiB libkrun gives.
+    ///
+    /// Beside [`ram_mib`](Session::ram_mib) and not out of it: on a GPU that shares the
+    /// host's memory, all of it can be host memory in use at once. Ignored without
+    /// [`gpu`](Session::gpu).
+    pub fn gpu_memory_mib(mut self, gpu_memory_mib: u32) -> Session {
+        self.gpu_memory_mib = Some(gpu_memory_mib);
         self
     }
 
@@ -582,7 +599,7 @@ impl Session {
         // cannot serve Vulkan runs the session without it rather than refusing it.
         #[cfg(feature = "gpu")]
         if self.gpu {
-            devices.add(super::gpu::device()?);
+            devices.add(super::gpu::device(self.gpu_memory_mib)?);
         }
         // In this order, and the order is the whole of what names them -- see the module
         // doc.

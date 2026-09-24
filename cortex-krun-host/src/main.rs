@@ -33,6 +33,8 @@
 //! --vcpus <n>           overrides, when the server was told to                [optional]
 //! --memory-mib <n>                                                            [optional]
 //! --gpu                 attach virtio-gpu; refused unless built with `gpu`   [optional]
+//! --gpu-memory-mib <n>  what that GPU may hold -- its host-visible window and the heap
+//!                       the guest sees; only beside `--gpu`                   [optional]
 //! ```
 //!
 //! And one argument that is a question rather than a machine:
@@ -156,6 +158,7 @@ struct Args {
     vcpus: Option<u8>,
     memory_mib: Option<u32>,
     gpu: bool,
+    gpu_memory_mib: Option<u32>,
 }
 
 impl Args {
@@ -177,6 +180,7 @@ impl Args {
         let mut vcpus = None;
         let mut memory_mib = None;
         let mut gpu = false;
+        let mut gpu_memory_mib = None;
 
         let mut argv = argv.into_iter();
         while let Some(flag) = argv.next() {
@@ -216,6 +220,7 @@ impl Args {
                 // would be a second spelling of leaving it out.
                 //
                 "--gpu" => gpu = true,
+                "--gpu-memory-mib" => gpu_memory_mib = Some(number(&flag, value()?)?),
                 other => anyhow::bail!("{other} is not an argument a boot takes"),
             }
         }
@@ -230,6 +235,13 @@ impl Args {
             !gpu,
             "--gpu: this boot was built without the `gpu` feature, which is what virglrenderer \
              and a virtio-gpu device come in with"
+        );
+
+        // A size of a device that is not there: the server resolves the two together, so a
+        // boot told one without the other is the halves disagreeing.
+        anyhow::ensure!(
+            gpu || gpu_memory_mib.is_none(),
+            "--gpu-memory-mib without --gpu -- a size is of a GPU"
         );
 
         let required = |name: &str, value: Option<PathBuf>| {
@@ -256,6 +268,7 @@ impl Args {
             vcpus,
             memory_mib,
             gpu,
+            gpu_memory_mib,
         })
     }
 }
@@ -347,6 +360,9 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
     }
     if let Some(memory) = args.memory_mib {
         session = session.ram_mib(memory);
+    }
+    if let Some(memory) = args.gpu_memory_mib {
+        session = session.gpu_memory_mib(memory);
     }
     // In the order they were given, which is the order the protocol says they are realized
     // in: a share at `/work/out` that follows one at `/work` lands inside it.

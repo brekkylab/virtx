@@ -34,6 +34,26 @@
 //! build has no render server and carries an in-process venus context instead, which
 //! answers to `VENUS` alone -- with this bit set there it would look for a server that
 //! was never built.
+//!
+//! # How much memory the GPU holds
+//!
+//! Every host-visible allocation the guest maps -- on a GPU that shares the host's memory,
+//! nearly all of them -- is mapped through one window of guest-physical addresses, so the
+//! window is what the guest's GPU can hold at once: a mapping past it fails `vkMapMemory`
+//! with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. It is libkrun's 8 GiB unless the session names a
+//! size ([`Session::gpu_memory_mib`](super::Session::gpu_memory_mib)).
+//!
+//! The device the guest enumerates reports the same size: venus caps every heap, and
+//! `VK_EXT_memory_budget`'s budgets, at `VKR_HEAP_SIZE_MAX` (see
+//! `3rdparty/_patches/virglrenderer-8167744-heap-limit.patch`), which is set here from the
+//! window. Otherwise the guest sees the host device's whole heap -- 19 GB on an 18 GB Mac
+//! -- sizes itself to that, and learns the truth from a mapping that fails; ncnn copies
+//! out of the null pointer it gets back.
+//!
+//! What the window costs is the host's. On macOS and Linux libkrun reserves it without
+//! committing it, and a blob's memory is mapped into it when the guest maps that blob; on
+//! Windows vm-memory commits the whole window with the rest of guest memory, so it is charged
+//! against the commit limit from boot whether or not the guest ever maps anything.
 
 use krun::{DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
 use krun_display::{
@@ -50,8 +70,17 @@ const NO_VIRGL: VirglRendererFlags = VirglRendererFlags::from_bits_retain(1 << 7
 /// device only wants there to be one.
 const SCANOUT: (u32, u32) = (1280, 800);
 
-/// A virtio-gpu device carrying venus, with a display backend that presents nothing.
-pub(crate) fn device() -> Result<GpuDevice> {
+/// The window, and the heaps, when a session names no size: libkrun's own default.
+const DEFAULT_WINDOW: u64 = 8 << 30;
+
+/// A virtio-gpu device carrying venus, with a display backend that presents nothing, whose
+/// memory is `memory_mib` or [`DEFAULT_WINDOW`] -- see the module doc.
+pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
+    let window = memory_mib.map_or(DEFAULT_WINDOW, |mib| u64::from(mib) << 20);
+    // SAFETY: nothing else runs yet -- libkrun starts its threads, and virglrenderer its
+    // render server, only once the machine is built from this device.
+    unsafe { std::env::set_var("VKR_HEAP_SIZE_MAX", window.to_string()) };
+
     let vtable = <Headless as IntoDisplayBackend<()>>::into_display_backend(None);
 
     // SAFETY: `vtable` is a fully populated krun_display_backend produced by krun_display
@@ -75,7 +104,7 @@ pub(crate) fn device() -> Result<GpuDevice> {
     #[cfg(target_os = "macos")]
     let flags = flags | VirglRendererFlags::RENDER_SERVER;
 
-    Ok(GpuDevice::new(flags, backend))
+    Ok(GpuDevice::new(flags, backend).shm_size(window as usize))
 }
 
 /// A display backend that exists so the device can come up, and does nothing else. See

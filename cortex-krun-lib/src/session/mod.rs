@@ -52,6 +52,54 @@ pub use mount::Mount;
 pub use net::Network;
 pub use session::Session;
 
+/// The host's physical memory in bytes, or `None` where it cannot be read.
+///
+/// What a server holds a machine's size against: a guest's RAM and its GPU's memory are both
+/// the host's on a GPU that shares it, so a session asking for more than the two can have
+/// together is one this host cannot make.
+#[cfg(target_os = "macos")]
+pub fn host_memory() -> Option<u64> {
+    let mut bytes: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is a u64, and `bytes` and `len` describe one.
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ret == 0 && bytes > 0).then_some(bytes)
+}
+
+/// The host's physical memory in bytes, or `None` where it cannot be read.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn host_memory() -> Option<u64> {
+    // SAFETY: sysconf reads a value and touches no memory of ours.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    (pages > 0 && page > 0).then(|| pages as u64 * page as u64)
+}
+
+/// The host's physical memory in bytes, or `None` where it cannot be read.
+#[cfg(windows)]
+pub fn host_memory() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: an all-zero MEMORYSTATUSEX is valid, and `dwLength` is set before the call
+    // reads it.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `status` is a MEMORYSTATUSEX with its length filled in.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0 && status.ullTotalPhys > 0).then_some(status.ullTotalPhys)
+}
+
 /// libkrun's logger at the level `KRUN_LOG` names (`error`, `warn`, `info`, `debug` or
 /// `trace`), on stderr -- which for a boot is its console log. It carries what rutabaga
 /// forwards from virglrenderer as well. Nothing is logged at all without it, since libkrun

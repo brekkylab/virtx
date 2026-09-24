@@ -372,7 +372,10 @@ fn reach(init: &InitCall) -> anyhow::Result<(Network, Vec<u16>)> {
 ///
 /// Two refusals, and the difference is what has to change. A machine nothing can run on --
 /// no vCPU, or no memory -- is [`INVALID_PARAMS`](Error::INVALID_PARAMS), because the number
-/// is what has to change. A GPU this build cannot attach is
+/// is what has to change; so is a GPU memory size beside no GPU, since the request describes a
+/// device it did not ask for. A machine bigger than this host -- its RAM and its GPU's memory
+/// together past the host's, which on a GPU sharing the host's memory is what both are drawn
+/// from -- is [`UNSUPPORTED_MACHINE`](Error::UNSUPPORTED_MACHINE). A GPU this build cannot attach is
 /// [`UNSUPPORTED_MACHINE`](Error::UNSUPPORTED_MACHINE), because the request is well formed and
 /// what is missing is a boot built with `gpu` on a host with virglrenderer -- and it is said
 /// here, at `init`, rather than left to a boot that would otherwise come up without the device
@@ -408,10 +411,47 @@ fn shape(init: &InitCall) -> anyhow::Result<Shape> {
         ));
     }
 
+    if init.gpu_memory_mib == Some(0) {
+        return Err(coded(
+            Error::INVALID_PARAMS,
+            anyhow::anyhow!("gpu_memory_mib: 0 is a GPU that can hold nothing"),
+        ));
+    }
+    // The client's size is refused without a GPU; the operator's is only a default, and
+    // means nothing to a session that has none.
+    if init.gpu_memory_mib.is_some() && !gpu {
+        return Err(coded(
+            Error::INVALID_PARAMS,
+            anyhow::anyhow!("gpu_memory_mib: a size is of a GPU, and this session has none"),
+        ));
+    }
+    let memory_mib = init.memory_mib.or(default.memory_mib);
+    let gpu_memory_mib = gpu
+        .then(|| init.gpu_memory_mib.or(default.gpu_memory_mib))
+        .flatten();
+
+    // Only a size that was named is held to the host: libkrun's default window is what every
+    // GPU session had before there was a member to name one.
+    if let (Some(gpu_mib), Some(host)) = (gpu_memory_mib, cortex_krun::session::host_memory()) {
+        let ram_mib = memory_mib.unwrap_or(cortex_krun::session::Session::DEFAULT_RAM_MIB);
+        let asked = (u64::from(ram_mib) + u64::from(gpu_mib)) << 20;
+        if asked > host {
+            return Err(coded(
+                Error::UNSUPPORTED_MACHINE,
+                anyhow::anyhow!(
+                    "memory_mib {ram_mib} and gpu_memory_mib {gpu_mib} together are more than \
+                     this host's {} MiB",
+                    host >> 20
+                ),
+            ));
+        }
+    }
+
     Ok(Shape {
         vcpus: init.vcpus.or(default.vcpus),
-        memory_mib: init.memory_mib.or(default.memory_mib),
+        memory_mib,
         gpu,
+        gpu_memory_mib,
     })
 }
 
@@ -444,6 +484,7 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
         vcpus: None,
         memory_mib: None,
         gpu: None,
+        gpu_memory_mib: None,
     };
     match machine.call(Call::Init(replayed)).await? {
         Response::Init(answer) => Ok(answer.cwd),

@@ -11,6 +11,8 @@ xtask = "run --package xtask --"
 # directory before anywhere else, and macOS is steered there by a patch to libkrun, but
 # on Linux what decides is the *calling object's* `DT_RUNPATH`, which is the binary's and
 # so is the link's to set. `$ORIGIN` is how that names the directory the binary is in,
-# and it is the linker that expands it, not a shell.
-[target.'cfg(target_os = "linux")']
+# and it is the linker that expands it, not a shell. Only the gnu targets: the guest and
+# abin are static musl binaries linked by rust-lld directly, which open no kernel and
+# take no `-Wl,`.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]

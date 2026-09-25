@@ -559,9 +559,10 @@ fn kernel_library() -> anyhow::Result<PathBuf> {
 /// Build the guest kernel.
 ///
 /// The whole of it is in [`build-libkrunfw.sh`](../scripts/build-libkrunfw.sh), including
-/// why this repository builds one at all rather than installing a release: the config
-/// libkrunfw ships for x86_64 leaves the guest with no write-combining, which nothing
-/// reports and which costs a factor of 36 on the path a GPU's weights take.
+/// why this repository builds one at all rather than installing a release, and why never
+/// one older than v5.6.2: before it, the x86_64 config left the guest with no
+/// write-combining, which nothing reports and which costs a factor of 36 on the path a
+/// GPU's weights take.
 ///
 /// `sh` on every host, Windows included: the script is one piece of logic for three
 /// platforms, and Git Bash is already required for the submodules.

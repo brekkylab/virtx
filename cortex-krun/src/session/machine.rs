@@ -307,6 +307,11 @@ impl Machine {
             .spawn()
             .map_err(|e| anyhow::anyhow!("starting {}: {e}", program.display()))?;
 
+        // Before anything else is done with it: a boot that is not in the job from the moment
+        // it exists is one that outlives a server killed in the window before it was.
+        #[cfg(windows)]
+        reap_with_this_process(&boot);
+
         // A virtio-console port discards what the host writes while no process in the guest
         // has it open, rather than queueing it -- the socket is up long before the kernel is.
         // So this waits for the guest to say that something is reading, and only then is
@@ -615,5 +620,78 @@ mod tests {
         assert_eq!(after("--memory-mib").as_deref(), Some("4096"));
         assert!(asked.iter().any(|arg| arg == "--gpu"));
         assert_eq!(after("--gpu-memory-mib").as_deref(), Some("8192"));
+    }
+}
+/// Tie a boot's lifetime to this process's, so that a server that dies takes its machines
+/// with it.
+///
+/// [`Machine::drop`] kills the boot, and that covers the ways a server ends by *running* —
+/// a session stopped, an error returned, a client that went away. It covers none of the ways
+/// a server ends by being ended: a `TerminateProcess`, a panic that aborts, a debugger
+/// detaching, the console window closed. There is no unwinding on those paths and so no
+/// `Drop`, and what is left is a micro-VM with no one to talk to. Measured here: a run that
+/// failed left `cortex-krun-host` up for twenty minutes, holding the RAM it had been given,
+/// holding the pipe its parent's output was being read through, and holding its own
+/// executable open — which is how the next `cargo build` came to fail on a linker that could
+/// not replace the file.
+///
+/// A job object is the one mechanism that does not need this process to be alive to act. The
+/// handle is created once and never closed while the server runs; every boot is assigned to
+/// it, and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` tells the kernel to terminate what is in the
+/// job when the last handle to it goes — which happens on process exit however that exit came
+/// about.
+///
+/// Best effort, and deliberately so. A machine that booted is worth more than the guarantee
+/// that it will be reaped: if the job cannot be made or the child cannot be assigned to it,
+/// this says so once and the boot goes on without it, back to being `Drop`'s to kill.
+#[cfg(windows)]
+fn reap_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle as _;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    /// `isize` and not `HANDLE`, because a `OnceLock` holds one value for every thread and a
+    /// raw pointer is not `Send`. What it stands for is a handle this process holds until it
+    /// exits, which is the whole of what makes the job work.
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() || job == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        // The handle is kept open on purpose -- closing it is what kills the job.
+        (set != 0).then_some(job as isize)
+    });
+
+    let Some(job) = job else {
+        eprintln!(
+            "{}: no job object; a boot will outlive a server that is killed rather than stopped",
+            env!("CARGO_BIN_NAME")
+        );
+        return;
+    };
+
+    // SAFETY: the child is alive and owns its handle for as long as this borrow lasts.
+    let assigned =
+        unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) };
+    if assigned == 0 {
+        eprintln!(
+            "{}: this boot is not in the job object and will outlive a server that is killed",
+            env!("CARGO_BIN_NAME")
+        );
     }
 }

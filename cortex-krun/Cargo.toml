@@ -52,5 +52,8 @@ libc = { workspace = true }
 # two compiled.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    # Job objects, which is how a boot is tied to this process rather than to its own `Drop`
+    # -- see `reap_with_this_process`.
+    "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

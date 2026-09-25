@@ -10,14 +10,14 @@
 //! built by one `cargo build`, and an argument either end gets wrong is refused by name
 //! before a hypervisor is touched.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use cortex::console::{
     Call, Message, Response,
     stdio::{read, write},
 };
-use cortex_krun::session::Network;
+use cortex_krun::session::{self, Network};
 use cortex_krun_host::{CAPABILITIES_ARG, GPU_CAPABILITY, GUEST_BIN};
 
 /// The reach a session gets when its client did not ask for one, and the host ports granted
@@ -171,8 +171,8 @@ pub struct Machine {
     boot: std::process::Child,
     /// The console port, split: one call goes out and one answer comes back, so there is
     /// never more than one outstanding and nothing to pair beyond the id.
-    incoming: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-    outgoing: tokio::net::unix::OwnedWriteHalf,
+    incoming: tokio::io::BufReader<session::Incoming>,
+    outgoing: session::Outgoing,
     /// The next call's id. A number about the wire and nothing else.
     next: u64,
     /// Everything this boot made and nothing else reads: gone when this drops.
@@ -209,8 +209,7 @@ impl Machine {
         // settled against this server's own defaults before it arrived here.
         shape: Shape,
     ) -> anyhow::Result<Machine> {
-        use std::io::Read as _;
-        use std::os::unix::fs::PermissionsExt as _;
+        use tokio::io::AsyncReadExt as _;
 
         // The program a boot runs, signed when it was built -- see `halves`.
         let program = super::halves::boot()?;
@@ -229,7 +228,7 @@ impl Machine {
         let guest_dir = dir.join("guest");
         std::fs::create_dir_all(&guest_dir)?;
 
-        let (socket, console) = (dir.join("port.sock"), dir.join("console.log"));
+        let console = dir.join("console.log");
 
         // A copy and not a link: this directory is served to the guest over virtio-fs, and
         // what it holds has to be a file under it rather than a name pointing out of it.
@@ -237,11 +236,14 @@ impl Machine {
         let from = super::halves::guest()?;
         std::fs::copy(&from, &bin)
             .map_err(|e| anyhow::anyhow!("copying {} into the share: {e}", from.display()))?;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
+        executable(&bin)
+            .map_err(|e| anyhow::anyhow!("making {} executable: {e}", bin.display()))?;
 
         // Bound before the child is started, because the child connects to it as its first
-        // act and there is nothing to retry against if it is not there yet.
-        let listener = std::os::unix::net::UnixListener::bind(&socket)
+        // act and there is nothing to retry against if it is not there yet. What a boot has
+        // to be told to reach it comes back with it: on one host that is a socket's path and
+        // on the other a pipe name, and neither is spelled here.
+        let (mut listener, channel) = session::Listener::bind(&dir)
             .map_err(|e| anyhow::anyhow!("binding the console channel: {e}"))?;
 
         let mut told = told(
@@ -249,7 +251,7 @@ impl Machine {
             session,
             &guest_dir,
             abin().as_deref(),
-            &socket,
+            &channel,
             network,
             host_ports,
             shape,
@@ -297,12 +299,17 @@ impl Machine {
         // this does not happen are worth telling apart: a boot that could not start says so
         // by exiting, a guest that died inside says so the same way, and a machine that is
         // merely slow says nothing at all. Without this they are one hang.
-        listener.set_nonblocking(true)?;
-        let until = std::time::Instant::now() + BOOT_TIMEOUT;
-        let (mut port, _) = loop {
-            match listener.accept() {
-                Ok(connected) => break connected,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+        let connected = listener.accept();
+        tokio::pin!(connected);
+        let until = tokio::time::Instant::now() + BOOT_TIMEOUT;
+        let (incoming, outgoing) = loop {
+            tokio::select! {
+                // The connection first, so that one arriving in the same moment the deadline
+                // does is taken rather than reported as a machine that never came.
+                biased;
+                connected = &mut connected => break connected
+                    .map_err(|e| anyhow::anyhow!("waiting for the guest to connect: {e}"))?,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                     if let Some(status) = boot.try_wait()? {
                         anyhow::bail!(
                             "the boot exited with {status} before the guest connected{}",
@@ -310,41 +317,43 @@ impl Machine {
                         );
                     }
                     anyhow::ensure!(
-                        std::time::Instant::now() < until,
+                        tokio::time::Instant::now() < until,
                         "the guest did not connect within {}s{}",
                         BOOT_TIMEOUT.as_secs(),
                         said(&console)
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(e) => anyhow::bail!("waiting for the guest to connect: {e}"),
             }
         };
-        // Accepted from a non-blocking listener, which on some platforms is where the new
-        // socket gets it from.
-        port.set_nonblocking(false)?;
-        port.set_read_timeout(Some(BOOT_TIMEOUT))?;
 
+        // Buffered here rather than where the struct is made, because the handshake is read
+        // off the same stream the frames are and a read of eight bytes must not take a
+        // buffer's worth of the first frame with it.
+        let mut incoming = tokio::io::BufReader::new(incoming);
         let mut heard = [0u8; cortex_krun_host::HANDSHAKE.len()];
-        port.read_exact(&mut heard).map_err(|e| {
-            anyhow::anyhow!(
-                "waiting for the guest to say it is there: {e}{}",
-                said(&console)
-            )
-        })?;
+        tokio::time::timeout(BOOT_TIMEOUT, incoming.read_exact(&mut heard))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the guest connected but did not say it was there within {}s{}",
+                    BOOT_TIMEOUT.as_secs(),
+                    said(&console)
+                )
+            })?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "waiting for the guest to say it is there: {e}{}",
+                    said(&console)
+                )
+            })?;
         anyhow::ensure!(
             &heard == cortex_krun_host::HANDSHAKE,
             "the guest said {heard:?} where a handshake was expected"
         );
 
-        // From here the channel is this end's to drive, so it moves to the runtime's socket
-        // type: the framing below is async and the accepted one is not.
-        port.set_nonblocking(true)?;
-        let (incoming, outgoing) = tokio::net::UnixStream::from_std(port)?.into_split();
-
         Ok(Machine {
             boot,
-            incoming: tokio::io::BufReader::new(incoming),
+            incoming,
             outgoing,
             next: 0,
             dir,
@@ -391,7 +400,9 @@ fn told(
     // Taken rather than looked up here, so that what a boot is told is a function of its
     // arguments: `abin()` asks the filesystem, and the one caller asks it once.
     abin: Option<&Path>,
-    channel: &Path,
+    // What `Listener::bind` answered with, passed on as it stands: a socket's path on one
+    // host and a pipe name on the other, and nothing here reads it as either.
+    channel: &OsStr,
     network: Network,
     host_ports: &[u16],
     shape: Shape,
@@ -461,6 +472,35 @@ fn number<T: std::str::FromStr>(key: &str) -> Option<T> {
 /// A switch read the same way: set to anything but `0` or nothing at all.
 fn flag(key: &str) -> bool {
     std::env::var_os(key).is_some_and(|on| !on.is_empty() && on != "0")
+}
+
+/// Mark a file the guest is about to exec as executable, as the host's virtiofs server reads
+/// executability.
+///
+/// A mode bit where the host has them. Windows has not, and libkrun's virtiofs there answers
+/// `0644` for every regular file unless an alternate data stream beside it says otherwise --
+/// so a guest binary copied in with `fs::copy` is one the guest cannot run, and the failure
+/// is an `exec` that never happened rather than anything this end would hear about.
+///
+/// The stream is libkrun's own convention, `uid:gid:0mode` with the mode including its file
+/// type, and it is written here rather than asked of the device because the device is not up
+/// yet: this is the file being put into the share the machine has not been given.
+fn executable(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+    }
+
+    #[cfg(windows)]
+    {
+        const OVERRIDE_STAT: &str = ":user.containers.override_stat";
+        const ROOT_EXECUTABLE: &str = "0:0:0100755";
+
+        let mut stream = path.as_os_str().to_os_string();
+        stream.push(OVERRIDE_STAT);
+        std::fs::write(PathBuf::from(stream), ROOT_EXECUTABLE)
+    }
 }
 
 /// The tail of the guest's console, for a failure that happened before there was a channel to

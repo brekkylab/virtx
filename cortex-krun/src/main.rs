@@ -36,7 +36,7 @@ const NOT_EXECUTABLE: u8 = 126;
 ///         ├── session.ext4    what the session wrote -- outlives any one machine
 ///         └── machine/        what only makes sense while one is up
 ///             ├── guest/      shared into the guest: the guest binary it execs
-///             ├── port.sock   the console channel
+///             ├── port.sock   the console channel, where a host has one as a file
 ///             └── console.log the kernel's own output
 /// ```
 ///

@@ -40,6 +40,7 @@
 //! a caller is unreachable. That is also why a session has one operation and not two --
 //! nothing can run after a session starts, so nothing can ask a second thing of it.
 
+mod channel;
 pub(crate) mod ext4;
 #[cfg(feature = "gpu")]
 mod gpu;
@@ -47,6 +48,7 @@ mod mount;
 mod net;
 mod session;
 
+pub use channel::{Channel, Incoming, Listener, Outgoing};
 pub use ext4::Ext4;
 pub use mount::Mount;
 pub use net::Network;

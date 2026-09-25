@@ -57,7 +57,9 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # oci-client is async and its blob downloads write into an `AsyncWrite`.
-tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "macros"] }
+# `net` for the console channel -- a unix socket on one host and a pair of named pipes on
+# the other, both of which a server drives asynchronously. See `session::channel`.
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "macros"] }
 
 # Reading layer blobs. `tar` parses the archive and reports where each entry's
 # bytes are, which is what lets the tree hold offsets instead of contents;

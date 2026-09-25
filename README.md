@@ -447,6 +447,32 @@ a caller: the two spellings differ by little more than `AsFd` → `AsHandle`, an
 holding the difference in one place is what lets everything above it be written
 once.
 
+### The console channel is two pipes
+
+What a console *session* runs on is a named virtio-console port, and the host end
+of one is a descriptor the server and the boot share — a unix socket on macOS.
+Windows gets **two named pipes** instead, and
+[`session::channel`](cortex-krun-lib/src/session/channel.rs) is where both ends of
+that live so that nothing above it has to know which host it is on.
+
+Two, because libkrun's Windows console reads the port's input handle with a
+blocking `ReadFile` on one thread and writes its output handle with a blocking
+`WriteFile` on another, neither of them overlapped. Both handles therefore have to
+be synchronous, and two handles onto one synchronous file object serialize against
+each other — so a read parked waiting for the guest would hold the write that was
+meant to wake it, and the protocol would deadlock on its first call. Two pipes are
+two file objects.
+
+An `AF_UNIX` socket would have been the smaller change, and Windows has had them
+since 1803, but a socket is not a handle `ReadFile` takes and Rust's standard
+library has no Windows spelling for one.
+
+The name travels the other way round from the path it replaces: `Listener::bind`
+answers with what the boot has to be told, because a pipe name is not a path and
+is not under the directory a caller picked. On Windows it also has to be called
+from inside a Tokio runtime — `ServerOptions::create` registers the pipe with the
+reactor — which `Machine::boot` already is.
+
 It also hands the console no stdin. libkrun's Windows console parks its input
 thread in a blocking `ReadFile`, and the VMM joins that thread before it exits
 — so a tty stdin means the process runs the command, prints, and then hangs
@@ -716,6 +742,31 @@ codegen, which is this build's business and not the system Python's. Two traps
 follow from that: meson resolves `python3` off `PATH` — a native-file
 `[binaries] python3` entry does *not* steer the python module — and a Windows
 venv never creates that name, so the script makes one.
+
+### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-console.patch`
+
+One read, on the path every console session takes, and the machine it breaks looks
+like one that booted fine.
+
+A port's rx thread fills a guest descriptor by reading into it until it is full:
+`read_to_desc` calls `read_volatile` again with whatever is left and stops only on
+a short read or on `WouldBlock`. The unix side gets that for free, because its
+descriptor is non-blocking and the second read answers `EWOULDBLOCK`. The Windows
+side hands it a synchronous handle, so the second read *blocks* — with the bytes
+already in the descriptor and never handed over. On a port carrying a
+request/response protocol that is every message smaller than one descriptor: the
+host writes 68 bytes, the guest's rx thread waits for the other 4028, and neither
+end moves again. It is invisible to a console on a terminal, where the next
+keystroke eventually arrives.
+
+So `read_volatile` now reads no more than is already there — `PeekNamedPipe`, and
+`WouldBlock` when that is nothing — which is the contract the rx loop was written
+against. `wait_until_readable` then has to answer for the waiting, and it cannot do
+it the way it did: `WaitForSingleObject` on a file handle reports that an
+*overlapped* operation on it completed, and these handles are synchronous, so
+waiting on one says nothing about whether anything arrived. A pipe is polled, with
+the stop event's own timed wait as the pause between two asks; a console handle is
+a synchronization object and is still waited on as before.
 
 ### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 

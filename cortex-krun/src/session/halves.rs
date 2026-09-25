@@ -41,12 +41,21 @@
 use std::path::PathBuf;
 
 /// The program a boot runs: `$CORTEX_KRUN_BOOT_BIN`, else the binary beside this one.
+///
+/// Spelled with this host's suffix for an executable, unlike the guest below: the boot is
+/// this platform's program and cargo links it under whatever name this platform gives one.
 pub fn boot() -> anyhow::Result<PathBuf> {
-    beside("CORTEX_KRUN_BOOT_BIN", "cortex-krun-host")
+    beside(
+        "CORTEX_KRUN_BOOT_BIN",
+        &format!("cortex-krun-host{}", std::env::consts::EXE_SUFFIX),
+    )
 }
 
 /// The program the guest execs: `$CORTEX_KRUN_GUEST_BIN`, else the binary beside this one.
 /// Copied into every machine's share -- see [`Machine`](super::machine::Machine).
+///
+/// No suffix, whatever this host puts on one of its own: these bytes are a static musl ELF
+/// that runs inside the VM, and the name is one a Linux guest is about to exec.
 pub fn guest() -> anyhow::Result<PathBuf> {
     beside("CORTEX_KRUN_GUEST_BIN", "cortex-krun-guest")
 }

@@ -156,10 +156,10 @@ pub struct Session {
     host_ports: Vec<u16>,
     gpu: bool,
     gpu_memory_mib: Option<u32>,
-    /// A named virtio-console port, and the descriptor behind it -- see
-    /// [`port`](Session::port). Held as a number rather than a borrow so that a
-    /// [`Session`] stays a plain value; keeping the descriptor open is the caller's.
-    port: Option<(String, i32)>,
+    /// A named virtio-console port, and the descriptors behind it -- see
+    /// [`port`](Session::port). Held as numbers rather than a borrow so that a
+    /// [`Session`] stays a plain value; keeping the channel open is the caller's.
+    port: Option<(String, super::channel::Raw)>,
     command: Vec<String>,
     /// The whole argv, for a caller who is not running the image's program at all -- see
     /// [`exec`](Session::exec). When set it is what runs, and `command` is not consulted.
@@ -340,7 +340,7 @@ impl Session {
         self
     }
 
-    /// A named virtio-console port beside the guest's console, carrying whatever `fd` is
+    /// A named virtio-console port beside the guest's console, carrying whatever `channel` is
     /// the host end of.
     ///
     /// The console itself is this process's terminal and is the kernel's: it is where a
@@ -349,20 +349,20 @@ impl Session {
     /// the name given here -- `/dev/virtio-ports/<name>` where the guest has udev rules,
     /// and the `name` attribute under `/sys/class/virtio-ports` where it does not.
     ///
-    /// **The same descriptor both ways.** A socket is bidirectional and the port the guest
-    /// opens is one thing rather than a pair, so `fd` is used for input and output alike.
+    /// **The port the guest opens is one thing either way**, whether the channel behind it is
+    /// one descriptor or two -- which host it is decides that, and
+    /// [`Channel`](super::Channel) is where the difference is held.
     ///
-    /// `fd` is borrowed and not taken: it has to stay open for as long as the machine runs,
-    /// which is the rest of the process -- see [`enter`](Session::enter). Replaces what an
-    /// earlier call said.
+    /// The channel is borrowed and not taken: it has to stay open for as long as the machine
+    /// runs, which is the rest of the process -- see [`enter`](Session::enter). Replaces what
+    /// an earlier call said.
     ///
     /// **A port is written to a queue nothing is reading until the guest opens it**, and
     /// the driver discards what arrives before then rather than queueing it. So a caller
     /// on the other end of `fd` cannot speak first: something in the guest has to say it
     /// is there.
-    #[cfg(unix)]
-    pub fn port(mut self, name: impl Into<String>, fd: std::os::fd::RawFd) -> Session {
-        self.port = Some((name.into(), fd));
+    pub fn port(mut self, name: impl Into<String>, channel: &super::Channel) -> Session {
+        self.port = Some((name.into(), channel.raw()));
         self
     }
 
@@ -556,16 +556,29 @@ impl Session {
 
         // After the default console and never before: `add_default_console` is what makes
         // port 0 the console the kernel prints on, and port 0 is the first one added.
-        #[cfg(unix)]
-        if let Some((name, fd)) = &self.port {
-            use std::os::fd::BorrowedFd;
-
-            // SAFETY: the descriptor is the caller's and is promised to outlive the machine
-            // -- see [`port`]. libkrun `dup`s it here, so what is borrowed is borrowed only
-            // for the length of this call.
-            let fd = unsafe { BorrowedFd::borrow_raw(*fd) };
+        if let Some((name, raw)) = &self.port {
+            // SAFETY: the descriptors are the caller's and are promised to outlive the
+            // machine -- see [`port`]. libkrun `dup`s them here, so what is borrowed is
+            // borrowed only for the length of this call.
+            //
+            // One both ways on unix, where a socket carries both directions, and two on
+            // Windows, where a console port's reads and writes have to be able to block
+            // independently -- see [`Channel`](super::Channel).
+            #[cfg(unix)]
+            let (input, output) = {
+                let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(*raw) };
+                (fd, fd)
+            };
+            #[cfg(windows)]
+            let (input, output) = unsafe {
+                use std::os::windows::io::BorrowedHandle;
+                (
+                    BorrowedHandle::borrow_raw(raw.0 as *mut std::ffi::c_void),
+                    BorrowedHandle::borrow_raw(raw.1 as *mut std::ffi::c_void),
+                )
+            };
             console
-                .add_inout_port(name, Some(fd), Some(fd))
+                .add_inout_port(name, Some(input), Some(output))
                 .map_err(|e| Error::vmm(format!("attaching the {name} console port"), e))?;
         }
 
@@ -662,9 +675,15 @@ fn tags(mounts: &[Mount]) -> Vec<String> {
 /// Refused here rather than in the guest: a relative mount point is mounted wherever the
 /// init is standing, and the guest reports that -- if it reports it at all -- to a console
 /// that is already showing a boot going wrong.
+///
+/// Absolute *in the guest*, which is a leading `/` and is asked of the text rather than of
+/// `Path`. A mount point is a Linux path this host is only carrying: `Path::is_absolute`
+/// answers by the rules of whichever host that is, and on Windows `/.cortex` is not one --
+/// so the guest's own share would be refused on the way to a machine that would have mounted
+/// it fine.
 fn mount_point(mount: &Mount) -> Result<&str> {
     let at = named(&mount.at)?;
-    match mount.at.is_absolute() {
+    match at.starts_with('/') {
         true => Ok(at),
         false => Err(Error::MountPoint { at: at.to_string() }),
     }

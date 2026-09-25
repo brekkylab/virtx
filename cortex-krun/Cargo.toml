@@ -35,8 +35,6 @@ cortex-krun-host = { workspace = true }
 # Putting the image a session names into the cache. The machine itself is the boot's: what
 # this binary wants from the library is the store.
 cortex-krun-lib = { workspace = true }
-# `kill(pid, 0)`, to ask whether the pid a leftover session path is named for is still alive.
-libc = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "io-std",
@@ -44,4 +42,18 @@ tokio = { workspace = true, features = [
     "macros",
     "net",
     "rt-multi-thread",
+    "time",
+] }
+
+# Asking whether the pid a leftover session path is named for is still alive, which each
+# platform spells with its own call -- `kill(pid, 0)` on one, `OpenProcess` on the other.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# The same release libkrun's own Windows code takes, so one version is resolved rather than
+# two compiled.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
 ] }

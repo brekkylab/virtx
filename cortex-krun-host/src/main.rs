@@ -77,12 +77,10 @@
 
 use std::convert::Infallible;
 use std::ffi::OsString;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cortex_krun::session::{Ext4, Mount, Network, Session};
+use cortex_krun::session::{Channel, Ext4, Mount, Network, Session};
 use cortex_krun_host::{ABIN_DIR, CAPABILITIES_ARG, GUEST_DIR, PORT_NAME, guest_program};
 
 /// A failure of ours, not a guest's -- the shell's code for "found it, could not run it",
@@ -324,7 +322,7 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
     // The console port is a descriptor, and this is where it comes from: one connection back
     // to the process that spawned this one. Held for the length of this function, which is
     // the length of the process -- the VM borrows it for as long as it runs.
-    let channel = UnixStream::connect(&args.channel).map_err(|e| {
+    let channel = Channel::connect(&args.channel).map_err(|e| {
         anyhow::anyhow!(
             "connecting to the console channel at {}: {e}",
             args.channel.display()
@@ -337,7 +335,7 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
         // process that is about to open it, and a boot that could not format one is a boot
         // that failed rather than a session the server thought it had.
         .rootfs(Ext4::at(&args.session, Ext4::SIZE)?)
-        .port(PORT_NAME, channel.as_raw_fd())
+        .port(PORT_NAME, &channel)
         // The directory the guest binary is in, shared so that the guest has one to exec.
         .mount(Mount::new(&args.guest, GUEST_DIR))
         .network(args.network)

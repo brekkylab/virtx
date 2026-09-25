@@ -13,6 +13,7 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <host|guest|abin>... [--gpu] [--debug]
        cargo xtask download <guest|abin>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
+       cargo xtask upload   [--prefix <dir>]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
@@ -20,6 +21,7 @@ usage: cargo xtask init     [--force]
   build     builds the components from source
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
+  upload    uploads what install put in <prefix>/bin, for download to fetch
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
@@ -29,7 +31,7 @@ usage: cargo xtask init     [--force]
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
-  --prefix <dir>  where to install (default: $CARGO_INSTALL_ROOT, $CARGO_HOME, ~/.cargo)
+  --prefix <dir>  where to install, or upload from (default: $CARGO_INSTALL_ROOT, $CARGO_HOME, ~/.cargo)
   --gpu           builds host with GPU support, and the GPU libraries it links first
   --debug         builds unoptimized (the guest is always optimized)";
 
@@ -118,6 +120,14 @@ fn main() -> anyhow::Result<()> {
                 "install copies what build and download left; it takes only --prefix and --debug\n\n{USAGE}"
             );
             install(&options)
+        }
+        Some("upload") => {
+            let options = parse(args)?;
+            ensure!(
+                options.components.is_empty() && !options.gpu && !options.debug,
+                "upload takes only --prefix\n\n{USAGE}"
+            );
+            upload(&options)
         }
         Some("run") => run_target(args.collect(), false),
         Some("test") => run_target(args.collect(), true),
@@ -536,6 +546,15 @@ fn download(options: &Options) -> anyhow::Result<()> {
         todo!("download abin");
     }
     Ok(())
+}
+
+fn upload(options: &Options) -> anyhow::Result<()> {
+    let prefix = match &options.prefix {
+        Some(prefix) => prefix.clone(),
+        None => default_prefix()?,
+    };
+    let _bin = prefix.join("bin");
+    todo!("upload")
 }
 
 fn install(options: &Options) -> anyhow::Result<()> {

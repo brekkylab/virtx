@@ -1,3 +1,35 @@
+diff --git a/include/libkrun_display.h b/include/libkrun_display.h
+deleted file mode 120000
+index 7a415917..00000000
+--- a/include/libkrun_display.h
++++ /dev/null
+@@ -1 +0,0 @@
+-../src/display/libkrun_display.h
+\ No newline at end of file
+diff --git a/include/libkrun_display.h b/include/libkrun_display.h
+new file mode 100644
+index 00000000..7a415917
+--- /dev/null
++++ b/include/libkrun_display.h
+@@ -0,0 +1 @@
++../src/display/libkrun_display.h
+\ No newline at end of file
+diff --git a/include/libkrun_input.h b/include/libkrun_input.h
+deleted file mode 120000
+index dd9d61c8..00000000
+--- a/include/libkrun_input.h
++++ /dev/null
+@@ -1 +0,0 @@
+-../src/input/libkrun_input.h
+\ No newline at end of file
+diff --git a/include/libkrun_input.h b/include/libkrun_input.h
+new file mode 100644
+index 00000000..dd9d61c8
+--- /dev/null
++++ b/include/libkrun_input.h
+@@ -0,0 +1 @@
++../src/input/libkrun_input.h
+\ No newline at end of file
 diff --git a/src/devices/src/virtio/gpu/device.rs b/src/devices/src/virtio/gpu/device.rs
 index c0626a5a..622266c8 100644
 --- a/src/devices/src/virtio/gpu/device.rs
@@ -56,7 +88,7 @@ index c0626a5a..622266c8 100644
              self.export_table.take(),
              self.displays.clone(),
 diff --git a/src/devices/src/virtio/gpu/virtio_gpu.rs b/src/devices/src/virtio/gpu/virtio_gpu.rs
-index fa09f59..76212a8 100644
+index fa09f59b..13dd7bd3 100644
 --- a/src/devices/src/virtio/gpu/virtio_gpu.rs
 +++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
 @@ -12,16 +12,13 @@ use super::protocol::{
@@ -116,7 +148,45 @@ index fa09f59..76212a8 100644
              map_sender,
          }
      }
-@@ -579,10 +578,14 @@ impl VirtioGpu {
+@@ -449,7 +448,36 @@ impl VirtioGpu {
+     }
+ 
+     /// Releases guest kernel reference on the resource.
+-    pub fn unref_resource(&mut self, resource_id: u32) -> VirtioGpuResult {
++    pub fn unref_resource(
++        &mut self,
++        resource_id: u32,
++        shm_region: &VirtioShmRegion,
++    ) -> VirtioGpuResult {
++        // A blob the guest mapped and never unmapped is still aliased into its address
++        // space by the hypervisor, and that alias points at the host mapping this
++        // function is about to drop. So the hypervisor's mapping goes first.
++        //
++        // Nothing in the protocol makes a guest unmap before it unrefs -- a process that
++        // dies holding a blob does exactly this -- and on Windows what is left behind is
++        // not merely a wrong alias: the next map into that window walks the stale range
++        // and bugchecks the host from `Vid!VsmmVaGpaCoreMapGpaRange`, with the guest's
++        // ordering deciding whether the machine stays up.
++        //
++        // An unmap that fails leaves the resource in place, holding the host mapping the
++        // alias still points at, rather than freeing it out from under the hypervisor.
++        #[cfg(any(target_os = "macos", target_os = "windows"))]
++        {
++            if self
++                .resources
++                .get(&resource_id)
++                .is_some_and(|resource| resource.shmem_offset.is_some())
++            {
++                self.resource_unmap_blob(resource_id, shm_region)?;
++            }
++        }
++        #[cfg(target_os = "linux")]
++        let _ = shm_region;
++
+         let resource = self
+             .resources
+             .remove(&resource_id)
+@@ -579,10 +607,14 @@ impl VirtioGpu {
                  .present_frame(scanout_id, frame_id, Some(&rect))?
          }
  
@@ -132,7 +202,7 @@ index fa09f59..76212a8 100644
              Err(e) => return Err(ErrRutabaga(e)),
          }
  
-@@ -931,7 +934,7 @@ impl VirtioGpu {
+@@ -931,7 +963,7 @@ impl VirtioGpu {
              map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
          })
      }
@@ -141,7 +211,7 @@ index fa09f59..76212a8 100644
      pub fn resource_map_blob(
          &mut self,
          resource_id: u32,
-@@ -943,45 +946,58 @@ impl VirtioGpu {
+@@ -943,45 +975,58 @@ impl VirtioGpu {
              .get_mut(&resource_id)
              .ok_or(ErrInvalidResourceId)?;
  
@@ -234,7 +304,7 @@ index fa09f59..76212a8 100644
          // Access flags not a part of the virtio-gpu spec.
          Ok(OkMapInfo {
              map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
-@@ -1023,7 +1039,7 @@ impl VirtioGpu {
+@@ -1023,7 +1068,7 @@ impl VirtioGpu {
  
          Ok(OkNoData)
      }
@@ -243,7 +313,7 @@ index fa09f59..76212a8 100644
      pub fn resource_unmap_blob(
          &mut self,
          resource_id: u32,
-@@ -1055,6 +1071,13 @@ impl VirtioGpu {
+@@ -1055,6 +1100,13 @@ impl VirtioGpu {
              return Err(ErrUnspec);
          }
  
@@ -258,7 +328,7 @@ index fa09f59..76212a8 100644
  
          Ok(OkNoData)
 diff --git a/src/devices/src/virtio/gpu/worker.rs b/src/devices/src/virtio/gpu/worker.rs
-index 9d19c103..8436cd03 100644
+index 9d19c103..34b19359 100644
 --- a/src/devices/src/virtio/gpu/worker.rs
 +++ b/src/devices/src/virtio/gpu/worker.rs
 @@ -1,18 +1,20 @@
@@ -343,6 +413,17 @@ index 9d19c103..8436cd03 100644
              self.map_sender.clone(),
              self.export_table.take(),
              self.displays.clone(),
+@@ -144,7 +153,9 @@ impl Worker {
+ 
+                 virtio_gpu.resource_create_3d(resource_id, resource_create_3d)
+             }
+-            GpuCommand::ResourceUnref(info) => virtio_gpu.unref_resource(info.resource_id),
++            GpuCommand::ResourceUnref(info) => {
++                virtio_gpu.unref_resource(info.resource_id, &self.shm_region)
++            }
+             GpuCommand::SetScanout(info) => virtio_gpu.set_scanout(
+                 info.scanout_id,
+                 info.resource_id,
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
 index f7447382..67f29b53 100644
 --- a/src/libkrun/src/api/device_builders.rs
@@ -555,10 +636,76 @@ index 86bbe613..85b76b45 100644
          self.vm.remove_mapping(reply_sender, guest_addr, len);
      }
 diff --git a/src/libkrun/src/vmm/windows/vstate.rs b/src/libkrun/src/vmm/windows/vstate.rs
-index 5c4d36ea..330c68a7 100644
+index 5c4d36ea..66acdecb 100644
 --- a/src/libkrun/src/vmm/windows/vstate.rs
 +++ b/src/libkrun/src/vmm/windows/vstate.rs
-@@ -132,6 +132,57 @@ impl Vm {
+@@ -8,12 +8,13 @@
+ //! and routes I/O and MMIO exits through the WHP instruction emulator.
+ 
+ use log::{debug, error};
++use std::collections::BTreeMap;
+ use std::ffi::c_void;
+ use std::fmt::{Display, Formatter};
+ use std::io;
+ use std::mem;
+ use std::result;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
+ use std::thread;
+ 
+ use super::super::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
+@@ -98,13 +99,49 @@ pub type Result<T> = result::Result<T, Error>;
+ 
+ pub struct Vm {
+     whp_vm: Arc<WhpVm>,
++    /// What this partition has aliased into the guest's virtio-gpu shm window:
++    /// guest address -> (host pointer, length).
++    ///
++    /// Kept because WHP does not split a GPA range on unmap, so taking a mapping
++    /// down needs the length it went up with rather than the length of whatever
++    /// is going in next. Without it a blob of a different size lands on the old
++    /// range: the unmap is refused, the map that follows overlaps, and the
++    /// partition's own record of its ranges is left inconsistent -- which on this
++    /// path does not fail the call, it bugchecks the host.
++    blob_mappings: Mutex<BTreeMap<u64, (u64, u64)>>,
++}
++
++/// The mapping in `mappings` that `[guest_addr, guest_addr + len)` would overlap.
++///
++/// A range that starts below this one but reaches into it overlaps as badly as one
++/// that starts inside it, and neither can be undone by an exact unmap -- so both are
++/// refused rather than mapped over.
++fn overlapping(
++    mappings: &BTreeMap<u64, (u64, u64)>,
++    guest_addr: u64,
++    len: u64,
++) -> Option<(u64, u64, u64)> {
++    let below = mappings
++        .range(..=guest_addr)
++        .next_back()
++        .filter(|(start, (_, mapped))| start.saturating_add(*mapped) > guest_addr);
++    let above = mappings.range(guest_addr..).next().filter(|(start, _)| {
++        // `len == 0` maps nothing, so nothing can be inside it.
++        **start < guest_addr.saturating_add(len)
++    });
++    below
++        .or(above)
++        .map(|(start, (host, mapped))| (*start, *host, *mapped))
+ }
+ 
+ impl Vm {
+     pub fn new(vcpu_count: u8) -> Result<Self> {
+         whp::check_hypervisor().map_err(Error::WhpNotAvailable)?;
+         let whp_vm = Arc::new(WhpVm::new(vcpu_count as u32).map_err(Error::VmSetup)?);
+-        Ok(Vm { whp_vm })
++        Ok(Vm {
++            whp_vm,
++            blob_mappings: Mutex::new(BTreeMap::new()),
++        })
+     }
+ 
+     pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
+@@ -132,6 +169,95 @@ impl Vm {
      pub fn whp_vm(&self) -> &Arc<WhpVm> {
          &self.whp_vm
      }
@@ -582,10 +729,32 @@ index 5c4d36ea..330c68a7 100644
 +    ) {
 +        debug!("add_mapping: host_addr={host_addr:x}, guest_addr={guest_addr:x}, len={len}");
 +
-+        // Nothing is mapped at this offset the first time a blob lands there,
-+        // so a failed unmap is the normal case rather than an error.
-+        if let Err(e) = self.whp_vm.unmap_memory(guest_addr, len) {
-+            debug!("no previous mapping at {guest_addr:x} to remove: {e}");
++        let mut mappings = self.blob_mappings.lock().unwrap();
++
++        // What is already at this address comes down with the length it went up
++        // with. The first blob to land here has nothing to undo, which is why
++        // this is a lookup rather than an unmap whose failure is shrugged off:
++        // an unmap that fails when there *is* a mapping is the case that must
++        // not go on to map over it.
++        if let Some((old_host, old_len)) = mappings.remove(&guest_addr) {
++            if let Err(e) = self.whp_vm.unmap_memory(guest_addr, old_len) {
++                error!(
++                    "refusing to map over the mapping at {guest_addr:x} \
++                     (host {old_host:x}, len {old_len}) that would not come down: {e}"
++                );
++                mappings.insert(guest_addr, (old_host, old_len));
++                reply_sender.send(false).unwrap();
++                return;
++            }
++        }
++
++        if let Some((start, host, mapped)) = overlapping(&mappings, guest_addr, len) {
++            error!(
++                "refusing to map {guest_addr:x}+{len}: it overlaps the mapping at \
++                 {start:x} (host {host:x}, len {mapped}), which no exact unmap undoes"
++            );
++            reply_sender.send(false).unwrap();
++            return;
 +        }
 +
 +        // SAFETY: the caller hands over a host mapping that stays live until
@@ -599,6 +768,7 @@ index 5c4d36ea..330c68a7 100644
 +            error!("Error adding memory map: {e}");
 +            reply_sender.send(false).unwrap();
 +        } else {
++            mappings.insert(guest_addr, (host_addr, len));
 +            reply_sender.send(true).unwrap();
 +        }
 +    }
@@ -606,10 +776,25 @@ index 5c4d36ea..330c68a7 100644
 +    pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
 +        debug!("remove_mapping: guest_addr={guest_addr:x}, len={len}");
 +
-+        if let Err(e) = self.whp_vm.unmap_memory(guest_addr, len) {
++        let mut mappings = self.blob_mappings.lock().unwrap();
++
++        // The recorded length, for the same reason `add_mapping` uses it: the
++        // caller's is the resource's size, which is what the mapping was made
++        // with today and need not stay that way.
++        let Some(&(_, mapped)) = mappings.get(&guest_addr) else {
++            error!("no mapping at {guest_addr:x} to remove");
++            reply_sender.send(false).unwrap();
++            return;
++        };
++        if mapped != len {
++            debug!("removing {guest_addr:x} with its mapped length {mapped}, not {len}");
++        }
++
++        if let Err(e) = self.whp_vm.unmap_memory(guest_addr, mapped) {
 +            error!("Error removing memory map: {e}");
 +            reply_sender.send(false).unwrap();
 +        } else {
++            mappings.remove(&guest_addr);
 +            reply_sender.send(true).unwrap();
 +        }
 +    }

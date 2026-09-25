@@ -49,7 +49,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant as HostInstant};
 
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
@@ -75,6 +75,11 @@ const TCP_BUFFER: usize = 256 * 1024;
 /// that a retried name lookup reuses the socket it opened, short enough that nothing
 /// accumulates.
 const UDP_IDLE: Duration = Duration::from_secs(60);
+
+/// How many times one wake may drive smoltcp before the loop moves on. High enough that
+/// a full send buffer goes out in one pass -- 256 KiB is 179 frames at this MTU -- and
+/// low enough that a flow with more than that to say does not starve the rest.
+const POLL_ROUNDS: usize = 256;
 
 /// How long the loop may sleep when neither smoltcp nor a host socket has anything to
 /// say. There is nothing to poll for -- every source of work wakes it -- so this is only
@@ -269,7 +274,22 @@ async fn run(mut wire: Wire, policy: Policy, resolvers: Vec<Ipv4Addr>) {
         }
 
         // 2. smoltcp: ARP answered, segments acknowledged, buffers filled and drained.
-        iface.poll(now(), &mut queues, &mut sockets);
+        //
+        // **Until it stops making progress, rather than once.** A `poll` emits at most one
+        // frame per socket, so one call per wake makes the throughput the wake rate times
+        // the MTU -- measured at 190 frames a second, which is 0.25 MB/s whatever the peer
+        // can do, with the send buffer sitting full at 256 KiB the whole time. Draining it
+        // here is what smoltcp asks of a caller, and on the same path it is the difference
+        // between 0.25 MB/s and 48 MB/s.
+        //
+        // Bounded, because the sockets are the guest's to open: with no ceiling, one flow
+        // with a full buffer holds this loop for as long as it has frames, and the wire,
+        // the host sockets and every other flow wait behind it.
+        for _ in 0..POLL_ROUNDS {
+            if iface.poll(now(), &mut queues, &mut sockets) == PollResult::None {
+                break;
+            }
+        }
 
         // 3. Both directions of every stream flow, and what it takes to end one.
         pump_tcp(&mut sockets, &mut tcp_flows, &mut tcp_open);

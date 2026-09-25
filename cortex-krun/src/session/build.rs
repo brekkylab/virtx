@@ -144,11 +144,11 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
 /// that failed takes the machine with it and the disk is left holding whatever the steps
 /// before it wrote.
 async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> anyhow::Result<()> {
-    // This server's own shape and not the session's: what a build gets is its operator's
-    // business, where a session's size is what its client asked for. The reach is [`reach`]'s,
-    // because a recipe's commonest first step fetches packages -- a build that could not reach
-    // a registry would be a different build, where one that is smaller is the same one, slower.
-    let mut machine = Machine::boot(base, &upper.path, &[], network, &[], Shape::from_env())
+    // Half the host and no GPU, not the session's shape -- see [`Shape::for_build`]. The reach
+    // is [`reach`]'s, because a recipe's commonest first step fetches packages -- a build that
+    // could not reach a registry would be a different build, where one that is smaller is the
+    // same one, slower.
+    let mut machine = Machine::boot(base, &upper.path, &[], network, &[], Shape::for_build())
         .await
         .map_err(|e| coded(Error::BOOT_FAILED, e))?;
 

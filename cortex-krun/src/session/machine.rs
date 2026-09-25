@@ -102,6 +102,23 @@ impl Shape {
             gpu_memory_mib: number::<u32>(GPU_MEMORY_ENV).filter(|mib| *mib > 0),
         }
     }
+
+    /// What a build gets: half the host's processors and half its memory, and never a GPU.
+    ///
+    /// A build is the host's own work and nobody else's session, so it is sized to the host
+    /// rather than to the default a session gets. Where the host cannot be read, the boot's
+    /// default stands in.
+    pub fn for_build() -> Shape {
+        Shape {
+            vcpus: std::thread::available_parallelism()
+                .ok()
+                .map(|n| (n.get() / 2).clamp(1, usize::from(u8::MAX)) as u8),
+            memory_mib: cortex_krun::session::host_memory()
+                .map(|bytes| (bytes >> 21).clamp(1, u64::from(u32::MAX)) as u32),
+            gpu: false,
+            gpu_memory_mib: None,
+        }
+    }
 }
 
 /// The operator's disk size from [`DISK_ENV`], in bytes, and [`Ext4::SIZE`] where there is

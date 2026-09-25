@@ -40,6 +40,9 @@ struct Session {
     /// Where the session's writes are. Outlives every machine started on it, and is what a
     /// `snapshot` reads.
     upper: Ext4,
+    /// The disk, open with the operating system told to delete it when the last handle to it
+    /// closes -- see [`held`]. Never read through; what it is for is being open.
+    _held: Option<std::fs::File>,
     /// Guest paths a snapshot must not carry, as the guest spells them: the guest binary's
     /// share, and every mount point the boot made to hang a tree on. Making a directory is a
     /// write, and a write lands on the upper -- so without these a snapshot would claim
@@ -234,6 +237,8 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
         .join(std::process::id().to_string())
         .join("session.ext4");
     let upper = seeded(&disk, size, init.snapshot.as_deref())?;
+    // After the disk exists and before a boot opens it, which is the only order that works.
+    let _held = held(&disk);
 
     // What a snapshot must leave out: this backend's own two shares, and every directory the
     // boot made to hang one of the client's trees on.
@@ -264,7 +269,16 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // the trees went is not answered at all: the client named the path each one appears at,
     // so there is nothing this end knows about them that the client did not say.
     let (started, cwd) = boot().await.map_err(|e| coded(Error::BOOT_FAILED, e))?;
-    Ok((Session { boot, upper, skip }, started, InitResp { cwd }))
+    Ok((
+        Session {
+            boot,
+            upper,
+            _held,
+            skip,
+        },
+        started,
+        InitResp { cwd },
+    ))
 }
 
 /// The disk this session runs on: a fresh one, with `snapshot` already written into it when
@@ -862,4 +876,65 @@ fn refused(e: &anyhow::Error) -> Error {
         message: format!("{e:#}"),
         data: None,
     }
+}
+/// Hand a session's disk to the operating system to delete, so that no code of ours has to.
+///
+/// **Two gibibytes is what a session that was killed leaves behind**, and the sweep that
+/// reclaims it runs at the *next* server's start — which is a promise about a run that may
+/// not come, and which a reused pid can make it break besides. `Ext4::discard` already has
+/// the shape of the answer for a throwaway disk: unlink the file while it is open and let the
+/// host reclaim it when the last descriptor closes, "which includes every way a process can
+/// die without running any code of its own". A session's disk cannot be unlinked that way,
+/// because a `stop` and the boot after it find it by name.
+///
+/// `FILE_FLAG_DELETE_ON_CLOSE` gives the same guarantee without taking the name away: the
+/// file stays where it is, every later open finds it, and the kernel removes it when the last
+/// handle goes. So the handle opened here is held for the session and closed by whatever ends
+/// this process — a `stop`, a panic, a `TerminateProcess`, a parent that went away. The
+/// boot's own handle has to go too, which is what the job object in [`machine`] is for.
+///
+/// Two things it does not cover, and both are the sweep's:
+///
+/// * a machine that stops rather than a process — a bugcheck, or the power. Nothing in user
+///   space closes a handle then, and nothing in user space can.
+/// * the session directory around the file, which is left empty. A directory is cheap and the
+///   next sweep takes it.
+///
+/// Nothing is enforced about the opening: `share_mode` on Windows must let every other opener
+/// in, and Rust's own is `READ | WRITE | DELETE`, which is what the boot opens the disk with
+/// and what lets it be deleted under it.
+///
+/// Best effort. A disk that cannot be held this way is a disk the sweep reclaims, which is
+/// where this started.
+#[cfg(windows)]
+fn held(disk: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    /// `FILE_FLAG_DELETE_ON_CLOSE`, spelled here rather than pulled in as a windows-sys
+    /// feature for one number.
+    const DELETE_ON_CLOSE: u32 = 0x0400_0000;
+
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(DELETE_ON_CLOSE)
+        .open(disk);
+    match held {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!(
+                "{}: {} is not held open, so a killed server leaves it for the next sweep: {e}",
+                env!("CARGO_BIN_NAME"),
+                disk.display()
+            );
+            None
+        }
+    }
+}
+
+/// Nothing to do off Windows: a session's disk is removed by the end of [`run`] and, failing
+/// that, by the next server's sweep — the same two paths Windows has. What Windows adds is a
+/// third that does not depend on either.
+#[cfg(not(windows))]
+fn held(_disk: &Path) -> Option<std::fs::File> {
+    None
 }

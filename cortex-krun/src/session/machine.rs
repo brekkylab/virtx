@@ -47,6 +47,12 @@ pub const MEMORY_ENV: &str = "CORTEX_KRUN_MEMORY_MIB";
 pub const GPU_ENV: &str = "CORTEX_KRUN_GPU";
 pub const GPU_MEMORY_ENV: &str = "CORTEX_KRUN_GPU_MEMORY_MIB";
 
+/// How much a session may write, in gibibytes, when its client did not say -- the operator's
+/// default for the same reason the machine's shape is. Not part of [`Shape`], because it is
+/// not the boot's to know: the disk is made here, once per session, and a boot is only
+/// handed the file.
+pub const DISK_ENV: &str = "CORTEX_KRUN_DISK_GIB";
+
 /// How long to wait for the guest to come up before saying it did not.
 const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -96,6 +102,17 @@ impl Shape {
             gpu_memory_mib: number::<u32>(GPU_MEMORY_ENV).filter(|mib| *mib > 0),
         }
     }
+}
+
+/// The operator's disk size from [`DISK_ENV`], in bytes, and [`Ext4::SIZE`] where there is
+/// none -- dropped rather than refused when it is zero or unreadable, the way
+/// [`Shape::from_env`]'s numbers are.
+///
+/// [`Ext4::SIZE`]: cortex_krun::session::Ext4::SIZE
+pub fn disk_from_env() -> u64 {
+    number::<u32>(DISK_ENV)
+        .filter(|gib| *gib > 0)
+        .map_or(cortex_krun::session::Ext4::SIZE, |gib| u64::from(gib) << 30)
 }
 
 /// Whether the boot beside this binary can attach a GPU, asked of that boot itself.

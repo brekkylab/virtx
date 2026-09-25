@@ -104,7 +104,9 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     // next one's sweep.
     let at = super::sessions().join(std::process::id().to_string());
     std::fs::create_dir_all(&at)?;
-    let upper = Ext4::at(at.join("build.ext4"), Ext4::SIZE)?;
+    // The operator's size and not the session's, for the reason the machine's shape is --
+    // see [`run`].
+    let upper = Ext4::at(at.join("build.ext4"), super::machine::disk_from_env())?;
     let blob = at.join("build.tar");
 
     run(&recipe.base, &upper, &script, reach(network)).await?;

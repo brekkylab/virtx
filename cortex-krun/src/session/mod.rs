@@ -189,6 +189,9 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // comes up, and all three are cheaper to refuse now than after an image has been pulled.
     let shape = shape(&init)?;
 
+    // And how much it may write, which is fixed when its disk is formatted.
+    let size = disk(&init)?;
+
     let image = init.image.clone().ok_or_else(|| {
         coded(
             Error::INVALID_PARAMS,
@@ -230,7 +233,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     let disk = sessions()
         .join(std::process::id().to_string())
         .join("session.ext4");
-    let upper = seeded(&disk, init.snapshot.as_deref())?;
+    let upper = seeded(&disk, size, init.snapshot.as_deref())?;
 
     // What a snapshot must leave out: this backend's own two shares, and every directory the
     // boot made to hang one of the client's trees on.
@@ -276,7 +279,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
 ///
 /// A blob that is not a layer is [`INVALID_PARAMS`](Error::INVALID_PARAMS): what has to
 /// change is what was sent, not this server.
-fn seeded(disk: &Path, snapshot: Option<&[u8]>) -> anyhow::Result<Ext4> {
+fn seeded(disk: &Path, size: u64, snapshot: Option<&[u8]>) -> anyhow::Result<Ext4> {
     // A file here is an earlier `init`'s that did not finish -- this runs only while the
     // session has not been told what it is, and the sweep took every other process's on the
     // way in. So it is nobody's session, and a client retrying an `init` that failed at the
@@ -284,7 +287,7 @@ fn seeded(disk: &Path, snapshot: Option<&[u8]>) -> anyhow::Result<Ext4> {
     let _ = std::fs::remove_file(disk);
 
     let Some(blob) = snapshot else {
-        return Ok(Ext4::at(disk, Ext4::SIZE)?);
+        return Ok(Ext4::at(disk, size)?);
     };
 
     /// What a gzip stream starts with, which is the whole of how one is told from a tar.
@@ -298,7 +301,7 @@ fn seeded(disk: &Path, snapshot: Option<&[u8]>) -> anyhow::Result<Ext4> {
     )
     .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::Error::new(e)))?;
 
-    Ext4::seeded(disk, Ext4::SIZE, &mut std::io::Cursor::new(tar))
+    Ext4::seeded(disk, size, &mut std::io::Cursor::new(tar))
         .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::Error::new(e)))
 }
 
@@ -452,6 +455,23 @@ fn shape(init: &InitCall) -> anyhow::Result<Shape> {
     })
 }
 
+/// How large this session's disk is, in bytes: the client's `disk_gib` if it said, and this
+/// server's own default if it did not -- see [`machine::DISK_ENV`].
+///
+/// A ceiling on a sparse file rather than space taken from the host, so there is nothing to
+/// hold it against here. `0` is [`INVALID_PARAMS`](Error::INVALID_PARAMS), for the reason a
+/// vCPU count of zero is.
+fn disk(init: &InitCall) -> anyhow::Result<u64> {
+    match init.disk_gib {
+        Some(0) => Err(coded(
+            Error::INVALID_PARAMS,
+            anyhow::anyhow!("disk_gib: 0 is a disk nothing can be written on"),
+        )),
+        Some(gib) => Ok(u64::from(gib) << 30),
+        None => Ok(machine::disk_from_env()),
+    }
+}
+
 /// Tell the guest what the session is, in the one spelling both ends use.
 ///
 /// The client's `init` named its trees by host URL; the guest's copy names them by the guest
@@ -482,6 +502,7 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
         memory_mib: None,
         gpu: None,
         gpu_memory_mib: None,
+        disk_gib: None,
     };
     match machine.call(Call::Init(replayed)).await? {
         Response::Init(answer) => Ok(answer.cwd),

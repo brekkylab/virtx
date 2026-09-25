@@ -215,7 +215,9 @@ the session with `UNSUPPORTED_MACHINE` when it cannot. A client on the other end
 of a pipe cannot `cfg` around anything, and a session that silently ran on the CPU
 costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
 with `CORTEX_KRUN_GPU`, `CORTEX_KRUN_VCPUS` and `CORTEX_KRUN_MEMORY_MIB` as this
-server's own defaults for a client that says nothing.
+server's own defaults for a client that says nothing. So does `disk_gib`, how much
+a session may write on top of its image (a sparse ceiling, 2 GiB by default), with
+`CORTEX_KRUN_DISK_GIB` as the default -- which is also the size a build's disk gets.
 
 ### Which Vulkan version the guest device reports
 

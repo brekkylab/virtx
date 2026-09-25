@@ -365,24 +365,6 @@ fn sign(exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a binary needs in its environment to boot a VM on this machine.
-///
-/// The guest kernel is not among them any more: it sits beside the binary, and every
-/// loader finds it there -- see `cortex-krun-lib/build.rs`. What is left is the GPU
-/// libraries on Windows, which are linked rather than opened by name and so are the
-/// loader's to find at start-up, in a directory nothing else puts on the path.
-fn runtime_env(command: &mut Command) -> anyhow::Result<()> {
-    if cfg!(windows) {
-        let epoxy = root_path().join("build/epoxy/bin");
-        if epoxy.is_dir() {
-            let mut dirs = vec![epoxy];
-            dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-            command.env("PATH", env::join_paths(dirs)?);
-        }
-    }
-    Ok(())
-}
-
 fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     let split = args.iter().position(|a| a == "--");
     let (cargo_args, program_args) = match split {
@@ -447,7 +429,6 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
                 .current_dir(manifest_dir)
                 .env("CARGO_MANIFEST_DIR", manifest_dir);
         }
-        runtime_env(&mut command)?;
         let status = command
             .status()
             .with_context(|| format!("running {}", exe.display()))?;

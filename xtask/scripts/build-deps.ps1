@@ -103,17 +103,44 @@ Libs: -L$sdk/Lib -lvulkan-1
 
 Write-Output 'Setting up libepoxy'
 
+# Static, like virglrenderer, so that nothing has to find a DLL at start-up.
+#
+# `EPOXY_PUBLIC` is defined on the command line and not left to the headers, because
+# `include/epoxy/common.h` defaults it to `__declspec(dllimport)` under any compiler that
+# defines `_MSC_VER` -- clang-cl does -- and libepoxy's meson sets it only for a shared
+# build. It has to be defined for libepoxy's own compile and not just for its consumers':
+# without it `dispatch_common.c` asks for `__imp_epoxy_wglGetProcAddress`, a symbol its own
+# archive is what defines.
 if (Test-Path (Join-Path $epoxyBuild 'build.ninja')) { $reconfigure = @('--reconfigure') } else { $reconfigure = @() }
 Invoke-Checked 'libepoxy configure' {
     & $meson setup @reconfigure $epoxyBuild $epoxySrc --prefix $epoxyPrefix --buildtype release `
-        --native-file $native -Dtests=false -Ddocs=false | Out-Null
+        --native-file $native -Dtests=false -Ddocs=false -Ddefault_library=static `
+        -Dc_args=-DEPOXY_PUBLIC=extern | Out-Null
 }
 Invoke-Checked 'libepoxy build' { & $meson compile -C $epoxyBuild | Out-Null }
 Invoke-Checked 'libepoxy install' { & $meson install -C $epoxyBuild | Out-Null }
 
+# epoxy's `.pc`, written rather than read, for the two things an archive needs and the
+# installed one does not say: the same `EPOXY_PUBLIC`, for everything that includes its
+# headers, and `-lopengl32 -lgdi32` in `Libs` rather than `Libs.private` -- an archive does
+# not carry its own dependencies, and the `pkg_config` crate reads the private ones only
+# for a probe asked to be static, which `rutabaga_gfx`'s build script does not do. It goes
+# in $pcdir, which is the whole of the path below, so this is the one both virglrenderer's
+# build and that probe resolve.
+$epoxy = $epoxyPrefix -replace '\\','/'
+$epoxyVersion = (Select-String -Path (Join-Path $epoxyPrefix 'lib\pkgconfig\epoxy.pc') `
+    -Pattern '^Version:\s*(.+)$').Matches[0].Groups[1].Value.Trim()
+@"
+Name: epoxy
+Description: GL dispatch library
+Version: $epoxyVersion
+Libs: -L$epoxy/lib -lepoxy -lopengl32 -lgdi32
+Cflags: -I$epoxy/include -DEPOXY_PUBLIC=extern
+"@ | Set-Content -Encoding ascii (Join-Path $pcdir 'epoxy.pc')
+
 Write-Output 'Setting up virglrenderer'
 
-$env:PKG_CONFIG_PATH = "$pcdir;$(Join-Path $epoxyPrefix 'lib\pkgconfig')"
+$env:PKG_CONFIG_PATH = $pcdir
 
 if (Test-Path (Join-Path $virglrendererBuild 'build.ninja')) { $reconfigure = @('--reconfigure') } else { $reconfigure = @() }
 Write-Output "Configuring virglrenderer ($(& git -C $virglrendererSrc rev-parse --short HEAD))"
@@ -129,21 +156,10 @@ Invoke-Checked 'virglrenderer build' { & $meson compile -C $virglrendererBuild |
 Invoke-Checked 'virglrenderer install' { & $meson install -C $virglrendererBuild | Out-Null }
 
 $virglrendererPcdir = Join-Path $virglrendererPrefix 'lib\pkgconfig'
-Copy-Item (Join-Path $pcdir 'vulkan.pc') (Join-Path $virglrendererPcdir 'vulkan.pc') -Force
-
-$epoxy = $epoxyPrefix -replace '\\','/'
-$epoxyVersion = (Select-String -Path (Join-Path $epoxyPrefix 'lib\pkgconfig\epoxy.pc') `
-    -Pattern '^Version:\s*(.+)$').Matches[0].Groups[1].Value.Trim()
-@"
-Name: epoxy
-Description: GL dispatch library
-Version: $epoxyVersion
-Libs: -L$epoxy/lib -lepoxy
-Libs.private: -lopengl32 -lgdi32
-Cflags: -I$epoxy/include
-"@ | Set-Content -Encoding ascii (Join-Path $virglrendererPcdir 'epoxy.pc')
+foreach ($pc in 'vulkan.pc', 'epoxy.pc') {
+    Copy-Item (Join-Path $pcdir $pc) (Join-Path $virglrendererPcdir $pc) -Force
+}
 
 $env:PKG_CONFIG_PATH = $virglrendererPcdir
 $version = & pkg-config --modversion virglrenderer
 Write-Output "virglrenderer $version installed to $virglrendererPrefix"
-Write-Output "epoxy-0.dll ($(Join-Path $epoxyPrefix 'bin')) must be beside the binary or on PATH"

@@ -10,8 +10,8 @@ use anyhow::{Context, bail, ensure};
 
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
-       cargo xtask build    <host|guest|abin>... [--gpu] [--debug]
-       cargo xtask download <guest|abin>... [--debug]
+       cargo xtask build    <host|guest|abin|kernel>... [--gpu] [--debug]
+       cargo xtask download <guest|abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask upload   [--prefix <dir>]
        cargo xtask run      <cargo run args>... [-- <program args>...]
@@ -28,6 +28,7 @@ usage: cargo xtask init     [--force]
   host      the console server and the VM process, for this machine
   guest     the program that runs inside the VM
   abin      the executables every VM gets at /abin
+  kernel    the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
@@ -44,6 +45,7 @@ enum Component {
     Host,
     Guest,
     Abin,
+    Kernel,
 }
 
 struct Options {
@@ -151,6 +153,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
             Some("host") => Component::Host,
             Some("guest") => Component::Guest,
             Some("abin") => Component::Abin,
+            Some("kernel") => Component::Kernel,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
@@ -303,6 +306,9 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Abin) {
         build_abin(options)?;
     }
+    if options.has(Component::Kernel) {
+        build_kernel()?;
+    }
     eprintln!("xtask: built into {}", options.out().display());
     Ok(())
 }
@@ -379,10 +385,10 @@ fn runtime_env(command: &mut Command) -> anyhow::Result<()> {
         }
     } else if cfg!(windows) {
         let root = root_path();
-        let krunfw = root.join("data/krunfw");
+        let krunfw = root.join("build/krunfw");
         ensure!(
             krunfw.join("libkrunfw.dll").is_file(),
-            "no libkrunfw.dll in {}; run scripts/build-libkrunfw-windows.sh first",
+            "no libkrunfw.dll in {}; run xtask/scripts/build-libkrunfw.sh first",
             krunfw.display()
         );
         let mut dirs = vec![krunfw];
@@ -496,7 +502,7 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
     let arch = target.split('-').next().unwrap_or_default();
-    let sysroot = root.join(format!("data/musl-sysroot/{arch}/usr/include/stdio.h"));
+    let sysroot = root.join(format!("build/musl-sysroot/{arch}/usr/include/stdio.h"));
     if !sysroot.exists() {
         let status = Command::new("sh")
             .arg(root.join("xtask/scripts/fetch-musl-sysroot.sh"))
@@ -538,12 +544,62 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+
+/// Where the guest kernel is built to, and what it is called there.
+///
+/// One directory under `build/`, like everything else this repository compiles, and the
+/// name is the platform's: `libkrunfw.dll`, `libkrunfw.5.dylib`, `libkrunfw.so.5.6.1`.
+/// The Linux name carries the full version, so this answers with whatever is there
+/// rather than with a name it worked out.
+fn kernel_library() -> anyhow::Result<PathBuf> {
+    let dir = root_path().join("build/krunfw");
+    let matches = |name: &str| {
+        if cfg!(windows) {
+            name == "libkrunfw.dll"
+        } else if cfg!(target_os = "macos") {
+            name.starts_with("libkrunfw.") && name.ends_with(".dylib")
+        } else {
+            name.starts_with("libkrunfw.so")
+        }
+    };
+    let found = fs::read_dir(&dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(matches));
+    found.with_context(|| {
+        format!(
+            "no libkrunfw in {} -- run `cargo xtask build kernel` first",
+            dir.display()
+        )
+    })
+}
+
+/// Build the guest kernel.
+///
+/// The whole of it is in [`build-libkrunfw.sh`](../scripts/build-libkrunfw.sh), including
+/// why this repository builds one at all rather than installing a release: the config
+/// libkrunfw ships for x86_64 leaves the guest with no write-combining, which nothing
+/// reports and which costs a factor of 36 on the path a GPU's weights take.
+///
+/// `sh` on every host, Windows included: the script is one piece of logic for three
+/// platforms, and Git Bash is already required for the submodules.
+fn build_kernel() -> anyhow::Result<()> {
+    let mut sh = Command::new("sh");
+    sh.arg(root_path().join("xtask/scripts/build-libkrunfw.sh"));
+    let status = sh.status().context("running build-libkrunfw.sh")?;
+    ensure!(status.success(), "building the guest kernel failed");
+    Ok(())
+}
 fn download(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Guest) {
         todo!("download guest");
     }
     if options.has(Component::Abin) {
         todo!("download abin");
+    }
+    if options.has(Component::Kernel) {
+        todo!("download kernel");
     }
     Ok(())
 }
@@ -582,7 +638,14 @@ fn install(options: &Options) -> anyhow::Result<()> {
         built.display()
     );
 
+    // The guest kernel goes with them. libkrun resolves it by leaf name, and every
+    // platform looks beside the running binary before it looks anywhere else -- so a
+    // binary installed next to it needs no PATH, no DYLD_FALLBACK_LIBRARY_PATH and no
+    // wrapper to be run by hand.
+    let kernel = kernel_library()?;
+
     fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
+    place(&kernel, &bin.join(kernel.file_name().expect("the kernel is a file")))?;
     for exe in &host_exes {
         place(&built.join(exe), &bin.join(exe))?;
     }

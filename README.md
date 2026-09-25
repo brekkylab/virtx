@@ -17,14 +17,12 @@ too, over the Windows Hypervisor Platform, with its own setup — see
 [Windows (WHP)](#windows-whp). The rest of this section is macOS.
 
 ```sh
-brew install lld meson ninja
-brew tap libkrun/krun
-brew install libkrunfw
+brew install lld meson ninja krunvm
 ```
 
 | Dependency | Why |
 |---|---|
-| `libkrunfw` | The guest kernel, packaged as a shared library. libkrun `dlopen`s `libkrunfw.5.dylib` at runtime; it is never linked. |
+| `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host --gpu`. |
@@ -425,7 +423,7 @@ cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
 The guest kernel there is `libkrunfw.dll`'s, which is 6.12.109 on x86_64 at the
-tag `scripts/build-libkrunfw-windows.sh` pins.
+tag `xtask/scripts/build-libkrunfw.sh` pins.
 
 Everything libkrun needs is upstream — the Windows port merged as
 [libkrun#858](https://github.com/libkrun/libkrun/pull/858) on 2026-09-21 and the
@@ -529,32 +527,87 @@ cannot be re-enabled without reinstalling Windows.
 
 ```powershell
 git submodule update --init
-sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
+sh xtask/scripts/build-libkrunfw.sh     # guest kernel -> build/krunfw/
 cargo xtask init                        # patches the submodules
 cargo xtask build host --gpu            # builds libepoxy and virglrenderer first
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
-`cargo xtask run` puts `data/krunfw/` on `PATH` -- and `build/epoxy/bin/`, when a
+`cargo xtask run` puts `build/krunfw/` on `PATH` -- and `build/epoxy/bin/`, when a
 `gpu` build made one -- because libkrun resolves the guest kernel with
 `LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly, or
 through a plain `cargo run`, fails with `Error: FileNotFound`.
 
-### `libkrunfw.dll` has to be cross-compiled from Linux
+### The guest kernel is built, not installed
 
-libkrunfw gained a Windows target in
-[libkrunfw#122](https://github.com/containers/libkrunfw/pull/122), but its
-releases ship no DLL and `make OS=Windows` cross-compiles from a *Linux* host
-with MinGW-w64: it configures and builds a Linux kernel, then wraps `vmlinux`
-in a DLL. It uses its own kernel config — Hyper-V enlightenments on, and the
-kernel bundle aligned to 4 KiB rather than 64 KiB to match WHP's page
-granularity.
+[`xtask/scripts/build-libkrunfw.sh`](xtask/scripts/build-libkrunfw.sh) builds libkrunfw
+into `build/krunfw/` on every host, and the reason is not reproducibility.
 
-None of that runs on Windows, so
-[`scripts/build-libkrunfw-windows.sh`](scripts/build-libkrunfw-windows.sh) does
-it in a throwaway `ubuntu:24.04` container and copies the DLL back into
-`data/krunfw/`. It pins libkrunfw to a tag for the same reason the submodules
-are pinned. Expect 10–20 minutes on the first run; it is a full kernel build.
+**The config libkrunfw ships for x86_64 leaves the guest with no write-combining.**
+`CONFIG_MTRR` is off there, and `CONFIG_X86_PAT` is `def_bool y` with `depends on MTRR`,
+so PAT goes with it: the guest comes up with PAT slots `WB WT UC- UC` and no WC among
+them, and every `ioremap_wc` a driver asks for is handed back UC-. Nothing reports an
+error. It is only slower — and on the path where a CPU writes into a resizable BAR, it
+is slower by a factor of 36. Measured here, loading one 900 MiB model onto the GPU:
+
+| | throughput | load |
+|---|---|---|
+| shipped config | 5 MB/s | 178.0s |
+| `CONFIG_MTRR=y` | 180 MB/s | 5.0s |
+
+It went out in libkrunfw's [`d28d263`][d28d263], which turns off "processor quirks and
+features we don't need in a virtual machine" and saves 75 KiB of kernel image. That is
+true of MTRR itself, and it takes PAT along by accident: the commit mentions neither PAT
+nor write-combining, and libkrunfw's own SEV and TDX configs still carry
+`CONFIG_MTRR=y`. So it is a regression to carry rather than a trade to respect, and
+carrying it means building the kernel rather than taking a release or a Homebrew bottle.
+
+aarch64 has neither register set — memory types there come from the page tables' MAIR,
+and write-combining needs none of this — so the patch is x86_64's alone and an arm64
+build is only about controlling what is in the guest.
+
+[d28d263]: https://github.com/containers/libkrunfw/commit/d28d263
+
+**Where the kernel is built** depends on what the host can offer a Linux toolchain.
+Linux and Windows both build in a throwaway `ubuntu:24.04` container — Windows because
+it has no such toolchain at all, Linux so that it gets the same one rather than whatever
+the distribution has. macOS cannot: the output is a `.dylib` that has to be linked on
+macOS while the kernel inside it has to be built on Linux, which libkrunfw resolves with
+`krunvm`, and which the script defers to. `brew install krunvm` if it is missing.
+
+Windows has a second reason to build rather than install, which is that there is nothing
+to install: libkrunfw gained a Windows target in
+[libkrunfw#122](https://github.com/containers/libkrunfw/pull/122) but its releases ship
+no DLL, and `make OS=Windows` cross-compiles from a *Linux* host with MinGW-w64,
+configuring and building a Linux kernel and then wrapping `vmlinux` in a DLL. It uses
+its own kernel config there — Hyper-V enlightenments on, and the kernel bundle aligned
+to 4 KiB rather than 64 KiB to match WHP's page granularity.
+
+Expect 10–20 minutes on the first run; it is a full kernel build. `LIBKRUNFW_REBUILD=1`
+builds again over what is already there.
+
+### libkrun — `3rdparty/_patches/libkrun-85bed71-macos-krunfw-path.patch`
+
+One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
+beside the binary that opens it.**
+
+`cortex-krun-lib/build.rs` puts it there, and libkrun opens it by name at run time rather
+than linking it. On Windows a bare name is enough, because the loader searches the
+executable's own directory before anywhere else. On Linux it is enough too, because
+`dlopen` consults the *calling object's* `DT_RUNPATH` and the link sets that to `$ORIGIN`
+— see `.cargo/config.toml`.
+
+dyld does neither. A `dlopen` argument with no slash in it is looked for in
+`DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH`
+(`$HOME/lib:/usr/local/lib:/usr/lib`), and nowhere near the caller. `@rpath` and
+`@loader_path` do not help: they are prefixes dyld expands inside a *path*, so a name
+that is not one is never resolved against them, whatever `LC_RPATH` the binary carries.
+So `KRUNFW_NAME` is `@loader_path/libkrunfw.5.dylib` there — a path, which dyld then
+resolves against the directory of whatever did the `dlopen`.
+
+What this replaces is an environment variable that whoever runs the binary had to set,
+which a wrapper can do for `cargo xtask run` and nothing can do for an installed binary
+someone runs by hand.
 
 ### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-virtiofs.patch`
 

@@ -724,16 +724,14 @@ fn sweep() {
 #[cfg(unix)]
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 performs only that check; it cannot affect this or any other process.
-    unsafe { libc::kill(pid, 0) == 0 }
+    (unsafe { libc::kill(pid, 0) == 0 })
         || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(windows)]
 fn alive(pid: i32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     // SAFETY: a call that only asks for a handle. The handle is closed below and nothing is
     // done with the process itself.

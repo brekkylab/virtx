@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch] $Rebuild)
 
 $ErrorActionPreference = 'Stop'
@@ -7,33 +7,39 @@ $root = Split-Path -Parent $PSScriptRoot
 
 Write-Output 'Applying patches'
 
+function Invoke-Native([scriptblock] $block) {
+    $ErrorActionPreference = 'Continue'
+    & $block 2>&1 | Out-Null
+    return $LASTEXITCODE
+}
+
 function Invoke-PatchFile([string] $submodule, [string] $patchFile) {
     $dir = Join-Path $root "3rdparty\$submodule"
 
     if (-not (Test-Path (Join-Path $dir '.git'))) {
-        Write-Error "$submodule is not checked out; run: git submodule update --init"
+        throw "$submodule is not checked out; run: git submodule update --init"
     }
 
-    & git -C $dir apply --reverse --check $patchFile 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    if ((Invoke-Native { & git -C $dir apply --reverse --check $patchFile }) -eq 0) {
         Write-Output "  ${submodule}: already patched"
         return
     }
 
-    & git -C $dir apply --check $patchFile 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error ("  ${submodule}: patch does not apply -- the submodule has moved or`n" +
+    if ((Invoke-Native { & git -C $dir apply --check $patchFile }) -ne 0) {
+        throw ("  ${submodule}: patch does not apply -- the submodule has moved or`n" +
             "  has other local changes. Reset it or refresh $patchFile.")
     }
 
-    & git -C $dir apply $patchFile
-    if ($LASTEXITCODE -ne 0) { Write-Error "  ${submodule}: git apply failed" }
+    if ((Invoke-Native { & git -C $dir apply $patchFile }) -ne 0) {
+        throw "  ${submodule}: git apply failed"
+    }
     Write-Output "  ${submodule}: applied $(Split-Path -Leaf $patchFile)"
 }
 
 function Invoke-Checked([string] $what, [scriptblock] $block) {
+    $ErrorActionPreference = 'Continue'
     & $block
-    if ($LASTEXITCODE -ne 0) { Write-Error "$what failed ($LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" }
 }
 
 $patches = Join-Path $root '3rdparty\_patches'
@@ -87,10 +93,12 @@ if ($Rebuild) {
 New-Item -ItemType Directory -Force -Path $build, $pcdir | Out-Null
 
 if (-not (Test-Path $meson)) {
-    $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
-    $pythonVersion = if ($python) { & $python --version 2>$null }
-    if (-not $pythonVersion) {
-        Write-Error 'no usable python.exe on PATH (the Microsoft Store stub does not count)'
+    $python = Get-Command python.exe, python3.exe -All -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Source |
+        Where-Object { (Invoke-Native { & $_ --version }) -eq 0 } |
+        Select-Object -First 1
+    if (-not $python) {
+        throw 'no usable python.exe on PATH (the Microsoft Store stub does not count)'
     }
     Write-Output 'Creating the meson venv'
     Invoke-Checked 'venv' { & $python -m venv $venv }
@@ -98,8 +106,7 @@ if (-not (Test-Path $meson)) {
         & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet --upgrade pip meson pyyaml mako
     }
 }
-& (Join-Path $venv 'Scripts\python.exe') -c 'import yaml, mako' 2>$null
-if ($LASTEXITCODE -ne 0) {
+if ((Invoke-Native { & (Join-Path $venv 'Scripts\python.exe') -c 'import yaml, mako' }) -ne 0) {
     Invoke-Checked 'pip install' { & (Join-Path $venv 'Scripts\python.exe') -m pip install --quiet pyyaml mako }
 }
 $scripts = Join-Path $venv 'Scripts'
@@ -154,7 +161,18 @@ Invoke-Checked 'virglrenderer install' { & $meson install -C $virglrendererBuild
 
 $virglrendererPcdir = Join-Path $virglrendererPrefix 'lib\pkgconfig'
 Copy-Item (Join-Path $pcdir 'vulkan.pc') (Join-Path $virglrendererPcdir 'vulkan.pc') -Force
-Copy-Item (Join-Path $epoxyPrefix 'lib\pkgconfig\epoxy.pc') (Join-Path $virglrendererPcdir 'epoxy.pc') -Force
+
+$epoxy = $epoxyPrefix -replace '\\','/'
+$epoxyVersion = (Select-String -Path (Join-Path $epoxyPrefix 'lib\pkgconfig\epoxy.pc') `
+    -Pattern '^Version:\s*(.+)$').Matches[0].Groups[1].Value.Trim()
+@"
+Name: epoxy
+Description: GL dispatch library
+Version: $epoxyVersion
+Libs: -L$epoxy/lib -lepoxy
+Libs.private: -lopengl32 -lgdi32
+Cflags: -I$epoxy/include
+"@ | Set-Content -Encoding ascii (Join-Path $virglrendererPcdir 'epoxy.pc')
 
 $env:PKG_CONFIG_PATH = $virglrendererPcdir
 $version = & pkg-config --modversion virglrenderer

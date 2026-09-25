@@ -10,10 +10,13 @@
 //! is the session rather than a usage message: the common case is the one a caller does not
 //! have to spell.
 
+mod image;
 mod session;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
 
 /// A failure of ours, not a command's -- the shell's code for "found it, could not run it".
 const NOT_EXECUTABLE: u8 = 126;
@@ -57,22 +60,35 @@ pub(crate) fn home() -> PathBuf {
     cortex_krun::home().expect("neither CORTEX_KRUN_HOME nor a cache directory is to be had")
 }
 
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Answer a console session on stdin and stdout (the default).
+    Run,
+    /// Manage the images sessions boot from.
+    #[command(subcommand)]
+    Image(image::Command),
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(std::env::args().skip(1)).await {
+    let (result, failure) = match Cli::parse().command {
+        None | Some(Command::Run) => (session::run().await, NOT_EXECUTABLE),
+        Some(Command::Image(command)) => (image::run(command).await, 1),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // To stderr and never stdout: from the moment the server starts, stdout carries
             // frames and nothing else.
             eprintln!("{}: {e:#}", env!("CARGO_BIN_NAME"));
-            ExitCode::from(NOT_EXECUTABLE)
+            ExitCode::from(failure)
         }
-    }
-}
-
-async fn run(argv: impl IntoIterator<Item = impl AsRef<str>>) -> anyhow::Result<()> {
-    match argv.into_iter().next().as_ref().map(AsRef::as_ref) {
-        None | Some("run") => session::run().await,
-        Some(other) => anyhow::bail!("{other:?} is not `run`, which is also what no argument is"),
     }
 }

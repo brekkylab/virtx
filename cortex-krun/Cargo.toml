@@ -25,6 +25,7 @@ gpu = ["cortex-krun-lib/gpu"]
 
 [dependencies]
 anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
 # The protocol this server answers on stdin and stdout.
 cortex = { workspace = true }
 # The boot's command line -- its library half, which links no hypervisor.

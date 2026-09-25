@@ -106,8 +106,8 @@ pub fn to_blob(disk: &Path, from: &str, skip: &[&str], out: impl Write) -> Resul
     let options = Options {
         checksums: Checksums::Enabled,
     };
-    let fs = SuperBlock::new_with_options(file, &options)
-        .map_err(|e| failed(disk, "reading", e))?;
+    let fs =
+        SuperBlock::new_with_options(file, &options).map_err(|e| failed(disk, "reading", e))?;
 
     let at = fs
         .resolve_path(from)
@@ -118,7 +118,10 @@ pub fn to_blob(disk: &Path, from: &str, skip: &[&str], out: impl Write) -> Resul
 
     // As they appear inside the layer, which is where they are compared. A caller names
     // them the way the guest does, absolutely, because that is the spelling it has.
-    let skip: Vec<&str> = skip.iter().map(|path| path.trim_start_matches('/')).collect();
+    let skip: Vec<&str> = skip
+        .iter()
+        .map(|path| path.trim_start_matches('/'))
+        .collect();
 
     let mut archive = tar::Builder::new(Hashing::new(out));
     // Every regular file with more than one name, against the first name it was given.
@@ -469,7 +472,15 @@ fn seed<D: Read + Seek>(disk: &Path, to: &str, size: u64, tar: &mut D) -> Result
     // a copy; and the nodes the formatter would not take, for `special` to finish.
     let mut linked: HashMap<InodeId, String> = HashMap::new();
     let mut deferred: Vec<Special> = Vec::new();
-    plant(&mut fs, disk, &tree.root, to, tar, &mut linked, &mut deferred)?;
+    plant(
+        &mut fs,
+        disk,
+        &tree.root,
+        to,
+        tar,
+        &mut linked,
+        &mut deferred,
+    )?;
 
     fs.close().map_err(|e| failed(disk, "formatting", e))?;
 
@@ -665,7 +676,7 @@ mod tests {
     use std::path::PathBuf;
 
     use arcbox_ext4::constants::file_mode;
-    use arcbox_ext4::{Formatter, FormatOptions};
+    use arcbox_ext4::{FormatOptions, Formatter};
 
     use super::*;
     use crate::image::tree::{Node, Tree};
@@ -674,8 +685,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let path =
-                std::env::temp_dir().join(format!("cortex-krun-upper-{name}-{}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("cortex-krun-upper-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)
@@ -702,10 +713,22 @@ mod tests {
         let mut fs = Formatter::with_options(&disk, FormatOptions::new(16 << 20)).unwrap();
 
         let dir = |fs: &mut Formatter, path: &str, xattrs: Option<&HashMap<String, Vec<u8>>>| {
-            fs.create(path, file_mode::S_IFDIR | 0o755, None, None, None, None, None, xattrs)
-                .unwrap();
+            fs.create(
+                path,
+                file_mode::S_IFDIR | 0o755,
+                None,
+                None,
+                None,
+                None,
+                None,
+                xattrs,
+            )
+            .unwrap();
         };
-        let file = |fs: &mut Formatter, path: &str, body: &str, xattrs: Option<&HashMap<String, Vec<u8>>>| {
+        let file = |fs: &mut Formatter,
+                    path: &str,
+                    body: &str,
+                    xattrs: Option<&HashMap<String, Vec<u8>>>| {
             let mut data = Cursor::new(body.as_bytes().to_vec());
             fs.create(
                 path,
@@ -832,22 +855,39 @@ mod tests {
         // The whiteout: a character device on the upper, `.wh.removed` in the archive,
         // and a character device again once the archive is read.
         match tree.get(b"etc/removed") {
-            Some(Node::Device { block: false, major: 0, minor: 0, .. }) => {}
+            Some(Node::Device {
+                block: false,
+                major: 0,
+                minor: 0,
+                ..
+            }) => {}
             other => panic!("the deletion came back as {other:?}"),
         }
 
         // The opaque marker: an xattr on the upper, `.wh..wh..opq` in the archive.
-        let cache = tree.dir(b"var/cache").expect("var/cache is not a directory");
+        let cache = tree
+            .dir(b"var/cache")
+            .expect("var/cache is not a directory");
         assert!(
-            cache.meta.xattrs.iter().any(|x| x.name == b"trusted.overlay.opaque"),
+            cache
+                .meta
+                .xattrs
+                .iter()
+                .any(|x| x.name == b"trusted.overlay.opaque"),
             "the opaque directory did not say so"
         );
 
         // `work/` is beside the upperdir, not in it.
-        assert!(tree.get(b"work").is_none(), "overlayfs's workdir is in the layer");
+        assert!(
+            tree.get(b"work").is_none(),
+            "overlayfs's workdir is in the layer"
+        );
 
         // What the boot made rather than what the session wrote.
-        assert!(tree.get(b".cortex").is_none(), "a skipped path is in the layer");
+        assert!(
+            tree.get(b".cortex").is_none(),
+            "a skipped path is in the layer"
+        );
     }
 
     /// The attribute an image is meant to carry travels; the one overlayfs keeps about
@@ -859,14 +899,21 @@ mod tests {
         let (tree, _) = exported(&disk);
 
         let ping = tree.get(b"bin/ping").expect("bin/ping is not in the layer");
-        let names: Vec<&[u8]> = ping.meta().xattrs.iter().map(|x| x.name.as_slice()).collect();
+        let names: Vec<&[u8]> = ping
+            .meta()
+            .xattrs
+            .iter()
+            .map(|x| x.name.as_slice())
+            .collect();
 
         assert!(
             names.contains(&&b"security.capability"[..]),
             "a file capability was dropped: {names:?}"
         );
         assert!(
-            !names.iter().any(|name| name.starts_with(b"trusted.overlay.")),
+            !names
+                .iter()
+                .any(|name| name.starts_with(b"trusted.overlay.")),
             "overlayfs's own bookkeeping reached the image: {names:?}"
         );
     }
@@ -915,7 +962,10 @@ mod tests {
 
         let mut back = Vec::new();
         let again = to_blob(&seeded, "/upper", &[], &mut back).unwrap();
-        assert_eq!(again, digest, "what came back is not the layer that went on");
+        assert_eq!(
+            again, digest,
+            "what came back is not the layer that went on"
+        );
         assert_eq!(back, sent);
     }
 
@@ -944,7 +994,9 @@ mod tests {
 
         // A second name for the same inode, which has to stay one file and not two.
         let mut header = entry(tar::EntryType::Link, 0);
-        archive.append_link(&mut header, "bin/sh", "bin/busybox").unwrap();
+        archive
+            .append_link(&mut header, "bin/sh", "bin/busybox")
+            .unwrap();
 
         let mut header = entry(tar::EntryType::Fifo, 0);
         archive
@@ -974,7 +1026,12 @@ mod tests {
         let tree = crate::image::ingest(&mut Cursor::new(&back)).unwrap();
 
         match tree.get(b"dev/null") {
-            Some(Node::Device { block: false, major: 1, minor: 3, .. }) => {}
+            Some(Node::Device {
+                block: false,
+                major: 1,
+                minor: 3,
+                ..
+            }) => {}
             other => panic!("dev/null came back as {other:?}"),
         }
         match tree.get(b"run/pipe") {
@@ -982,13 +1039,21 @@ mod tests {
             other => panic!("run/pipe came back as {other:?}"),
         }
         match tree.get(b"etc/gone") {
-            Some(Node::Device { block: false, major: 0, minor: 0, .. }) => {}
+            Some(Node::Device {
+                block: false,
+                major: 0,
+                minor: 0,
+                ..
+            }) => {}
             other => panic!("the deletion came back as {other:?}"),
         }
 
         let counts = tree.link_counts();
         let linked = counts.values().filter(|links| **links == 2).count();
-        assert_eq!(linked, 1, "the hard link came back as two files: {counts:?}");
+        assert_eq!(
+            linked, 1,
+            "the hard link came back as two files: {counts:?}"
+        );
     }
 
     /// A disk that is already somebody's session is not a disk to write a layer onto.

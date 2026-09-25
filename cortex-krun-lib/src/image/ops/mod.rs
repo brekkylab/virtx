@@ -152,7 +152,12 @@ pub(crate) mod tests {
         }
 
         /// File an image over `files` under `reference`, as a pull would have left it.
-        pub(crate) fn pulled(&self, cache: &Cache, reference: &str, files: &[(&[u8], &[u8])]) -> Image {
+        pub(crate) fn pulled(
+            &self,
+            cache: &Cache,
+            reference: &str,
+            files: &[(&[u8], &[u8])],
+        ) -> Image {
             let image = Image {
                 manifest: Digest::of(reference.as_bytes()),
                 layers: vec![self.layer(cache, files)],

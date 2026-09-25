@@ -141,8 +141,14 @@ mod tests {
 
         assert!(list(Some(cache.clone())).unwrap().is_empty());
         assert!(!layer.exists(), "the layer is still here");
-        assert!(!cache.fsmeta_path(&stack).exists(), "the metadata is still here");
-        assert!(!cache.disk_path(&stack).exists(), "the descriptor is still here");
+        assert!(
+            !cache.fsmeta_path(&stack).exists(),
+            "the metadata is still here"
+        );
+        assert!(
+            !cache.disk_path(&stack).exists(),
+            "the descriptor is still here"
+        );
     }
 
     /// The case the reckoning is for: a base under something else is not deleted with it.
@@ -169,7 +175,10 @@ mod tests {
         let only = cache.layer_path(&over.layers[1].digest);
 
         let gone = remove("test/over:1", Some(cache.clone())).unwrap();
-        assert!(shared.is_file(), "the base's layer went with the image over it");
+        assert!(
+            shared.is_file(),
+            "the base's layer went with the image over it"
+        );
         assert!(!only.exists(), "the image's own layer is still here");
         assert!(
             gone.files.iter().all(|path| path != &shared),

@@ -47,7 +47,11 @@ fn main() {
     let name = kernel.file_name().expect("a file has a name");
     // Three, because cargo puts a binary, an example and a test in three different
     // directories, and "beside the running binary" is the only thing the loader looks at.
-    for to in [profile.clone(), profile.join("examples"), profile.join("deps")] {
+    for to in [
+        profile.clone(),
+        profile.join("examples"),
+        profile.join("deps"),
+    ] {
         if let Err(e) =
             std::fs::create_dir_all(&to).and_then(|()| std::fs::copy(&kernel, to.join(name)))
         {
@@ -78,7 +82,11 @@ fn library(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(matches))
+        .find(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(matches)
+        })
 }
 
 fn manifest_dir() -> PathBuf {

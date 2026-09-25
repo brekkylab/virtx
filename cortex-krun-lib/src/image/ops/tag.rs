@@ -109,7 +109,11 @@ mod tests {
 
         let listed = list(Some(cache.clone())).unwrap();
         assert_eq!(listed.len(), 2, "{listed:?}");
-        assert!(listed.iter().all(|entry| entry.image.manifest == pulled.manifest));
+        assert!(
+            listed
+                .iter()
+                .all(|entry| entry.image.manifest == pulled.manifest)
+        );
 
         // And the new name is a name a boot can be given.
         provision("test/current:1", Some(cache.clone())).unwrap();
@@ -131,7 +135,9 @@ mod tests {
 
         let listed = list(Some(cache.clone())).unwrap();
         assert!(
-            listed.iter().any(|entry| entry.reference.contains("pinned")),
+            listed
+                .iter()
+                .any(|entry| entry.reference.contains("pinned")),
             "{listed:?}"
         );
     }

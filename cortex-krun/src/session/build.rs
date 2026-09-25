@@ -40,7 +40,6 @@
 //! two callers who declared the same thing get the same image whatever this module does
 //! with it on the way.
 
-
 use cortex::console::{Call, Error, ExecCall, InitCall, Response};
 use cortex::image::{Image as Recipe, Step};
 use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
@@ -422,7 +421,10 @@ mod tests {
 
         let (script, config) = plan(&declared, &ImageState::default()).unwrap();
         assert_eq!(script[0], "export TZ='Asia/Seoul' && date");
-        assert_eq!(config.env.as_deref(), Some(&["TZ=Asia/Seoul".to_string()][..]));
+        assert_eq!(
+            config.env.as_deref(),
+            Some(&["TZ=Asia/Seoul".to_string()][..])
+        );
     }
 
     /// The base's own environment is already in the machine, and repeating it here would
@@ -437,7 +439,10 @@ mod tests {
         let (script, config) = plan(&recipe(vec![Step::run("build")]), &base).unwrap();
 
         assert_eq!(script[0], "cd '/srv' && build", "{script:?}");
-        assert_eq!(config.env.as_deref(), Some(&["PATH=/usr/bin".to_string()][..]));
+        assert_eq!(
+            config.env.as_deref(),
+            Some(&["PATH=/usr/bin".to_string()][..])
+        );
     }
 
     /// Nothing to run is nothing to boot, and the caller reads that off an empty script.
@@ -465,7 +470,13 @@ mod tests {
         let declared = recipe(vec![Step::copy("app", "/srv/app")]);
         let refused = plan(&declared, &ImageState::default()).unwrap_err();
 
-        assert_eq!(super::super::refused(&refused).code, Error::UNSUPPORTED_IMAGE);
-        assert!(format!("{refused:#}").contains("build context"), "{refused:#}");
+        assert_eq!(
+            super::super::refused(&refused).code,
+            Error::UNSUPPORTED_IMAGE
+        );
+        assert!(
+            format!("{refused:#}").contains("build context"),
+            "{refused:#}"
+        );
     }
 }

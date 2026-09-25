@@ -191,7 +191,10 @@ mod tests {
         // Untagging is deliberately not a deletion, so after this the layer and the disk
         // are files nothing names.
         untag("test/base:1", Some(cache.clone())).unwrap();
-        assert!(cache.has_layer(&pulled.layers[0].digest), "untag deleted it");
+        assert!(
+            cache.has_layer(&pulled.layers[0].digest),
+            "untag deleted it"
+        );
 
         let swept = prune(Some(Duration::ZERO), Some(cache.clone())).unwrap();
         assert_eq!(swept.files.len(), 3, "{:?}", swept.files);

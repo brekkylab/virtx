@@ -342,7 +342,11 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     }
     run(cargo, "host")?;
 
-    sign(&options.out().join(format!("cortex-krun-host{}", env::consts::EXE_SUFFIX)))
+    sign(
+        &options
+            .out()
+            .join(format!("cortex-krun-host{}", env::consts::EXE_SUFFIX)),
+    )
 }
 
 fn sign(exe: &Path) -> anyhow::Result<()> {
@@ -384,7 +388,11 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
         .stderr(std::process::Stdio::inherit())
         .output()
         .context("running cargo")?;
-    ensure!(out.status.success(), "cargo {} failed", if test { "test" } else { "build" });
+    ensure!(
+        out.status.success(),
+        "cargo {} failed",
+        if test { "test" } else { "build" }
+    );
 
     let mut targets: Vec<(PathBuf, PathBuf)> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -398,7 +406,10 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
             continue;
         };
         let is_test = message["profile"]["test"].as_bool().unwrap_or(false);
-        let kinds = message["target"]["kind"].as_array().cloned().unwrap_or_default();
+        let kinds = message["target"]["kind"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let runnable = kinds.iter().any(|k| k == "bin" || k == "example");
         if (test && is_test) || (!test && !is_test && runnable) {
             let manifest_dir = message["manifest_path"]
@@ -506,7 +517,6 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// Where the guest kernel is built to, and what it is called there.
 ///
 /// One directory under `build/`, like everything else this repository compiles, and the
@@ -528,7 +538,11 @@ fn kernel_library() -> anyhow::Result<PathBuf> {
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(matches));
+        .find(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(matches)
+        });
     found.with_context(|| {
         format!(
             "no libkrunfw in {} -- run `cargo xtask build kernel` first",
@@ -608,7 +622,10 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let kernel = kernel_library()?;
 
     fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
-    place(&kernel, &bin.join(kernel.file_name().expect("the kernel is a file")))?;
+    place(
+        &kernel,
+        &bin.join(kernel.file_name().expect("the kernel is a file")),
+    )?;
     for exe in &host_exes {
         place(&built.join(exe), &bin.join(exe))?;
     }

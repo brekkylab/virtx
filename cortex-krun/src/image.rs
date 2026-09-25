@@ -38,7 +38,10 @@ pub(crate) async fn run(command: Command) -> anyhow::Result<()> {
                 .max()
                 .unwrap_or(0)
                 .max("REFERENCE".len());
-            println!("{:width$}  {:12}  {:>9}  PROVISIONED", "REFERENCE", "MANIFEST", "SIZE");
+            println!(
+                "{:width$}  {:12}  {:>9}  PROVISIONED",
+                "REFERENCE", "MANIFEST", "SIZE"
+            );
             for entry in listed {
                 let manifest = entry.image.manifest.hex();
                 println!(

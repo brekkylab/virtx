@@ -379,8 +379,12 @@ pub(crate) fn corrected(path: &Path) -> Result<()> {
     // Every inode there is, which at this point is the root and whatever the formatter
     // put beside it. Read through the crate that wrote them, which is the one case its
     // reader is exactly right for.
-    let mut reader = arcbox_ext4::Reader::new(path)
-        .map_err(|e| Error::io(format!("reading {}", path.display()), std::io::Error::other(e)))?;
+    let mut reader = arcbox_ext4::Reader::new(path).map_err(|e| {
+        Error::io(
+            format!("reading {}", path.display()),
+            std::io::Error::other(e),
+        )
+    })?;
     let mut inodes = vec![ROOT_INODE];
     let mut walking = vec![reader.tree().root()];
     while let Some(index) = walking.pop() {
@@ -510,7 +514,12 @@ pub(crate) fn special(disk: &Path, nodes: &[Special]) -> Result<()> {
         let ino = reader.tree().node(found).inode;
         let group = (ino - 1) / sb.inodes_per_group;
         let within = u64::from((ino - 1) % sb.inodes_per_group);
-        let table = u64::from(reader.get_group_descriptor(group).map_err(unreadable)?.inode_table_lo);
+        let table = u64::from(
+            reader
+                .get_group_descriptor(group)
+                .map_err(unreadable)?
+                .inode_table_lo,
+        );
         at.push(table * block_size + within * u64::from(sb.inode_size));
     }
     drop(reader);
@@ -563,7 +572,6 @@ fn device(major: u32, minor: u32) -> (u32, u32) {
         (0, (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

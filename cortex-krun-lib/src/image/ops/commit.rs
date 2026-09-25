@@ -153,8 +153,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let path =
-                std::env::temp_dir().join(format!("cortex-krun-commit-{name}-{}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("cortex-krun-commit-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Scratch(path)
@@ -260,10 +260,17 @@ mod tests {
         let built = commit(&base, None, config, "test/stated:1", Some(cache.clone())).unwrap();
 
         let digests = |image: &Image| -> Vec<Digest> {
-            image.layers.iter().map(|layer| layer.digest.clone()).collect()
+            image
+                .layers
+                .iter()
+                .map(|layer| layer.digest.clone())
+                .collect()
         };
         assert_eq!(digests(&built), digests(&base), "a layer was invented");
-        assert_eq!(built.config.env.as_deref(), Some(&["TZ=UTC".to_string()][..]));
+        assert_eq!(
+            built.config.env.as_deref(),
+            Some(&["TZ=UTC".to_string()][..])
+        );
         assert_ne!(
             built.manifest, base.manifest,
             "an image that states something else is the same image"

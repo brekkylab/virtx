@@ -365,39 +365,20 @@ fn sign(exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What a binary needs in its environment to boot a VM on this machine.
+///
+/// The guest kernel is not among them any more: it sits beside the binary, and every
+/// loader finds it there -- see `cortex-krun-lib/build.rs`. What is left is the GPU
+/// libraries on Windows, which are linked rather than opened by name and so are the
+/// loader's to find at start-up, in a directory nothing else puts on the path.
 fn runtime_env(command: &mut Command) -> anyhow::Result<()> {
-    if cfg!(target_os = "macos") {
-        let brew = Command::new("brew").arg("--prefix").output();
-        if let Ok(brew) = brew
-            && brew.status.success()
-        {
-            let mut fallback = OsString::from(String::from_utf8_lossy(&brew.stdout).trim());
-            fallback.push("/lib:");
-            match env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
-                Some(existing) => fallback.push(existing),
-                None => {
-                    let home = env::var_os("HOME").unwrap_or_default();
-                    fallback.push(home);
-                    fallback.push("/lib:/usr/local/lib:/usr/lib");
-                }
-            }
-            command.env("DYLD_FALLBACK_LIBRARY_PATH", fallback);
-        }
-    } else if cfg!(windows) {
-        let root = root_path();
-        let krunfw = root.join("build/krunfw");
-        ensure!(
-            krunfw.join("libkrunfw.dll").is_file(),
-            "no libkrunfw.dll in {}; run xtask/scripts/build-libkrunfw.sh first",
-            krunfw.display()
-        );
-        let mut dirs = vec![krunfw];
-        let epoxy = root.join("build/epoxy/bin");
+    if cfg!(windows) {
+        let epoxy = root_path().join("build/epoxy/bin");
         if epoxy.is_dir() {
-            dirs.push(epoxy);
+            let mut dirs = vec![epoxy];
+            dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+            command.env("PATH", env::join_paths(dirs)?);
         }
-        dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-        command.env("PATH", env::join_paths(dirs)?);
     }
     Ok(())
 }

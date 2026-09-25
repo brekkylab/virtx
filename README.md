@@ -32,6 +32,7 @@ brew install lld meson ninja krunvm
 ```sh
 git submodule update --init
 cargo xtask init                        # patches the submodules (--force resets them first)
+cargo xtask build kernel                # the guest kernel -> build/krunfw/
 cargo xtask build host guest            # -> target/release/ (add --gpu to build MoltenVK and
                                         #    virglrenderer first; add abin for /abin)
 cargo xtask install                     # -> ~/.cargo/bin, or --prefix <dir>
@@ -72,21 +73,21 @@ host-specific all the same, and the Windows setup is different throughout; see
 
 `cargo xtask run` and `cargo xtask test` are `cargo run` and `cargo test` with
 that part added: they build through cargo, then prepare each binary before
-running it. On macOS that is two things, both mandatory:
+running it. On macOS that is one thing, and it is mandatory: an ad-hoc codesign
+with `com.apple.security.hypervisor`. No developer certificate is needed, but
+Hypervisor.framework refuses to start without the entitlement.
 
-1. Ad-hoc codesigns the binary with `com.apple.security.hypervisor`. No
-   developer certificate is needed, but Hypervisor.framework refuses to start
-   without the entitlement.
-2. Puts Homebrew's `lib` on `DYLD_FALLBACK_LIBRARY_PATH`, because libkrun
-   `dlopen`s `libkrunfw.5.dylib` by leaf name and `/opt/homebrew/lib` is not on
-   dyld's default search path. The *fallback* path, not `DYLD_LIBRARY_PATH`:
-   dyld consults the latter first for every library, absolute install names
-   included, so it let the virglrenderer 0.10.4e that krunkit's Homebrew tap
-   installs stand in for the one `data/` built — silently, since the GPU still
-   came up.
+It used to be two. The second put Homebrew's `lib` on
+`DYLD_FALLBACK_LIBRARY_PATH` so that dyld would find the guest kernel there, and
+is gone now that the kernel is built here and sits beside the binary — see [The
+guest kernel is built, not
+installed](#the-guest-kernel-is-built-not-installed). Worth not bringing back: a
+search path wide enough to find the kernel was also wide enough to let the
+virglrenderer that krunkit's tap installs stand in for the one `build/` had
+built, silently, since the GPU still came up.
 
-A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does
-neither, and a binary that creates a VM fails on both counts. The one exception is
+A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not
+sign, and a binary that creates a VM fails without it. The one exception is
 the one that matters for a console server: `cargo xtask build host` signs
 `cortex-krun-host` once cargo has built it. A console server is started by
 whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
@@ -221,7 +222,7 @@ a session may write on top of its image (a sparse ceiling, 2 GiB by default), wi
 
 With the current build and an `alpine:edge` guest (Mesa 26.2.3) the device
 reports **1.4.343**, with `VK_KHR_synchronization2` on. The same guest reported
-1.3.0 against krunkit's 0.10.4e (see the `DYLD_FALLBACK_LIBRARY_PATH` note above), and this section
+1.3.0 against krunkit's 0.10.4e (see the note on that search path under [Running](#running)), and this section
 was first written about a 1.2 cap, for the reason below. Which host change
 lifted it has not been pinned down.
 
@@ -527,16 +528,19 @@ cannot be re-enabled without reinstalling Windows.
 
 ```powershell
 git submodule update --init
-sh xtask/scripts/build-libkrunfw.sh     # guest kernel -> build/krunfw/
 cargo xtask init                        # patches the submodules
+cargo xtask build kernel                # guest kernel -> build/krunfw/
 cargo xtask build host --gpu            # builds libepoxy and virglrenderer first
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
-`cargo xtask run` puts `build/krunfw/` on `PATH` -- and `build/epoxy/bin/`, when a
-`gpu` build made one -- because libkrun resolves the guest kernel with
-`LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly, or
-through a plain `cargo run`, fails with `Error: FileNotFound`.
+The kernel first, because a build of `cortex-krun-lib` stops without one -- it is
+what copies the kernel beside the binaries, which is how they find it.
+
+`cargo xtask run` adds `build/epoxy/bin/` to `PATH`, when a `gpu` build made one.
+That is the only thing left there: those libraries are linked rather than opened
+by name, so they are the loader's to find at start-up and live where nothing else
+would look.
 
 ### The guest kernel is built, not installed
 

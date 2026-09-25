@@ -204,9 +204,6 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // declared, and otherwise an image built here over it -- which is a machine of its own,
     // run and finished before the session's is started. Either way what comes back is a name
     // in the cache, and everything after this point cannot tell the two apart.
-    //
-    // A build gets the session's own reach, because the commonest first step of any recipe
-    // fetches packages.
     let booting = if image.steps.is_empty() {
         image.base.clone()
     } else {

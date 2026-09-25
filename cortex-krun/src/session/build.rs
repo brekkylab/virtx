@@ -63,10 +63,12 @@ const REPOSITORY: &str = "localhost/cortex-krun-build";
 /// That name is what a session then boots on, so a caller treats the answer exactly as it
 /// would have treated `recipe.base` had there been no steps.
 ///
-/// `network` is the reach the session asked for, and the build gets the same one. It has
-/// to: the commonest first step of any recipe fetches packages, and a build that could not
-/// reach a mirror when the session it is for can would fail for a reason the client has no
-/// way to read. No host ports, because a build serves nothing.
+/// `network` is the reach the session asked for, and the build gets at least the public
+/// internet whatever that was. It has to: the commonest first step of any recipe fetches
+/// packages, and a session that is to run offline still has to be built by something that
+/// can reach a mirror. A session granted [`Network::Full`] builds with it too, so a mirror
+/// on its LAN is still one its build can reach. No host ports, because a build serves
+/// nothing.
 ///
 /// Nothing is booted for a recipe whose steps are all `ENV` and `WORKDIR`. Those change
 /// what the image states and not what is in it, and there is nothing for a machine to do.
@@ -105,7 +107,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     let upper = Ext4::at(at.join("build.ext4"), Ext4::SIZE)?;
     let blob = at.join("build.tar");
 
-    run(&recipe.base, &upper, &script, network).await?;
+    run(&recipe.base, &upper, &script, reach(network)).await?;
 
     // Only now that the machine is down and has flushed -- `run` took it down on its way
     // out, and the last thing it asked the guest for was a flush. Saying so is this end's
@@ -141,10 +143,9 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
 /// before it wrote.
 async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> anyhow::Result<()> {
     // This server's own shape and not the session's: what a build gets is its operator's
-    // business, where a session's size is what its client asked for. The reach is the
-    // exception above, and it is one because a recipe's commonest first step fetches packages
-    // -- a build that could not reach a registry would be a different build, where one that
-    // is smaller is the same one, slower.
+    // business, where a session's size is what its client asked for. The reach is [`reach`]'s,
+    // because a recipe's commonest first step fetches packages -- a build that could not reach
+    // a registry would be a different build, where one that is smaller is the same one, slower.
     let mut machine = Machine::boot(base, &upper.path, &[], network, &[], Shape::from_env())
         .await
         .map_err(|e| coded(Error::BOOT_FAILED, e))?;
@@ -211,6 +212,15 @@ async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> a
         }
         Response::Error(e) => anyhow::bail!("flushing the build's disk: {}", e.message),
         other => anyhow::bail!("the guest answered a flush with {other:?}"),
+    }
+}
+
+/// How far a build reaches for a session that asked for `session`: the public internet at
+/// the least, and everything when the session was granted everything.
+fn reach(session: Network) -> Network {
+    match session {
+        Network::Full => Network::Full,
+        Network::Disabled | Network::HostOnly | Network::Public => Network::Public,
     }
 }
 
@@ -436,6 +446,15 @@ mod tests {
 
         assert!(script.is_empty(), "{script:?}");
         assert_eq!(config.working_dir.as_deref(), Some("/work"));
+    }
+
+    /// A session kept off the network is still built by a machine that can fetch packages.
+    #[test]
+    fn a_build_reaches_the_internet_whatever_the_session_reaches() {
+        assert_eq!(reach(Network::Disabled), Network::Public);
+        assert_eq!(reach(Network::HostOnly), Network::Public);
+        assert_eq!(reach(Network::Public), Network::Public);
+        assert_eq!(reach(Network::Full), Network::Full);
     }
 
     /// Refused where it is read, and by a code that says the image is what has to change.

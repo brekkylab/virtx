@@ -7,7 +7,7 @@ $root = Split-Path -Parent $PSScriptRoot
 
 Write-Output 'Applying patches'
 
-function Apply-Patch([string] $submodule, [string] $patchFile) {
+function Invoke-PatchFile([string] $submodule, [string] $patchFile) {
     $dir = Join-Path $root "3rdparty\$submodule"
 
     if (-not (Test-Path (Join-Path $dir '.git'))) {
@@ -39,7 +39,7 @@ function Invoke-Checked([string] $what, [scriptblock] $block) {
 $patches = Join-Path $root '3rdparty\_patches'
 
 Get-ChildItem -Path $patches -Filter '*.patch' | Sort-Object Name | ForEach-Object {
-    Apply-Patch ($_.Name -creplace '-[0-9a-f]{7,40}-.*$', '') $_.FullName
+    Invoke-PatchFile ($_.Name -creplace '-[0-9a-f]{7,40}-.*$', '') $_.FullName
 }
 
 Write-Output 'Setting up the MSVC environment'
@@ -88,7 +88,8 @@ New-Item -ItemType Directory -Force -Path $build, $pcdir | Out-Null
 
 if (-not (Test-Path $meson)) {
     $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
-    if (-not $python -or -not (& $python --version 2>$null)) {
+    $pythonVersion = if ($python) { & $python --version 2>$null }
+    if (-not $pythonVersion) {
         Write-Error 'no usable python.exe on PATH (the Microsoft Store stub does not count)'
     }
     Write-Output 'Creating the meson venv'

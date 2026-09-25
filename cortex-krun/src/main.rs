@@ -26,8 +26,8 @@ const NOT_EXECUTABLE: u8 = 126;
 /// ```text
 /// {home}/
 /// ├── abin/                   cortex's own executables, shared into every guest at
-/// │   │                       `/abin` -- put there by `scripts/build-abin.sh`, and a
-/// │   │                       directory this server reads and never writes
+/// │   │                       `/abin` when there is no `abin/` beside this binary --
+/// │   │                       a directory this server reads and never writes
 /// │   └── skills/{program}/   what each of them is, as the session reads it
 /// ├── images/                 the images sessions boot from, shared by every tool in
 /// │                           this repository -- `Cache`'s, not this server's

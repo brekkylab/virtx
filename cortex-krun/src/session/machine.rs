@@ -466,15 +466,20 @@ fn told(
 
 /// Cortex's own executables, or `None` for a host that has none.
 ///
-/// One well-known place under [`home`](crate::home) and no variable naming another: where
-/// this server keeps things is already something `home` answers, so a second way to point
-/// somewhere else would be two answers to one question.
+/// `abin/` beside this binary first -- where `cargo xtask build --abin` puts it and
+/// `cargo xtask install --abin` copies it, as part of the same set as the boot and the guest --
+/// and then `abin/` under [`home`](crate::home).
 ///
 /// **A host with none is a session with no `/abin`, not a session that fails.** These are
 /// executables a session is better off with and can run without -- see `ABIN_DIR`.
 fn abin() -> Option<PathBuf> {
-    let dir = crate::home().join("abin");
-    dir.is_dir().then_some(dir)
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("abin")));
+    beside
+        .into_iter()
+        .chain([crate::home().join("abin")])
+        .find(|dir| dir.is_dir())
 }
 
 /// A default read out of this server's environment, ignoring anything that is not a number.

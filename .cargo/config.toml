@@ -8,6 +8,9 @@ runner = "scripts/macos-run.sh"
 runner = "scripts/windows-run.cmd"
 
 [env]
-# virglrenderer built by scripts/build-virglrenderer.sh, needed by the `gpu`
+# virglrenderer built by xtask/scripts/build-deps.sh, needed by the `gpu`
 # feature. Not forced, so an existing PKG_CONFIG_PATH in the environment wins.
 PKG_CONFIG_PATH = { value = "build/virglrenderer/lib/pkgconfig", relative = true }
+
+[alias]
+xtask = "run --package xtask --"

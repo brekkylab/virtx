@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 REBUILD=0
 for arg in "$@"; do
@@ -9,38 +9,6 @@ for arg in "$@"; do
         --rebuild) REBUILD=1 ;;
         *) echo "usage: $0 [--rebuild]" >&2; exit 1 ;;
     esac
-done
-
-echo "Applying patches"
-
-apply_patch() {
-    submodule="$1"
-    patch_file="$2"
-    dir="$ROOT/3rdparty/$submodule"
-
-    if [ ! -d "$dir/.git" ] && [ ! -f "$dir/.git" ]; then
-        echo "$submodule is not checked out; run: git submodule update --init" >&2
-        exit 1
-    fi
-
-    if git -C "$dir" apply --reverse --check "$patch_file" 2>/dev/null; then
-        echo "$submodule: already patched"
-        return
-    fi
-
-    if ! git -C "$dir" apply --check "$patch_file" 2>/dev/null; then
-        echo "$submodule: patch does not apply -- the submodule has moved or" >&2
-        echo "has other local changes. Reset it or refresh $patch_file." >&2
-        exit 1
-    fi
-
-    git -C "$dir" apply "$patch_file"
-    echo "$submodule: applied $(basename "$patch_file")"
-}
-
-for patch_file in "$ROOT"/3rdparty/_patches/*.patch; do
-    patch_name="$(basename "$patch_file")"
-    apply_patch "$(printf '%s' "$patch_name" | sed -E 's/-[0-9a-f]{7,40}-.*$//')" "$patch_file"
 done
 
 if [ "$(uname -s)" = Darwin ]; then

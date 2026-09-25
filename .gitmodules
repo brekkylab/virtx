@@ -1,6 +1,6 @@
 [submodule "libkrun"]
 	path = 3rdparty/libkrun
-	# scripts/apply-patches.sh patches this tree in place; cargo needs the real
+	# `cargo xtask init` patches this tree in place; cargo needs the real
 	# path, so the patch cannot live in an exported copy.
 	ignore = dirty
 	url = https://github.com/libkrun/libkrun.git
@@ -10,13 +10,13 @@
 	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
 [submodule "rutabaga_gfx"]
 	path = 3rdparty/rutabaga_gfx
-	# scripts/apply-patches.sh patches this tree in place; cargo needs the real
+	# `cargo xtask init` patches this tree in place; cargo needs the real
 	# path, so the patch cannot live in an exported copy.
 	ignore = dirty
 	url = https://github.com/magma-gpu/rutabaga_gfx.git
 [submodule "3rdparty/libepoxy"]
 	path = 3rdparty/libepoxy
-	# Built by scripts/build-virglrenderer-windows.ps1 only: virglrenderer
+	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer
 	# requires epoxy unconditionally, and Windows has no package manager here.
 	url = https://github.com/anholt/libepoxy.git
 	ignore = dirty
@@ -30,7 +30,7 @@
 	ignore = dirty
 [submodule "3rdparty/arcbox-ext4"]
 	path = 3rdparty/arcbox-ext4
-	# scripts/init.sh patches this tree in place; cargo needs the real path, so
+	# `cargo xtask init` patches this tree in place; cargo needs the real path, so
 	# the patch cannot live in an exported copy.
 	ignore = dirty
 	url = https://github.com/arcboxlabs/ext4-rs.git

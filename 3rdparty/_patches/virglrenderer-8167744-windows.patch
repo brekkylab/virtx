@@ -1197,16 +1197,14 @@ index 0ee5468..1acf134 100644
        *fd = os_dupfd_cloexec(res->fd);
        return *fd >= 0 ? res->fd_type : VIRGL_RESOURCE_FD_INVALID;
 diff --git a/src/virgl_resource.h b/src/virgl_resource.h
-index 8eb770e..d99449f 100644
+index 8eb770e..04b3c77 100644
 --- a/src/virgl_resource.h
 +++ b/src/virgl_resource.h
-@@ -98,6 +98,9 @@ struct virgl_resource {
+@@ -98,6 +98,7 @@ struct virgl_resource {
     int iov_count;
  
     uint32_t map_info;
-+#ifdef _WIN32
 +   uint64_t map_ptr;
-+#endif
  
     uint64_t map_size;
     void *mapped;
@@ -1227,7 +1225,7 @@ index 8988bb7..154d572 100644
  #include "util/os_misc.h"
  #include "util/u_pointer.h"
 diff --git a/src/virglrenderer.c b/src/virglrenderer.c
-index ce2b03d..7aad640 100644
+index cca83a2..9a67518 100644
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
 @@ -38,7 +38,11 @@
@@ -1306,7 +1304,7 @@ index ce2b03d..7aad640 100644
        break;
     case VIRTGPU_DRM_CAPSET_DRM:
        *max_ver = 0;
-@@ -1023,6 +1041,15 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+@@ -1033,6 +1051,15 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
        state.proxy_initialized = true;
     }
  
@@ -1322,7 +1320,7 @@ index ce2b03d..7aad640 100644
     if ((flags & VIRGL_RENDERER_ASYNC_FENCE_CB) &&
         (flags & VIRGL_RENDERER_DRM)) {
        int drm_fd = get_drm_fd();
-@@ -1103,6 +1130,9 @@ void virgl_renderer_reset(void)
+@@ -1113,6 +1140,9 @@ void virgl_renderer_reset(void)
  
     if (state.drm_initialized)
        drm_renderer_reset();
@@ -1332,7 +1330,7 @@ index ce2b03d..7aad640 100644
  }
  
  int virgl_renderer_get_poll_fd(void)
-@@ -1308,6 +1338,9 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
+@@ -1318,6 +1348,9 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
        res = virgl_resource_create_from_opaque_handle(ctx, args->res_handle, blob.u.opaque_handle);
        if (!res)
           return -ENOMEM;
@@ -1342,7 +1340,7 @@ index ce2b03d..7aad640 100644
     } else if (blob.type != VIRGL_RESOURCE_FD_INVALID) {
        res = virgl_resource_create_from_fd(args->res_handle,
                                            blob.type,
-@@ -1379,6 +1412,13 @@ int virgl_renderer_resource_map(uint32_t res_handle, void **out_map, uint64_t *o
+@@ -1389,6 +1422,13 @@ int virgl_renderer_resource_map(uint32_t res_handle, void **out_map, uint64_t *o
           ret = vkr_allocator_resource_map(res, &map, &map_size);
           break;
        case VIRGL_RESOURCE_OPAQUE_HANDLE:
@@ -1356,11 +1354,10 @@ index ce2b03d..7aad640 100644
           map = ctx->resource_map(ctx, res, NULL, PROT_WRITE | PROT_READ, MAP_SHARED);
           map_size = res->map_size;
           break;
-@@ -1510,6 +1550,19 @@ int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint32_t *map_info
+@@ -1520,6 +1560,17 @@ int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint32_t *map_info
     return 0;
  }
  
-+#ifdef _WIN32
 +int virgl_renderer_resource_get_map_ptr(uint32_t res_handle, uint64_t *map_ptr)
 +{
 +   TRACE_FUNC();
@@ -1371,12 +1368,11 @@ index ce2b03d..7aad640 100644
 +  *map_ptr = res->map_ptr;
 +   return 0;
 +}
-+#endif
 +
  int
  virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
  {
-@@ -1529,6 +1582,10 @@ virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
+@@ -1539,6 +1590,10 @@ virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
        *fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_SHM;
        break;
     case VIRGL_RESOURCE_OPAQUE_HANDLE:
@@ -1388,7 +1384,7 @@ index ce2b03d..7aad640 100644
        /* Avoid a default case so that -Wswitch will tell us at compile time if a
         * new virgl resource type is added without being handled here.
 diff --git a/src/virglrenderer.h b/src/virglrenderer.h
-index 0bcafef..94043c6 100644
+index 0bcafef..26ef265 100644
 --- a/src/virglrenderer.h
 +++ b/src/virglrenderer.h
 @@ -36,7 +36,18 @@
@@ -1411,13 +1407,11 @@ index 0bcafef..94043c6 100644
  
  typedef void *virgl_renderer_gl_context;
  
-@@ -431,10 +442,16 @@ VIRGL_EXPORT int virgl_renderer_resource_unmap(uint32_t res_handle);
+@@ -431,10 +442,14 @@ VIRGL_EXPORT int virgl_renderer_resource_unmap(uint32_t res_handle);
  #define VIRGL_RENDERER_MAP_CACHE_WC        0x03
  
  VIRGL_EXPORT int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint32_t *map_info);
-+#ifdef _WIN32
 +VIRGL_EXPORT int virgl_renderer_resource_get_map_ptr(uint32_t res_handle, uint64_t *map_ptr);
-+#endif
  
  #define VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF        0x0001
  #define VIRGL_RENDERER_BLOB_FD_TYPE_OPAQUE        0x0002

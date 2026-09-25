@@ -23,7 +23,7 @@ path = "src/main.rs"
 anyhow = "1"
 # The protocol this binary answers. No default features: what is wanted is the console, and
 # every binding cortex offers brings a libfuse provider or an HTTP stack with it.
-cortex = { path = "../../cortex/cortex", default-features = false }
+cortex = { path = "../../cortex", default-features = false }
 # The two names that are the wire's rather than either end's -- the port to find and the
 # handshake to send. No features, so nothing of the boot's other half is in this graph.
 cortex-krun-host = { path = "../cortex-krun-host", default-features = false }

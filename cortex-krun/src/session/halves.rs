@@ -1,7 +1,7 @@
 //! The other two halves, which are files beside this binary rather than parts of it.
 //!
-//! The boot is a member of this workspace, so cargo links it into the same directory as this
-//! binary; the guest is cross-compiled by `build.rs` and left there too. So the three ship as
+//! `cargo xtask build` puts all three in one directory -- cargo links the boot beside this
+//! binary, and the xtask cross-compiles the guest and leaves it there too. So the three ship as
 //! a set and a lookup is `current_exe`'s parent plus a name. Nothing is searched for on
 //! `PATH`: a server that found *some* `cortex-krun-host` would be a server running a
 //! different build's hypervisor against this build's command line, and that command line is
@@ -27,11 +27,8 @@
 //! Each half can be named outright, which is what a caller who builds one some other way --
 //! or ships the three somewhere with a layout of its own -- has instead of this rule.
 //!
-//! `CORTEX_KRUN_GUEST_BIN` is read twice and means two things. Here it names the file to copy
-//! into a machine's share; in `build.rs` it names a file to place beside this binary instead
-//! of cross-compiling one, which is a build this crate performs and can therefore be told to
-//! skip. `CORTEX_KRUN_BOOT_BIN` is read only here, because there is no matching build to
-//! skip: the boot is a workspace member and cargo links it beside this binary itself.
+//! `CORTEX_KRUN_GUEST_BIN` names the file to copy into a machine's share, and
+//! `CORTEX_KRUN_BOOT_BIN` the boot to spawn.
 //!
 //! A binary named by either is taken as it is. The boot's entitlement is the case that shows
 //! what that costs -- `scripts/macos-link.sh` signs what it links and nothing else, so a boot
@@ -82,8 +79,7 @@ fn beside(env: &str, name: &str) -> anyhow::Result<PathBuf> {
         .join(name);
     anyhow::ensure!(
         path.is_file(),
-        "no {name} beside {} -- `cargo build --workspace` builds it there (a `-p cortex-krun` \
-         builds only the guest, which is this crate's build script's), or name one in {env}",
+        "no {name} beside {} -- `cargo xtask build` builds it there, or name one in {env}",
         exe.display()
     );
     Ok(path)

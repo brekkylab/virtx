@@ -3,9 +3,7 @@ param([switch] $Rebuild)
 
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent $PSScriptRoot
-
-Write-Output 'Applying patches'
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Invoke-Native([scriptblock] $block) {
     $ErrorActionPreference = 'Continue'
@@ -13,39 +11,10 @@ function Invoke-Native([scriptblock] $block) {
     return $LASTEXITCODE
 }
 
-function Invoke-PatchFile([string] $submodule, [string] $patchFile) {
-    $dir = Join-Path $root "3rdparty\$submodule"
-
-    if (-not (Test-Path (Join-Path $dir '.git'))) {
-        throw "$submodule is not checked out; run: git submodule update --init"
-    }
-
-    if ((Invoke-Native { & git -C $dir apply --reverse --check $patchFile }) -eq 0) {
-        Write-Output "  ${submodule}: already patched"
-        return
-    }
-
-    if ((Invoke-Native { & git -C $dir apply --check $patchFile }) -ne 0) {
-        throw ("  ${submodule}: patch does not apply -- the submodule has moved or`n" +
-            "  has other local changes. Reset it or refresh $patchFile.")
-    }
-
-    if ((Invoke-Native { & git -C $dir apply $patchFile }) -ne 0) {
-        throw "  ${submodule}: git apply failed"
-    }
-    Write-Output "  ${submodule}: applied $(Split-Path -Leaf $patchFile)"
-}
-
 function Invoke-Checked([string] $what, [scriptblock] $block) {
     $ErrorActionPreference = 'Continue'
     & $block
     if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" }
-}
-
-$patches = Join-Path $root '3rdparty\_patches'
-
-Get-ChildItem -Path $patches -Filter '*.patch' | Sort-Object Name | ForEach-Object {
-    Invoke-PatchFile ($_.Name -creplace '-[0-9a-f]{7,40}-.*$', '') $_.FullName
 }
 
 Write-Output 'Setting up the MSVC environment'

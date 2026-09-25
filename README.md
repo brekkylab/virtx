@@ -27,16 +27,17 @@ brew install libkrunfw
 | `libkrunfw` | The guest kernel, packaged as a shared library. libkrun `dlopen`s `libkrunfw.5.dylib` at runtime; it is never linked. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
-| `meson`, `ninja` | Only for `scripts/build-virglrenderer.sh` (the `gpu` feature). |
+| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host --gpu`. |
 
 ## Setup
 
 ```sh
 git submodule update --init
-./scripts/apply-patches.sh              # patches the libkrun and rutabaga_gfx submodules
-./scripts/build-virglrenderer.sh        # only for the `gpu` feature
-./scripts/fetch-musl-sysroot.sh         # only to build cortex-abins/
-./scripts/build-abin.sh                 # cortex's own executables -> {home}/abin
+cargo xtask init                        # patches the submodules (--force resets them first)
+./scripts/fetch-musl-sysroot.sh         # only to build abin
+cargo xtask build host guest            # -> target/release/ (add --gpu to build MoltenVK and
+                                        #    virglrenderer first; add abin for /abin)
+cargo xtask install                     # -> ~/.cargo/bin, or --prefix <dir>
 ```
 
 ## Running
@@ -325,7 +326,7 @@ patch carries what upstream main still gets wrong there:
 dload path asks dyld for `libvulkan.1.dylib` or `libMoltenVK.dylib` by leaf
 name, and Homebrew's `lib` is not on its default search path.
 
-`scripts/build-virglrenderer.sh` handles all of it. It exports the pinned
+`xtask/scripts/build-deps.sh` handles all of it. It exports the pinned
 submodule tree with `git archive` and patches the copy under `data/`, so the
 `virglrenderer` submodule stays pristine. venus-protocol is a meson subproject
 that is not in that tree; meson clones it at configure time, so the first build
@@ -351,7 +352,7 @@ an exported blob is an shm fd, which the Darwin backend wraps as
 `virgl_renderer_resource_map`.
 
 The same file needs work for Windows too, and it belongs in this patch rather
-than a second one: two patches on one file break `apply-patches.sh`'s "already
+than a second one: two patches on one file break `cargo xtask init`'s "already
 patched" check, because the first one's context stops matching once the second
 is in. `virgl_renderer.rs` opens a DRM render node, folds stderr into stdout
 with `dup2`, and turns exported `int` fds into descriptors — none of which exist
@@ -412,7 +413,7 @@ had to be written rather than widened:
   `RutabagaError::MagmaGpuError(RutabagaUnsupported)`.
 
 These two are Rust crates that cargo resolves by path, so their patches cannot
-live in an exported copy the way virglrenderer's does — `scripts/apply-patches.sh`
+live in an exported copy the way virglrenderer's does — `cargo xtask init`
 applies them to the submodule working trees, and both submodules are marked
 `ignore = dirty` in `.gitmodules`. Running the script twice is a no-op.
 
@@ -530,8 +531,8 @@ cannot be re-enabled without reinstalling Windows.
 ```powershell
 git submodule update --init
 sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
-.\scripts\init.ps1                      # patches the submodules, and builds
-                                        # libepoxy and virglrenderer for `gpu`
+cargo xtask init                        # patches the submodules
+cargo xtask build host --gpu            # builds libepoxy and virglrenderer first
 cargo run --example run -- alpine:3.21 'uname -srm'
 ```
 
@@ -707,10 +708,10 @@ The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 ### virglrenderer on Windows
 
 ```powershell
-.\scripts\init.ps1
+cargo xtask build host --gpu
 ```
 
-produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
+runs `xtask/scripts/build-deps.ps1`, which produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
 `vulkan-1.dll` and `epoxy-0.dll`, exporting the 48 `virgl_renderer_*` entry
 points — `virgl_renderer_resource_get_map_ptr` among them, which is the one the
 blob mapping above is built on.
@@ -803,7 +804,7 @@ with `KRUN_LOG` set, which is why the `run` example now installs a logger.
 ### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 
 Rebased onto `8167744`, and since built on a Windows host with no further
-fixes: `scripts/init.ps1` compiles and installs it, a `--features gpu` build
+fixes: `xtask/scripts/build-deps.ps1` compiles and installs it, a `--features gpu` build
 links against it, and the guest enumerates the device — `/dev/dri/card0`,
 `renderD128`, `card0-Virtual-1`. What that does not say is that anything has
 been *rendered* through it there; the image has to carry the guest half for
@@ -903,12 +904,15 @@ here for the machine that runs them.
 
 `docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
 C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
-that can cross-compile it for the guest. [`scripts/build-abin.sh`](scripts/build-abin.sh) says
-what would lift that.
+that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built for
+`<arch>-unknown-linux-musl` somewhere that has that toolchain, dropped at
+`~/.cache/cortex/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
+and `docread` added to `ABINS` in [`xtask`](xtask/src/main.rs).
 
 ```sh
-./scripts/fetch-musl-sysroot.sh   # once
-./scripts/build-abin.sh           # -> $CORTEX_KRUN_HOME/abin, or ~/.cache/cortex-krun/abin
+./scripts/fetch-musl-sysroot.sh            # once
+cargo xtask build --abin                   # -> target/release/abin, beside the server
+cargo xtask install --abin --prefix <dir>  # -> <dir>/bin/abin
 ```
 
 Everything this host keeps is under that one root -- `$CORTEX_KRUN_HOME`, or `cortex-krun`
@@ -932,9 +936,8 @@ kept beside it is one that drifts from the parser it describes -- but **the copy
 today**. Nothing checks that a `SKILLS.md` still says what its binary says, so a clap string
 that moves is a file to regenerate. Making that mechanical is work not done.
 
-The server looks for that one directory and nothing names another: where it keeps things is
-already what `home()` answers, so a second way to point somewhere else would be two answers to
-one question. **A host with no such directory is a session with no `/abin`**, not a session
+The server looks for `abin/` beside its own binary first -- the one `xtask` builds and
+installs with it -- and then for `abin/` under `home()`. **A host with no such directory is a session with no `/abin`**, not a session
 that fails -- these are executables a session is better off with and can run without, and what
 its absence costs is a `PATH` that is only the image's.
 
@@ -961,21 +964,22 @@ cortex-abins/               the programs in the guest's /abin -- index and mem, 
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at 8167744
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-3rdparty/_patches/           applied to the two submodules above by scripts/apply-patches.sh;
+3rdparty/_patches/           applied to the submodules above by `cargo xtask init`;
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 scripts/                    build and provisioning helpers, plus the cargo runner and linker,
-                            the musl cc/ar that cortex-abins/ cross-compiles with, and
-                            build-abin.sh, which installs the result -- programs and skills
-                            both -- where a session finds it
+                            the musl cc/ar that cortex-abins/ cross-compiles with
+xtask/                      `cargo xtask build` / `install`: the server, the boot, the guest
+                            and abin/ built and placed as one set
 data/                       untracked: musl sysroot, sessions, build outputs
 ```
 
 `Cargo.lock` is not tracked. `data/` holds everything reproducible from the
 scripts.
 
-`cargo build --workspace` is what puts all three binaries in one directory:
-`cortex-krun` finds the other two by looking beside itself, and a `-p cortex-krun`
-builds only the guest -- which is its build script's -- and not the boot. On macOS
+`cargo xtask build` is what puts all three binaries in one directory:
+`cortex-krun` finds the other two by looking beside itself. A plain `cargo build`
+links the server and the boot but not the guest, which is a musl cross-build of its
+own workspace; `cargo xtask install` copies the whole set into `<prefix>/bin`. On macOS
 the boot needs the hypervisor entitlement, and `scripts/macos-link.sh` -- the cargo
 linker for `aarch64-apple-darwin` -- signs it as it is linked, so a plain build is
 enough. `scripts/macos-run.sh` signs whatever `cargo run` was asked for, which is

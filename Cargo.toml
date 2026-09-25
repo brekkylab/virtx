@@ -10,7 +10,7 @@
 # `cortex-krun-guest` is the init that runs inside one.
 [workspace]
 resolver = "3"
-members = ["cortex-krun", "cortex-krun-host", "cortex-krun-lib"]
+members = ["cortex-krun", "cortex-krun-host", "cortex-krun-lib", "xtask"]
 
 # `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
 # workspace. Without this, cargo would auto-adopt the path dependencies as
@@ -43,7 +43,7 @@ anyhow = "1"
 #
 # No default features: what is wanted is the console, and every binding cortex offers brings
 # a libfuse provider or an HTTP stack with it.
-cortex = { path = "../cortex/cortex", default-features = false }
+cortex = { path = "../cortex", default-features = false }
 cortex-krun-host = { path = "cortex-krun-host", default-features = false }
 cortex-krun-lib = { path = "cortex-krun-lib" }
 # The wire's codec, which `cortex` already carries in its public API: two versions of it in

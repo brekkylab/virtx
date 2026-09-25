@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [features]
 # Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus
-# support -- run scripts/build-virglrenderer.sh first.
+# support -- run `cargo xtask build host --gpu`, which builds it first.
 gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]

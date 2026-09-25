@@ -28,3 +28,9 @@
 	path = 3rdparty/SPIRV-Cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
 	ignore = dirty
+[submodule "3rdparty/arcbox-ext4"]
+	path = 3rdparty/arcbox-ext4
+	# scripts/init.sh patches this tree in place; cargo needs the real path, so
+	# the patch cannot live in an exported copy.
+	ignore = dirty
+	url = https://github.com/arcboxlabs/ext4-rs.git

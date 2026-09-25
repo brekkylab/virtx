@@ -1,0 +1,43 @@
+diff --git a/src/file_tree.rs b/src/file_tree.rs
+index b3094ca..ecff59b 100644
+--- a/src/file_tree.rs
++++ b/src/file_tree.rs
+@@ -2,7 +2,7 @@
+ // being built.  Each node holds an inode number, name, optional block ranges,
+ // and pointers (indices) into the flat `nodes` vector.
+ 
+-use std::path::{Path, PathBuf};
++use std::path::{Component, Path, PathBuf};
+ 
+ pub type InodeNumber = u32;
+ 
+@@ -73,19 +73,21 @@ impl FileTree {
+ 
+     /// Look up a node by path, walking the tree from the root.
+     ///
+-    /// The path is split into components.  A leading "/" or empty first component
+-    /// is skipped so that both "/foo/bar" and "foo/bar" resolve identically.
++    /// The path is split into components.  A root prefix is skipped so that both
++    /// "/foo/bar" and "foo/bar" resolve identically.
+     /// Returns `None` if any component is not found.
+     pub fn lookup(&self, path: &Path) -> Option<usize> {
+         let mut current = self.root;
+ 
+         for component in path.components() {
+-            let name = component.as_os_str().to_str()?;
+-
+-            // Skip the root directory prefix.
+-            if name == "/" || name.is_empty() {
+-                continue;
+-            }
++            // Matched as a component rather than by spelling: `Component::RootDir`
++            // renders as "\\" on Windows, so comparing the text against "/" left the
++            // separator to be looked up as a file name and every path under the root
++            // answered `None`.
++            let name = match component {
++                Component::Prefix(_) | Component::RootDir => continue,
++                other => other.as_os_str().to_str()?,
++            };
+ 
+             let node = &self.nodes[current];
+             let found = node.children.iter().find(|&&child_idx| {

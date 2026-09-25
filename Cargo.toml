@@ -57,6 +57,11 @@ tokio = "1"
 # 2026-09-02) and routes macOS to a stub backend that panics at runtime.
 # Track the repo until a release carries it.
 [patch.crates-io]
+# arcbox-ext4 0.1.2's `FileTree::lookup` compares a path component against "/",
+# which `Component::RootDir` never spells on Windows -- so formatting a session's
+# ext4 answered `NotFound("/")` there. Patched in the submodule; the commit is the
+# one 0.1.2 was published from.
+arcbox-ext4 = { path = "3rdparty/arcbox-ext4" }
 rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
 magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }
 

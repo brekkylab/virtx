@@ -795,6 +795,22 @@ numbers. Nothing here issues a DRM ioctl — the header is pulled in for the
 capset enums in `virtgpu_drm.h` — so the branch supplies the typedefs and lets
 the `DRM_IOCTL_*` definitions evaluate to zero.
 
+### arcbox-ext4 — `3rdparty/_patches/arcbox-ext4-c43590d-windows-paths.patch`
+
+One line, on the path every session takes. `FileTree::lookup` walks a path with
+`Path::components()` and skips the root by comparing the component's text
+against `"/"` — which is what `Component::RootDir` renders as on unix and never
+on Windows, where it is `"\"`. So the separator was looked up as a file name,
+every path under the root answered `None`, and `Ext4::at` failed at
+`Formatter::new` with `NotFound("/")` before a guest was ever started. The
+component is now matched as a component, so a root or a drive prefix is skipped
+whatever it is spelled.
+
+The submodule is pinned to `c43590d`, which is the commit 0.1.2 was published
+from — its `src/` is byte-identical to the crate on crates.io — rather than to
+`master`, which has moved on. It is reached through `[patch.crates-io]`, like
+`rutabaga_gfx`.
+
 ## `/abin`
 
 Every guest gets one directory of cortex's own executables at `/abin`, **first on a

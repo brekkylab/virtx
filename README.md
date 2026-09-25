@@ -601,6 +601,46 @@ never boots a guest. The first two are on the path every `execve` takes.
 `lchown` on one fails and `apk` reports `failed to preserve <file>: owner`.
 Ownership is uniformly root here and the install completes, so it is a wart
 rather than a blocker.
+Two more, found the first time a session was given mounts rather than a bare
+guest. Both stop a machine before it has a guest to report from, and neither
+error says what it is about.
+
+- **`path_to_nt_wide` passed a Win32 path to the object manager verbatim.** The
+  conversion prepends `\??\` and nothing else, so a path spelled with forward
+  slashes — `Path::join("examples/sam3")` makes one, and every Win32 call takes
+  it — arrives at `NtCreateFile` as a name with a `/` in it. The object manager
+  is not Win32: there `/` is an ordinary character, so the path names a file
+  that is not there and the answer is `ERROR_INVALID_NAME`. Separators are
+  normalized on the way now, which loses nothing because a `/` cannot occur in
+  a Windows filename.
+
+- **The share root could not be a reparse point**, which is what every mount
+  point on Windows is. `openat` opened the root with `FILE_OPEN_REPARSE_POINT`
+  and then refused anything carrying `FILE_ATTRIBUTE_REPARSE_POINT` — so a tree
+  attached to the host by a userspace filesystem and then handed to a guest,
+  which is how `cortex` shares one it holds in memory, was refused. The root is
+  followed rather than opened as a link now, and the refusal is gone rather
+  than relaxed.
+
+  It is gone because it did not buy what its wording suggested. What it covered
+  was the *root*, which an operator names when starting a session and a guest
+  never picks. What a guest can reach it never covered: `lookup` composes a
+  child path by joining strings and opens it absolutely,
+  `FILE_OPEN_REPARSE_POINT` applies only to the last component, and the object
+  manager follows every one before it — so a junction planted under a share is
+  a way out of it today, and is reported to the guest as a plain directory
+  besides, since `IO_REPARSE_TAG_MOUNT_POINT` is not treated as a symlink.
+  **Containment belongs in `lookup` and is not there.** Refusing the root only
+  made it look as though it were.
+
+Worth knowing while reading either: **an error raised in this file arrives
+under another name.** `linux_error` takes the errno off an `io::Error` and
+falls back to `libc::EIO` when there is none, which is 5 on Windows; that maps
+to `LINUX_EIO`, also 5, and `io::Error::from_raw_os_error(5)` formats as
+Windows' error 5. So the reparse refusal above — an `io::Error::new(Other, …)`
+with a message and no errno — reached the log as `ERROR_ACCESS_DENIED`, and the
+message it was carrying was dropped on the way.
+
 
 ### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-vsock.patch`
 
@@ -785,6 +825,44 @@ takes a panic it cannot unwind out of and the process aborts —
 `STATUS_STACK_BUFFER_OVERRUN`, a backtrace through `WHvEmulatorTryMmioEmulation`,
 and nothing naming the network. The `error!` that does name it is only reachable
 with `KRUN_LOG` set, which is why the `run` example now installs a logger.
+
+### libkrun — `3rdparty/_patches/libkrun-85bed71-x86_64-mptable.patch`
+
+The twelfth virtio-mmio device on an x86_64 guest got an interrupt line nothing
+had told the kernel about, and the machine stopped there without saying so.
+
+`MMIODeviceManager` hands out GSIs from `IRQ_BASE` to `IRQ_MAX`, which
+`arch/x86_64/layout.rs` sets to 5 and 23 — its comment says as much: "The I/O
+APIC has 24 pins (0-23) … leaving GSIs 5-23 for virtio-mmio devices." The MP
+table describing those pins was still writing the 16 legacy ISA entries
+Firecracker's original `for i in 0..16` produced. A GSI with no `MP_INTSRC`
+entry is one the kernel never routes, so the device holding it waits for an
+interrupt that cannot arrive — and waits silently, because nothing failed.
+
+Which device that is depends on the session's shape. A session with a GPU, a
+network and three shares lands on:
+
+```
+fs 5 · console 6 · rng 7 · balloon 8 · net 9 · gpu 10 · block 11 · block 12
+fs 13 · fs 14 · fs 15 · fs 16   ← the line no MP_INTSRC covers
+```
+
+The guest's boot then stops where that fs device is mounted, which is before
+`cortex-krun-guest` is started at all — libkrun's init mounts the shares first.
+What a server sees is the handshake never arriving: "the guest connected but
+did not say it was there within 60s", naming nothing that would lead here. The
+`ioapic: write: ioredtbl register N` line for 16 is simply absent from a debug
+log that has 5, 13, 14 and 15.
+
+The table now carries one entry per pin, counted from `IRQ_MAX` rather than
+from a literal of its own, so the two cannot drift apart again. That is eleven
+virtio-mmio devices before the fix and nineteen after — with the nine a session
+always has, two user mounts and ten.
+
+**Not a Windows bug**, although this is where it was found: the MP table and
+the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
+ceiling. macOS is aarch64, where the interrupt controller is a GIC and
+`IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
 
 ### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 

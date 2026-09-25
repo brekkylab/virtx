@@ -433,8 +433,8 @@ impl Session {
     /// across the pivot. Without that every session exits 0, whatever it ran.
     ///
     /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement;
-    /// `scripts/macos-run.sh`, registered as the cargo runner, ad-hoc signs it for `cargo
-    /// run`. Hypervisor.framework refuses to start a VM without it.
+    /// `cargo xtask run` and `cargo xtask test` ad-hoc sign what they run.
+    /// Hypervisor.framework refuses to start a VM without it.
     ///
     /// # A session, and the next one
     ///

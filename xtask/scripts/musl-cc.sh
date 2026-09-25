@@ -1,6 +1,6 @@
 #!/bin/sh
 # The C compiler cargo hands to `cc-rs` when building `cortex-abins/` for the guest. Named by
-# `cortex-abins/.cargo/config.toml`, the same way `macos-link.sh` is named as a linker.
+# `cortex-abins/.cargo/config.toml`.
 #
 # It is Apple's own clang: a clang is a cross-compiler for every target LLVM was built with,
 # and the two things it is missing for this one are a target triple and somewhere to find a
@@ -14,9 +14,9 @@ case "$(uname -m)" in
     *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-SYSROOT="$(cd "$(dirname "$0")/.." && pwd)/data/musl-sysroot/$ARCH"
+SYSROOT="$(cd "$(dirname "$0")/../.." && pwd)/data/musl-sysroot/$ARCH"
 if [ ! -e "$SYSROOT/usr/include/stdio.h" ]; then
-    echo "no musl sysroot at $SYSROOT -- run scripts/fetch-musl-sysroot.sh" >&2
+    echo "no musl sysroot at $SYSROOT -- run xtask/scripts/fetch-musl-sysroot.sh" >&2
     exit 1
 fi
 

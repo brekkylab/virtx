@@ -466,8 +466,8 @@ fn told(
 
 /// Cortex's own executables, or `None` for a host that has none.
 ///
-/// `abin/` beside this binary first -- where `cargo xtask build --abin` puts it and
-/// `cargo xtask install --abin` copies it, as part of the same set as the boot and the guest --
+/// `abin/` beside this binary first -- where `cargo xtask build abin` puts it and
+/// `cargo xtask install` copies it, as part of the same set as the boot and the guest --
 /// and then `abin/` under [`home`](crate::home).
 ///
 /// **A host with none is a session with no `/abin`, not a session that fails.** These are

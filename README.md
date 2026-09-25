@@ -34,7 +34,6 @@ brew install libkrunfw
 ```sh
 git submodule update --init
 cargo xtask init                        # patches the submodules (--force resets them first)
-./scripts/fetch-musl-sysroot.sh         # only to build abin
 cargo xtask build host guest            # -> target/release/ (add --gpu to build MoltenVK and
                                         #    virglrenderer first; add abin for /abin)
 cargo xtask install                     # -> ~/.cargo/bin, or --prefix <dir>
@@ -43,9 +42,9 @@ cargo xtask install                     # -> ~/.cargo/bin, or --prefix <dir>
 ## Running
 
 ```sh
-cargo run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
-CORTEX_NET=public cargo run --example run -- alpine:3.21 'apk add curl'
-CORTEX_GPU=1 cargo run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+cargo xtask run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
+CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'apk add curl'
+CORTEX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 ```
 
 One example, because there is one thing to show: a machine made out of the parts
@@ -59,8 +58,8 @@ boots the guest on an overlay of the two. The session is the ext4 file, so the
 second run of the same image sees what the first one did:
 
 ```sh
-cargo run --example run -- alpine:3.21 'echo hi > /root/note'
-cargo run --example run -- alpine:3.21 'cat /root/note'     # hi
+cargo xtask run --example run -- alpine:3.21 'echo hi > /root/note'
+cargo xtask run --example run -- alpine:3.21 'cat /root/note'     # hi
 ```
 
 Deleting `data/sessions/<image>.ext4` is how one starts over. The file is
@@ -69,12 +68,13 @@ sparse — a 2 GiB ceiling costs a couple of megabytes until it is used.
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
 
 Nothing in it is gated by host: `session` attaches the guest's console itself,
-which is the one call that would otherwise differ. The cargo runner is
+which is the one call that would otherwise differ. What running it takes is
 host-specific all the same, and the Windows setup is different throughout; see
 [Windows (WHP)](#windows-whp).
 
-`cargo run` goes through `scripts/macos-run.sh`, registered as the cargo runner
-for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
+`cargo xtask run` and `cargo xtask test` are `cargo run` and `cargo test` with
+that part added: they build through cargo, then prepare each binary before
+running it. On macOS that is two things, both mandatory:
 
 1. Ad-hoc codesigns the binary with `com.apple.security.hypervisor`. No
    developer certificate is needed, but Hypervisor.framework refuses to start
@@ -87,14 +87,13 @@ for `aarch64-apple-darwin`. It does two things that are mandatory on macOS:
    installs stand in for the one `data/` built — silently, since the GPU still
    came up.
 
-Running the built binary directly, without the runner, will fail on both counts
-— with one exception, and it is the one that matters for a console server:
-`cortex-krun-host` is signed as it is *linked*, by `scripts/macos-link.sh`,
-registered as the cargo linker for the same target. A console server is started
-by whoever wants a session — a test, an agent runtime, a CLI — and `cargo run`
+A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does
+neither, and a binary that creates a VM fails on both counts. The one exception is
+the one that matters for a console server: `cargo xtask build host` signs
+`cortex-krun-host` once cargo has built it. A console server is started by
+whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
 is not on that path, so the binary that calls `hv_vm_create` has to come out of
-a plain `cargo build` already entitled. Nothing else linked for this target is
-touched.
+the build already entitled. A plain `cargo build` leaves it unsigned.
 
 ## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
 
@@ -133,7 +132,7 @@ a block root — the existing `KRUN_BLOCK_ROOT_DEVICE` one as much as this — h
 left that mount under no path by the time the workload exits, so the status was
 dropped and the host always saw 0. The init now holds a descriptor on the
 virtiofs root across the pivot and sends the ioctl to that, which is what makes
-`cargo run --example run -- alpine:3.21 'exit 42'` exit 42.
+`cargo xtask run --example run -- alpine:3.21 'exit 42'` exit 42.
 
 The ext4 is formatted on the host, by [`arcbox-ext4`][arcbox]: macOS has no
 `mke2fs`, nor does Windows, so a formatter that is a library rather than a
@@ -224,7 +223,7 @@ a session may write on top of its image (a sparse ceiling, 2 GiB by default), wi
 
 With the current build and an `alpine:edge` guest (Mesa 26.2.3) the device
 reports **1.4.343**, with `VK_KHR_synchronization2` on. The same guest reported
-1.3.0 against krunkit's 0.10.4e (see the runner note above), and this section
+1.3.0 against krunkit's 0.10.4e (see the `DYLD_FALLBACK_LIBRARY_PATH` note above), and this section
 was first written about a 1.2 cap, for the reason below. Which host change
 lifted it has not been pinned down.
 
@@ -422,7 +421,7 @@ applies them to the submodule working trees, and both submodules are marked
 An x86_64 Windows host boots a microVM over the Windows Hypervisor Platform:
 
 ```powershell
-cargo run --example run -- alpine:3.21 'uname -srm'
+cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
 The guest kernel there is `libkrunfw.dll`'s, which is 6.12.109 on x86_64 at the
@@ -533,21 +532,13 @@ git submodule update --init
 sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
 cargo xtask init                        # patches the submodules
 cargo xtask build host --gpu            # builds libepoxy and virglrenderer first
-cargo run --example run -- alpine:3.21 'uname -srm'
+cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
-`cargo run` goes through [`scripts/windows-run.cmd`](scripts/windows-run.cmd),
-registered as the cargo runner for `x86_64-pc-windows-msvc`, which forwards to
-[`scripts/windows-run.ps1`](scripts/windows-run.ps1) beside it. The `.ps1` puts
-`data/krunfw/` on `PATH`, because libkrun resolves the guest kernel with
-`LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly
-fails with `Error: FileNotFound`.
-
-The shim is there because cargo resolves a runner's *program* against the config
-file and leaves its arguments as they were written: a `.ps1` named as an argument
-is looked for in whatever directory the run started from, which for `cargo test`
-is the package's, not the workspace's. A `.cmd` is a program, so cargo hands it
-over absolute, and `%~dp0` finds the script beside it.
+`cargo xtask run` puts `data/krunfw/` on `PATH` -- and `build/epoxy/bin/`, when a
+`gpu` build made one -- because libkrun resolves the guest kernel with
+`LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly, or
+through a plain `cargo run`, fails with `Error: FileNotFound`.
 
 ### `libkrunfw.dll` has to be cross-compiled from Linux
 
@@ -652,21 +643,15 @@ There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-### A guest command is an argument, and arguments do not survive the trip
+### A guest command is an argument
 
-`cargo run --example run -- alpine:3.21 '<script>'` reaches the binary through
-`powershell -File scripts/windows-run.ps1`, and PowerShell's `-File` argument
-parsing does not carry a multi-line shell script intact. Indented lines vanish
-outright — an `if` body or a function body comes out empty, leaving syntax that
-still parses. A double-quoted run of words loses everything after its first
-space. A backslash line continuation loses every line but the first. `!`
-arrives as `'\!'`. None of it is reported.
-
-Short single-line commands are fine, which is what every example in this README
-passes. Anything longer belongs in a file: write the script into a directory the
-guest already mounts and pass `sh /mnt/run.sh`. Write it with LF line endings —
-`Set-Content` gives CRLF, and `sh` takes the carriage return as part of each
-command.
+`cargo xtask run --example run -- alpine:3.21 '<script>'` starts the binary itself,
+with no PowerShell in between. The cargo runner this replaced went through
+`powershell -File`, whose argument parsing mangled a multi-line shell script --
+indented lines vanished, a double-quoted run of words lost everything after its
+first space -- and said nothing. A script kept in a file still has to have LF line
+endings: `Set-Content` gives CRLF, and `sh` takes the carriage return as part of
+each command.
 
 **The blob mapping is what the design rests on.** Guest Vulkan puts host memory
 in the guest's shm window: venus
@@ -910,9 +895,9 @@ that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built 
 and `docread` added to `ABINS` in [`xtask`](xtask/src/main.rs).
 
 ```sh
-./scripts/fetch-musl-sysroot.sh            # once
-cargo xtask build --abin                   # -> target/release/abin, beside the server
-cargo xtask install --abin --prefix <dir>  # -> <dir>/bin/abin
+cargo xtask build abin                     # -> target/release/abin, beside the server;
+                                           #    fetches the musl sysroot the first time
+cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
 ```
 
 Everything this host keeps is under that one root -- `$CORTEX_KRUN_HOME`, or `cortex-krun`
@@ -966,10 +951,11 @@ cortex-abins/               the programs in the guest's /abin -- index and mem, 
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 3rdparty/_patches/           applied to the submodules above by `cargo xtask init`;
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
-scripts/                    build and provisioning helpers, plus the cargo runner and linker,
-                            the musl cc/ar that cortex-abins/ cross-compiles with
-xtask/                      `cargo xtask build` / `install`: the server, the boot, the guest
-                            and abin/ built and placed as one set
+xtask/                      `cargo xtask init` / `build` / `install` / `run` / `test`: the
+                            server, the boot, the guest and abin/ built and placed as one
+                            set; xtask/scripts/ has what it runs -- the GPU libraries'
+                            build, the musl sysroot fetch, and the musl cc/ar that
+                            cortex-abins/ cross-compiles with
 data/                       untracked: musl sysroot, sessions, build outputs
 ```
 
@@ -980,7 +966,7 @@ scripts.
 `cortex-krun` finds the other two by looking beside itself. A plain `cargo build`
 links the server and the boot but not the guest, which is a musl cross-build of its
 own workspace; `cargo xtask install` copies the whole set into `<prefix>/bin`. On macOS
-the boot needs the hypervisor entitlement, and `scripts/macos-link.sh` -- the cargo
-linker for `aarch64-apple-darwin` -- signs it as it is linked, so a plain build is
-enough. `scripts/macos-run.sh` signs whatever `cargo run` was asked for, which is
-what the examples that create a VM themselves need.
+the boot needs the hypervisor entitlement, which `cargo xtask build host` puts on
+after cargo links it -- after rustc's own strip too, which would otherwise rewrite
+the signature. `cargo xtask run` and `cargo xtask test` sign whatever they run, which
+is what the examples and tests that create a VM themselves need.

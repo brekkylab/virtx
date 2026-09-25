@@ -13,9 +13,8 @@
 //!   `com.apple.security.hypervisor` entitlement, and libkrun `dlopen`s libkrunfw, which
 //!   needs library validation off. Both are carried by a code signature, and a signature is
 //!   read at `exec` -- so the process that creates a VM can never be the process that decided
-//!   to. The signature goes on where the boot is linked: `scripts/macos-link.sh` is the cargo
-//!   linker for this target and signs that one binary, so a plain `cargo build` produces an
-//!   entitled boot rather than one that only works under `cargo run`.
+//!   to. `cargo xtask build host` signs the boot once cargo has built it; a plain
+//!   `cargo build` leaves it unsigned.
 //! - **The boot does not come back.** Entering the VMM hands it the process, and the VMM
 //!   exits when the guest goes down. A server that entered one would stop being able to
 //!   answer anything.
@@ -31,7 +30,7 @@
 //! `CORTEX_KRUN_BOOT_BIN` the boot to spawn.
 //!
 //! A binary named by either is taken as it is. The boot's entitlement is the case that shows
-//! what that costs -- `scripts/macos-link.sh` signs what it links and nothing else, so a boot
+//! what that costs -- `cargo xtask build host` signs the boot it builds and nothing else, so a boot
 //! built elsewhere carries whatever signature its own build gave it, and one without the
 //! entitlement fails at `hv_vm_create` rather than here.
 

@@ -51,7 +51,7 @@
 //!
 //! # What it assembles, and what assembles it
 //!
-//! [`Session`], which is the same machine `cargo run --example run` boots: the image's disk
+//! [`Session`], which is the same machine `cargo xtask run --example run` boots: the image's disk
 //! as the overlay's lower, the session's ext4 as its upper, the stacking done in the guest by
 //! libkrun's own init. Three things are added to it, and they are the whole of what a console
 //! session is:

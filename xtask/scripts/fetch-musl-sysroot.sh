@@ -18,7 +18,7 @@ case "$(uname -m)" in
     *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="$ROOT/data/musl-sysroot/$ARCH"
 REPO="https://dl-cdn.alpinelinux.org/alpine/$BRANCH/main/$ARCH"
 

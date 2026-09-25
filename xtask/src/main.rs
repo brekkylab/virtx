@@ -13,11 +13,15 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <host|guest|abin>... [--gpu] [--debug]
        cargo xtask download <guest|abin>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
+       cargo xtask run      <cargo run args>... [-- <program args>...]
+       cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
   init      initializes the repository, ready to build
   build     builds the components from source
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
+  run       cargo run, with what a binary needs to boot a VM on this machine
+  test      cargo test, the same way
 
   host      the console server and the VM process, for this machine
   guest     the program that runs inside the VM
@@ -115,6 +119,8 @@ fn main() -> anyhow::Result<()> {
             );
             install(&options)
         }
+        Some("run") => run_target(args.collect(), false),
+        Some("test") => run_target(args.collect(), true),
         Some("-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -318,7 +324,145 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     if !options.debug {
         cargo.arg("--release");
     }
-    run(cargo, "host")
+    run(cargo, "host")?;
+
+    sign(&options.out().join(format!("cortex-krun-host{}", env::consts::EXE_SUFFIX)))
+}
+
+fn sign(exe: &Path) -> anyhow::Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let out = Command::new("codesign")
+        .arg("--entitlements")
+        .arg(root_path().join("xtask/hvf-entitlements.plist"))
+        .args(["--force", "-s", "-"])
+        .arg(exe)
+        .output()
+        .context("running codesign")?;
+    ensure!(
+        out.status.success(),
+        "codesign of {} failed -- without the hypervisor entitlement it cannot create a VM\n{}",
+        exe.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(())
+}
+
+fn runtime_env(command: &mut Command) -> anyhow::Result<()> {
+    if cfg!(target_os = "macos") {
+        let brew = Command::new("brew").arg("--prefix").output();
+        if let Ok(brew) = brew
+            && brew.status.success()
+        {
+            let mut fallback = OsString::from(String::from_utf8_lossy(&brew.stdout).trim());
+            fallback.push("/lib:");
+            match env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
+                Some(existing) => fallback.push(existing),
+                None => {
+                    let home = env::var_os("HOME").unwrap_or_default();
+                    fallback.push(home);
+                    fallback.push("/lib:/usr/local/lib:/usr/lib");
+                }
+            }
+            command.env("DYLD_FALLBACK_LIBRARY_PATH", fallback);
+        }
+    } else if cfg!(windows) {
+        let root = root_path();
+        let krunfw = root.join("data/krunfw");
+        ensure!(
+            krunfw.join("libkrunfw.dll").is_file(),
+            "no libkrunfw.dll in {}; run scripts/build-libkrunfw-windows.sh first",
+            krunfw.display()
+        );
+        let mut dirs = vec![krunfw];
+        let epoxy = root.join("build/epoxy/bin");
+        if epoxy.is_dir() {
+            dirs.push(epoxy);
+        }
+        dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        command.env("PATH", env::join_paths(dirs)?);
+    }
+    Ok(())
+}
+
+fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
+    let split = args.iter().position(|a| a == "--");
+    let (cargo_args, program_args) = match split {
+        Some(at) => (&args[..at], &args[at + 1..]),
+        None => (&args[..], &[][..]),
+    };
+
+    let mut cargo = cargo();
+    if test {
+        cargo.args(["test", "--no-run"]);
+    } else {
+        cargo.arg("build");
+    }
+    let out = cargo
+        .args(cargo_args)
+        .arg("--message-format=json-render-diagnostics")
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .context("running cargo")?;
+    ensure!(out.status.success(), "cargo {} failed", if test { "test" } else { "build" });
+
+    let mut targets: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "compiler-artifact" {
+            continue;
+        }
+        let Some(exe) = message["executable"].as_str() else {
+            continue;
+        };
+        let is_test = message["profile"]["test"].as_bool().unwrap_or(false);
+        let kinds = message["target"]["kind"].as_array().cloned().unwrap_or_default();
+        let runnable = kinds.iter().any(|k| k == "bin" || k == "example");
+        if (test && is_test) || (!test && !is_test && runnable) {
+            let manifest_dir = message["manifest_path"]
+                .as_str()
+                .and_then(|m| Path::new(m).parent())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(root_path);
+            targets.push((exe.into(), manifest_dir));
+        }
+    }
+
+    if !test {
+        ensure!(
+            targets.len() == 1,
+            "cargo built {} runnable targets; name one with --bin, --example or -p",
+            targets.len()
+        );
+    }
+
+    let mut failed = 0;
+    for (exe, manifest_dir) in &targets {
+        sign(exe)?;
+        let mut command = Command::new(exe);
+        command.args(program_args);
+        if test {
+            eprintln!("     Running {}", exe.display());
+            command
+                .current_dir(manifest_dir)
+                .env("CARGO_MANIFEST_DIR", manifest_dir);
+        }
+        runtime_env(&mut command)?;
+        let status = command
+            .status()
+            .with_context(|| format!("running {}", exe.display()))?;
+        if !test {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        if !status.success() {
+            failed += 1;
+        }
+    }
+    ensure!(failed == 0, "{failed} test binaries failed");
+    Ok(())
 }
 
 fn build_guest(options: &Options) -> anyhow::Result<()> {
@@ -342,11 +486,15 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
     let arch = target.split('-').next().unwrap_or_default();
-    ensure!(
-        root.join(format!("data/musl-sysroot/{arch}/usr/include/stdio.h"))
-            .exists(),
-        "no musl sysroot for abin -- run scripts/fetch-musl-sysroot.sh"
-    );
+    let sysroot = root.join(format!("data/musl-sysroot/{arch}/usr/include/stdio.h"));
+    if !sysroot.exists() {
+        let status = Command::new("sh")
+            .arg(root.join("xtask/scripts/fetch-musl-sysroot.sh"))
+            .status()
+            .context("running fetch-musl-sysroot.sh")?;
+        ensure!(status.success(), "fetching the musl sysroot failed");
+        ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
+    }
 
     let crate_dir = root.join("cortex-abins");
     let mut cargo = cross_cargo(&crate_dir);

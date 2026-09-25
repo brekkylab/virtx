@@ -65,9 +65,3 @@ arcbox-ext4 = { path = "3rdparty/arcbox-ext4" }
 rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
 magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }
 
-# The boot half is stripped by `scripts/macos-link.sh`, not by rustc. rustc strips a
-# release binary *after* the linker returns, and on macOS that rewrites the signature
-# the script just applied -- dropping the hypervisor entitlement with it. Stripping
-# inside the script, before `codesign`, keeps the one order that works.
-[profile.release.package.cortex-krun-host]
-strip = "none"

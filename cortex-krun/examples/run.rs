@@ -1,50 +1,49 @@
 //! Run a command in an OCI image, on a writable layer of its own.
 //!
-//!   cargo run --example run
-//!   cargo run --example run -- alpine:3.21 'uname -srm'
+//!   cargo xtask run --example run
+//!   cargo xtask run --example run -- alpine:3.21 'uname -srm'
 //!
 //! The image is taken from the cache, and pulled only if it is not there -- so this runs
 //! an image a registry never served just as well as one it did:
 //!
-//!   cargo run --example run -- localhost/cortex-krun-build:<digest> 'jq --version'
+//!   cargo xtask run --example run -- localhost/cortex-krun-build:<digest> 'jq --version'
 //!
 //! The first run of something not yet here pulls it and stitches it into a disk; later
 //! ones find both in the cache. The session's writes go to `data/sessions/<image>.ext4`,
 //! so a second run sees what the first one did:
 //!
-//!   cargo run --example run -- alpine:3.21 'echo hello > /root/note'
-//!   cargo run --example run -- alpine:3.21 'cat /root/note'
+//!   cargo xtask run --example run -- alpine:3.21 'echo hello > /root/note'
+//!   cargo xtask run --example run -- alpine:3.21 'cat /root/note'
 //!
 //! Deleting that file is how the session starts over.
 //!
 //! A third argument is a host directory the guest sees at `/mnt`, read-only:
 //!
-//!   cargo run --example run -- alpine:3.21 'ls /mnt' ./scripts
+//!   cargo xtask run --example run -- alpine:3.21 'ls /mnt' ./scripts
 //!
 //! A session reaches nothing by default. `CORTEX_NET` is how much of the network it
 //! gets -- `none`, `host`, `public` or `full` -- and the guest is configured over DHCP
 //! before the command runs, so an image needs nothing in it:
 //!
-//!   CORTEX_NET=public cargo run --example run -- alpine:3.21 'wget -qO- http://example.com'
-//!   CORTEX_NET=public cargo run --example run -- alpine:3.21 'apk add curl'
+//!   CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'wget -qO- http://example.com'
+//!   CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'apk add curl'
 //!
 //! `CORTEX_HOST_PORTS` is a comma-separated grant of TCP ports on this machine, reached
 //! at the gateway the guest's default route already names:
 //!
-//!   CORTEX_HOST_PORTS=8080 CORTEX_NET=host cargo run --example run -- \
+//!   CORTEX_HOST_PORTS=8080 CORTEX_NET=host cargo xtask run --example run -- \
 //!       alpine:3.21 'wget -qO- http://10.0.2.1:8080'
 //!
 //! `CORTEX_GPU=1` asks for guest Vulkan, which needs the `gpu` feature to be anything
 //! more than a flag and an image carrying Mesa's venus driver:
 //!
-//!   CORTEX_GPU=1 cargo run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+//!   CORTEX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 //!
 //! Nothing here is host-specific: [`session`](cortex_krun::session) attaches the guest's
-//! console itself, which is the one call that would otherwise differ between them. The cargo
-//! runner is, though, and both are registered in `.cargo/config.toml`: on macOS
-//! `scripts/macos-run.sh` ad-hoc signs the binary with
-//! `com.apple.security.hypervisor`, which Hypervisor.framework will not start a VM
-//! without, and on Windows `scripts/windows-run.ps1` puts `libkrunfw.dll` on `PATH`.
+//! console itself, which is the one call that would otherwise differ between them. Running
+//! it is, though, which is why it goes through `cargo xtask run`: on macOS that ad-hoc signs
+//! the binary with `com.apple.security.hypervisor`, which Hypervisor.framework will not start
+//! a VM without, and on Windows it puts `libkrunfw.dll` on `PATH`.
 //!
 //! **This boots a machine directly, which is not what a session does.** A console client
 //! spawns `cortex-krun`, which spawns the signed boot beside it; what this example shows is

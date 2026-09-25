@@ -19,7 +19,7 @@ case "$(uname -m)" in
 esac
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DEST="$ROOT/data/musl-sysroot/$ARCH"
+DEST="$ROOT/build/musl-sysroot/$ARCH"
 REPO="https://dl-cdn.alpinelinux.org/alpine/$BRANCH/main/$ARCH"
 
 if [ -e "$DEST/usr/include/stdio.h" ]; then

@@ -14,7 +14,7 @@ case "$(uname -m)" in
     *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-SYSROOT="$(cd "$(dirname "$0")/../.." && pwd)/data/musl-sysroot/$ARCH"
+SYSROOT="$(cd "$(dirname "$0")/../.." && pwd)/build/musl-sysroot/$ARCH"
 if [ ! -e "$SYSROOT/usr/include/stdio.h" ]; then
     echo "no musl sysroot at $SYSROOT -- run xtask/scripts/fetch-musl-sysroot.sh" >&2
     exit 1

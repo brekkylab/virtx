@@ -503,9 +503,9 @@ cannot be re-enabled without reinstalling Windows.
 
 ```powershell
 git submodule update --init
-sh scripts/apply-patches.sh             # Git Bash; patches the submodules
 sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
-.\scripts\build-virglrenderer-windows.ps1   # only for the `gpu` feature
+.\scripts\init.ps1                      # patches the submodules, and builds
+                                        # libepoxy and virglrenderer for `gpu`
 cargo run --example run -- alpine:3.21 'uname -srm'
 ```
 
@@ -674,10 +674,10 @@ The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 ### virglrenderer on Windows
 
 ```powershell
-.\scripts\build-virglrenderer-windows.ps1
+.\scripts\init.ps1
 ```
 
-produces `data/virglrenderer/bin/virglrenderer-1.dll`, linked against
+produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
 `vulkan-1.dll` and `epoxy-0.dll`, exporting the 48 `virgl_renderer_*` entry
 points — `virgl_renderer_resource_get_map_ptr` among them, which is the one the
 blob mapping above is built on.
@@ -719,11 +719,13 @@ venv never creates that name, so the script makes one.
 
 ### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 
-**Rebased onto `8167744` without a Windows host to build it on**: it applies,
-and its non-Windows half builds on macOS in both `render-server-mode=none` and
-`thread`, but the `_WIN32` code has not been compiled against the new base.
-Expect the first Windows build to need fixes, most likely in files upstream
-added since 1.3.0 (`virgl_iov.c`, `vkr_host_copy.c`, `vkr_descriptor_heap.c`).
+Rebased onto `8167744`, and since built on a Windows host with no further
+fixes: `scripts/init.ps1` compiles and installs it, a `--features gpu` build
+links against it, and the guest enumerates the device — `/dev/dri/card0`,
+`renderD128`, `card0-Virtual-1`. What that does not say is that anything has
+been *rendered* through it there; the image has to carry the guest half for
+that (`apk add mesa-vulkan-virtio vulkan-loader`). Its non-Windows half still
+builds on macOS in both `render-server-mode=none` and `thread`.
 
 32 files. Most of it is the POSIX surface venus and vrend assume and Windows
 does not have — `unistd.h`, `sys/mman.h`, `dlfcn.h`, `sys/resource.h`,

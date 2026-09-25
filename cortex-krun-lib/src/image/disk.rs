@@ -236,6 +236,11 @@ mod tests {
 
     /// A line break is the quote's twin: one ends the name early, the other ends the
     /// extent and begins one nobody asked for.
+    ///
+    /// Unix only, because the name this refuses is one Windows has no way to hand it:
+    /// a quote and a line break are both illegal in an NTFS name, so the filesystem
+    /// turns the file away before a descriptor could ever spell it.
+    #[cfg(unix)]
     #[test]
     fn a_name_that_would_forge_an_extent_line_is_refused() {
         let scratch = Scratch::new("forged");

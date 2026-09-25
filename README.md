@@ -535,11 +535,18 @@ sh scripts/build-libkrunfw-windows.sh   # guest kernel -> data/krunfw/
 cargo run --example run -- alpine:3.21 'uname -srm'
 ```
 
-`cargo run` goes through [`scripts/windows-run.ps1`](scripts/windows-run.ps1),
-registered as the cargo runner for `x86_64-pc-windows-msvc`. It puts
+`cargo run` goes through [`scripts/windows-run.cmd`](scripts/windows-run.cmd),
+registered as the cargo runner for `x86_64-pc-windows-msvc`, which forwards to
+[`scripts/windows-run.ps1`](scripts/windows-run.ps1) beside it. The `.ps1` puts
 `data/krunfw/` on `PATH`, because libkrun resolves the guest kernel with
 `LoadLibrary("libkrunfw.dll")` by leaf name. Running the built binary directly
 fails with `Error: FileNotFound`.
+
+The shim is there because cargo resolves a runner's *program* against the config
+file and leaves its arguments as they were written: a `.ps1` named as an argument
+is looked for in whatever directory the run started from, which for `cargo test`
+is the package's, not the workspace's. A `.cmd` is a program, so cargo hands it
+over absolute, and `%~dp0` finds the script beside it.
 
 ### `libkrunfw.dll` has to be cross-compiled from Linux
 
@@ -767,6 +774,31 @@ it the way it did: `WaitForSingleObject` on a file handle reports that an
 waiting on one says nothing about whether anything arrived. A pipe is polled, with
 the stop event's own timed wait as the pause between two asks; a console handle is
 a synchronization object and is still waited on as before.
+
+### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-net.patch`
+
+One word, and without it a session with a network never boots at all.
+
+`NetDevice::new_unixstream_handle` is the Windows builder, and it takes its
+`OwnedHandle` by value — so the socket is the caller's to give away and the
+builder's to keep. It then read the number out with `as_raw_handle`, which
+*borrows*, and let the `OwnedHandle` fall out of scope at the end of the
+function: `CloseHandle` on the socket the backend had just been handed the
+number of. The `OwnedFd` builders beside it use `into_raw_fd`, which is the
+contract a caller is written against, and
+[`wire/windows.rs`](cortex-krun-lib/src/session/net/wire/windows.rs) says as
+much in a comment — "ownership goes with it: nothing here closes this end
+again."
+
+Nothing fails where the mistake is. The device is built, the machine boots, and
+the guest driver gets as far as activating it — by which time the handle is
+closed, or reused by something that is not a socket, and `ioctlsocket(FIONBIO)`
+answers `WSAEOPNOTSUPP`. That becomes `BadActivate`, which virtio's MMIO write
+path meets with an `.expect` inside an `extern "C"` callback, so the vcpu thread
+takes a panic it cannot unwind out of and the process aborts —
+`STATUS_STACK_BUFFER_OVERRUN`, a backtrace through `WHvEmulatorTryMmioEmulation`,
+and nothing naming the network. The `error!` that does name it is only reachable
+with `KRUN_LOG` set, which is why the `run` example now installs a logger.
 
 ### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
 

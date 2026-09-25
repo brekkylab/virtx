@@ -1,10 +1,12 @@
 //! The wire on a host with no `socketpair`: a connected pair on loopback, and a length in
 //! front of every frame.
 //!
-//! **Not exercised.** Windows has no hypervisor this tree can test on from anywhere else,
-//! so what is here is written from libkrun's own Windows backend and has never been run.
-//! It is a starting point for someone sitting at such a machine, not a working feature,
-//! and it says so rather than pretending otherwise.
+//! **Run once, on one machine.** Written from libkrun's own Windows backend rather than
+//! against it, and first exercised on an x86_64 Windows host: a guest takes its address
+//! over DHCP and reaches the public internet. What that first run turned up was not here
+//! but in libkrun -- its Windows builder closed the socket it had been given -- and is
+//! carried as `libkrun-85bed71-windows-net.patch`. Nothing beyond one host and one guest
+//! has been tried, so treat what follows as described rather than as proven.
 //!
 //! # Why a pair on loopback and not AF_UNIX
 //!

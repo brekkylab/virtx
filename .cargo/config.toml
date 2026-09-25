@@ -5,14 +5,7 @@ linker = "scripts/macos-link.sh"
 runner = "scripts/macos-run.sh"
 
 [target.x86_64-pc-windows-msvc]
-runner = [
-    "powershell",
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    "scripts/windows-run.ps1",
-]
+runner = "scripts/windows-run.cmd"
 
 [env]
 # virglrenderer built by scripts/build-virglrenderer.sh, needed by the `gpu`

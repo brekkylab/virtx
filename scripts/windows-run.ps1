@@ -1,4 +1,5 @@
-# Cargo runner for x86_64-pc-windows-msvc, registered in .cargo/config.toml.
+# Cargo runner for x86_64-pc-windows-msvc, reached through scripts/windows-run.cmd,
+# which is what .cargo/config.toml registers.
 #
 # It does the one thing that is mandatory on Windows: puts `data/krunfw/` on
 # PATH. libkrun resolves the guest kernel with `LoadLibrary("libkrunfw.dll")`,

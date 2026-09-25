@@ -57,6 +57,10 @@ use cortex_krun::image;
 use cortex_krun::session::{Ext4, Mount, Network, Session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The machine is entered on this thread, so libkrun logs here rather than in a spawned
+    // host: `KRUN_LOG=debug` is what makes a device that refuses to activate say why.
+    cortex_krun::session::log_from_env();
+
     let mut args = std::env::args().skip(1);
     let reference = args.next().unwrap_or_else(|| "alpine:latest".to_string());
     let command = args.next();

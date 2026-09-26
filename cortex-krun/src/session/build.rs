@@ -46,6 +46,10 @@ use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
 use cortex_krun::session::{Ext4, Network};
 use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
 
+use std::io::{Read as _, Seek as _, Write as _};
+use std::path::Path;
+use std::time::Duration;
+
 use super::machine::{Machine, Shape};
 use super::{SYNC, coded, pulled};
 
@@ -56,6 +60,8 @@ const RECIPE: &str = "cortex-krun/build/1\n";
 /// Where a built image is filed. Not a registry anybody can reach: an image made here has
 /// no home but this cache, and a name that looked pullable would be a lie.
 const REPOSITORY: &str = "localhost/cortex-krun-build";
+
+const GUEST_CONSOLE: &str = "/dev/console";
 
 /// Whether `name` is one this module filed a build under, rather than one a client chose.
 pub fn internal(name: &str) -> bool {
@@ -165,16 +171,23 @@ async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> a
         other => anyhow::bail!("the guest answered an init with {other:?}"),
     }
 
+    let mut console = Console::open(&machine.console())?;
+    console.skip()?;
+
     for (index, line) in script.iter().enumerate() {
-        let answered = machine
-            .call(Call::Exec(ExecCall {
+        console.drain();
+        eprintln!("step {}/{}: {line}", index + 1, script.len());
+
+        let answered = console
+            .during(machine.call(Call::Exec(ExecCall {
                 // Through `sh`, which is what a `RUN` is declared to be -- see the
                 // protocol's own note on the step. No timeout: a build has no deadline
                 // this end could invent that would not be wrong for somebody.
-                cmd: vec!["sh".into(), "-c".into(), line.clone()],
+                cmd: vec!["sh".into(), "-c".into(), shown(line, GUEST_CONSOLE)],
                 timeout_ms: None,
-            }))
+            })))
             .await?;
+        console.drain();
 
         match answered {
             Response::Exec(done) if done.code == 0 => {}
@@ -219,6 +232,44 @@ async fn run(base: &str, upper: &Ext4, script: &[String], network: Network) -> a
         Response::Error(e) => anyhow::bail!("flushing the build's disk: {}", e.message),
         other => anyhow::bail!("the guest answered a flush with {other:?}"),
     }
+}
+
+struct Console(std::fs::File);
+
+impl Console {
+    fn open(path: &Path) -> anyhow::Result<Console> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))?;
+        Ok(Console(file))
+    }
+
+    fn skip(&mut self) -> std::io::Result<()> {
+        self.0.seek(std::io::SeekFrom::End(0)).map(|_| ())
+    }
+
+    fn drain(&mut self) {
+        let mut read = Vec::new();
+        if self.0.read_to_end(&mut read).is_ok() && !read.is_empty() {
+            let _ = std::io::stderr().write_all(&read);
+        }
+    }
+
+    async fn during<T>(&mut self, work: impl std::future::Future<Output = T>) -> T {
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                done = &mut work => return done,
+                _ = tick.tick() => self.drain(),
+            }
+        }
+    }
+}
+
+fn shown(line: &str, console: &str) -> String {
+    format!(
+        "rc=$( {{ {{ ( {line}\n) 3>&-; echo $? >&3; }} 2>&1 >>{console} | tee -a {console} >&2; }} 3>&1 ); exit ${{rc:-1}}"
+    )
 }
 
 /// How far a build reaches for a session that asked for `session`: the public internet at
@@ -467,6 +518,42 @@ mod tests {
         assert_eq!(reach(Network::HostOnly), Network::Public);
         assert_eq!(reach(Network::Public), Network::Public);
         assert_eq!(reach(Network::Full), Network::Full);
+    }
+
+    fn ran(line: &str) -> (i32, String, String) {
+        let dir = std::env::temp_dir().join(format!("cortex-krun-shown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let console = dir.join(format!("{}.log", line.len()));
+        std::fs::write(&console, b"").unwrap();
+        let out = std::process::Command::new("sh")
+            .args(["-c", &shown(line, console.to_str().unwrap())])
+            .output()
+            .unwrap();
+        let shown = std::fs::read_to_string(&console).unwrap();
+        let _ = std::fs::remove_file(&console);
+        (
+            out.status.code().unwrap(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            shown,
+        )
+    }
+
+    #[test]
+    fn a_step_is_shown_and_keeps_its_code_and_stderr() {
+        let (code, stderr, shown) = ran("echo out; echo err >&2; exit 7");
+        assert_eq!(code, 7);
+        assert_eq!(stderr, "err\n");
+        assert!(
+            shown.contains("out\n") && shown.contains("err\n"),
+            "{shown:?}"
+        );
+
+        let (code, _, shown) = ran("echo fine # a trailing comment");
+        assert_eq!(code, 0);
+        assert_eq!(shown, "fine\n");
+
+        let (code, _, _) = ran("false");
+        assert_eq!(code, 1);
     }
 
     /// Refused where it is read, and by a code that says the image is what has to change.

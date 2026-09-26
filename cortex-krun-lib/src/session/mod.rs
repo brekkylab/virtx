@@ -114,10 +114,43 @@ pub fn log_from_env() {
         Ok("info") => LogLevel::Info,
         Ok("debug") => LogLevel::Debug,
         Ok("trace") => LogLevel::Trace,
-        _ => return,
+        _ => {
+            if log::set_logger(&GuestConsole).is_ok() {
+                log::set_max_level(log::LevelFilter::Error);
+            }
+            return;
+        }
     };
     // A second call finds a logger in place, which is all it would have set up.
     let _ = krun::init_log(None, level, LogStyle::Auto, LogOptions::NO_ENV);
+}
+
+struct GuestConsole;
+
+impl GuestConsole {
+    const TARGET: &'static str = "init_or_kernel";
+    const UNTERMINATED: &'static str = "[missing newline]";
+}
+
+impl log::Log for GuestConsole {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.target() == GuestConsole::TARGET
+    }
+
+    fn log(&self, record: &log::Record) {
+        use std::io::Write as _;
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let said = record.args().to_string();
+        let mut stderr = std::io::stderr().lock();
+        let _ = match said.strip_prefix(GuestConsole::UNTERMINATED) {
+            Some(part) => stderr.write_all(part.as_bytes()),
+            None => writeln!(stderr, "{}", said.strip_suffix('\r').unwrap_or(&said)),
+        };
+    }
+
+    fn flush(&self) {}
 }
 
 #[derive(Debug, thiserror::Error)]

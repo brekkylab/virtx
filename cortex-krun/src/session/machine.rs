@@ -382,6 +382,10 @@ impl Machine {
         })
     }
 
+    pub fn console(&self) -> PathBuf {
+        self.dir.join("console.log")
+    }
+
     /// One call out and its answer back.
     ///
     /// There is one outstanding at a time, so an answer carrying a different id is a peer

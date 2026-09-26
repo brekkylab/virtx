@@ -13,24 +13,17 @@ const INDEX: &str = "images.json";
 const LOCK: &str = "images.lock";
 
 /// Where to keep images when the caller does not say: `images` under
-/// [`home`](crate::home), which `CORTEX_KRUN_HOME` answers for.
+/// [`cortex::cache_root`], which `CORTEX_HOME` answers for.
 ///
 /// `CORTEX_IMAGE_CACHE_ROOT` still overrides it, being the narrower of the two: somebody
 /// keeping images on another disk is saying something about images and not about everything
 /// this host keeps.
-///
-/// A host with no home directory to speak of gets a temporary one rather than a failure.
-/// What is here can be downloaded again, so the cost of falling back is a re-pull -- unlike
-/// a session's own disk, which is why [`home`](crate::home) leaves the answer to its
-/// callers.
 fn cache_root() -> PathBuf {
     if let Some(named) = std::env::var_os("CORTEX_IMAGE_CACHE_ROOT") {
         return PathBuf::from(named);
     }
 
-    crate::home()
-        .unwrap_or_else(|| std::env::temp_dir().join("cortex-krun"))
-        .join("images")
+    cortex::cache_root().join("images")
 }
 
 /// Local cache for the VM images downloaded to this machine.

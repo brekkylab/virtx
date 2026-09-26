@@ -32,8 +32,9 @@ usage: cargo xtask init     [--force]
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
-  --prefix <dir>  where to install, or upload from (default: $CORTEX_KRUN_HOME, else cortex
-                  under $XDG_CACHE_HOME or ~/.cache, %LOCALAPPDATA% on Windows)
+  --prefix <dir>  where to install, or upload from (default: $CORTEX_HOME, else cortex
+                  under ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows,
+                  $XDG_CACHE_HOME or ~/.cache otherwise)
   --no-gpu        builds host without GPU support, skipping the GPU libraries it would link
   --debug         builds unoptimized (the guest is always optimized)";
 
@@ -585,7 +586,7 @@ fn download(options: &Options) -> anyhow::Result<()> {
 fn upload(options: &Options) -> anyhow::Result<()> {
     let prefix = match &options.prefix {
         Some(prefix) => prefix.clone(),
-        None => default_prefix()?,
+        None => cortex::cache_root(),
     };
     let _bin = prefix.join("bin");
     todo!("upload")
@@ -595,7 +596,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let built = options.out();
     let prefix = match &options.prefix {
         Some(prefix) => prefix.clone(),
-        None => default_prefix()?,
+        None => cortex::cache_root(),
     };
     let bin = prefix.join("bin");
 
@@ -637,26 +638,6 @@ fn install(options: &Options) -> anyhow::Result<()> {
 
     eprintln!("xtask: installed to {}", bin.display());
     Ok(())
-}
-
-fn default_prefix() -> anyhow::Result<PathBuf> {
-    if let Some(named) = env::var_os("CORTEX_KRUN_HOME") {
-        return Ok(named.into());
-    }
-
-    #[cfg(windows)]
-    let base = env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| {
-        env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("AppData").join("Local"))
-    });
-
-    #[cfg(not(windows))]
-    let base = env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
-
-    Ok(base
-        .context("no cache directory to install into; pass --prefix")?
-        .join("cortex"))
 }
 
 fn place(from: &Path, to: &Path) -> anyhow::Result<()> {

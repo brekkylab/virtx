@@ -19,6 +19,8 @@ path = "src/lib.rs"
 gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]
+cortex = { workspace = true }
+
 # libkrun 2.0-dev, pinned via the `3rdparty/libkrun` submodule.
 # The package is named `libkrun`; its lib target is `krun`.
 # `blk` is off by default in libkrun; without it there is no `BlockDevice` and

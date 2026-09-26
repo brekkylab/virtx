@@ -21,9 +21,9 @@ use clap::{Parser, Subcommand};
 /// A failure of ours, not a command's -- the shell's code for "found it, could not run it".
 const NOT_EXECUTABLE: u8 = 126;
 
-/// Everything this server keeps on disk, under one root -- `$CORTEX_KRUN_HOME`, or
-/// `cortex-krun` under the user's cache directory. The rule is
-/// [`cortex_krun::home`]'s, so that this and the images below it are one answer to where
+/// Everything this server keeps on disk, under one root -- `$CORTEX_HOME`, or
+/// `cortex` under the user's cache directory. The rule is
+/// [`cortex::cache_root`]'s, so that this and the images below it are one answer to where
 /// this host keeps things rather than two.
 ///
 /// ```text
@@ -57,7 +57,7 @@ const NOT_EXECUTABLE: u8 = 126;
 /// images: `session.ext4` is what a session wrote, and a server that put it somewhere the
 /// machine may sweep would be losing it rather than saying it had nowhere to put it.
 pub(crate) fn home() -> PathBuf {
-    cortex_krun::home().expect("neither CORTEX_KRUN_HOME nor a cache directory is to be had")
+    cortex::cache_root()
 }
 
 #[derive(Parser)]

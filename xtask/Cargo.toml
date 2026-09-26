@@ -8,4 +8,5 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+cortex = { workspace = true }
 serde_json = "1"

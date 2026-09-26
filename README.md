@@ -1035,11 +1035,11 @@ cargo xtask build abin                     # -> target/release/abin, beside the 
 cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
 ```
 
-Everything this host keeps is under that one root -- `$CORTEX_KRUN_HOME`, or `cortex-krun`
-under the user's cache directory (`XDG_CACHE_HOME`, `%LOCALAPPDATA%` on Windows, `~/.cache`
-otherwise): `abin/` here, `images/` that every tool in this repository pulls into, and
-`session/{pid}/` while a server is up. One rule, in `cortex_krun::home`, because a host has
-one answer to where its things go. `CORTEX_IMAGE_CACHE_ROOT` still moves the images out from
+Everything this host keeps is under that one root -- `$CORTEX_HOME`, or `cortex` under the
+user's cache directory (`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows,
+`XDG_CACHE_HOME` or `~/.cache` otherwise): `abin/` here, `images/` that every tool in this
+repository pulls into, and `session/{pid}/` while a server is up. One rule, in
+`cortex::cache_root`, because a host has one answer to where its things go. `CORTEX_IMAGE_CACHE_ROOT` still moves the images out from
 under it on their own, being the narrower of the two.
 
 What each program is travels with it: `cortex-abins/{program}/SKILLS.md` is installed at

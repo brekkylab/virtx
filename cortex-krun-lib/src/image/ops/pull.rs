@@ -19,7 +19,7 @@ use crate::image::{
 ///
 /// `None` for either side takes the default: a [`Registry`] that reads what anybody can
 /// read, and the [`Cache`] at `CORTEX_IMAGE_CACHE_ROOT`, or `images` under
-/// [`home`](crate::home) when that is unset. Name one to pull from a private repository, or to keep the image
+/// [`cortex::cache_root`] when that is unset. Name one to pull from a private repository, or to keep the image
 /// somewhere of your own.
 ///
 /// A layer is held whole in memory only for as long as it takes to uncompress it,

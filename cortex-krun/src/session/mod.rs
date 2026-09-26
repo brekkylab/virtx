@@ -2,6 +2,7 @@
 
 mod build;
 mod halves;
+mod images;
 mod machine;
 
 use std::future::Future;
@@ -9,10 +10,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use cortex::console::stdio::StdioServer;
-use cortex::console::{
+use cortex::protocol::stdio::StdioServer;
+use cortex::protocol::{
     Call, Error, ExecCall, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec, Notification,
-    Response, Server, SnapshotResp,
+    PROTOCOL_VERSION, Response, Server, SnapshotResp, VersionResp,
 };
 use cortex_krun::session::{Ext4, Network};
 use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
@@ -48,6 +49,9 @@ struct Session {
     /// write, and a write lands on the upper -- so without these a snapshot would claim
     /// directories nobody asked for. See [`Ext4::to_blob`].
     skip: Vec<String>,
+    /// The image `init` built for this session, removed when the session is dropped.
+    /// After the machine, so that nothing is still booted on it.
+    _built: Option<images::Built>,
 }
 
 /// Answer a console session on stdin and stdout, until the client ends it.
@@ -68,6 +72,49 @@ pub async fn run() -> anyhow::Result<()> {
 
     while let Some(message) = server.recv().await? {
         match message {
+            Message::Request {
+                id,
+                call: Call::Version(_),
+            } => {
+                let answered = Response::Version(VersionResp {
+                    version: PROTOCOL_VERSION.into(),
+                });
+                server.respond(id, answered).await?;
+            }
+
+            Message::Request {
+                id,
+                call: Call::BuildImage(call),
+            } => {
+                let answered = match images::build_image(call).await {
+                    Ok(built) => Response::BuildImage(built),
+                    Err(e) => Response::Error(refused(&e)),
+                };
+                server.respond(id, answered).await?;
+            }
+
+            Message::Request {
+                id,
+                call: Call::ListImages(_),
+            } => {
+                let answered = match images::list_images() {
+                    Ok(listed) => Response::ListImages(listed),
+                    Err(e) => Response::Error(refused(&e)),
+                };
+                server.respond(id, answered).await?;
+            }
+
+            Message::Request {
+                id,
+                call: Call::RemoveImage(call),
+            } => {
+                let answered = match images::remove_image(call) {
+                    Ok(removed) => Response::RemoveImage(removed),
+                    Err(e) => Response::Error(refused(&e)),
+                };
+                server.respond(id, answered).await?;
+            }
+
             Message::Request {
                 id,
                 call: Call::Init(_),
@@ -171,6 +218,7 @@ pub async fn run() -> anyhow::Result<()> {
     // any way that runs this leaves nothing behind; one killed outright is the next server's
     // sweep to reclaim.
     drop(machine);
+    drop(session);
     let _ = std::fs::remove_dir_all(sessions().join(std::process::id().to_string()));
     Ok(())
 }
@@ -204,23 +252,11 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
             ),
         )
     })?;
-    anyhow::ensure!(!image.base.is_empty(), "the image named no base");
 
-    // What this session actually boots on. The base itself when that is all the client
-    // declared, and otherwise an image built here over it -- which is a machine of its own,
-    // run and finished before the session's is started. Either way what comes back is a name
-    // in the cache, and everything after this point cannot tell the two apart.
-    let booting = if image.steps.is_empty() {
-        image.base.clone()
-    } else {
-        build::build(&image, network).await?
-    };
-
-    // Into the cache, so that the boot -- which asks no registry anything -- finds it. Done
-    // here and not there because this is the end with a client to tell, and a name nobody can
-    // pull is the one failure at `init` that is about what was asked for rather than about
-    // this machine.
-    pulled(&booting).await?;
+    // What this session actually boots on: a base pulled as it is, an image built here over
+    // one, or one a client built or named earlier. Either way what comes back is a name in
+    // the cache, and everything after this point cannot tell them apart.
+    let (booting, _built) = images::resolve(&image, network).await?;
 
     // Where each tree is on this side, against the one path in the guest that names it. Read
     // before anything is built, because a session whose trees can never be there is one in
@@ -275,6 +311,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
             upper,
             _held,
             skip,
+            _built,
         },
         started,
         InitResp { cwd },
@@ -504,7 +541,7 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
                     spec
                 })
             })
-            .collect::<Result<_, cortex::console::InvalidMount>>()?,
+            .collect::<Result<_, cortex::protocol::InvalidMount>>()?,
         // None of these reaches the guest: an image is what this end booted, a network is a
         // device that either is or is not attached by now, a snapshot is refused above, and
         // the machine's shape was spent on the boot -- the guest is running on the answer and

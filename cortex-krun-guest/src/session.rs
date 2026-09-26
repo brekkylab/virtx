@@ -67,10 +67,10 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::Duration;
 
-use cortex::console::stdio::StdioServer;
-use cortex::console::{
+use cortex::protocol::stdio::StdioServer;
+use cortex::protocol::{
     Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec,
-    Notification, ReadCall, ReadResp, Response, Server, WriteCall, WriteResp,
+    Notification, ReadCall, ReadResp, Response, Server, VersionResp, WriteCall, WriteResp,
 };
 use cortex_krun_host::{ABIN_DIR, HANDSHAKE};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
@@ -216,6 +216,22 @@ pub async fn serve(port: std::fs::File) -> anyhow::Result<()> {
                         "this backend keeps a session on a disk the host attached, which is \
                          one root up from this process and not something it can read -- the \
                          server answers a snapshot off that disk instead",
+                    ));
+                    server.respond(id, answered).await?;
+                }
+
+                Call::Version(_) => {
+                    let answered = Response::Version(VersionResp {
+                        version: "1".into(),
+                    });
+                    server.respond(id, answered).await?;
+                }
+
+                Call::BuildImage(_) | Call::RemoveImage(_) | Call::ListImages(_) => {
+                    let answered = Response::Error(refused(
+                        Error::METHOD_NOT_FOUND,
+                        "images are the host's cache and not this machine's -- the server \
+                         answers these without forwarding them",
                     ));
                     server.respond(id, answered).await?;
                 }

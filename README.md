@@ -25,7 +25,7 @@ brew install lld meson ninja krunvm
 | `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
-| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host --gpu`. |
+| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host` unless `--no-gpu` is given. |
 
 ## Setup
 
@@ -33,9 +33,9 @@ brew install lld meson ninja krunvm
 git submodule update --init
 cargo xtask init                        # patches the submodules (--force resets them first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
-cargo xtask build host guest            # -> target/release/ (add --gpu to build MoltenVK and
-                                        #    virglrenderer first; add abin for /abin)
-cargo xtask install                     # -> ~/.cargo/bin, or --prefix <dir>
+cargo xtask build host guest            # -> target/release/ (builds MoltenVK and virglrenderer
+                                        #    first unless --no-gpu; add abin for /abin)
+cargo xtask install                     # -> ~/.cache/cortex/bin, or --prefix <dir>
 ```
 
 ## Running
@@ -530,7 +530,7 @@ cannot be re-enabled without reinstalling Windows.
 git submodule update --init
 cargo xtask init                        # patches the submodules
 cargo xtask build kernel                # guest kernel -> build/krunfw/
-cargo xtask build host --gpu            # builds libepoxy and virglrenderer first
+cargo xtask build host                  # builds libepoxy and virglrenderer first
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
@@ -790,7 +790,7 @@ The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 ### virglrenderer on Windows
 
 ```powershell
-cargo xtask build host --gpu
+cargo xtask build host
 ```
 
 runs `xtask/scripts/build-deps.ps1`, which produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against

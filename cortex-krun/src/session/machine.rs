@@ -13,7 +13,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use cortex::console::{
+use cortex::protocol::{
     Call, Message, Response,
     stdio::{read, write},
 };
@@ -59,7 +59,7 @@ const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// A host directory the guest can see, where it sees it, and whether a command may write
 /// in it.
 ///
-/// What a [`MountSpec`](cortex::console::MountSpec) came to on this side: the URL already
+/// What a [`MountSpec`](cortex::protocol::MountSpec) came to on this side: the URL already
 /// read as a directory, and the guest path and the `ro` carried on as they arrived.
 #[derive(Clone)]
 pub struct Mount {
@@ -71,7 +71,7 @@ pub struct Mount {
 /// The machine a session runs in: how much of the host it gets, and whether it has a Vulkan
 /// device.
 ///
-/// What [`InitCall`](cortex::console::InitCall)'s three machine members came to on this side,
+/// What [`InitCall`](cortex::protocol::InitCall)'s three machine members came to on this side,
 /// each already resolved against this server's own defaults -- so what reaches a boot is one
 /// answer per question and not a client's wish beside an operator's.
 ///

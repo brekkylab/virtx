@@ -40,8 +40,8 @@
 //! two callers who declared the same thing get the same image whatever this module does
 //! with it on the way.
 
-use cortex::console::{Call, Error, ExecCall, InitCall, Response};
-use cortex::image::{Image as Recipe, Step};
+use cortex::image::{Recipe, Step};
+use cortex::protocol::{Call, Error, ExecCall, InitCall, Response};
 use cortex_krun::image::{Cache, Digest, Image, ImageState, commit};
 use cortex_krun::session::{Ext4, Network};
 use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
@@ -57,7 +57,14 @@ const RECIPE: &str = "cortex-krun/build/1\n";
 /// no home but this cache, and a name that looked pullable would be a lie.
 const REPOSITORY: &str = "localhost/cortex-krun-build";
 
-/// Build what `recipe` declares, and answer with the name the built image is filed under.
+/// Whether `name` is one this module filed a build under, rather than one a client chose.
+pub fn internal(name: &str) -> bool {
+    name.strip_prefix(REPOSITORY)
+        .is_some_and(|rest| rest.starts_with(':'))
+}
+
+/// Build what `recipe` declares, and answer with the name the built image is filed under,
+/// and whether this call is what filed it -- `false` when the same recipe was already there.
 ///
 /// That name is what a session then boots on, so a caller treats the answer exactly as it
 /// would have treated `recipe.base` had there been no steps.
@@ -71,9 +78,7 @@ const REPOSITORY: &str = "localhost/cortex-krun-build";
 ///
 /// Nothing is booted for a recipe whose steps are all `ENV` and `WORKDIR`. Those change
 /// what the image states and not what is in it, and there is nothing for a machine to do.
-pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> {
-    anyhow::ensure!(!recipe.base.is_empty(), "the image named no base");
-
+pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<(String, bool)> {
     // The base has to be in the cache and stitchable before anything can boot on it, and a
     // name nobody can pull is a failure about what was asked for rather than about this
     // machine -- which is why it is answered here, before any of the rest.
@@ -86,7 +91,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     // The same recipe over the same base is the same image. Answered before a machine is
     // made, which is the whole reason the name is the digest of the declaration.
     if cache.image_index()?.contains_key(&named) {
-        return Ok(named);
+        return Ok((named, false));
     }
 
     let (script, config) = plan(recipe, &base.config)?;
@@ -94,7 +99,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     if script.is_empty() {
         commit(&base, None, config, named.as_str(), Some(cache))
             .map_err(|e| coded(Error::INTERNAL_ERROR, anyhow::Error::new(e)))?;
-        return Ok(named);
+        return Ok((named, true));
     }
 
     // The disk the build writes on. Its own, and never the session's: what a session wrote
@@ -134,7 +139,7 @@ pub async fn build(recipe: &Recipe, network: Network) -> anyhow::Result<String> 
     let _ = std::fs::remove_file(&upper.path);
 
     built.map_err(|e| coded(Error::INTERNAL_ERROR, anyhow::Error::new(e)))?;
-    Ok(named)
+    Ok((named, true))
 }
 
 /// Boot on `base`, run every line of `script` in order, and flush before coming back.
@@ -370,7 +375,7 @@ mod tests {
     use super::*;
 
     fn recipe(steps: Vec<Step>) -> Recipe {
-        Recipe::new().base("alpine:3.21").steps(steps)
+        Recipe::new("alpine:3.21").steps(steps)
     }
 
     /// The two steps that are not commands still reach every command after them, and only

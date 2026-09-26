@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// Everything cortex-krun keeps on this host, under one root: `$CORTEX_KRUN_HOME`, or
-/// `cortex-krun` under the user's cache directory.
+/// `cortex` under the user's cache directory.
 ///
 /// **One rule for every kind of thing kept here**, because a host has one answer to "where
 /// does this go" and two ways of deriving it are two answers. What hangs off it is split by
@@ -34,5 +34,5 @@ pub fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
 
-    Some(base?.join("cortex-krun"))
+    Some(base?.join("cortex"))
 }

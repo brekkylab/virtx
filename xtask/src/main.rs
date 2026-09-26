@@ -10,7 +10,7 @@ use anyhow::{Context, bail, ensure};
 
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
-       cargo xtask build    <host|guest|abin|kernel>... [--gpu] [--debug]
+       cargo xtask build    <host|guest|abin|kernel>... [--no-gpu] [--debug]
        cargo xtask download <guest|abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask upload   [--prefix <dir>]
@@ -32,8 +32,9 @@ usage: cargo xtask init     [--force]
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
-  --prefix <dir>  where to install, or upload from (default: $CARGO_INSTALL_ROOT, $CARGO_HOME, ~/.cargo)
-  --gpu           builds host with GPU support, and the GPU libraries it links first
+  --prefix <dir>  where to install, or upload from (default: $CORTEX_KRUN_HOME, else cortex
+                  under $XDG_CACHE_HOME or ~/.cache, %LOCALAPPDATA% on Windows)
+  --no-gpu        builds host without GPU support, skipping the GPU libraries it would link
   --debug         builds unoptimized (the guest is always optimized)";
 
 const HOST_BINS: &[&str] = &["cortex-krun", "cortex-krun-host"];
@@ -51,7 +52,7 @@ enum Component {
 struct Options {
     components: Vec<Component>,
     prefix: Option<PathBuf>,
-    gpu: bool,
+    no_gpu: bool,
     debug: bool,
 }
 
@@ -93,8 +94,8 @@ fn main() -> anyhow::Result<()> {
                 "name what to build\n\n{USAGE}"
             );
             ensure!(
-                !options.gpu || options.has(Component::Host),
-                "--gpu is for building host\n\n{USAGE}"
+                !options.no_gpu || options.has(Component::Host),
+                "--no-gpu is for building host\n\n{USAGE}"
             );
             build(&options)
         }
@@ -108,7 +109,7 @@ fn main() -> anyhow::Result<()> {
                 !options.components.is_empty(),
                 "name what to download\n\n{USAGE}"
             );
-            ensure!(!options.gpu, "--gpu is for building host\n\n{USAGE}");
+            ensure!(!options.no_gpu, "--no-gpu is for building host\n\n{USAGE}");
             ensure!(
                 !options.has(Component::Host),
                 "host is built and signed on this machine, not downloaded\n\n{USAGE}"
@@ -118,7 +119,7 @@ fn main() -> anyhow::Result<()> {
         Some("install") => {
             let options = parse(args)?;
             ensure!(
-                options.components.is_empty() && !options.gpu,
+                options.components.is_empty() && !options.no_gpu,
                 "install copies what build and download left; it takes only --prefix and --debug\n\n{USAGE}"
             );
             install(&options)
@@ -126,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         Some("upload") => {
             let options = parse(args)?;
             ensure!(
-                options.components.is_empty() && !options.gpu && !options.debug,
+                options.components.is_empty() && !options.no_gpu && !options.debug,
                 "upload takes only --prefix\n\n{USAGE}"
             );
             upload(&options)
@@ -145,7 +146,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
     let mut options = Options {
         components: Vec::new(),
         prefix: None,
-        gpu: false,
+        no_gpu: false,
         debug: false,
     };
     while let Some(arg) = args.next() {
@@ -158,8 +159,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
             }
-            Some("--gpu") => {
-                options.gpu = true;
+            Some("--no-gpu") => {
+                options.no_gpu = true;
                 continue;
             }
             Some("--debug") => {
@@ -314,7 +315,7 @@ fn build(options: &Options) -> anyhow::Result<()> {
 }
 
 fn build_host(options: &Options) -> anyhow::Result<()> {
-    if options.gpu {
+    if !options.no_gpu {
         let scripts = root_path().join("xtask/scripts");
         let mut deps = if cfg!(windows) {
             let mut ps = Command::new("powershell");
@@ -334,7 +335,7 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     for bin in HOST_BINS {
         cargo.args(["-p", bin]);
     }
-    if options.gpu {
+    if !options.no_gpu {
         cargo.args(["--features", "cortex-krun-host/gpu"]);
     }
     if !options.debug {
@@ -639,15 +640,23 @@ fn install(options: &Options) -> anyhow::Result<()> {
 }
 
 fn default_prefix() -> anyhow::Result<PathBuf> {
-    if let Some(root) = env::var_os("CARGO_INSTALL_ROOT") {
-        return Ok(root.into());
+    if let Some(named) = env::var_os("CORTEX_KRUN_HOME") {
+        return Ok(named.into());
     }
-    if let Some(home) = env::var_os("CARGO_HOME") {
-        return Ok(home.into());
-    }
-    let home = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .context("no home directory to put ~/.cargo in; pass --prefix")?;
-    Ok(PathBuf::from(home).join(".cargo"))
+
+    #[cfg(windows)]
+    let base = env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| {
+        env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("AppData").join("Local"))
+    });
+
+    #[cfg(not(windows))]
+    let base = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+
+    Ok(base
+        .context("no cache directory to install into; pass --prefix")?
+        .join("cortex"))
 }
 
 fn place(from: &Path, to: &Path) -> anyhow::Result<()> {

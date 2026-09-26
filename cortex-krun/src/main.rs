@@ -1,6 +1,6 @@
 //! `cortex-krun` -- the half that answers a console session.
 //!
-//! Reads requests on stdin and writes answers on stdout, per [`cortex::console`]; what it
+//! Reads requests on stdin and writes answers on stdout, per [`cortex::protocol`]; what it
 //! does with one is to run it inside a micro-VM. The VM is not in this process: a session
 //! spawns `cortex-krun-host`, the signed binary sitting beside this one, and talks to the
 //! guest down a socket that boot turns into a console port. See [`session::halves`] for why

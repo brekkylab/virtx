@@ -10,10 +10,11 @@ use anyhow::{Context, bail, ensure};
 
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
-       cargo xtask build    <host|guest|abin|kernel>... [--no-gpu] [--debug]
+       cargo xtask build    <host|guest|abin|kernel>... [--debug]
        cargo xtask download <guest|abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
-       cargo xtask upload   [--prefix <dir>]
+       cargo xtask upload   --bucket <name> [--profile <name>] [--region <region>]
+                            [--latest] [--allow-dirty] [--dry-run]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
@@ -21,7 +22,8 @@ usage: cargo xtask init     [--force]
   build     builds the components from source
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
-  upload    uploads what install put in <prefix>/bin, for download to fetch
+  upload    archives what install would put in <prefix>/bin, for this platform, and
+            publishes it to S3 for cortex's ensure_cortex to fetch
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
@@ -32,11 +34,21 @@ usage: cargo xtask init     [--force]
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
-  --prefix <dir>  where to install, or upload from (default: $CORTEX_HOME, else cortex
-                  under ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows,
-                  $XDG_CACHE_HOME or ~/.cache otherwise)
-  --no-gpu        builds host without GPU support, skipping the GPU libraries it would link
-  --debug         builds unoptimized (the guest is always optimized)";
+  --prefix <dir>  where to install (default: $CORTEX_HOME, else cortex under
+                  ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
+                  ~/.cache otherwise)
+  --debug         builds unoptimized (the guest is always optimized)
+
+  --bucket <name>     (upload) the bucket to publish to (default: $CORTEX_DIST_BUCKET)
+  --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
+                      the environment's keys, or `default`)
+  --region <region>   (upload) the bucket's region (default: the profile's)
+  --latest            (upload) also points this platform's `latest` at the release, which is
+                      what `ensure_cortex` fetches when told no version; without it
+                      `latest` names whatever it named before
+  --allow-dirty       (upload) publishes from a tree with uncommitted changes, filed under
+                      `<sha>-dirty` rather than the sha
+  --dry-run           (upload) archives, says what it would upload, and stops";
 
 const HOST_BINS: &[&str] = &["cortex-krun", "cortex-krun-host"];
 const GUEST_BIN: &str = "cortex-krun-guest";
@@ -53,7 +65,6 @@ enum Component {
 struct Options {
     components: Vec<Component>,
     prefix: Option<PathBuf>,
-    no_gpu: bool,
     debug: bool,
 }
 
@@ -94,10 +105,6 @@ fn main() -> anyhow::Result<()> {
                 !options.components.is_empty(),
                 "name what to build\n\n{USAGE}"
             );
-            ensure!(
-                !options.no_gpu || options.has(Component::Host),
-                "--no-gpu is for building host\n\n{USAGE}"
-            );
             build(&options)
         }
         Some("download") => {
@@ -110,7 +117,6 @@ fn main() -> anyhow::Result<()> {
                 !options.components.is_empty(),
                 "name what to download\n\n{USAGE}"
             );
-            ensure!(!options.no_gpu, "--no-gpu is for building host\n\n{USAGE}");
             ensure!(
                 !options.has(Component::Host),
                 "host is built and signed on this machine, not downloaded\n\n{USAGE}"
@@ -120,19 +126,12 @@ fn main() -> anyhow::Result<()> {
         Some("install") => {
             let options = parse(args)?;
             ensure!(
-                options.components.is_empty() && !options.no_gpu,
+                options.components.is_empty(),
                 "install copies what build and download left; it takes only --prefix and --debug\n\n{USAGE}"
             );
             install(&options)
         }
-        Some("upload") => {
-            let options = parse(args)?;
-            ensure!(
-                options.components.is_empty() && !options.no_gpu && !options.debug,
-                "upload takes only --prefix\n\n{USAGE}"
-            );
-            upload(&options)
-        }
+        Some("upload") => upload(&parse_upload(args)?),
         Some("run") => run_target(args.collect(), false),
         Some("test") => run_target(args.collect(), true),
         Some("-h" | "--help") | None => {
@@ -147,7 +146,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
     let mut options = Options {
         components: Vec::new(),
         prefix: None,
-        no_gpu: false,
         debug: false,
     };
     while let Some(arg) = args.next() {
@@ -158,10 +156,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
             Some("kernel") => Component::Kernel,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
-                continue;
-            }
-            Some("--no-gpu") => {
-                options.no_gpu = true;
                 continue;
             }
             Some("--debug") => {
@@ -175,6 +169,54 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
         }
     }
     Ok(options)
+}
+
+/// Where `upload` publishes to, and how.
+///
+/// Its own flags rather than [`Options`]: nothing here names a component or a profile, and
+/// none of it means anything to another task.
+struct Upload {
+    bucket: String,
+    profile: Option<String>,
+    region: Option<String>,
+    /// Whether to move this platform's `latest` to the release, and only when asked
+    /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
+    /// `latest` changes what every `ensure_cortex` told no version fetches next.
+    latest: bool,
+    allow_dirty: bool,
+    dry_run: bool,
+}
+
+fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Upload> {
+    let mut bucket = env::var("CORTEX_DIST_BUCKET")
+        .ok()
+        .filter(|b| !b.is_empty());
+    let mut upload = Upload {
+        bucket: String::new(),
+        profile: None,
+        region: None,
+        latest: false,
+        allow_dirty: false,
+        dry_run: false,
+    };
+    fn value(flag: &str, args: &mut impl Iterator<Item = OsString>) -> anyhow::Result<String> {
+        args.next()
+            .and_then(|v| v.into_string().ok())
+            .with_context(|| format!("{flag} needs a value"))
+    }
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--bucket") => bucket = Some(value("--bucket", &mut args)?),
+            Some("--profile") => upload.profile = Some(value("--profile", &mut args)?),
+            Some("--region") => upload.region = Some(value("--region", &mut args)?),
+            Some("--latest") => upload.latest = true,
+            Some("--allow-dirty") => upload.allow_dirty = true,
+            Some("--dry-run") => upload.dry_run = true,
+            _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+        }
+    }
+    upload.bucket = bucket.context("name a bucket with --bucket or $CORTEX_DIST_BUCKET")?;
+    Ok(upload)
 }
 
 fn root_path() -> PathBuf {
@@ -315,30 +357,30 @@ fn build(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Always with the GPU. A host without a Vulkan loader still runs the build -- the boot opens
+/// the loader at run time and reports `gpu` only where it finds one -- so one build serves
+/// hosts with a GPU and without, and there is no second one to keep working.
 fn build_host(options: &Options) -> anyhow::Result<()> {
-    if !options.no_gpu {
-        let scripts = root_path().join("xtask/scripts");
-        let mut deps = if cfg!(windows) {
-            let mut ps = Command::new("powershell");
-            ps.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-                .arg(scripts.join("build-deps.ps1"));
-            ps
-        } else {
-            let mut sh = Command::new("sh");
-            sh.arg(scripts.join("build-deps.sh"));
-            sh
-        };
-        let status = deps.status().context("running build-deps")?;
-        ensure!(status.success(), "building the GPU libraries failed");
-    }
+    let scripts = root_path().join("xtask/scripts");
+    let mut deps = if cfg!(windows) {
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(scripts.join("build-deps.ps1"));
+        ps
+    } else {
+        let mut sh = Command::new("sh");
+        sh.arg(scripts.join("build-deps.sh"));
+        sh
+    };
+    let status = deps.status().context("running build-deps")?;
+    ensure!(status.success(), "building the GPU libraries failed");
+
     let mut cargo = cargo();
     cargo.current_dir(root_path()).arg("build");
     for bin in HOST_BINS {
         cargo.args(["-p", bin]);
     }
-    if !options.no_gpu {
-        cargo.args(["--features", "cortex-krun-host/gpu"]);
-    }
+    cargo.args(["--features", "cortex-krun-host/gpu"]);
     if !options.debug {
         cargo.arg("--release");
     }
@@ -522,9 +564,10 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
 /// Where the guest kernel is built to, and what it is called there.
 ///
 /// One directory under `build/`, like everything else this repository compiles, and the
-/// name is the platform's: `libkrunfw.dll`, `libkrunfw.5.dylib`, `libkrunfw.so.5.6.1`.
-/// The Linux name carries the full version, so this answers with whatever is there
-/// rather than with a name it worked out.
+/// name is the platform's: `libkrunfw.dll`, `libkrunfw.5.dylib`, `libkrunfw.so.5` -- the
+/// soname libkrun opens, which `build-libkrunfw.sh` renames the built file to. The Linux
+/// name carries the ABI version, so this answers with whatever is there rather than with
+/// a name it worked out.
 fn kernel_library() -> anyhow::Result<PathBuf> {
     let dir = root_path().join("build/krunfw");
     let matches = |name: &str| {
@@ -583,23 +626,169 @@ fn download(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn upload(options: &Options) -> anyhow::Result<()> {
-    let prefix = match &options.prefix {
-        Some(prefix) => prefix.clone(),
-        None => cortex::cache_root(),
+/// Where a release is filed in the bucket, under which every platform has a directory of
+/// its own: `cortex-krun/<os>-<arch>/<sha>/cortex-krun-<os>-<arch>.tar.gz`, and beside the
+/// shas `latest`, one line naming the one `ensure_cortex` fetches when told nothing.
+///
+/// **One `latest` per platform, not one for all of them**, unlike `abin/latest`. abin is
+/// cross-compiled for every architecture in one run; this is built on the machine it is
+/// for, one platform at a time, so a single pointer would name a sha some platforms have
+/// not uploaded yet.
+const DIST_ROOT: &str = "cortex-krun";
+
+/// The platforms a release is published for, as `std::env::consts` spells them -- which
+/// is what `ensure_cortex` builds its URL from. macOS is Apple silicon only and Windows
+/// x86_64 only for now.
+fn dist_platform() -> anyhow::Result<String> {
+    let (os, arch) = (env::consts::OS, env::consts::ARCH);
+    ensure!(
+        matches!(
+            (os, arch),
+            ("macos", "aarch64") | ("windows", "x86_64") | ("linux", "x86_64" | "aarch64")
+        ),
+        "no release is published for {os}-{arch}"
+    );
+    Ok(format!("{os}-{arch}"))
+}
+
+/// Archive the set `install` would put in `bin/` and publish it.
+///
+/// The git sha of HEAD names the release, as it does abin's, and nothing downstream checks
+/// the bytes against it -- so a tree with uncommitted changes is refused unless asked for,
+/// and then filed under `<sha>-dirty` so the path does not claim to be the commit. What it
+/// cannot check is that the build is *of* HEAD: it archives whatever `build` left.
+fn upload(upload: &Upload) -> anyhow::Result<()> {
+    let platform = dist_platform()?;
+    let root = root_path();
+
+    let git = |args: &[&str]| -> anyhow::Result<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .context("running git")?;
+        ensure!(out.status.success(), "git {} failed", args.join(" "));
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let _bin = prefix.join("bin");
-    todo!("upload")
+    let sha = git(&["rev-parse", "HEAD"])?;
+    // Untracked files are left out: an editor's swap file is not a change to the build.
+    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
+    ensure!(
+        !dirty || upload.allow_dirty,
+        "the working tree has uncommitted changes; commit them, or --allow-dirty"
+    );
+    let version = if dirty {
+        format!("{sha}-dirty")
+    } else {
+        sha.clone()
+    };
+    if git(&["branch", "-r", "--contains", &sha])?.is_empty() {
+        eprintln!("xtask: warning: {sha} is on no remote branch; nobody else can check it out");
+    }
+
+    // Staged under the release profile's own directory, and emptied first: a file a
+    // previous build had and this one does not must not ride along.
+    let dist = target_path().join("release").join("dist");
+    let name = format!("{DIST_ROOT}-{platform}");
+    let stage = dist.join(&name);
+    if stage.exists() {
+        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
+    }
+    stage_bin(&target_path().join("release"), &stage)?;
+    if !stage.join("abin").is_dir() {
+        eprintln!("xtask: warning: no abin was built; sessions from this release get no /abin");
+    }
+
+    // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
+    // remote host, and Windows' own bsdtar has no `--force-local` to say otherwise.
+    let archive = format!("{name}.tar.gz");
+    let mut entries: Vec<OsString> = fs::read_dir(&stage)
+        .with_context(|| format!("reading {}", stage.display()))?
+        .map(|entry| entry.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()?;
+    entries.sort();
+    let status = Command::new("tar")
+        .current_dir(&dist)
+        // macOS' bsdtar otherwise adds an AppleDouble `._` file for any file with xattrs.
+        .env("COPYFILE_DISABLE", "1")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&name)
+        .args(&entries)
+        .status()
+        .context("running tar")?;
+    ensure!(status.success(), "archiving {} failed", stage.display());
+    let latest = dist.join(format!("{name}.latest"));
+    fs::write(&latest, format!("{version}\n"))
+        .with_context(|| format!("writing {}", latest.display()))?;
+
+    let prefix = format!("s3://{}/{DIST_ROOT}/{platform}", upload.bucket);
+    let archive_key = format!("{prefix}/{version}/{archive}");
+    let latest_key = format!("{prefix}/latest");
+    if upload.dry_run {
+        eprintln!(
+            "xtask: would upload {} to {archive_key}",
+            dist.join(&archive).display()
+        );
+        if upload.latest {
+            eprintln!("xtask: would point {latest_key} at {version}");
+        } else {
+            eprintln!("xtask: would leave {latest_key} as it is (--latest moves it)");
+        }
+        return Ok(());
+    }
+
+    let aws = |from: &Path, to: &str, cache: &str| -> anyhow::Result<()> {
+        let mut aws = Command::new("aws");
+        aws.args(["s3", "cp", "--only-show-errors", "--cache-control", cache]);
+        if let Some(profile) = &upload.profile {
+            aws.args(["--profile", profile]);
+        }
+        if let Some(region) = &upload.region {
+            aws.args(["--region", region]);
+        }
+        let status = aws
+            .arg(from)
+            .arg(to)
+            .status()
+            .context("running the aws CLI -- is it installed?")?;
+        ensure!(status.success(), "uploading {to} failed");
+        Ok(())
+    };
+    // The archive under its version never changes, so it may be cached forever; `latest`
+    // is the one key that moves, and is written last, so that it never names a version
+    // whose archive is not there yet.
+    aws(
+        &dist.join(&archive),
+        &archive_key,
+        "public, max-age=31536000, immutable",
+    )?;
+    eprintln!("xtask: uploaded {archive_key}");
+    if upload.latest {
+        aws(&latest, &latest_key, "no-cache")?;
+        eprintln!("xtask: {latest_key} is now {version}");
+    } else {
+        eprintln!("xtask: left {latest_key} as it is (--latest moves it)");
+    }
+    Ok(())
 }
 
 fn install(options: &Options) -> anyhow::Result<()> {
-    let built = options.out();
     let prefix = match &options.prefix {
         Some(prefix) => prefix.clone(),
         None => cortex::cache_root(),
     };
     let bin = prefix.join("bin");
+    stage_bin(&options.out(), &bin)?;
+    eprintln!("xtask: installed to {}", bin.display());
+    Ok(())
+}
 
+/// Put the set a `bin/` holds -- the host halves, the guest, the guest kernel, and abin if
+/// it was built -- from `built` into `bin`. What `install` does, and what `upload` archives.
+fn stage_bin(built: &Path, bin: &Path) -> anyhow::Result<()> {
     let host_exes: Vec<String> = HOST_BINS
         .iter()
         .map(|name| format!("{name}{}", env::consts::EXE_SUFFIX))
@@ -635,8 +824,6 @@ fn install(options: &Options) -> anyhow::Result<()> {
     if built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;
     }
-
-    eprintln!("xtask: installed to {}", bin.display());
     Ok(())
 }
 

@@ -66,8 +66,8 @@ fn main() {
 
 /// The kernel in `dir`, whatever this platform calls it.
 ///
-/// The Linux name carries the full version (`libkrunfw.so.5.6.1`), so this matches rather
-/// than names.
+/// The Linux name carries the ABI version (`libkrunfw.so.5`, the soname libkrun opens), so
+/// this matches rather than names.
 fn library(dir: &Path) -> Option<PathBuf> {
     let matches = |name: &str| {
         if cfg!(windows) {

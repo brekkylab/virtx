@@ -26,14 +26,19 @@
 //! in `create_gl_context`. venus needs none of it. libkrun does not expose the bit in its
 //! own flag set, hence `from_bits_retain`.
 //!
-//! # `RENDER_SERVER`, on macOS only
+//! # `RENDER_SERVER`, everywhere but Windows
 //!
 //! Upstream virglrenderer serves venus only through its render server, and initialises
-//! venus at all only when this bit is set. The macOS build runs that server as a thread
-//! of this process (`render-server-mode=thread`), so the bit starts nothing. The Windows
-//! build has no render server and carries an in-process venus context instead, which
-//! answers to `VENUS` alone -- with this bit set there it would look for a server that
-//! was never built.
+//! venus at all only when this bit is set. The macOS and Linux builds run that server as a
+//! thread of this process (`render-server-mode=thread`, in `xtask/scripts/build-deps.sh`),
+//! so the bit starts nothing. The Windows build has no render server and carries an
+//! in-process venus context instead, which answers to `VENUS` alone -- with this bit set
+//! there it would look for a server that was never built.
+//!
+//! Left off where there is a server, venus is never initialised and nothing says so: the
+//! device still reports a venus capset of the right size, but zero-filled, and the guest's
+//! driver refuses a wire format of version 0 without a word -- `vkEnumeratePhysicalDevices`
+//! finds no GPU. That was every Linux boot while this bit was macOS's alone.
 //!
 //! # How much memory the GPU holds
 //!
@@ -101,7 +106,7 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
         | VirglRendererFlags::USE_ASYNC_FENCE_CB
         | NO_VIRGL;
     // See the module doc.
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     let flags = flags | VirglRendererFlags::RENDER_SERVER;
 
     Ok(GpuDevice::new(flags, backend).shm_size(window as usize))

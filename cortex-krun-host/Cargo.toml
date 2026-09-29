@@ -45,10 +45,26 @@ vm = ["dep:cortex-krun-lib"]
 # virtio-gpu with venus, passed through to the session layer. Its own feature because what it
 # costs is a C library this tree neither ships nor builds: a host without virglrenderer fails
 # at the linker, which is the one place a message explaining what to install cannot be given.
-gpu = ["vm", "cortex-krun-lib/gpu"]
+#
+# The Vulkan loader is not linked but opened, except on macOS where MoltenVK is built in: a
+# boot with this feature starts on a host with no Vulkan, and reports and attaches a GPU only
+# where it finds one -- which is what `libc` and `windows-sys` below are for. On Windows that
+# takes `/DELAYLOAD:vulkan-1.dll`, which `build.rs` asks for.
+gpu = ["vm", "cortex-krun-lib/gpu", "dep:libc", "dep:windows-sys"]
 
 [dependencies]
 anyhow = { workspace = true }
 # The machine this binary becomes: `Session` assembles it and `Ext4` is the disk it writes to.
 # Optional, and that is the point -- see the `vm` feature.
 cortex-krun-lib = { workspace = true, optional = true }
+
+# `dlopen`, to find the Vulkan loader a `gpu` boot opens rather than links.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
+
+# `LoadLibraryW`, the same question on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }

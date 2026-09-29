@@ -243,6 +243,10 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // And how much it may write, which is fixed when its disk is formatted.
     let size = disk(&init)?;
 
+    // And whether this host can run a machine at all -- asked here as well as at the boot,
+    // so a client hears it before an image has been pulled for a session that cannot start.
+    machine::hypervisor()?;
+
     let image = init.image.clone().ok_or_else(|| {
         coded(
             Error::INVALID_PARAMS,
@@ -457,7 +461,9 @@ fn shape(init: &InitCall) -> anyhow::Result<Shape> {
             Error::UNSUPPORTED_MACHINE,
             anyhow::anyhow!(
                 "a GPU was asked for and this boot has none to attach -- it is built with the \
-                 `gpu` feature, on a host that has virglrenderer"
+                 `gpu` feature, and attaches one only on a host with a Vulkan loader \
+                 (libvulkan1 on Debian and Ubuntu, vulkan-loader on Fedora; on Windows, \
+                 vulkan-1.dll from the GPU's driver)"
             ),
         ));
     }

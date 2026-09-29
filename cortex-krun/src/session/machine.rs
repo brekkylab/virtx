@@ -156,6 +156,40 @@ pub fn can_gpu() -> anyhow::Result<bool> {
     }
 }
 
+/// Whether this host can run a machine at all, and if not, what to do about it.
+///
+/// **Linux only**, because it is the one host where the answer depends on how the machine
+/// was set up rather than on this build: `/dev/kvm` may be missing, and where it is there,
+/// Debian and Ubuntu leave it `0660 root:kvm` and grant it by ACL only to a user logged in
+/// at the seat -- so a user over ssh, or a service, is refused it. Without this, either is
+/// a boot that exits with libkrun's own sentence in a console log nobody reads. On macOS
+/// the hypervisor is the signature's, which `cargo xtask build host` gives; on Windows it
+/// is a feature of the edition, and a boot without it says so itself.
+///
+/// Opened rather than stat'd: the mode, a group and an ACL each decide it, and asking the
+/// kernel is the one check that weighs all three the way the boot's open will.
+pub fn hypervisor() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "this host has no /dev/kvm, so it cannot run a micro-VM: KVM is off (turn on \
+             virtualization in the firmware, and load kvm_intel or kvm_amd), or this is a VM \
+             without nested virtualization, or a container started without --device /dev/kvm"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => anyhow::bail!(
+            "this user may not open /dev/kvm, so it cannot run a micro-VM: add it to the kvm \
+             group with `sudo usermod -aG kvm $USER`, then log in again"
+        ),
+        Err(e) => anyhow::bail!("opening /dev/kvm: {e}"),
+    }
+    Ok(())
+}
+
 /// Everything the boot says it can make, one name to a line.
 fn capabilities() -> anyhow::Result<Vec<String>> {
     let program = super::halves::boot()?;
@@ -230,6 +264,9 @@ impl Machine {
 
         // The program a boot runs, signed when it was built -- see `halves`.
         let program = super::halves::boot()?;
+        // Before anything is made for it: a host that cannot run a machine is a sentence
+        // about the host, not a boot that exits into a console log.
+        hypervisor()?;
 
         // Two directories, because two lifetimes. The session's is named by this process's
         // pid, which is what the sweep in `session` reads back, and holds the one thing that

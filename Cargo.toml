@@ -42,7 +42,8 @@ anyhow = "1"
 # backend for it.
 #
 # No default features: what is wanted is the console, and every binding cortex offers brings
-# a libfuse provider or an HTTP stack with it.
+# a libfuse provider or an HTTP stack with it. That includes the default `ensure`, which
+# fetches a published cortex-krun -- this server has no use for fetching itself.
 cortex = { path = "../cortex", default-features = false }
 cortex-krun-host = { path = "cortex-krun-host", default-features = false }
 cortex-krun-lib = { path = "cortex-krun-lib" }

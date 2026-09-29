@@ -103,6 +103,20 @@ else
     reconfigure=""
 fi
 
+# How venus reaches Vulkan. Linked on macOS, where the Vulkan is MoltenVK built into the
+# binary above and there is no loader to open. Opened at run time everywhere else: linked,
+# `cortex-krun-host` needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
+# could run no session at all rather than only no GPU one. The boot asks for the loader
+# itself before it reports or attaches a GPU -- see `vulkan` in `cortex-krun-host`.
+if [ "$(uname -s)" = Darwin ]; then
+    vulkan_dload=false
+else
+    vulkan_dload=true
+fi
+
+# `--libdir=lib` below because meson's default is the host's: on Debian and Ubuntu that is
+# `lib/x86_64-linux-gnu`, and `.cargo/config.toml` points rutabaga_gfx's pkg-config at
+# `lib/pkgconfig` -- where macOS already puts it, and where it would find nothing there.
 echo "Configuring virglrenderer ($(git -C "$virglrenderer_src" rev-parse --short HEAD))"
 PKG_CONFIG_PATH="$virglrenderer_pcdir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
     meson setup $reconfigure "$virglrenderer_build" "$virglrenderer_src" \
@@ -110,9 +124,10 @@ PKG_CONFIG_PATH="$virglrenderer_pcdir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
         -Dvrend=false \
         -Drender-server-mode=thread \
         -Drender-server-worker=thread \
-        -Dvulkan-dload=false \
+        -Dvulkan-dload="$vulkan_dload" \
         -Ddefault_library=static \
         --prefix="$virglrenderer_prefix" \
+        --libdir=lib \
         --buildtype=release >/dev/null
 
 echo "Compiling virglrenderer"

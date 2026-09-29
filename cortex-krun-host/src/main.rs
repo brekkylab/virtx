@@ -87,18 +87,77 @@ use cortex_krun_host::{ABIN_DIR, CAPABILITIES_ARG, GUEST_DIR, PORT_NAME, guest_p
 /// which is what a boot that could not become a VM is.
 const NOT_EXECUTABLE: u8 = 126;
 
-/// What this build can make, for the server that is about to spawn it -- see
+/// What this boot can make here, for the server that is about to spawn it -- see
 /// [`CAPABILITIES_ARG`].
 ///
-/// A capability is here when a feature decides whether an argument can be honoured, which
-/// today is one: `--gpu` needs a device that needs virglrenderer, and a host without that
-/// library does not link a build that has it. Everything else on the command line is answered
-/// by every build of this binary, and a name for those would be a list a server reads and
-/// learns nothing from.
-const CAPABILITIES: &[&str] = &[
+/// A capability is here when something decides whether an argument can be honoured, which
+/// today is one: `--gpu` needs a device that needs virglrenderer, which a build has with the
+/// `gpu` feature, and venus under it needs a Vulkan loader, which a host has or does not --
+/// see [`vulkan`]. Everything else on the command line is answered by every build of this
+/// binary, and a name for those would be a list a server reads and learns nothing from.
+fn capabilities() -> Vec<&'static str> {
+    let mut names = Vec::new();
     #[cfg(feature = "gpu")]
-    cortex_krun_host::GPU_CAPABILITY,
-];
+    if vulkan::loader().is_ok() {
+        names.push(cortex_krun_host::GPU_CAPABILITY);
+    }
+    names
+}
+
+/// Whether venus has a Vulkan loader to reach on this host.
+///
+/// **Opened, not linked**, except on macOS: there the Vulkan is MoltenVK, built into this
+/// binary, and there is nothing to find. Elsewhere virglrenderer opens the loader itself when
+/// a GPU is made (Linux, `vulkan-dload`) or the linker defers it to the first call (Windows,
+/// `/DELAYLOAD`) -- so a boot starts on a host without one, and this is the question asked
+/// before either would find out. Opened the same way virglrenderer will, and let go again: a
+/// boot that attaches a GPU opens it for real a moment later.
+///
+/// A loader is not a device -- a host can have one with no driver under it -- but that is
+/// the loader's to report, as the device fails to come up, and not something a boot can
+/// know without making an instance.
+#[cfg(feature = "gpu")]
+mod vulkan {
+    #[cfg(target_os = "macos")]
+    pub fn loader() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn loader() -> anyhow::Result<()> {
+        for name in [c"libvulkan.so.1", c"libvulkan.so"] {
+            // SAFETY: a nul-terminated name; the handle is closed before it could be used.
+            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if !handle.is_null() {
+                // SAFETY: the handle `dlopen` just returned, closed once.
+                unsafe { libc::dlclose(handle) };
+                return Ok(());
+            }
+        }
+        anyhow::bail!(
+            "this host has no Vulkan loader (libvulkan.so.1) for a GPU to be made with: \
+             install it -- libvulkan1 on Debian and Ubuntu, vulkan-loader on Fedora -- along \
+             with a Vulkan driver for the GPU"
+        )
+    }
+
+    #[cfg(windows)]
+    pub fn loader() -> anyhow::Result<()> {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+
+        let name: Vec<u16> = "vulkan-1.dll\0".encode_utf16().collect();
+        // SAFETY: a nul-terminated UTF-16 name that outlives the call. Left loaded: the
+        // delay-loaded imports resolve against it on the first call a GPU makes.
+        if unsafe { LoadLibraryW(name.as_ptr()) }.is_null() {
+            anyhow::bail!(
+                "this host has no Vulkan loader (vulkan-1.dll) for a GPU to be made with: it \
+                 comes with the GPU's driver, or with the Vulkan Runtime from \
+                 https://vulkan.lunarg.com"
+            );
+        }
+        Ok(())
+    }
+}
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -115,7 +174,7 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(NOT_EXECUTABLE);
         }
-        for name in CAPABILITIES {
+        for name in capabilities() {
             println!("{name}");
         }
         return ExitCode::SUCCESS;
@@ -234,6 +293,12 @@ impl Args {
             "--gpu: this boot was built without the `gpu` feature, which is what virglrenderer \
              and a virtio-gpu device come in with"
         );
+        // And where this build has one but the host has no Vulkan for it, for the same reason
+        // -- and because what the device would say instead is a guest with no GPU in it.
+        #[cfg(feature = "gpu")]
+        if gpu {
+            vulkan::loader().map_err(|e| anyhow::anyhow!("--gpu: {e}"))?;
+        }
 
         // A size of a device that is not there: the server resolves the two together, so a
         // boot told one without the other is the halves disagreeing.

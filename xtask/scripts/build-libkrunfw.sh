@@ -34,12 +34,21 @@
 #   as far as `kernel.c`, the C bundle libkrunfw wraps it in, and the host links that.
 #   This is what libkrunfw's own `krunvm` path does, with the container in place of the
 #   microVM; its native macOS build needs a case-sensitive volume and GNU tools besides.
+#
+# In the container the kernel tree lives in a named volume, not in the bind-mounted
+# `build/`. Docker Desktop shares host directories over VirtioFS, and untarring a kernel
+# there fails intermittently -- tar sees directories change inode under it ("Directory
+# renamed before its status could be extracted") or fails to replace a symlink
+# ("Operation not supported"). Only the results cross the bind mount: the library into
+# `build/krunfw/`, and on macOS `kernel.c` back into the clone, for the host to link.
+# The volume persists, so a rebuild is incremental; `docker volume rm` it to start over.
 set -eu
 
 # Pinned for the same reason the submodules are: the kernel config and the ABI version
 # have to match what libkrun expects (KRUNFW_NAME, ABI 5).
 LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-v5.6.2}"
 IMAGE="${LIBKRUNFW_IMAGE:-ubuntu:24.04}"
+VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD="$ROOT/build/libkrunfw-build"
@@ -53,8 +62,8 @@ case "$(uname -s)" in
 esac
 
 # What the library is called, which is also how this tells a build it already has from
-# one it does not. The Linux name carries the full version, so it is matched rather
-# than named.
+# one it does not. The Linux name carries the ABI version (`libkrunfw.so.5`, renamed so
+# below), so it is matched rather than named.
 case "$HOST" in
     linux) PATTERN="libkrunfw.so.*" ;;
     macos) PATTERN="libkrunfw.*.dylib" ;;
@@ -95,10 +104,24 @@ apt-get install -y --no-install-recommends \
     python3 python3-pyelftools git curl ca-certificates xz-utils \
     patch rsync cpio zstd kmod ${EXTRA_PACKAGES:-}
 
-cd /build/libkrunfw
+# The clone is copied into the volume once per tag, for the same reason the host one is
+# cloned again: an old tree would keep the old kernel. Anything a build left in the host
+# clone -- a kernel tree from before the volume, a `kernel.c` -- stays behind.
+SRC=/work/libkrunfw
+if [ "$(git -C "$SRC" describe --tags 2>/dev/null)" != "$LIBKRUNFW_TAG" ]; then
+    rm -rf "$SRC"
+    mkdir -p "$SRC"
+    tar -C /build/libkrunfw --exclude='./linux-*' --exclude='./kernel.c' \
+        --exclude='./libkrunfw*' -cf - . | tar -C "$SRC" -xf -
+fi
+
+cd "$SRC"
 # bin2cbundle.py needs pyelftools; the kernel build needs the rest.
 make ${MAKE_ARGS:-} -j"$(nproc)"
 cp -v libkrunfw* /out/ 2>/dev/null || true
+if [ -n "${COPY_BACK:-}" ]; then
+    cp -v $COPY_BACK /build/libkrunfw/
+fi
 EOF
 
     # MSYS/Git Bash rewrites arguments that look like absolute paths; the leading `//`
@@ -106,8 +129,11 @@ EOF
     MSYS_NO_PATHCONV=1 docker run --rm \
         -e EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" \
         -e MAKE_ARGS="${MAKE_ARGS:-}" \
+        -e COPY_BACK="${COPY_BACK:-}" \
+        -e LIBKRUNFW_TAG="$LIBKRUNFW_TAG" \
         -v "$BUILD:/build" \
         -v "$PREFIX:/out" \
+        -v "$VOLUME:/work" \
         "$IMAGE" sh /build/build.sh
 }
 
@@ -117,9 +143,18 @@ case "$HOST" in
         ;;
     linux)
         build_in_container
+        # Kept under its soname, not the name make gives it. libkrun opens
+        # `libkrunfw.so.5` by that name -- found beside the binary through its
+        # `$ORIGIN` runpath -- and no `make install` runs here to add the link from
+        # it to `libkrunfw.so.5.6.2`. Renamed rather than linked, so that
+        # everything downstream copies one file under the one name that works.
+        for lib in "$PREFIX"/libkrunfw.so.*.*.*; do
+            [ -e "$lib" ] || continue
+            mv -f "$lib" "$PREFIX/libkrunfw.so.$(basename "$lib" | cut -d. -f3)"
+        done
         ;;
     macos)
-        MAKE_ARGS="kernel.c" build_in_container
+        MAKE_ARGS="kernel.c" COPY_BACK="kernel.c" build_in_container
         (cd "$BUILD/libkrunfw" && make)
         cp -v "$BUILD/libkrunfw"/libkrunfw.*.dylib "$PREFIX/"
         ;;

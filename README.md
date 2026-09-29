@@ -25,7 +25,7 @@ brew install lld meson ninja krunvm
 | `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
-| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host` unless `--no-gpu` is given. |
+| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host`. |
 
 ## Setup
 
@@ -34,7 +34,7 @@ git submodule update --init
 cargo xtask init                        # patches the submodules (--force resets them first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
 cargo xtask build host guest            # -> target/release/ (builds MoltenVK and virglrenderer
-                                        #    first unless --no-gpu; add abin for /abin)
+                                        #    first; add abin for /abin)
 cargo xtask install                     # -> ~/.cache/cortex/bin, or --prefix <dir>
 ```
 
@@ -303,8 +303,9 @@ of a real macOS path:
   `virgl_renderer_resource_map` simply `mmap`s.
 
 Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so the
-session asks for it on macOS (see `cortex-krun-lib/src/session/gpu.rs`). The
-patch carries what upstream main still gets wrong there:
+session asks for it wherever the render server is built -- macOS and Linux, not
+Windows (see `cortex-krun-lib/src/session/gpu.rs`). The patch carries what
+upstream main still gets wrong there:
 
 - **`vkr_metal_helpers.m` includes `venus-protocol/vulkan_metal.h`**, a path
   that went away when venus-protocol moved out to a subproject. Upstream CI
@@ -322,7 +323,33 @@ patch carries what upstream main still gets wrong there:
 
 `-Dvulkan-dload=false` still links MoltenVK rather than `dlopen`ing it: the
 dload path asks dyld for `libvulkan.1.dylib` or `libMoltenVK.dylib` by leaf
-name, and Homebrew's `lib` is not on its default search path.
+name, and Homebrew's `lib` is not on its default search path. Linux does the
+opposite: `-Dvulkan-dload=true`, so `cortex-krun-host` starts on a host with no
+Vulkan loader, and reports a GPU (`--capabilities`) only where it finds one.
+
+### virglrenderer on Linux — `3rdparty/_patches/virglrenderer-8167744-linux-host-memory.patch`
+
+A guest maps host-visible memory through the fd its `VkDeviceMemory` exports:
+the host `mmap`s it into the guest's window. A dma_buf or a shm fd can be
+mapped; an opaque fd cannot. NVIDIA's driver exports host-visible memory only as
+opaque fds, so on it every guest `vkMapMemory` failed with
+`VK_ERROR_MEMORY_MAP_FAILED` (the host answers `RESOURCE_MAP_BLOB` with
+`ERR_UNSPEC`), while llvmpipe, which exports dma_bufs, worked.
+
+The patch does on such a device what macOS does with Metal buffers: memory is
+allocated as shm, imported as a host pointer (`VK_EXT_external_memory_host`)
+and exported as that shm. It is used only where the device exports no dma_buf,
+takes host pointers at no more than page alignment, and the guest did not ask
+for exportable memory; a memory type a host pointer cannot back falls through
+to the path it had. Resizable-BAR types -- device-local *and* host-visible --
+are reported to the guest as device-local only, since system memory cannot back
+them and nothing else the host has can be mapped. The shm is freed in
+`vkr_device_remove_object`, after the memory imported from it, on both the
+`vkFreeMemory` and the device-teardown path.
+
+Every patch here is applied on every host, so this one leaves the hunks of the
+others alone: `cargo xtask init` recognises an applied patch by reversing it
+against the whole stack.
 
 `xtask/scripts/build-deps.sh` handles all of it. It exports the pinned
 submodule tree with `git archive` and patches the copy under `data/`, so the

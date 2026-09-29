@@ -158,17 +158,39 @@ pub fn can_gpu() -> anyhow::Result<bool> {
 
 /// Whether this host can run a machine at all, and if not, what to do about it.
 ///
-/// **Linux only**, because it is the one host where the answer depends on how the machine
-/// was set up rather than on this build: `/dev/kvm` may be missing, and where it is there,
-/// Debian and Ubuntu leave it `0660 root:kvm` and grant it by ACL only to a user logged in
-/// at the seat -- so a user over ssh, or a service, is refused it. Without this, either is
-/// a boot that exits with libkrun's own sentence in a console log nobody reads. On macOS
-/// the hypervisor is the signature's, which `cargo xtask build host` gives; on Windows it
-/// is a feature of the edition, and a boot without it says so itself.
+/// **Linux and Windows**, the hosts where the answer depends on how the machine was set up
+/// rather than on this build. On macOS the hypervisor is the signature's, which
+/// `cargo xtask build host` gives.
 ///
-/// Opened rather than stat'd: the mode, a group and an ACL each decide it, and asking the
-/// kernel is the one check that weighs all three the way the boot's open will.
+/// On Linux, `/dev/kvm` may be missing, and where it is there, Debian and Ubuntu leave it
+/// `0660 root:kvm` and grant it by ACL only to a user logged in at the seat -- so a user
+/// over ssh, or a service, is refused it. Without this, either is a boot that exits with
+/// libkrun's own sentence in a console log nobody reads. Opened rather than stat'd: the
+/// mode, a group and an ACL each decide it, and asking the kernel is the one check that
+/// weighs all three the way the boot's open will.
+///
+/// On Windows, the hypervisor is `WinHvPlatform.dll`, which is there only where the Windows
+/// Hypervisor Platform feature is turned on. The boot delay-loads it (see
+/// `cortex-krun-host/build.rs`), so without this its first call into the DLL is an
+/// exception rather than a sentence. Whether the hypervisor is *running* -- virtualization
+/// on in the firmware -- is the boot's to find out, and libkrun says so when it is not.
 pub fn hypervisor() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+        let name: Vec<u16> = "WinHvPlatform.dll\0".encode_utf16().collect();
+        // SAFETY: a nul-terminated UTF-16 string that outlives the call. Left loaded: the
+        // boot is another process, and this one loading it costs nothing.
+        if unsafe { LoadLibraryW(name.as_ptr()) }.is_null() {
+            anyhow::bail!(
+                "this host has no Windows Hypervisor Platform (WinHvPlatform.dll), so it cannot \
+                 run a micro-VM: turn it on with `Enable-WindowsOptionalFeature -Online \
+                 -FeatureName HypervisorPlatform` in an elevated PowerShell, or under \
+                 \"Turn Windows features on or off\", and restart"
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     match std::fs::OpenOptions::new()
         .read(true)
@@ -522,10 +544,44 @@ fn abin() -> Option<PathBuf> {
     let beside = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("abin")));
-    beside
+    let dir = beside
         .into_iter()
         .chain([crate::home().join("abin")])
-        .find(|dir| dir.is_dir())
+        .find(|dir| dir.is_dir())?;
+    #[cfg(windows)]
+    abin_executable(&dir);
+    Some(dir)
+}
+
+/// Mark each program in `abin/` executable, as the guest binary is -- see [`executable`].
+///
+/// **Windows only.** `abin/` is shared as it stands rather than copied into the machine's
+/// directory, and there libkrun's virtiofs answers `0644` for a file with no stream beside
+/// it, so without this every `/abin` program is one the guest cannot exec. Nothing else on
+/// Windows keeps a mode for it to have: a release unpacked onto NTFS, or built there, has
+/// none. Elsewhere the file's own mode is what the guest sees, and it came with the file.
+///
+/// Every boot, rather than once where the directory is made: it is cheap, and a directory
+/// replaced since -- an install, a new release -- is marked again. Only the programs, not
+/// `skills/`, which is read and never run. A file it fails on is said and skipped, for the
+/// same reason a host with no `abin/` is a session without it.
+#[cfg(windows)]
+fn abin_executable(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(e) = executable(&path) {
+            eprintln!(
+                "{}: {} will not be executable in the guest: {e}",
+                env!("CARGO_BIN_NAME"),
+                path.display()
+            );
+        }
+    }
 }
 
 /// A default read out of this server's environment, ignoring anything that is not a number.

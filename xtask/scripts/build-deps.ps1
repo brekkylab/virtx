@@ -32,7 +32,6 @@ $clangcl = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue).Source
 if (-not $clangcl) { Write-Error 'clang-cl.exe is not on PATH; install LLVM' }
 $lldLink = (Get-Command lld-link.exe -ErrorAction SilentlyContinue).Source
 $llvmLib = (Get-Command llvm-lib.exe -ErrorAction SilentlyContinue).Source
-if (-not $env:VULKAN_SDK) { Write-Error 'VULKAN_SDK is not set; install the Vulkan SDK' }
 if (-not (Get-Command pkg-config.exe -ErrorAction SilentlyContinue)) { Write-Error 'pkg-config.exe is not on PATH' }
 
 $build = Join-Path $root 'build'
@@ -91,19 +90,66 @@ $(if ($lldLink) { "c_ld = '$($lldLink -replace '\\','/')'" })
 $(if ($llvmLib) { "ar = '$($llvmLib -replace '\\','/')'" })
 "@ | Set-Content -Encoding ascii $native
 
-$sdk = $env:VULKAN_SDK -replace '\\','/'
-$sdkVersion = Split-Path -Leaf $env:VULKAN_SDK
+# The Vulkan loader: headers, and an import library for `vulkan-1.dll`. Both come from the
+# Vulkan SDK when one is installed (`VULKAN_SDK`), and otherwise from what is already here --
+# the Vulkan headers virglrenderer carries in its tree, and an import library made from
+# them. That one is enough because the host delay-loads `vulkan-1.dll`
+# (cortex-krun-host/build.rs): the link needs only the names, and a name the loader does
+# not export would fail only if something called it. Any Windows
+# with a GPU driver has the DLL itself; it is the driver's, not ours to ship.
+#
+# Searched for rather than assumed at `Include\` and `Lib\`, and the shallowest of each taken,
+# since an SDK carries other copies (MoltenVK's, samples').
+function Find-Shallowest([string] $dir, [string] $name) {
+    if (-not $dir -or -not (Test-Path $dir)) { return $null }
+    Get-ChildItem -Path $dir -Recurse -Filter $name -ErrorAction SilentlyContinue |
+        Where-Object { $_.DirectoryName -notmatch '32$' } |
+        Sort-Object { $_.FullName.Length } | Select-Object -First 1
+}
+$sdkVersion = if ($env:VULKAN_SDK_VERSION) { $env:VULKAN_SDK_VERSION } elseif ($env:VULKAN_SDK) { Split-Path -Leaf $env:VULKAN_SDK } else { 'bundled' }
+$vulkanCore = Find-Shallowest $env:VULKAN_SDK 'vulkan_core.h'
+if (-not $vulkanCore) {
+    $vulkanCore = Find-Shallowest (Join-Path $virglrendererSrc 'include') 'vulkan_core.h'
+}
+if (-not $vulkanCore) { Write-Error 'no Vulkan headers: neither VULKAN_SDK nor virglrenderer''s include\ has them' }
+$vulkanInclude = Split-Path -Parent $vulkanCore.DirectoryName
+$vulkanLib = Find-Shallowest $env:VULKAN_SDK 'vulkan-1.lib'
+if ($vulkanLib) {
+    $vulkanLibDir = $vulkanLib.DirectoryName
+} else {
+    $vulkanLibDir = Join-Path $build 'vulkan'
+    New-Item -ItemType Directory -Force -Path $vulkanLibDir | Out-Null
+    # vulkan_win32.h only where there is one: virglrenderer's tree has none, and venus
+    # calls nothing in it by name.
+    $headers = 'vulkan_core.h', 'vulkan_win32.h' |
+        ForEach-Object { Join-Path $vulkanInclude "vulkan\$_" } | Where-Object { Test-Path $_ }
+    $names = foreach ($header in $headers) {
+        Select-String -Path $header `
+            -Pattern 'VKAPI_ATTR\s+\S+\s+VKAPI_CALL\s+(vk\w+)\s*\(' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+    }
+    $def = Join-Path $vulkanLibDir 'vulkan-1.def'
+    (@('LIBRARY vulkan-1.dll', 'EXPORTS') + ($names | Sort-Object -Unique)) |
+        Set-Content -Encoding ascii $def
+    Invoke-Checked 'lib /def' {
+        lib.exe /nologo /machine:x64 "/def:$def" "/out:$(Join-Path $vulkanLibDir 'vulkan-1.lib')"
+    }
+    Write-Output "  no Vulkan SDK import library; made vulkan-1.lib from the headers ($(@($names).Count) names)"
+}
+Write-Output "  vulkan: headers in $vulkanInclude, vulkan-1.lib in $vulkanLibDir"
 @"
 Name: vulkan
 Description: Vulkan SDK loader
 Version: $sdkVersion
-Cflags: -I$sdk/Include
-Libs: -L$sdk/Lib -lvulkan-1
+Cflags: -I$($vulkanInclude -replace '\\','/')
+Libs: -L$($vulkanLibDir -replace '\\','/') -lvulkan-1
 "@ | Set-Content -Encoding ascii (Join-Path $pcdir 'vulkan.pc')
 
 Write-Output 'Setting up libepoxy'
 
-# Static, like virglrenderer, so that nothing has to find a DLL at start-up.
+# Static, like virglrenderer, so that nothing has to find a DLL at start-up -- and against the
+# static C runtime (`b_vscrt=mt`), as the Rust side is (`.cargo/config.toml`): an archive
+# built for the DLL one asks for `__imp_` symbols a static link has none of.
 #
 # `EPOXY_PUBLIC` is defined on the command line and not left to the headers, because
 # `include/epoxy/common.h` defaults it to `__declspec(dllimport)` under any compiler that
@@ -114,7 +160,7 @@ Write-Output 'Setting up libepoxy'
 if (Test-Path (Join-Path $epoxyBuild 'build.ninja')) { $reconfigure = @('--reconfigure') } else { $reconfigure = @() }
 Invoke-Checked 'libepoxy configure' {
     & $meson setup @reconfigure $epoxyBuild $epoxySrc --prefix $epoxyPrefix --buildtype release `
-        --native-file $native -Dtests=false -Ddocs=false -Ddefault_library=static `
+        --native-file $native -Dtests=false -Ddocs=false -Ddefault_library=static -Db_vscrt=mt `
         -Dc_args=-DEPOXY_PUBLIC=extern | Out-Null
 }
 Invoke-Checked 'libepoxy build' { & $meson compile -C $epoxyBuild | Out-Null }
@@ -148,11 +194,14 @@ Invoke-Checked 'virglrenderer configure' {
     & $meson setup @reconfigure $virglrendererBuild $virglrendererSrc --prefix $virglrendererPrefix `
         --buildtype release --native-file $native `
         -Dvenus=true -Drender-server-mode=none -Dvulkan-dload=false -Dplatforms= `
-        -Ddefault_library=static | Out-Null
+        -Ddefault_library=static -Db_vscrt=mt | Out-Null
 }
 
 Write-Output 'Compiling virglrenderer'
-Invoke-Checked 'virglrenderer build' { & $meson compile -C $virglrendererBuild | Out-Null }
+# Kept in a log rather than dropped, so that a build that fails can say why -- in CI there is
+# no tree left to look in afterwards.
+$virglrendererLog = Join-Path $build 'virglrenderer-build.log'
+Invoke-Checked 'virglrenderer build' { & $meson compile -C $virglrendererBuild *> $virglrendererLog }
 Invoke-Checked 'virglrenderer install' { & $meson install -C $virglrendererBuild | Out-Null }
 
 $virglrendererPcdir = Join-Path $virglrendererPrefix 'lib\pkgconfig'

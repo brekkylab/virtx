@@ -526,7 +526,7 @@ would need the bug fixed upstream.
 
 For the `gpu` feature, additionally:
 
-- The **Vulkan SDK**, and `LIBCLANG_PATH` pointing at a directory holding
+- `LIBCLANG_PATH` pointing at a directory holding
   `libclang.dll`. `bindgen` builds `krun_display` and needs that DLL; having
   `clang.exe` on `PATH` is not enough, even though an LLVM install keeps both
   in the same directory — `clang-sys` does not look there. Without it the
@@ -544,6 +544,12 @@ For the `gpu` feature, additionally:
   [env]
   LIBCLANG_PATH = 'C:\path\to\llvm\bin'
   ```
+
+- No Vulkan SDK is needed. `build-deps.ps1` uses one when `VULKAN_SDK` names
+  it, and otherwise the Vulkan headers virglrenderer bundles, with an import
+  library for `vulkan-1.dll` made from them. The host delay-loads that DLL,
+  which comes with any GPU driver, so a host without one still starts and says
+  it cannot make a GPU.
 
 One host setting is worth checking before anything else: **Smart App Control**
 blocks unsigned executables, which is every build script cargo compiles and

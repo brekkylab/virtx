@@ -1,0 +1,371 @@
+# Build cortex-krun for every platform it is published for, and upload each to the dist
+# bucket, all under the one commit this runs on -- `cargo xtask upload` files a release by
+# the sha of HEAD. Moving each platform's `latest` to it -- what `ensure_cortex` fetches when
+# told no version, so what every such user gets next -- is a separate decision, made by:
+#
+# | run                      | cortex it builds against     | platforms          | `latest` |
+# |--------------------------|------------------------------|--------------------|----------|
+# | a tag pushed             | the same tag in cortex       | all                | moved    |
+# | a dispatch               | `cortex-ref`, else `main`     | all                | if `latest` is set |
+#
+# A push to a branch runs nothing: a build is either a release, or asked for.
+#
+# A run that moves `latest` builds every platform, so the four `latest`s always name one
+# commit. A tag is a release of both repositories at once: cortex-krun speaks the protocol
+# of the cortex it is built with, so the tag has to exist in brekkylab/cortex too, and the
+# checkout fails if it does not.
+#
+# # Platforms
+#
+# | release        | runner           | kernel and abin from                   | host build |
+# |----------------|------------------|----------------------------------------|------------|
+# | macos-aarch64  | macos-15         | kernel.c, abin: the arm64 Linux job    | gpu        |
+# | linux-x86_64   | ubuntu-24.04     | libkrunfw.so, abin: x86_64 Linux job   | gpu        |
+# | linux-aarch64  | ubuntu-24.04-arm | libkrunfw.so, abin: arm64 Linux job    | gpu        |
+# | windows-x86_64 | windows-2025     | libkrunfw.dll, abin: x86_64 Linux job  | gpu        |
+#
+# The guest kernel is built in a Linux container (see xtask/scripts/build-libkrunfw.sh),
+# which neither GitHub's macOS runners (no Docker) nor its Windows runners (Windows
+# containers) can run -- so the two Linux jobs build every platform's kernel and hand it on.
+# abin goes the same way: it is the guest's, so it depends on the architecture and not on
+# the host, and its C (SQLite) is cross-compiled by `xtask/scripts/musl-cc.sh`, a shell
+# script around clang that Windows cannot run. One build per architecture, then, where
+# the guest can be built by each platform, being Rust and linked by rust-lld alone.
+#
+# # What it needs
+#
+# - `AWS_ROLE_ARN`: the role `aws-actions/configure-aws-credentials` assumes over OIDC,
+#   trusted for this repository and allowed `s3:PutObject` under `cortex-krun/` only.
+# - `CORTEX_DEPLOY_KEY`: a read-only deploy key for brekkylab/cortex, which this workspace
+#   builds against as `../cortex`. Not needed once that repository is public.
+name: dist
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+    inputs:
+      cortex-ref:
+        description: The brekkylab/cortex ref to build against (empty is main, or the tag on a tag)
+        default: ""
+      upload:
+        description: Upload to the dist bucket
+        type: boolean
+        default: true
+      latest:
+        description: Point every platform's latest at this commit (what ensure_cortex fetches by default)
+        type: boolean
+        default: false
+
+concurrency:
+  group: dist
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  BUCKET: cortex-dist-044443350235-us-east-1-an
+  AWS_REGION: us-east-1
+  DIST_URL: https://cortex-dist-044443350235-us-east-1-an.s3.us-east-1.amazonaws.com
+  # A dispatch's word first, then a tag's own name, then main -- see the table above.
+  CORTEX_REF: ${{ inputs.cortex-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
+  # "true" on a pushed tag or a dispatch that asks; every other run leaves `latest` alone.
+  LATEST: ${{ inputs.latest == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guest-parts:
+    name: guest parts (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            targets: linux windows
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            targets: linux macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: cortex-krun
+    steps:
+      # With the submodules, which only the kernel does not need: `cargo xtask` loads the
+      # whole workspace, and that names crates in them.
+      - uses: actions/checkout@v4
+        with:
+          path: cortex-krun
+          submodules: true
+
+      # abin's programs are written in brekkylab/cortex, as `../cortex`.
+      - uses: actions/checkout@v4
+        with:
+          repository: brekkylab/cortex
+          ref: ${{ env.CORTEX_REF }}
+          path: cortex
+          ssh-key: ${{ secrets.CORTEX_DEPLOY_KEY }}
+
+      # A kernel is only its tag, its config and this script; the Makefile and configs come
+      # from the libkrunfw clone, pinned by tag in the script.
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: cortex-krun/build/krunfw
+          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('cortex-krun/xtask/scripts/build-libkrunfw.sh') }}
+
+      - name: Kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          for target in ${{ matrix.targets }}; do
+            echo "::group::libkrunfw for $target"
+            LIBKRUNFW_TARGET=$target sh xtask/scripts/build-libkrunfw.sh
+            echo "::endgroup::"
+          done
+
+      - run: ls -la build/krunfw
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: cortex-krun/build/krunfw/*
+          if-no-files-found: error
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cortex-krun
+          key: abin-${{ matrix.arch }}
+
+      - name: abin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+          cargo xtask build abin
+          ls -la target/release/abin
+          # A tarball, since an artifact keeps no file modes, and these are executables.
+          tar -C target/release -czf "$RUNNER_TEMP/abin.tar.gz" abin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abin-${{ matrix.arch }}
+          path: ${{ runner.temp }}/abin.tar.gz
+          if-no-files-found: error
+
+  # Which platforms this run builds: all of them, unless the commit says
+  # `[dist:<release>]`, as a change that touches one platform's build does to try it
+  # without rebuilding, and re-uploading, the other three.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      all: ${{ steps.plan.outputs.all }}
+    steps:
+      - id: plan
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+          REF_TYPE: ${{ github.ref_type }}
+          PLATFORMS: >-
+            [{"release": "macos-aarch64", "runner": "macos-15", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "linux-x86_64", "runner": "ubuntu-24.04", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}, {"release": "linux-aarch64", "runner": "ubuntu-24.04-arm", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "windows-x86_64", "runner": "windows-2025", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}]
+        run: |
+          # A tag is a release, and a release is every platform, whatever its commit says.
+          only=$(printf '%s' "$MESSAGE" | grep -oE '\[dist:[a-z0-9_-]+\]' | sed -E 's/\[dist:(.*)\]/\1/' | head -1)
+          if [ "$REF_TYPE" = tag ]; then only=""; fi
+          if [ -n "$only" ]; then
+            matrix=$(printf '%s' "$PLATFORMS" | jq -c --arg only "$only" '[.[] | select(.release == $only)]')
+            all=false
+          else
+            matrix=$(printf '%s' "$PLATFORMS" | jq -c .)
+            all=true
+          fi
+          echo "building: $(printf '%s' "$matrix" | jq -r '[.[].release] | join(" ")')"
+          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
+          echo "all=$all" >> "$GITHUB_OUTPUT"
+
+  dist:
+    name: dist (${{ matrix.release }})
+    needs: [plan, guest-parts]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: cortex-krun
+    steps:
+      # Before any checkout: Windows' git converts to CRLF by default, and the submodule
+      # patches, written against LF, then find no context to apply to.
+      - name: Keep line endings as committed
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          path: cortex-krun
+          submodules: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: brekkylab/cortex
+          ref: ${{ env.CORTEX_REF }}
+          path: cortex
+          ssh-key: ${{ secrets.CORTEX_DEPLOY_KEY }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.musl }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cortex-krun
+          key: ${{ matrix.release }}
+
+      - name: Toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm meson ninja-build pkg-config python3-venv libvulkan-dev libssl-dev
+
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install lld llvm meson ninja
+
+      # virglrenderer's Windows build: pkg-config, and libclang for bindgen -- see the
+      # README's Windows section. No Vulkan SDK: build-deps.ps1 makes do with the headers
+      # virglrenderer bundles, and an import library it makes from them.
+      - name: Toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # pkg-config.exe itself: build-deps.ps1 asks PowerShell for it, and the one Git
+          # Bash finds first is not an .exe PowerShell can run.
+          choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
+      - name: Patch the submodules
+        run: cargo xtask init
+
+      # MoltenVK takes most of a macOS build, and changes only with its submodule and patches.
+      - name: MoltenVK cache
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            cortex-krun/3rdparty/MoltenVK/Package
+          key: moltenvk-${{ hashFiles('cortex-krun/.git/modules/3rdparty/MoltenVK/HEAD', 'cortex-krun/3rdparty/_patches/MoltenVK-*.patch', 'cortex-krun/xtask/scripts/build-deps.sh') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-${{ matrix.kernel }}
+          path: kernel
+
+      - name: Put the kernel in place
+        run: |
+          mkdir -p build/krunfw
+          case "${{ matrix.release }}" in
+            macos-*)   LIBKRUNFW_KERNEL_C="$GITHUB_WORKSPACE/kernel/kernel.c" cargo xtask build kernel ;;
+            linux-*)   cp -v "$GITHUB_WORKSPACE"/kernel/libkrunfw.so.* build/krunfw/ ;;
+            windows-*) cp -v "$GITHUB_WORKSPACE"/kernel/libkrunfw.dll build/krunfw/ ;;
+          esac
+          ls -la build/krunfw
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: abin-${{ matrix.kernel }}
+          path: abin
+
+      - name: Put abin in place
+        run: |
+          mkdir -p target/release
+          # From stdin: GNU tar takes the `D:` of a Windows path for a remote host.
+          tar -C target/release -xzf - < "$GITHUB_WORKSPACE/abin/abin.tar.gz"
+          ls -la target/release/abin
+
+      - name: Build
+        run: cargo xtask build host guest
+
+      - name: virglrenderer's log (Windows, on failure)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          log=build/virglrenderer-build.log
+          # Windows PowerShell writes a redirect as UTF-16.
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          iconv -f UTF-16 -t UTF-8 "$log" > "$log.txt" 2>/dev/null || tr -d '\000' < "$log" > "$log.txt"
+          grep -nE "^FAILED|error( [A-Z]+[0-9]+)?:" "$log.txt" | head -20
+          echo ...
+          grep -nE -B3 -A6 "error( [A-Z]+[0-9]+)?:" "$log.txt" | head -80
+          tail -30 build/virglrenderer-build/meson-logs/meson-log.txt 2>/dev/null || true
+
+      - name: What was built
+        run: |
+          ls -la target/release | grep -E "cortex-krun|libkrunfw" || true
+          ls target/release/abin || true
+          exe=target/release/cortex-krun-host; [ -f "$exe" ] || exe=$exe.exe
+          echo "capabilities: [$("$exe" --capabilities | tr '\n' ' ')]"
+
+      # What each executable needs from the loader at start-up, delay-loaded or not -- the
+      # DLLs a release has to carry are the ones in the first list that Windows itself
+      # does not ship.
+      - name: DLL imports (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          readobj="/c/Program Files/LLVM/bin/llvm-readobj.exe"
+          for exe in target/release/cortex-krun.exe target/release/cortex-krun-host.exe; do
+            echo "== $exe"
+            "$readobj" --coff-imports "$exe" | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' | sort -u | tee "$RUNNER_TEMP/imports.txt"
+            # Nothing a release does not carry and Windows may not have, loaded at start-up:
+            # the C++ runtime is linked in, and the rest are delay-loaded, so a host without
+            # them still runs cortex-krun far enough to say what to install.
+            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv|dokan)" "$RUNNER_TEMP/imports.txt"; then
+              echo "::error::$exe needs the DLLs above to start"; fail=1
+            fi
+          done
+          exit ${fail:-0}
+
+      - name: Assume the publishing role
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload
+        run: |
+          # `inputs` is empty on a push, which uploads; only a dispatch can say not to.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.upload }}" != true ]; then flags=--dry-run; fi
+          # Only on a tag or when asked, and only on a run that builds every platform -- which
+          # both always are -- so that no `latest` names a commit another platform has no
+          # release for.
+          if [ "$LATEST" = true ] && [ "${{ needs.plan.outputs.all }}" = true ]; then flags="${flags:-} --latest"; fi
+          cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" ${flags:-}
+
+  verify:
+    needs: [plan, dist]
+    if: needs.plan.outputs.all == 'true' && (github.event_name != 'workflow_dispatch' || inputs.upload)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Every platform's archive for this commit, and -- on a run that moved them -- every
+      # platform's `latest` naming it.
+      - name: Every platform has this commit's release
+        env:
+          MOVED: ${{ env.LATEST }}
+        run: |
+          fail=0
+          for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            latest=$(curl -fsS "$DIST_URL/cortex-krun/$release/latest" || echo none)
+            archive="$DIST_URL/cortex-krun/$release/$GITHUB_SHA/cortex-krun-$release.tar.gz"
+            size=$(curl -fsSI "$archive" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
+            printf '%-15s archive=%s bytes latest=%s\n' "$release" "${size:-missing}" "$latest"
+            [ -n "$size" ] || fail=1
+            if [ "$MOVED" = true ] && [ "$latest" != "$GITHUB_SHA" ]; then fail=1; fi
+          done
+          exit $fail

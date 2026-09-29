@@ -16,3 +16,11 @@ xtask = "run --package xtask --"
 # take no `-Wl,`.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
+
+# The C runtime linked in, on Windows: the default imports it from `VCRUNTIME140.dll`, which
+# is the Visual C++ Redistributable's and not Windows' own, so a release would have to ship
+# it or its installer. Static, a release is its files and nothing else. The C libraries
+# linked with it have to agree -- `cc-rs` follows this flag by itself, and
+# `xtask/scripts/build-deps.ps1` builds libepoxy and virglrenderer with `b_vscrt=mt` to match.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -48,7 +48,6 @@ set -eu
 # have to match what libkrun expects (KRUNFW_NAME, ABI 5).
 LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-v5.6.2}"
 IMAGE="${LIBKRUNFW_IMAGE:-ubuntu:24.04}"
-VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD="$ROOT/build/libkrunfw-build"
@@ -61,13 +60,35 @@ case "$(uname -s)" in
     *) echo "unsupported host: $(uname -s)" >&2 && exit 1 ;;
 esac
 
+# What to build for: this host, unless `LIBKRUNFW_TARGET` names another. That is how one
+# Linux machine builds for the two hosts that cannot run the container themselves --
+# GitHub's macOS runners have no Docker, and its Windows runners run Windows containers:
+#
+#     LIBKRUNFW_TARGET=windows  on Linux: libkrunfw.dll, cross-compiled with MinGW-w64
+#     LIBKRUNFW_TARGET=macos    on Linux: build/krunfw/kernel.c only, for a Mac to link
+#     LIBKRUNFW_KERNEL_C=<path> on macOS: link that kernel.c, with no container at all
+#
+# The guest kernel is the container's architecture, so a macOS kernel.c comes from an
+# arm64 Linux machine.
+TARGET="${LIBKRUNFW_TARGET:-$HOST}"
+
+# The kernel tree's volume. Windows' has one of its own: its kernel is configured from
+# another file (`config-libkrunfw-windows_x86_64`), and the Makefile copies a config in only
+# when it unpacks a tree -- so a tree shared with the Linux build would keep the Linux one.
+# macOS and Linux share, since on one architecture they build the same kernel.
+case "$TARGET" in
+    windows) VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw-windows}" ;;
+    *) VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw}" ;;
+esac
+
 # What the library is called, which is also how this tells a build it already has from
 # one it does not. The Linux name carries the ABI version (`libkrunfw.so.5`, renamed so
 # below), so it is matched rather than named.
-case "$HOST" in
+case "$TARGET" in
     linux) PATTERN="libkrunfw.so.*" ;;
-    macos) PATTERN="libkrunfw.*.dylib" ;;
+    macos) if [ "$HOST" = macos ]; then PATTERN="libkrunfw.*.dylib"; else PATTERN="kernel.c"; fi ;;
     windows) PATTERN="libkrunfw.dll" ;;
+    *) echo "unsupported LIBKRUNFW_TARGET: $TARGET (linux, macos or windows)" >&2 && exit 1 ;;
 esac
 
 # shellcheck disable=SC2086
@@ -137,7 +158,7 @@ EOF
         "$IMAGE" sh /build/build.sh
 }
 
-case "$HOST" in
+case "$TARGET" in
     windows)
         EXTRA_PACKAGES="mingw-w64" MAKE_ARGS="OS=Windows" build_in_container
         ;;
@@ -154,9 +175,17 @@ case "$HOST" in
         done
         ;;
     macos)
-        MAKE_ARGS="kernel.c" COPY_BACK="kernel.c" build_in_container
-        (cd "$BUILD/libkrunfw" && make)
-        cp -v "$BUILD/libkrunfw"/libkrunfw.*.dylib "$PREFIX/"
+        if [ -n "${LIBKRUNFW_KERNEL_C:-}" ]; then
+            cp -v "$LIBKRUNFW_KERNEL_C" "$BUILD/libkrunfw/kernel.c"
+        else
+            MAKE_ARGS="kernel.c" COPY_BACK="kernel.c" build_in_container
+        fi
+        if [ "$HOST" = macos ]; then
+            (cd "$BUILD/libkrunfw" && make)
+            cp -v "$BUILD/libkrunfw"/libkrunfw.*.dylib "$PREFIX/"
+        else
+            cp -v "$BUILD/libkrunfw/kernel.c" "$PREFIX/kernel.c"
+        fi
         ;;
 esac
 

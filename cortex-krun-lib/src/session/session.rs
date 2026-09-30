@@ -25,7 +25,7 @@
 //! virtio-blk /dev/vda    the image's disk, read-only -- the overlay's lower
 //! virtio-blk /dev/vdb    this session's ext4 -- the overlay's upper layer
 //! virtio-con hvc0        the guest's console, on this process's own stdin and stdout
-//! virtio-net eth0        the guest's network, on a session that asked for one -- see below
+//! virtio-vsock           the guest's network, on a session that asked for one -- see below
 //! virtio-fs  mnt0, mnt1  one per [`Mount`], mounted by tag on the root after the pivot
 //! ```
 //!
@@ -42,14 +42,11 @@
 //!
 //! # The network, and where it actually is
 //!
-//! On a thread of this process, behind a socketpair: the device puts the guest's ethernet
-//! frames down one end and [`net`](super::net) is what reads them. So a session's network
-//! is not a thing the host has and the guest is let onto -- it is made, per session, out
-//! of host sockets, and what a level like [`Network::Public`] means is which of those
-//! sockets ever get opened.
+//! In this process's own sockets. The guest's kernel hands every socket it cannot answer on
+//! its own stack to the vsock device, and libkrun opens the host socket that answers it -- so
+//! a session's network is not a thing the host has and the guest is let onto, it is this
+//! process reaching out on the guest's behalf, and [`net`](super::net) is what decides where.
 //!
-//! The guest configures itself over DHCP before the workload starts, which is how an
-//! image that was never prepared for any of this gets an address, a route and a resolver.
 //! A session that asked for no network gets no device, and there is nothing in the guest
 //! that can put one back. See [`Session::network`].
 //!
@@ -83,7 +80,7 @@ use krun::{
 
 use crate::image::{Cache, ImageState, provision};
 
-use super::{Error, Ext4, Mount, Network, Result, net};
+use super::{Error, Ext4, Mount, Result, net};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
 /// with `rootfstype=virtiofs`.
@@ -152,8 +149,11 @@ pub struct Session {
     mounts: Vec<Mount>,
     vcpus: u8,
     ram_mib: u32,
-    network: Network,
-    host_ports: Vec<u16>,
+    network: bool,
+    /// The listeners whose connections are carried into the guest, each to one console port
+    /// -- see [`publish`](Session::publish). Shared rather than owned so that a `Session`
+    /// stays a value that clones; each is duplicated when the device is made.
+    published: Vec<(u16, std::sync::Arc<std::net::TcpListener>)>,
     gpu: bool,
     gpu_memory_mib: Option<u32>,
     /// A named virtio-console port, and the descriptors behind it -- see
@@ -191,10 +191,9 @@ impl Session {
             vcpus: 2,
             // Enough for a package install, which is the first thing anyone does.
             ram_mib: Self::DEFAULT_RAM_MIB,
-            // What a session that said nothing about it gets, and the only level that
-            // needs nothing of the host -- see `Session::network`.
-            network: Network::Disabled,
-            host_ports: Vec::new(),
+            // What a session that said nothing about it gets -- see `Session::network`.
+            network: false,
+            published: Vec::new(),
             gpu: false,
             gpu_memory_mib: None,
             port: None,
@@ -270,46 +269,35 @@ impl Session {
         self
     }
 
-    /// How much of the network the guest can reach, which by default is none of it.
+    /// Whether the guest reaches a network, which by default it does not.
     ///
-    /// **`Disabled` is an isolation nothing in the guest can undo**, because what it
-    /// leaves out is a device. There is no interface to bring up, no route to add and no
-    /// address to claim -- a socket the guest opens to anywhere but itself has nowhere to
-    /// go. It is the default because it is the only level that asks nothing of the host,
-    /// and because a session that did not say it wanted to reach the network should not.
+    /// **Off is an isolation nothing in the guest can undo**, because what it leaves out is a
+    /// device. There is no interface to bring up and no socket family to reach the host
+    /// through -- a socket the guest opens to anywhere but itself has nowhere to go. It is the
+    /// default because a session that did not say it wanted to reach the network should not.
     ///
-    /// Every other level is a device, and with it an address, a default route, an MTU and
-    /// a `/etc/resolv.conf`, all of which arrive over DHCP before the workload starts. An
-    /// image needs nothing in it for that: libkrun's init is the client, and
-    /// [`session::net`](super::net) is the server.
-    ///
-    /// | level | what it reaches |
-    /// |---|---|
-    /// | [`Disabled`](Network::Disabled) | nothing, there being no device |
-    /// | [`HostOnly`](Network::HostOnly) | names, and the ports [`host_ports`](Session::host_ports) granted |
-    /// | [`Public`](Network::Public) | the internet, and the grant -- not this machine, not its LAN |
-    /// | [`Full`](Network::Full) | every address, and the grant |
-    ///
-    /// **Reaching this machine is never a level.** It is
-    /// [`host_ports`](Session::host_ports) at all four, which is what keeps widening a
-    /// session's reach outward from widening it inward by accident.
-    pub fn network(mut self, network: Network) -> Session {
+    /// On is what this process reaches, less this host's loopback -- see
+    /// [`session::net`](super::net) for the whole of the rule, and why a name resolves in a
+    /// guest whose image was never prepared for any of this.
+    pub fn network(mut self, network: bool) -> Session {
         self.network = network;
         self
     }
 
-    /// TCP ports on this host the guest may connect to, at the gateway address its
-    /// default route already names. Appends, so several calls are several ports.
+    /// Every connection `listener` accepts becomes one to `console` in the guest.
     ///
-    /// Opened on loopback and nowhere else: a granted port is a service on *this*
-    /// machine, and one resolved through an interface would be whatever answers that port
-    /// on whichever network the host is attached to.
+    /// **Bound by the caller**, because where it listens is the caller's to know and to tell
+    /// whoever will connect -- a port it chose, or one the system gave it for `:0`. A
+    /// connection reaches whatever in the guest listens on `console`, on whichever address,
+    /// and is closed while nothing does -- which is what a machine on a network answers for a
+    /// port nothing listens on.
     ///
-    /// Granted at every [`network`](Session::network) level but
-    /// [`Disabled`](Network::Disabled), which has no device to carry it -- see that
-    /// method on why the host is a grant rather than a level.
-    pub fn host_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Session {
-        self.host_ports.extend(ports);
+    /// Appends. Ignored without a [`network`](Session::network), which is the device a
+    /// connection arrives through -- a caller that means to publish something asks for a
+    /// network to publish it on.
+    pub fn publish(mut self, console: u16, listener: std::net::TcpListener) -> Session {
+        self.published
+            .push((console, std::sync::Arc::new(listener)));
         self
     }
 
@@ -500,11 +488,10 @@ impl Session {
             .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
             .env_var(&format!("KRUN_BLOCK_UPPER_FSTYPE={UPPER_FSTYPE}"));
 
-        // What makes libkrun's init run a DHCP client on `eth0` -- and so what gets the
-        // guest its address, its route and its `/etc/resolv.conf`, none of which an image
-        // has anything in it to set up. The server answering is `net`.
-        if self.network.attached() {
-            init = init.env_var(&format!("{}=1", net::DHCP_ENV));
+        // What the guest's `/etc/resolv.conf` names, there being no lease to say it -- see
+        // `net::NAMESERVER`.
+        if self.network {
+            init = init.env_var(&format!("{}={}", net::NAMESERVER_ENV, net::NAMESERVER));
         }
 
         // One config entry per mount, saying which tag goes where. The devices carrying
@@ -604,8 +591,20 @@ impl Session {
 
         // The whole of what a network is here, and the whole of what having none is: the
         // device is attached or it is not -- see [`net`].
-        if self.network.attached() {
-            devices.add(net::attach(self.network, self.host_ports.clone())?);
+        if self.network {
+            let published = self
+                .published
+                .iter()
+                .map(|(console, listener)| {
+                    listener
+                        .try_clone()
+                        .map(|listener| (*console, listener))
+                        .map_err(|e| {
+                            Error::io(format!("sharing the listener for guest port {console}"), e)
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            devices.add(net::attach(published)?);
         }
 
         // Nothing at all without the feature, which is what `gpu` promises: a build that
@@ -767,12 +766,11 @@ mod tests {
         let session = Session::new();
         assert_eq!(session.vcpus, 2);
         assert_eq!(session.ram_mib, 2048);
-        assert_eq!(
-            session.network,
-            Network::Disabled,
+        assert!(
+            !session.network,
             "a session that said nothing got a network"
         );
-        assert!(session.host_ports.is_empty());
+        assert!(session.published.is_empty());
         assert!(!session.gpu);
         assert!(session.image.is_none());
         assert!(session.cache.is_none());

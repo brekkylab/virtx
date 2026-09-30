@@ -26,9 +26,9 @@ pub(crate) fn resolvers() -> Vec<Ipv4Addr> {
 
 /// The `nameserver` lines of a `resolv.conf`, as far as they are IPv4 addresses.
 ///
-/// IPv6 resolvers are passed over rather than refused: this stack carries no v6, so an
-/// address it cannot send a packet to is not one it can offer the guest. A file that
-/// names both ends up with the v4 ones, which is the working subset of what the host has.
+/// IPv6 resolvers are passed over rather than refused: the guest asks its nameserver over a
+/// v4 socket, and a v4 socket cannot send to a v6 address. A file that names both ends up
+/// with the v4 ones, which is the working subset of what the host has.
 fn nameservers(conf: &str) -> Vec<Ipv4Addr> {
     conf.lines()
         .map(|line| line.split('#').next().unwrap_or("").trim())
@@ -56,10 +56,10 @@ nameserver 9.9.9.9
         );
     }
 
-    /// A v6 resolver is a resolver this stack has no way to reach, so it is passed over
+    /// A v6 resolver is not one a v4 query can be carried to, so it is passed over
     /// rather than turned into a lookup that never answers.
     #[test]
-    fn a_resolver_this_stack_cannot_reach_is_passed_over() {
+    fn a_resolver_a_v4_query_cannot_reach_is_passed_over() {
         let conf = "nameserver fe80::1\nnameserver 1.1.1.1\n";
         assert_eq!(nameservers(conf), [Ipv4Addr::new(1, 1, 1, 1)]);
     }

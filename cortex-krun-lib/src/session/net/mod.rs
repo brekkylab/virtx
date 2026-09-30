@@ -1,188 +1,89 @@
-//! The network a session gets, and the stack on the host that is the whole of it.
+//! The network a session gets: the guest's own sockets, opened on the host.
 //!
-//! # Why a stack and not a switch
+//! # Why sockets and not a device
 //!
-//! Because there is nothing to switch onto. libkrun's virtio-net device does not bridge,
-//! route or NAT: it takes one socket and puts every ethernet frame the guest sends down
-//! it, and puts back whatever it reads. Everything a network *is* -- an address for the
-//! guest, something to answer its ARP, a gateway that forwards, a resolver -- is on the
-//! other end of that socket, and this module is that other end.
+//! Because a session's network is either all of what this host reaches or none of it, and
+//! all of what this host reaches is exactly what its sockets are. libkrun's Transparent
+//! Socket Impersonation gives the guest kernel an address family that speaks AF_INET and
+//! AF_INET6 to the program and vsock to the host: a `connect`, a `sendto` or a `listen` in
+//! the guest arrives here as a request, and libkrun opens the host socket that answers it.
 //!
 //! ```text
-//!      guest                    │ hypervisor │            host
-//!   ───────────────────────────────────────────────────────────────────
-//!   eth0 ──► virtio-net queue ──┼─ socketpair ─┼──► Stack ──► TcpStream
-//!                               │            │      │        UdpSocket
-//!                               │            │      ├─ ARP, DHCP, DNS
-//!                               │            │      └─ Policy
+//!      guest                          │ hypervisor │            host
+//!   ─────────────────────────────────────────────────────────────────────────
+//!   connect() ──► AF_TSI ──► vsock ───┼────────────┼──► muxer ──► TcpStream
+//!                                     │            │      │       UdpSocket
+//!                                     │            │      └─ Policy
 //! ```
 //!
-//! What that socket is, and how a frame is marked off on it, is the one thing here that
-//! differs between hosts -- see [`wire`]. Everything above it is the same network on
-//! every platform.
+//! There is no interface, no address, no route and no lease: nothing in the guest to
+//! configure and nothing on the host to forward. What is left to decide is the handful of
+//! places where "open what the guest asked for" is not the answer -- and those are
+//! [`policy`].
 //!
-//! # What the guest does not get
+//! # What a guest's own sockets still are
 //!
-//! An interface it has to configure, for one: libkrun's init runs a DHCP client when
-//! [`DHCP_ENV`] is set, and this stack is the server that answers it. That is also what
-//! writes `/etc/resolv.conf` in the guest, which is the difference between a network that
-//! works and one that only works by address.
+//! The guest's. The kernel tries its own stack first and falls back to the host only for
+//! what its own stack cannot reach, so two programs in the guest talking over its loopback
+//! never leave it, and a `listen` the host is not asked to take stays a listener in the
+//! guest.
 //!
-//! No IPv6. The guest may ask; nothing here answers, so it falls back to v4 rather than
-//! hanging. No inbound connections: a host reaching *into* a session is a grant with its
-//! own name and this is not it. And no raw sockets -- a `ping` from the guest is answered
-//! by this stack itself or not at all, because what is behind it is host sockets, and an
-//! unprivileged host process cannot send an ICMP echo.
+//! # A session with none
 //!
-//! # Where the policy is
+//! Gets no device, and so no way off its own loopback -- see [`Session::network`]. There is
+//! nothing in the guest that can put one back.
 //!
-//! In [`policy`], and applied at one place: the moment a flow asks for a host socket. It
-//! is not a firewall in front of a network -- it *is* the network, and a destination the
-//! policy refuses is a destination this stack never opens a socket to. There is nothing
-//! in the guest that can route around it, because the only way out of the guest is the
-//! queue this reads.
+//! [`Session::network`]: super::Session::network
 
-mod dhcp;
 mod policy;
-mod proxy;
+mod relay;
 mod resolver;
-mod stack;
-mod wire;
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, TcpListener};
+use std::sync::Arc;
+
+use krun::{TsiFlags, VsockDevice};
 
 use policy::Policy;
-use stack::Stack;
 
 use super::{Error, Result};
 
 /// Start this session's network and hand back the device that is its near end.
 ///
-/// The stack comes up first and on purpose: the guest's DHCP client gives up after a
-/// tenth of a second, and a server that came up when the machine did would be racing a
-/// kernel. By the time this returns, the thread answering is already there.
-pub(crate) fn attach(network: Network, host_ports: Vec<u16>) -> Result<krun::NetDevice> {
-    Stack::start(Policy {
-        network,
-        host_ports,
-    })
-}
-
-/// How much of the network a session may reach.
-///
-/// The names are the same four `cortex-krun-host` spells on its wire, and mean the same
-/// four things -- a session's reach is decided by whoever starts it, and this is what
-/// that decision turns into.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Network {
-    /// No device at all, which is the strongest statement available: there is nothing to
-    /// configure, nothing to route over and nothing to refuse, because the guest has no
-    /// interface but `lo`.
-    ///
-    /// The default. A session that did not ask to reach anything does not.
-    #[default]
-    Disabled,
-
-    /// A device, a resolver, and whatever [`host_ports`](Policy::host_ports) granted.
-    /// Nothing else: every destination outside the guest's own subnet is refused.
-    ///
-    /// What makes it a reach rather than an elaborate way of saying `Disabled` is the
-    /// grant -- a session that was given a port talks to whatever the caller put on this
-    /// machine, with none of it being on the internet.
-    ///
-    /// **Not an air gap.** The resolver forwards to the host's, so a name is a way to
-    /// spell something to the outside even when no packet of the guest's gets there.
-    /// [`Disabled`](Self::Disabled) is the air gap.
-    HostOnly,
-
-    /// The public internet, and the grant. Private ranges, link-local addresses, carrier
-    /// NAT space and this machine's own loopback stay refused -- a sandbox that can reach
-    /// the LAN is reaching things nobody published to it.
-    Public,
-
-    /// Every address, with no judgement but the grant's. For a caller who has decided the
-    /// sandbox boundary is somewhere else.
-    ///
-    /// Still not the host: reaching this machine is [`host_ports`](Policy::host_ports)
-    /// and only that, at every level -- see the module doc.
-    Full,
-}
-
-impl Network {
-    /// The name this level is spelled with, which is the one `--network` takes.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Network::Disabled => "none",
-            Network::HostOnly => "host",
-            Network::Public => "public",
-            Network::Full => "full",
-        }
+/// `published` are the listeners on this host whose connections reach a console port in the
+/// guest -- each one bound by the caller, which is the end that knows where it is and says
+/// so. Each gets a thread that carries its connections to wherever the guest is listening on
+/// that port by then.
+pub(crate) fn attach(published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
+    let policy = Arc::new(Policy::new(
+        resolver::host_resolvers().first().copied(),
+        published.iter().map(|(console, _)| *console),
+    ));
+    for (console, listener) in published {
+        relay::spawn(console, listener, policy.clone())
+            .map_err(|e| Error::io(format!("relaying into guest port {console}"), e))?;
     }
 
-    /// The level a name spells, and `None` for a word that is not one of the four.
-    ///
-    /// The inverse of [`as_str`](Self::as_str), and here beside it because a spelling with
-    /// only one half written down is one that drifts: a caller reading `--network` and a
-    /// caller writing it are in different processes, and what they disagree about is how much
-    /// of the network a sandbox gets.
-    ///
-    /// An unrecognised word is `None` rather than a level, and never
-    /// [`Disabled`](Self::Disabled): `on`, `true` and `1` are all things somebody might type
-    /// and none of them says how much reach is wanted, so the answer belongs to whoever can
-    /// say which spelling was rejected.
-    pub fn parse(name: &str) -> Option<Network> {
-        match name {
-            "none" => Some(Network::Disabled),
-            "host" => Some(Network::HostOnly),
-            "public" => Some(Network::Public),
-            "full" => Some(Network::Full),
-            _ => None,
-        }
-    }
-
-    /// Whether a session at this level gets a device -- and so whether there is a stack
-    /// to start at all.
-    pub(crate) fn attached(self) -> bool {
-        self != Network::Disabled
-    }
+    let mut device = VsockDevice::new(GUEST_CID, TsiFlags::HIJACK_INET)
+        .map_err(|e| Error::vmm("attaching the guest's network", e))?;
+    device.set_policy(policy);
+    Ok(device)
 }
 
-/// Told to libkrun's init as `KRUN_DHCP=1`, which is what makes it run a DHCP client on
-/// `eth0` -- and, with it, write the `/etc/resolv.conf` this stack's answer names.
-pub(crate) const DHCP_ENV: &str = "KRUN_DHCP";
+/// Told to libkrun's init as `KRUN_NAMESERVER`, which is what it writes into the guest's
+/// `/etc/resolv.conf` -- there being no lease to carry one.
+pub(crate) const NAMESERVER_ENV: &str = "KRUN_NAMESERVER";
 
-/// The guest's subnet, which nothing but the guest and this stack is on.
+/// The resolver the guest is told it has, and which [`policy`] carries to this host's.
 ///
-/// 10.0.2.0/24 because it is what every user-mode network since slirp has used, so an
-/// address seen in a log reads as "the sandbox" to anyone who has looked at one before.
-/// Nothing routes it: the host reaches these addresses through no interface at all, and
-/// the only thing that resolves them is this module.
-pub(crate) const SUBNET_PREFIX: u8 = 24;
+/// An address rather than the host's own resolver, because the host's is often one the
+/// guest could not name -- `127.0.0.53` behind systemd, a VPN's, one that changes when a
+/// laptop does. 10.0.2.3 because it is the one every user-mode network since slirp has put
+/// its resolver at, so it reads as "the sandbox's" to anyone who has looked at one. Nothing
+/// routes it: the guest has no stack that reaches it, which is what hands a query to the
+/// host, and the policy is the only thing that knows what it means.
+pub(crate) const NAMESERVER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 
-/// This stack, as the guest addresses it: its default route, the only address it can ARP
-/// for, and the resolver its `/etc/resolv.conf` is given.
-///
-/// One address for all three because they are one thing -- a gateway that forwards is
-/// already the only host the guest can reach, so giving the resolver a second address
-/// would be inventing a second machine to put it on.
-pub(crate) const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 1);
-
-/// What the guest is leased. A single address rather than a pool: there is one guest, it
-/// is the only thing on this subnet, and a lease it can lose is a session that loses its
-/// network while it runs.
-pub(crate) const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
-
-/// The gateway's hardware address, which is this stack's own.
-///
-/// Locally administered (the `0x02` bit) and not a real card's, because it is not a card:
-/// it exists so that the guest's ARP has something to put in a frame's destination.
-pub(crate) const GATEWAY_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0x01];
-
-/// The guest's hardware address, which the host chooses because the host makes the
-/// device. Fixed rather than random, so that two runs of one session are one machine as
-/// far as anything that remembers a MAC is concerned.
-pub(crate) const GUEST_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0x15];
-
-/// The largest ethernet frame either end will send. The guest is told this in its DHCP
-/// lease, so both ends agree without either fragmenting.
-pub(crate) const MTU: usize = 1500;
+/// The guest's vsock address. Any number above the reserved two would do: there is one
+/// guest on this device and nothing addresses it by number.
+const GUEST_CID: u64 = 3;

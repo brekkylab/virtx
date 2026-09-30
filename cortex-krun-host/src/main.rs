@@ -23,8 +23,11 @@
 //! --abin <dir>          shared read-only at ABIN_DIR; cortex's own executables, and the
 //!                       directory that goes first on a command's PATH          [optional]
 //! --channel <path>      the socket to connect back on, which becomes the console port
-//! --network <reach>     none | host | public | full; what the guest can reach
-//! --host-port <n>       a TCP port on this machine the guest may open, repeatable [optional]
+//! --network             give the guest a network; without it, it has none   [optional]
+//! --publish <n>         a guest port this machine may connect into, repeatable, and only
+//!                       beside `--network` -- see [`relay`]                  [optional]
+//! --relays <path>       where to say which loopback port each `--publish` is at; beside
+//!                       `--publish` and only there                           [optional]
 //! --mount <dir> <at>    a tree to share into the guest: the host directory, then the
 //!                       absolute path it appears at, with `:ro` on the end of that path
 //!                       for a tree a command may not write in. Repeatable, and the
@@ -80,7 +83,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cortex_krun::session::{Channel, Ext4, Mount, Network, Session};
+use cortex_krun::session::{Channel, Ext4, Mount, Session};
 use cortex_krun_host::{ABIN_DIR, CAPABILITIES_ARG, GUEST_DIR, PORT_NAME, guest_program};
 
 /// A failure of ours, not a guest's -- the shell's code for "found it, could not run it",
@@ -204,11 +207,11 @@ struct Args {
     /// `PATH`.
     abin: Option<PathBuf>,
     channel: PathBuf,
-    /// How much of the network the session gets, and which doors on this machine are open
-    /// to it. Two axes rather than one: `network` says how far out a session goes, and the
-    /// ports say what it may reach *here* -- so widening the one never widens the other.
-    network: Network,
-    host_ports: Vec<u16>,
+    /// Whether the session reaches a network at all.
+    network: bool,
+    /// The guest ports this machine may connect into, and where to say how -- see [`relay`].
+    publish: Vec<u16>,
+    relays: Option<PathBuf>,
     /// The trees the session was given, in the order the client named them -- see
     /// [`Share`].
     mounts: Vec<Share>,
@@ -231,8 +234,9 @@ impl Args {
         let mut guest = None;
         let mut abin = None;
         let mut channel = None;
-        let mut network = None;
-        let mut host_ports = Vec::new();
+        let mut network = false;
+        let mut publish = Vec::new();
+        let mut relays = None;
         let mut mounts = Vec::new();
         let mut vcpus = None;
         let mut memory_mib = None;
@@ -257,13 +261,10 @@ impl Args {
                 "--guest" => guest = Some(PathBuf::from(value()?)),
                 "--abin" => abin = Some(PathBuf::from(value()?)),
                 "--channel" => channel = Some(PathBuf::from(value()?)),
-                "--network" => {
-                    let name = text(&flag, value()?)?;
-                    network = Some(Network::parse(&name).ok_or_else(|| {
-                        anyhow::anyhow!("--network: {name} is not none, host, public or full")
-                    })?);
-                }
-                "--host-port" => host_ports.push(number(&flag, value()?)?),
+                // A flag and not a value, like `--gpu`: a boot has a network or it has none.
+                "--network" => network = true,
+                "--publish" => publish.push(number(&flag, value()?)?),
+                "--relays" => relays = Some(PathBuf::from(value()?)),
                 // Two values, because a mount is two things this binary reads differently:
                 // a host directory, which is a path and need not be text, and the place it
                 // takes in the guest, which is a string the protocol already spells.
@@ -307,6 +308,20 @@ impl Args {
             "--gpu-memory-mib without --gpu -- a size is of a GPU"
         );
 
+        // A port is carried in over the network, so one without it is the halves disagreeing.
+        anyhow::ensure!(
+            network || publish.is_empty(),
+            "--publish without --network -- a published port is reached over the network"
+        );
+
+        // Both or neither: a door nobody is told the way to is one no connection can find,
+        // and a file saying where no door is is the halves disagreeing about which boot this is.
+        anyhow::ensure!(
+            publish.is_empty() == relays.is_none(),
+            "--publish and --relays come together -- a published port is one the server is told \
+             the way to"
+        );
+
         let required = |name: &str, value: Option<PathBuf>| {
             value.ok_or_else(|| {
                 anyhow::anyhow!("{name} is missing -- a boot is started by a server")
@@ -319,14 +334,9 @@ impl Args {
             guest: required("--guest", guest)?,
             abin,
             channel: required("--channel", channel)?,
-            // Required rather than defaulted to `none`. A reach is the server's decision and
-            // the server always spells it, so a missing one is not a session that wanted no
-            // network -- it is one whose reach was dropped on the way here, and a sandbox
-            // quietly narrower than it was asked to be is worse than one that would not start.
-            network: network.ok_or_else(|| {
-                anyhow::anyhow!("--network is missing -- a boot is told its reach")
-            })?,
-            host_ports,
+            network,
+            publish,
+            relays,
             mounts,
             vcpus,
             memory_mib,
@@ -404,7 +414,6 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
         // The directory the guest binary is in, shared so that the guest has one to exec.
         .mount(Mount::new(&args.guest, GUEST_DIR))
         .network(args.network)
-        .host_ports(args.host_ports.iter().copied())
         // Exactly the guest binary -- see [`Session::exec`]. An image stating an entrypoint
         // states it about its own program, and this is not that program.
         .exec([guest_program()])
@@ -443,5 +452,51 @@ fn enter(args: Args) -> anyhow::Result<Infallible> {
         });
     }
 
+    // Last before the machine, because what it writes is the server's signal that the doors
+    // are there: once the guest connects, the file has been written -- see [`relay`].
+    if let Some(relays) = &args.relays {
+        for (console, listener) in relay(&args.publish, relays)? {
+            session = session.publish(console, listener);
+        }
+    }
+
     Ok(session.enter()?)
+}
+
+/// A listener on loopback for each published guest port, and a file saying which port each
+/// one is at.
+///
+/// **The server's door is not this.** What a client was told to connect to is a listener the
+/// server holds for the whole session, across every boot on it; this is the next hop, one per
+/// boot, which the server joins each of its connections to. A port the system picks is what
+/// lets two boots -- a `stop` and the next one, or two sessions side by side -- never ask
+/// for the same one.
+///
+/// The file is written whole before the machine starts, and renamed into place, so a server
+/// that finds it finds all of it. And it is there before the guest can say it is up, which is
+/// the moment the server reads it: nothing has to be polled for.
+///
+/// One line to a door: the guest port, a space, and the port here.
+fn relay(
+    publish: &[u16],
+    to: &std::path::Path,
+) -> anyhow::Result<Vec<(u16, std::net::TcpListener)>> {
+    use std::fmt::Write as _;
+
+    let mut doors = Vec::with_capacity(publish.len());
+    let mut said = String::new();
+    for &console in publish {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .map_err(|e| anyhow::anyhow!("--publish {console}: binding a relay: {e}"))?;
+        let port = listener.local_addr()?.port();
+        let _ = writeln!(said, "{console} {port}");
+        doors.push((console, listener));
+    }
+
+    let partial = to.with_extension("partial");
+    std::fs::write(&partial, said)
+        .map_err(|e| anyhow::anyhow!("--relays: writing {}: {e}", partial.display()))?;
+    std::fs::rename(&partial, to)
+        .map_err(|e| anyhow::anyhow!("--relays: moving {} into place: {e}", to.display()))?;
+    Ok(doors)
 }

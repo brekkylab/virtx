@@ -13,14 +13,12 @@ use std::pin::Pin;
 use cortex::protocol::stdio::StdioServer;
 use cortex::protocol::{
     Call, Error, ExecCall, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec, Notification,
-    PROTOCOL_VERSION, Response, Server, SnapshotResp, VersionResp,
+    PROTOCOL_VERSION, Port, Response, Server, SnapshotResp, VersionResp,
 };
-use cortex_krun::session::{Ext4, Network};
+use cortex_krun::session::Ext4;
 use cortex_krun_host::{ABIN_DIR, GUEST_DIR, guest_program};
 
-use machine::{HOST_PORTS_ENV, NETWORK_ENV};
-
-use machine::{Machine, Mount, Shape};
+use machine::{Doors, Machine, Mount, Relays, Shape};
 
 /// A machine that has been booted and told what the session is, with the guest's own answer
 /// to where it stands -- see [`InitResp::cwd`].
@@ -52,6 +50,21 @@ struct Session {
     /// The image `init` built for this session, removed when the session is dropped.
     /// After the machine, so that nothing is still booted on it.
     _built: Option<images::Built>,
+    /// The listeners behind the session's published ports, each in a task of its own: held
+    /// for as long as the session is, and closed when it goes -- see [`door`].
+    _doors: Listening,
+}
+
+/// Tasks that end when this does. What a session's doors are held by, so that dropping the
+/// session is what closes them.
+struct Listening(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
 }
 
 /// Answer a console session on stdin and stdout, until the client ends it.
@@ -229,11 +242,47 @@ pub async fn run() -> anyhow::Result<()> {
 /// after it takes a second one, on the same disk -- the one that is up, and what the client
 /// has to know about it.
 async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
-    // How far this session may reach, and which doors on this machine it is granted.
+    // Whether this session has a network, and which ports on this machine lead into it.
     // Settled before anything is built, because it is the one part of an `init` a client can
-    // be told it got wrong while the answer still costs it nothing: a reach decides whether a
-    // virtio-net device is attached, and a device is attached before a kernel comes up.
-    let (network, host_ports) = reach(&init)?;
+    // be told it got wrong while the answer still costs it nothing: a network is a device
+    // attached before a kernel comes up.
+    let (network, published) = network(&init)?;
+
+    // The ports, bound now and held for the whole session: a client connects to the port it
+    // named, and that port has to be the same one after every `stop` -- so it is this
+    // process's, not a boot's. Before anything is pulled, because a port that is taken is
+    // something the client can change and the cheapest moment to hear it is now.
+    let relays: Relays = std::sync::Arc::new(tokio::sync::watch::Sender::new(None));
+    // Before the first bind, so every early return aborts the doors already open.
+    let mut listening = Listening(Vec::with_capacity(published.len()));
+    for asked in &published {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, asked.host))
+            .await
+            .map_err(|e| {
+                coded(
+                    Error::INVALID_PARAMS,
+                    anyhow::anyhow!(
+                        "port {asked} cannot listen at 127.0.0.1:{}: {e}",
+                        asked.host
+                    ),
+                )
+            })?;
+        listening.0.push(tokio::spawn(door(
+            listener,
+            asked.console,
+            relays.subscribe(),
+        )));
+    }
+    let doors = Doors {
+        // One relay per guest port, however many ports here lead to it.
+        inbound: {
+            let mut ports: Vec<u16> = published.iter().map(|port| port.console).collect();
+            ports.sort_unstable();
+            ports.dedup();
+            ports
+        },
+        relays,
+    };
 
     // And how big a machine, for the same reason and at the same moment: a vCPU count and a
     // memory size are fixed when a machine is made, a GPU is a device attached before a kernel
@@ -260,7 +309,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // What this session actually boots on: a base pulled as it is, an image built here over
     // one, or one a client built or named earlier. Either way what comes back is a name in
     // the cache, and everything after this point cannot tell them apart.
-    let (booting, _built) = images::resolve(&image, network).await?;
+    let (booting, _built) = images::resolve(&image).await?;
 
     // Where each tree is on this side, against the one path in the guest that names it. Read
     // before anything is built, because a session whose trees can never be there is one in
@@ -291,15 +340,10 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // machine it makes.
     let at = upper.path.clone();
     let boot: Factory = Box::new(move || {
-        let (booting, mounts, host_ports, at) = (
-            booting.clone(),
-            mounts.clone(),
-            host_ports.clone(),
-            at.clone(),
-        );
+        let (booting, mounts, doors, at) =
+            (booting.clone(), mounts.clone(), doors.clone(), at.clone());
         Box::pin(async move {
-            let mut machine =
-                Machine::boot(&booting, &at, &mounts, network, &host_ports, shape).await?;
+            let mut machine = Machine::boot(&booting, &at, &mounts, network, &doors, shape).await?;
             let cwd = configure(&mut machine, &mounts).await?;
             Ok((machine, cwd))
         })
@@ -316,6 +360,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
             _held,
             skip,
             _built,
+            _doors: listening,
         },
         started,
         InitResp { cwd },
@@ -360,67 +405,90 @@ fn seeded(disk: &Path, size: u64, snapshot: Option<&[u8]>) -> anyhow::Result<Ext
         .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::Error::new(e)))
 }
 
-/// How much of the network this session gets, and which ports on this machine.
+/// Whether this session has a network, and the ports on this machine that lead into it.
 ///
-/// The client's if it said, and this server's own environment if it did not -- see
-/// [`NETWORK_ENV`]. Every name the protocol defines is one this backend can answer, so the
-/// only refusals are a name nobody defined and a grant that cannot mean anything.
-fn reach(init: &InitCall) -> anyhow::Result<(Network, Vec<u16>)> {
-    let named = |name: &str| {
-        Network::parse(name).ok_or_else(|| {
-            coded(
-                Error::UNSUPPORTED_NETWORK,
-                anyhow::anyhow!(
-                    "{name}: no such reach -- this server answers none, host, public and full"
-                ),
-            )
-        })
-    };
+/// The network is what the client asked for, on by default. Publishing ports with the network
+/// off is refused.
+fn network(init: &InitCall) -> anyhow::Result<(bool, Vec<Port>)> {
+    let network = init.network;
 
-    let (network, host_ports) = match init.network.as_ref() {
-        Some(asked) => (named(&asked.reach)?, asked.host_ports.clone()),
-        None => (
-            named(&std::env::var(NETWORK_ENV).unwrap_or_else(|_| "none".into()))
-                .map_err(|e| anyhow::anyhow!("{NETWORK_ENV}: {e}"))?,
-            // Parsed rather than passed on as the string it was written as: a boot is told
-            // ports and not a spelling of them, so a typo is this server's to report, by the
-            // name of the variable that carried it.
-            std::env::var(HOST_PORTS_ENV)
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|port| !port.is_empty())
-                .map(|port| {
-                    port.parse::<u16>().map_err(|_| {
-                        coded(
-                            Error::INVALID_PARAMS,
-                            anyhow::anyhow!("{HOST_PORTS_ENV}: {port} is not a port number"),
-                        )
-                    })
-                })
-                .collect::<anyhow::Result<_>>()?,
-        ),
-    };
-
-    // A door onto a machine the guest has no way to send a packet to is not a narrower
-    // session, it is two settings that cannot both have been meant. Said now, while the
-    // client can still pick which one it wanted.
-    if network == Network::Disabled && !host_ports.is_empty() {
+    // A port onto a machine with no network is not a narrower session, it is two settings
+    // that cannot both have been meant. Said now, while the client can still pick which one
+    // it wanted.
+    if !network && !init.ports.is_empty() {
         return Err(coded(
             Error::INVALID_PARAMS,
             anyhow::anyhow!(
-                "host_ports {host_ports:?} were granted to a session that asked for no \
-                 network -- a port on this host needs a device to reach it through"
+                "ports {} were published on a session that asked for no network -- a port is \
+                 carried in over it",
+                init.ports
+                    .iter()
+                    .map(Port::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         ));
     }
-    Ok((network, host_ports))
+    Ok((network, init.ports.clone()))
+}
+
+/// One published port: every connection `listener` accepts, joined to the relay the boot that
+/// is up keeps for `console` -- or, while none is, held until one is.
+///
+/// A connection waits rather than being refused because the door is the session's and a
+/// boot is not: a `stop` gives back what a machine holds, not the promise that the port
+/// leads into this session. What ends the wait is the next boot, or the session ending,
+/// which drops the sender this watches.
+async fn door(
+    listener: tokio::net::TcpListener,
+    console: u16,
+    relays: tokio::sync::watch::Receiver<Option<std::collections::HashMap<u16, u16>>>,
+) {
+    loop {
+        let mut client = match listener.accept().await {
+            Ok((client, _)) => client,
+            // Out of descriptors, most likely, which passes: a pause rather than a spin.
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let mut relays = relays.clone();
+        tokio::spawn(async move {
+            loop {
+                // Read and let go of before anything is awaited: the value is borrowed from
+                // the channel, and a borrow held across a connect is one the next boot waits
+                // on to say where it is.
+                let relay = match relays.wait_for(Option::is_some).await {
+                    Ok(up) => up.as_ref().and_then(|up| up.get(&console).copied()),
+                    Err(_) => return,
+                };
+                let Some(relay) = relay else { return };
+
+                match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay)).await {
+                    Ok(mut relay) => {
+                        let _ = relay.set_nodelay(true);
+                        let _ = client.set_nodelay(true);
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut relay).await;
+                        return;
+                    }
+                    // The machine went between the look and the connect. The next boot says
+                    // where it is, and the session ending says there is none.
+                    Err(_) => {
+                        if relays.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// How big a machine this session gets, and whether it has a Vulkan device.
 ///
 /// The client's where it said and this server's own environment where it did not -- see
-/// [`Shape::from_env`] -- which is [`reach`]'s rule, and here for [`reach`]'s reason: the end
+/// [`Shape::from_env`] -- which is [`network`]'s rule, and here for [`network`]'s reason: the end
 /// that knows what this host can spare is the one that started this process, and the end that
 /// knows what the work needs is the one asking for it -- so the client's word stands where it
 /// has one, member by member, and the operator's where it has none.
@@ -553,7 +621,8 @@ async fn configure(machine: &mut Machine, mounts: &[Mount]) -> anyhow::Result<Op
         // the machine's shape was spent on the boot -- the guest is running on the answer and
         // has nothing left to do with the question.
         image: None,
-        network: None,
+        network: true,
+        ports: Vec::new(),
         snapshot: None,
         vcpus: None,
         memory_mib: None,

@@ -21,18 +21,17 @@
 //!
 //!   cargo xtask run --example run -- alpine:3.21 'ls /mnt' ./scripts
 //!
-//! A session reaches nothing by default. `CORTEX_NET` is how much of the network it
-//! gets -- `none`, `host`, `public` or `full` -- and the guest is configured over DHCP
-//! before the command runs, so an image needs nothing in it:
+//! A session reaches nothing by default. `CORTEX_NET=1` gives it what this machine reaches,
+//! less this machine's loopback, and an image needs nothing in it for that:
 //!
-//!   CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'wget -qO- http://example.com'
-//!   CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'apk add curl'
+//!   CORTEX_NET=1 cargo xtask run --example run -- alpine:3.21 'wget -qO- http://example.com'
+//!   CORTEX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
 //!
-//! `CORTEX_HOST_PORTS` is a comma-separated grant of TCP ports on this machine, reached
-//! at the gateway the guest's default route already names:
+//! `CORTEX_PUBLISH` is a comma-separated list of `<host>:<console>` ports, each a listener on
+//! this machine's loopback that reaches the console port in the guest:
 //!
-//!   CORTEX_HOST_PORTS=8080 CORTEX_NET=host cargo xtask run --example run -- \
-//!       alpine:3.21 'wget -qO- http://10.0.2.1:8080'
+//!   CORTEX_PUBLISH=8080:80 CORTEX_NET=1 cargo xtask run --example run -- \
+//!       alpine:3.21 'apk add -q busybox-extras && httpd -f -p 80'
 //!
 //! `CORTEX_GPU=1` asks for guest Vulkan, which needs the `gpu` feature to be anything
 //! more than a flag and an image carrying Mesa's venus driver:
@@ -53,7 +52,7 @@
 use std::path::PathBuf;
 
 use cortex_krun::image;
-use cortex_krun::session::{Ext4, Mount, Network, Session};
+use cortex_krun::session::{Ext4, Mount, Session};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The machine is entered on this thread, so libkrun logs here rather than in a spawned
@@ -132,31 +131,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session = session.mount(Mount::new(dir, "/mnt").read_only());
     }
 
-    // A level rather than a switch: what the guest may reach, and never how it reaches
-    // it. An unknown word is refused rather than guessed at -- deciding a sandbox's
-    // egress on the caller's behalf is the one thing this must not do.
-    let asked = std::env::var("CORTEX_NET").unwrap_or_else(|_| "none".to_string());
-    let network = match asked.as_str() {
-        "none" => Network::Disabled,
-        "host" => Network::HostOnly,
-        "public" => Network::Public,
-        "full" => Network::Full,
-        other => {
-            return Err(format!("CORTEX_NET={other} is not none, host, public or full").into());
-        }
-    };
-    eprintln!("network: {}", network.as_str());
+    let network = std::env::var_os("CORTEX_NET").is_some_and(|on| on == "1");
+    eprintln!("network: {}", if network { "on" } else { "off" });
     session = session.network(network);
 
-    if let Ok(granted) = std::env::var("CORTEX_HOST_PORTS") {
-        let ports = granted
+    if let Ok(published) = std::env::var("CORTEX_PUBLISH") {
+        for port in published
             .split(',')
             .map(str::trim)
-            .filter(|port| !port.is_empty())
-            .map(str::parse::<u16>)
-            .collect::<Result<Vec<_>, _>>()?;
-        eprintln!("host ports: {ports:?}");
-        session = session.host_ports(ports);
+            .filter(|p| !p.is_empty())
+        {
+            let (host, console) = port
+                .split_once(':')
+                .ok_or_else(|| format!("CORTEX_PUBLISH: {port} is not <host>:<console>"))?;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", host.parse::<u16>()?))?;
+            eprintln!(
+                "publish: 127.0.0.1:{} -> {console}",
+                listener.local_addr()?.port()
+            );
+            session = session.publish(console.parse()?, listener);
+        }
     }
 
     // Ignored by a build without the `gpu` feature, which is what makes it safe to read

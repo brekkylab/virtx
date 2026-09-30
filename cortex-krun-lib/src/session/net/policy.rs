@@ -1,196 +1,213 @@
-//! How much of the network a session may reach, and the one place it is decided.
+//! Where a guest's socket may go, and the few places it goes somewhere else.
 //!
 //! # The decision is a socket, not a rule
 //!
-//! Everything the guest can reach, it reaches because this process opened a socket for
-//! it. So a policy here is not a filter in front of a network -- it is the answer to
-//! "does this flow get a socket at all", asked once per flow at the moment one is wanted.
-//! There is no second path to fall back to, nothing in the guest that can route around
-//! it, and no rule that can be out of date with respect to a connection already open:
-//! a flow that was refused never had anything to be out of date with.
+//! Everything the guest reaches, it reaches because libkrun opened a host socket for it,
+//! and every such socket is opened after asking this. So a policy here is not a filter in
+//! front of a network -- it is the answer to "where does this request get a socket", asked
+//! once per `connect`, destination or `listen`. There is nothing in the guest that can route
+//! around it, because the only way off the guest is the device that asks.
 //!
-//! # Why reaching the host is a separate grant
+//! # What it answers
 //!
-//! Because the convenient way to say "let it talk to the host" is a level that includes
-//! the host, and every such level also includes everything *else* on that side -- every
-//! port on this machine, every service on the LAN it is on. Widening a session's outside
-//! reach would then quietly widen its inside reach, which is the one direction a sandbox
-//! must never widen by accident.
+//! ```text
+//!   the guest asks for          it gets
+//!   ───────────────────────────────────────────────────────────────────────────
+//!   NAMESERVER:53               this host's resolver
+//!   loopback, or 0.0.0.0        its own published listener on that port, or refused
+//!   anywhere else               where it asked
+//!   listen on a published port  a listener on this host's loopback
+//!   listen on any other port    a listener in the guest, and nothing here
+//! ```
 //!
-//! So the host is not an address a level grants. It is [`Reach::Host`], reachable only
-//! at a port [`Policy::host_ports`] names, and it stays exactly that at every level --
-//! [`Network::Full`] included.
+//! **This host's loopback is not the guest's to reach.** What listens there is the
+//! operator's -- an agent, a database, a model server -- and a session given a network is
+//! not thereby given all of them. A guest only falls through to here for loopback when its
+//! own stack had nothing listening on that port, so a refusal is exactly what it would have
+//! been told without a network.
 //!
-//! # What the guest sees
+//! **Everything else is.** On is what this host reaches, its LAN included. A session that
+//! has to be kept off part of a network is kept off it by the host, which is where every
+//! other process on this machine is kept off it too.
 //!
-//! The gateway, and nothing else with an address. A guest that connects to
-//! [`GATEWAY`](super::GATEWAY) is asking for this machine, and what it gets is whatever
-//! the grant allows on loopback -- never an interface, never the LAN. Every other
-//! destination is the outside, judged by its address alone.
+//! # A published port, listened on
+//! A guest's `listen` on a port that was published is carried to this host's loopback at a
+//! port of this host's choosing, which [`relay`](super::relay) connects to. Kept per console
+//! port while nothing else holds it, so a restarted guest program listens where it did
+//! before; and on loopback, so only this host reaches it -- no more than the published port.
+//!
+//! Any other `listen` is kept in the guest, which the guest kernel does by itself when told
+//! no -- so a guest program serving another guest program works whether or not anyone
+//! published its port.
 
-use std::net::Ipv4Addr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+use std::sync::Mutex;
 
-use super::{GATEWAY, Network};
+use super::NAMESERVER;
 
-/// The port the stack answers DNS on, at [`GATEWAY`]. Always reachable when there is a
-/// device at all: a network whose names do not resolve is one that works only for a
-/// caller who already knows every address, which is no one.
-pub(crate) const DNS_PORT: u16 = 53;
+/// The DNS port, the one [`NAMESERVER`] answers on.
+const DNS_PORT: u16 = 53;
 
-/// What a destination turns out to be, once the address has been looked at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Reach {
-    /// This machine, at a granted port, which the stack opens on loopback.
-    Host,
-
-    /// The stack's own resolver.
-    Resolver,
-
-    /// Somewhere else, and allowed.
-    Outside,
-
-    /// Somewhere else, and not.
-    Refused,
-}
-
-/// A level and the grant that goes with it, which together are the whole of what a flow
-/// is judged by.
-#[derive(Clone, Debug, Default)]
+/// Everything a guest's request is judged by: where names go, and which console ports are
+/// published.
 pub(crate) struct Policy {
-    pub(crate) network: Network,
+    /// Where a query to [`NAMESERVER`] goes, and `None` for a host that names no resolver --
+    /// whose guest then resolves no names, which is what every other process here gets.
+    resolver: Option<Ipv4Addr>,
 
-    /// TCP ports on this machine the session may open, on loopback and nowhere else.
-    /// Empty is the default, and an empty grant is no reach at all rather than a wide one
-    /// -- a rule with no ports matching every port is exactly the mistake this is shaped
-    /// to make impossible.
-    pub(crate) host_ports: Vec<u16>,
+    /// The console ports a connection from this host may reach.
+    published: HashSet<u16>,
+
+    /// Where on this host's loopback each published console port is listened on, once the
+    /// guest has listened on it.
+    listening: Mutex<HashMap<u16, u16>>,
 }
 
 impl Policy {
-    /// What a flow to `addr:port` gets. UDP and TCP are judged the same way, but for the
-    /// resolver, which is a UDP port of the stack's own and is never a host grant.
-    pub(crate) fn reach(&self, addr: Ipv4Addr, port: u16, udp: bool) -> Reach {
-        if addr == GATEWAY {
-            return match (udp && port == DNS_PORT, self.host_ports.contains(&port)) {
-                (true, _) => Reach::Resolver,
-                (false, true) => Reach::Host,
-                (false, false) => Reach::Refused,
-            };
+    pub(crate) fn new(
+        resolver: Option<Ipv4Addr>,
+        published: impl IntoIterator<Item = u16>,
+    ) -> Self {
+        Policy {
+            resolver,
+            published: published.into_iter().collect(),
+            listening: Mutex::new(HashMap::new()),
         }
+    }
 
-        match self.network {
-            // Never reached -- a disabled session has no device to send a frame on -- but
-            // stated rather than left to a catch-all, so that adding a level cannot make
-            // "no network" mean something by accident.
-            Network::Disabled => Reach::Refused,
-            Network::HostOnly => Reach::Refused,
-            Network::Public if global(addr) => Reach::Outside,
-            Network::Public => Reach::Refused,
-            Network::Full => Reach::Outside,
-        }
+    /// Where on this host a connection reaches the guest's listener on `console`, or `None`
+    /// while nothing in the guest listens there for this host to reach.
+    pub(crate) fn listener(&self, console: u16) -> Option<u16> {
+        self.listening.lock().unwrap().get(&console).copied()
+    }
+
+    /// The loopback port `console` is listened on in `family`'s family: the previous one while
+    /// nothing holds it, a fresh one otherwise. `None` is a host with no free port.
+    fn listen_port(&self, console: u16, family: IpAddr) -> Option<u16> {
+        let mut listening = self.listening.lock().unwrap();
+        let here = loopback(family);
+        // A held port is either our guest's live listener or someone else's; we can't
+        // tell which, so it isn't handed out again.
+        let kept = listening
+            .get(&console)
+            .copied()
+            .filter(|&port| TcpListener::bind((here, port)).is_ok());
+        let port = match kept {
+            Some(port) => port,
+            None => TcpListener::bind((here, 0))
+                .and_then(|probe| probe.local_addr())
+                .ok()?
+                .port(),
+        };
+        listening.insert(console, port);
+        Some(port)
     }
 }
 
-/// Whether an address is one the internet routes to somebody.
-///
-/// Written out rather than taken from `Ipv4Addr::is_global`, which is unstable. The
-/// ranges are the ones IANA marks as not globally reachable; what they have in common
-/// for this module's purpose is that every one of them names something on the near side
-/// of the sandbox boundary -- this machine, its LAN, its carrier's NAT -- rather than
-/// something out on the network.
-fn global(addr: Ipv4Addr) -> bool {
-    let [a, b, ..] = addr.octets();
+impl krun::TsiPolicy for Policy {
+    fn connect(&self, to: SocketAddr) -> Option<SocketAddr> {
+        let ip = to.ip().to_canonical();
+        if ip == IpAddr::V4(NAMESERVER) {
+            return (to.port() == DNS_PORT)
+                .then_some(self.resolver)
+                .flatten()
+                .map(|resolver| SocketAddr::new(resolver.into(), DNS_PORT));
+        }
+        // What `0.0.0.0` means as a destination on Linux is this machine, so it is loopback
+        // by another name.
+        if ip.is_loopback() || ip.is_unspecified() {
+            return self
+                .listener(to.port())
+                .map(|port| SocketAddr::new(loopback(ip), port));
+        }
+        Some(to)
+    }
 
-    !(addr.is_unspecified()
-        || addr.is_loopback()
-        || addr.is_private()
-        || addr.is_link_local()
-        || addr.is_broadcast()
-        || addr.is_multicast()
-        || addr.is_documentation()
-        // 100.64.0.0/10, carrier-grade NAT: the address a home router has on the far
-        // side, and so another name for "still inside somebody's network".
-        || (a == 100 && (64..128).contains(&b))
-        // 192.0.0.0/24, IETF protocol assignments.
-        || (a == 192 && b == 0 && addr.octets()[2] == 0)
-        // 198.18.0.0/15, benchmarking.
-        || (a == 198 && (18..20).contains(&b))
-        // 240.0.0.0/4, reserved.
-        || a >= 240)
+    fn listen(&self, at: SocketAddr) -> Option<SocketAddr> {
+        if !self.published.contains(&at.port()) {
+            return None;
+        }
+        let port = self.listen_port(at.port(), at.ip())?;
+        Some(SocketAddr::new(loopback(at.ip()), port))
+    }
+}
+
+/// This host's loopback in the family of `ip`, which is the family the socket asking was
+/// made in and so the only one it can be given.
+fn loopback(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+        IpAddr::V6(_) => Ipv6Addr::LOCALHOST.into(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddrV4;
+
+    use krun::TsiPolicy;
+
     use super::*;
 
-    fn at(network: Network) -> Policy {
-        Policy {
-            network,
-            host_ports: Vec::new(),
-        }
+    const PUBLIC: SocketAddr =
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(93, 184, 215, 14), 443));
+
+    fn at(ip: impl Into<IpAddr>, port: u16) -> SocketAddr {
+        SocketAddr::new(ip.into(), port)
     }
 
-    const PUBLIC: Ipv4Addr = Ipv4Addr::new(93, 184, 215, 14);
-
+    /// On is what this host reaches: anywhere but its loopback goes where it was asked.
     #[test]
-    fn a_level_decides_only_the_outside() {
-        for (network, reach) in [
-            (Network::HostOnly, Reach::Refused),
-            (Network::Public, Reach::Outside),
-            (Network::Full, Reach::Outside),
+    fn the_outside_is_where_it_was_asked_for() {
+        let policy = Policy::new(None, []);
+        assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
+        let lan = at(Ipv4Addr::new(192, 168, 1, 1), 80);
+        assert_eq!(policy.connect(lan), Some(lan));
+    }
+
+    /// This host's loopback is the operator's, whatever the port and however it is spelled.
+    #[test]
+    fn this_hosts_loopback_is_refused() {
+        let policy = Policy::new(None, []);
+        for to in [
+            at(Ipv4Addr::LOCALHOST, 8080),
+            at(Ipv4Addr::new(127, 1, 2, 3), 22),
+            at(Ipv4Addr::UNSPECIFIED, 8080),
+            at(Ipv6Addr::LOCALHOST, 8080),
+            at(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 8080),
         ] {
-            assert_eq!(at(network).reach(PUBLIC, 443, false), reach, "{network:?}");
+            assert_eq!(policy.connect(to), None, "{to}");
         }
     }
 
-    /// The whole point of the grant being a grant: the widest level still reaches nothing
-    /// on this machine, and the narrowest one reaches what it was given.
+    /// The guest's resolver is this host's, for DNS and nothing else.
     #[test]
-    fn the_host_is_the_grant_and_never_the_level() {
-        assert_eq!(
-            at(Network::Full).reach(GATEWAY, 8080, false),
-            Reach::Refused
-        );
-
-        let granted = Policy {
-            network: Network::HostOnly,
-            host_ports: vec![8080],
-        };
-        assert_eq!(granted.reach(GATEWAY, 8080, false), Reach::Host);
-        assert_eq!(granted.reach(GATEWAY, 8081, false), Reach::Refused);
+    fn the_nameserver_is_this_hosts_resolver() {
+        let resolver = Ipv4Addr::new(192, 168, 1, 1);
+        let policy = Policy::new(Some(resolver), []);
+        assert_eq!(policy.connect(at(NAMESERVER, 53)), Some(at(resolver, 53)));
+        assert_eq!(policy.connect(at(NAMESERVER, 80)), None);
+        assert_eq!(Policy::new(None, []).connect(at(NAMESERVER, 53)), None);
     }
 
-    /// A resolver a session cannot reach is a session whose names do not resolve, so it
-    /// is not something a grant has to remember to include.
+    /// Only a published port is listened on here, at one port of this host's loopback that
+    /// it keeps -- and that the guest's own loopback then reaches too.
     #[test]
-    fn the_resolver_needs_no_grant_and_is_udp_only() {
-        assert_eq!(
-            at(Network::HostOnly).reach(GATEWAY, 53, true),
-            Reach::Resolver
-        );
-        assert_eq!(
-            at(Network::HostOnly).reach(GATEWAY, 53, false),
-            Reach::Refused
-        );
-    }
+    fn a_published_port_is_listened_on_here_and_nothing_else_is() {
+        let policy = Policy::new(None, [80]);
+        assert_eq!(policy.listen(at(Ipv4Addr::UNSPECIFIED, 8080)), None);
+        assert_eq!(policy.listener(80), None);
 
-    /// What `Public` is for: the internet, and not the things that merely look like it
-    /// from inside a guest.
-    #[test]
-    fn public_is_the_internet_and_not_the_near_side_of_it() {
-        let policy = at(Network::Public);
-        for near in [
-            Ipv4Addr::new(127, 0, 0, 1),
-            Ipv4Addr::new(10, 1, 2, 3),
-            Ipv4Addr::new(172, 16, 0, 1),
-            Ipv4Addr::new(192, 168, 1, 1),
-            Ipv4Addr::new(169, 254, 169, 254),
-            Ipv4Addr::new(100, 64, 0, 1),
-            Ipv4Addr::new(224, 0, 0, 1),
-            Ipv4Addr::new(255, 255, 255, 255),
-        ] {
-            assert_eq!(policy.reach(near, 80, false), Reach::Refused, "{near}");
-        }
-        assert_eq!(policy.reach(PUBLIC, 80, false), Reach::Outside);
+        let here = policy.listen(at(Ipv4Addr::UNSPECIFIED, 80)).unwrap();
+        assert_eq!(here.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(policy.listener(80), Some(here.port()));
+        assert_eq!(policy.listen(at(Ipv4Addr::UNSPECIFIED, 80)), Some(here));
+        assert_eq!(
+            policy.listen(at(Ipv6Addr::UNSPECIFIED, 80)),
+            Some(at(Ipv6Addr::LOCALHOST, here.port()))
+        );
+
+        assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(here));
     }
 }

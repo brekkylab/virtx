@@ -10,9 +10,7 @@ use cortex::protocol::{
 use cortex_krun::image::{
     Cache, Digest, Error as ImageError, Image, Reference, remove, tag, untag,
 };
-use cortex_krun::session::Network;
 
-use super::machine::NETWORK_ENV;
 use super::{build, coded, pulled};
 
 const ADJECTIVES: &[&str] = &[
@@ -55,14 +53,11 @@ fn picked_name(index: &BTreeMap<String, Image>) -> anyhow::Result<String> {
 
 /// The name in the cache a session on `image` boots, pulling or building it on the way, and
 /// the image itself when this call is what built it.
-pub async fn resolve(
-    image: &ImageSource,
-    network: Network,
-) -> anyhow::Result<(String, Option<Built>)> {
+pub async fn resolve(image: &ImageSource) -> anyhow::Result<(String, Option<Built>)> {
     let (name, built) = match image {
         ImageSource::Recipe { recipe } if recipe.steps.is_empty() => (recipe.base.clone(), None),
         ImageSource::Recipe { recipe } => {
-            let (name, fresh) = build::build(recipe, network).await?;
+            let (name, fresh) = build::build(recipe).await?;
             let built = fresh.then(|| Built(name.clone()));
             (name, built)
         }
@@ -103,7 +98,7 @@ fn discard(name: &str) -> anyhow::Result<()> {
 }
 
 pub async fn build_image(call: BuildImageCall) -> anyhow::Result<BuildImageResp> {
-    let (built, _) = resolve(&call.recipe.into(), network()?).await?;
+    let (built, _) = resolve(&call.recipe.into()).await?;
 
     let name = canonical(&built)?;
     let mut index = Cache::new().image_index()?;
@@ -181,11 +176,6 @@ fn canonical(name: &str) -> anyhow::Result<String> {
         .parse()
         .map_err(|e| coded(Error::INVALID_PARAMS, anyhow::anyhow!("{name}: {e}")))?;
     Ok(reference.to_string())
-}
-
-fn network() -> anyhow::Result<Network> {
-    let name = std::env::var(NETWORK_ENV).unwrap_or_else(|_| "public".into());
-    Network::parse(&name).ok_or_else(|| anyhow::anyhow!("{NETWORK_ENV}: {name}: no such reach"))
 }
 
 fn image_error(e: ImageError) -> anyhow::Error {

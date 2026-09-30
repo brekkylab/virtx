@@ -2,20 +2,15 @@
 //!
 //! # Not a resolver
 //!
-//! Nothing here resolves anything. The guest is told the gateway is its nameserver, and
-//! what the gateway does with a query is send it, unread, to whatever this host asks --
-//! and send the answer back the same way. So the guest gets the same names this machine
-//! gets, including whatever a VPN or a corporate resolver is serving, without any of it
-//! being configured twice.
-//!
-//! **A query is forwarded, not inspected.** That means a name is a way of saying
-//! something outward even for a session whose packets reach nothing -- see
-//! [`Network::HostOnly`](super::Network::HostOnly), which says so where a caller choosing
-//! a level will read it.
+//! Nothing here resolves anything. The guest is told [`NAMESERVER`](super::NAMESERVER) is its
+//! nameserver, and a query to it is sent, unread, to whatever this host asks -- and the answer
+//! comes back the same way. So the guest gets the same names this machine gets, including
+//! whatever a VPN or a corporate resolver is serving, without any of it being configured
+//! twice.
 //!
 //! # Read once, at the start
 //!
-//! The host is asked when the stack starts and not again. A host whose resolver changes
+//! The host is asked when the machine starts and not again. A host whose resolver changes
 //! mid-session -- a VPN coming up, a laptop changing networks -- leaves a session pointed
 //! at the old one, which is the same thing that happens to every process on this machine
 //! that read its resolvers when it started.
@@ -27,8 +22,8 @@
 //!   windows  GetAdaptersAddresses    per-adapter, since there is no such file
 //! ```
 //!
-//! Either way the answer is IPv4 addresses and only those: this stack carries no v6, so a
-//! resolver it could not send a packet to is not one it can offer the guest.
+//! Either way the answer is IPv4 addresses and only those: the nameserver the guest is told
+//! of is one, and a query to it is carried to one.
 
 #[cfg(unix)]
 mod unix;

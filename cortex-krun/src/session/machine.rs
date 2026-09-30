@@ -10,6 +10,7 @@
 //! built by one `cargo build`, and an argument either end gets wrong is refused by name
 //! before a hypervisor is touched.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -17,27 +18,15 @@ use cortex::protocol::{
     Call, Message, Response,
     stdio::{read, write},
 };
-use cortex_krun::session::{self, Network};
+use cortex_krun::session;
 use cortex_krun_host::{CAPABILITIES_ARG, GPU_CAPABILITY, GUEST_BIN};
-
-/// The reach a session gets when its client did not ask for one, and the host ports granted
-/// with it.
-///
-/// Read from this server's own environment, because a client that says nothing about a
-/// network is not asking for one setting over another -- it is leaving the question to
-/// whoever started this process, who is the only party here that knows what the machine it
-/// runs on is allowed to talk to. A client that does have an opinion says so, and what it
-/// says wins.
-pub const NETWORK_ENV: &str = "CORTEX_KRUN_NETWORK";
-pub const HOST_PORTS_ENV: &str = "CORTEX_KRUN_HOST_PORTS";
 
 /// The shape a session's machine gets when its client did not ask for one.
 ///
-/// This server's own environment, read for the reason [`NETWORK_ENV`] is: a client that says
-/// nothing about the size of its machine is not asking for one size over another, it is
-/// leaving the question to whoever started this process -- who is the only party here that
-/// knows what the host it runs on can spare. A client that does have an opinion says so, and
-/// what it says wins.
+/// This server's own environment: a client that says nothing about the size of its machine
+/// is not asking for one size over another, it is leaving the question to whoever started
+/// this process -- who is the only party here that knows what the host it runs on can spare.
+/// A client that does have an opinion says so, and what it says wins.
 ///
 /// Read here and passed on the command line, rather than left for the boot to find in the
 /// environment it inherits: what a machine was given is then something this end can be asked,
@@ -55,6 +44,23 @@ pub const DISK_ENV: &str = "CORTEX_KRUN_DISK_GIB";
 
 /// How long to wait for the guest to come up before saying it did not.
 const BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Where each published guest port can be reached right now: its console port against the
+/// loopback port the boot that is up relays it from, or `None` while no boot is up.
+///
+/// Watched rather than asked, because the doors a client connects to are the session's and
+/// outlive every boot: a connection that arrives between a `stop` and the next boot waits on
+/// this for a machine to join it to -- see [`super::door`].
+pub type Relays = std::sync::Arc<tokio::sync::watch::Sender<Option<HashMap<u16, u16>>>>;
+
+/// Every way into a machine from this host -- see [`cortex::protocol::Port`].
+#[derive(Clone, Default)]
+pub struct Doors {
+    /// The guest ports something here may connect into. Each is relayed by the boot, and
+    /// where the relays are is said in [`relays`](Self::relays) once the guest is up.
+    pub inbound: Vec<u16>,
+    pub relays: Relays,
+}
 
 /// A host directory the guest can see, where it sees it, and whether a command may write
 /// in it.
@@ -250,10 +256,18 @@ pub struct Machine {
     next: u64,
     /// Everything this boot made and nothing else reads: gone when this drops.
     dir: PathBuf,
+    /// Where the session's published ports are relayed from, which stops being this boot's
+    /// when it drops. `None` for a machine with nothing published.
+    relays: Option<Relays>,
 }
 
 impl Drop for Machine {
     fn drop(&mut self) {
+        // First, so that no connection is joined to a relay that is about to go: one that
+        // arrives from here on waits for the next boot.
+        if let Some(relays) = &self.relays {
+            relays.send_replace(None);
+        }
         let _ = self.boot.kill();
         let _ = self.boot.wait();
         // This boot's, and only this boot's: the disk beside it is the session's, and a
@@ -274,10 +288,9 @@ impl Machine {
         // build's is read once and thrown away.
         session: &Path,
         mounts: &[Mount],
-        network: Network,
-        // Beside the reach rather than folded into it, because widening the one must never
-        // widen the other -- see the boot's own note on the two axes.
-        host_ports: &[u16],
+        network: bool,
+        // The ways in, which need `network` -- a port is carried in over it.
+        doors: &Doors,
         // How much of the host this machine gets, and whether it has a Vulkan device --
         // settled against this server's own defaults before it arrived here.
         shape: Shape,
@@ -329,7 +342,8 @@ impl Machine {
             abin().as_deref(),
             &channel,
             network,
-            host_ports,
+            doors,
+            &dir.join("relays"),
             shape,
         );
         // In the order the client named them, which is the order the protocol says they are
@@ -432,12 +446,32 @@ impl Machine {
             "the guest said {heard:?} where a handshake was expected"
         );
 
+        // Where this boot relays each published port from. Written before the machine
+        // started, so a guest that has said it is up is a file that is there -- see the
+        // boot's `relay`.
+        if !doors.inbound.is_empty() {
+            let at = dir.join("relays");
+            let said = std::fs::read_to_string(&at)
+                .map_err(|e| anyhow::anyhow!("reading where the boot relays from: {e}"))?;
+            let relays = said
+                .lines()
+                .map(|line| {
+                    let (console, port) = line
+                        .split_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("{line:?} is not a relay"))?;
+                    Ok((console.parse::<u16>()?, port.parse::<u16>()?))
+                })
+                .collect::<anyhow::Result<HashMap<_, _>>>()?;
+            doors.relays.send_replace(Some(relays));
+        }
+
         Ok(Machine {
             boot,
             incoming,
             outgoing,
             next: 0,
             dir,
+            relays: (!doors.inbound.is_empty()).then(|| doors.relays.clone()),
         })
     }
 
@@ -488,8 +522,10 @@ fn told(
     // What `Listener::bind` answered with, passed on as it stands: a socket's path on one
     // host and a pipe name on the other, and nothing here reads it as either.
     channel: &OsStr,
-    network: Network,
-    host_ports: &[u16],
+    network: bool,
+    doors: &Doors,
+    // Where the boot says where it relays each published port from.
+    relays: &Path,
     shape: Shape,
 ) -> Vec<OsString> {
     let mut told: Vec<OsString> = vec![
@@ -501,18 +537,22 @@ fn told(
         guest.into(),
         "--channel".into(),
         channel.into(),
-        // Always spelled, even for a session that reaches nothing: the boot requires it, so
-        // a reach cannot be lost between here and there without the boot saying so.
-        "--network".into(),
-        network.as_str().into(),
     ];
+    // A flag, like `--gpu`: a boot without it has no network, which is also what a session
+    // that did not ask for one gets.
+    if network {
+        told.push("--network".into());
+    }
     // Left off entirely when this host has none, which is what the boot reads as a machine
     // that gets no `/abin` rather than one with an empty directory at that path.
     if let Some(abin) = abin {
         told.extend(["--abin".into(), abin.into()]);
     }
-    for port in host_ports {
-        told.extend(["--host-port".into(), OsString::from(port.to_string())]);
+    for console in &doors.inbound {
+        told.extend(["--publish".into(), OsString::from(console.to_string())]);
+    }
+    if !doors.inbound.is_empty() {
+        told.extend(["--relays".into(), relays.into()]);
     }
     if let Some(vcpus) = shape.vcpus {
         told.extend(["--vcpus".into(), OsString::from(vcpus.to_string())]);
@@ -658,8 +698,9 @@ mod tests {
                 Path::new("/s/guest"),
                 abin,
                 OsStr::new("/s/port.sock"),
-                Network::Disabled,
-                &[],
+                false,
+                &Doors::default(),
+                Path::new("/s/relays"),
                 Shape::default(),
             )
             .into_iter()
@@ -668,10 +709,47 @@ mod tests {
         };
 
         assert!(!line(None).iter().any(|arg| arg == "--abin"));
+        // And a session that asked for no network is a boot told nothing about one.
+        assert!(!line(None).iter().any(|arg| arg == "--network"));
 
         let given = line(Some(Path::new("/h/abin")));
         let at = given.iter().position(|arg| arg == "--abin").unwrap();
         assert_eq!(given[at + 1], "/h/abin");
+    }
+
+    /// A network and its published ports are spelled, and where the relays go only when there
+    /// is one to relay -- the boot refuses the one without the other.
+    #[test]
+    fn a_boot_is_told_its_doors() {
+        let line = |doors: &Doors| {
+            told(
+                "alpine:3.21",
+                Path::new("/s/session.ext4"),
+                Path::new("/s/guest"),
+                None,
+                OsStr::new("/s/port.sock"),
+                true,
+                doors,
+                Path::new("/s/relays"),
+                Shape::default(),
+            )
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+        };
+
+        let closed = line(&Doors::default());
+        assert!(closed.iter().any(|arg| arg == "--network"));
+        assert!(!closed.iter().any(|arg| arg == "--relays"));
+
+        let inward = line(&Doors {
+            inbound: vec![5900],
+            ..Doors::default()
+        });
+        let at = inward.iter().position(|arg| arg == "--publish").unwrap();
+        assert_eq!(inward[at + 1], "5900");
+        let at = inward.iter().position(|arg| arg == "--relays").unwrap();
+        assert_eq!(inward[at + 1], "/s/relays");
     }
 
     /// A shape is spelled only where it was answered, and the boot's own defaults are what an
@@ -686,8 +764,9 @@ mod tests {
                 Path::new("/s/guest"),
                 None,
                 OsStr::new("/s/port.sock"),
-                Network::Disabled,
-                &[],
+                false,
+                &Doors::default(),
+                Path::new("/s/relays"),
                 shape,
             )
             .into_iter()

@@ -42,7 +42,7 @@ cargo xtask install                     # -> ~/.cache/cortex/bin, or --prefix <d
 
 ```sh
 cargo xtask run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
-CORTEX_NET=public cargo xtask run --example run -- alpine:3.21 'apk add curl'
+CORTEX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
 CORTEX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 ```
 
@@ -184,6 +184,47 @@ Nothing here is a sandbox. libkrun's own README is explicit that a virtio-fs
 share offers no protection against a guest reaching other directories on the same
 host filesystem, and `read_only` bounds what a guest may write, not what it may
 read.
+
+## The network — `3rdparty/_patches/libkrun-85bed71-tsi.patch`
+
+A session's network is on or off, and on is libkrun's Transparent Socket
+Impersonation: the guest kernel hands every socket its own stack cannot answer
+to a vsock device, and libkrun opens the host socket that answers it. There is
+no interface, no address and no lease — nothing to configure in the guest and
+nothing to forward on the host.
+
+```rust
+Session::new()
+    .network(true)
+    .publish(80, TcpListener::bind("127.0.0.1:8080")?)
+    .command(["httpd", "-f", "-p", "80"])
+```
+
+**What TSI lacks is a say in where a socket goes.** Upstream opens whatever the
+guest asked for, so a guest reaches this host's loopback — every service the
+operator runs there — and a guest's `listen` binds the host's own port on every
+interface. The patch adds `TsiPolicy`, which the vsock muxer asks before a
+`connect`, a datagram's destination or a `listen` reaches any proxy, and
+`VsockDevice::set_policy` to hand one over. An answer is an address, not a yes:
+
+| the guest asks for | it gets |
+|---|---|
+| `10.0.2.3:53` | this host's resolver |
+| loopback or `0.0.0.0` | its own published listener on that port, or `ECONNREFUSED` |
+| anywhere else | where it asked |
+| `listen` on a published port | a listener on this host's loopback, which the relay joins to the published one |
+| `listen` on any other port | `EPERM`, which the guest kernel takes as "listen on your own stack" |
+
+The policy itself is [`net/policy.rs`](cortex-krun-lib/src/session/net/policy.rs).
+In the muxer rather than in each proxy, because the muxer is the one place every
+request passes through on every host — the unix and Windows proxies below it are
+two implementations of the same thing.
+
+**And a resolver, since there is no lease to name one.** The same patch has the
+init write `nameserver $KRUN_NAMESERVER` into `/etc/resolv.conf` once the root is
+in place, the same moment libkrun's DHCP client writes its own. A datagram's reply is
+stamped by the guest kernel with the address it was sent to, so the guest never
+sees that `10.0.2.3` was answered from somewhere else.
 
 ## The `gpu` feature
 
@@ -734,8 +775,10 @@ message it was carrying was dropped on the way.
 
 ### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-vsock.patch`
 
-Three stalls in TSI, all of them credit mistaken for something else, and all of
-them made permanent by the same property of this epoll: it is
+Three stalls in TSI, which is the whole of a session's network — see
+[The network](#the-network--3rdparty_patcheslibkrun-85bed71-tsipatch).
+All of them are credit mistaken for something else, and all of them are made
+permanent by the same property of this epoll: it is
 `WSAEventSelect`-backed, so re-arming interest does not re-announce bytes that
 landed while the interest was off.
 
@@ -891,31 +934,6 @@ waiting on one says nothing about whether anything arrived. A pipe is polled, wi
 the stop event's own timed wait as the pause between two asks; a console handle is
 a synchronization object and is still waited on as before.
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-net.patch`
-
-One word, and without it a session with a network never boots at all.
-
-`NetDevice::new_unixstream_handle` is the Windows builder, and it takes its
-`OwnedHandle` by value — so the socket is the caller's to give away and the
-builder's to keep. It then read the number out with `as_raw_handle`, which
-*borrows*, and let the `OwnedHandle` fall out of scope at the end of the
-function: `CloseHandle` on the socket the backend had just been handed the
-number of. The `OwnedFd` builders beside it use `into_raw_fd`, which is the
-contract a caller is written against, and
-[`wire/windows.rs`](cortex-krun-lib/src/session/net/wire/windows.rs) says as
-much in a comment — "ownership goes with it: nothing here closes this end
-again."
-
-Nothing fails where the mistake is. The device is built, the machine boots, and
-the guest driver gets as far as activating it — by which time the handle is
-closed, or reused by something that is not a socket, and `ioctlsocket(FIONBIO)`
-answers `WSAEOPNOTSUPP`. That becomes `BadActivate`, which virtio's MMIO write
-path meets with an `.expect` inside an `extern "C"` callback, so the vcpu thread
-takes a panic it cannot unwind out of and the process aborts —
-`STATUS_STACK_BUFFER_OVERRUN`, a backtrace through `WHvEmulatorTryMmioEmulation`,
-and nothing naming the network. The `error!` that does name it is only reachable
-with `KRUN_LOG` set, which is why the `run` example now installs a logger.
-
 ### libkrun — `3rdparty/_patches/libkrun-85bed71-x86_64-mptable.patch`
 
 The twelfth virtio-mmio device on an x86_64 guest got an interrupt line nothing
@@ -933,7 +951,7 @@ Which device that is depends on the session's shape. A session with a GPU, a
 network and three shares lands on:
 
 ```
-fs 5 · console 6 · rng 7 · balloon 8 · net 9 · gpu 10 · block 11 · block 12
+fs 5 · console 6 · rng 7 · balloon 8 · vsock 9 · gpu 10 · block 11 · block 12
 fs 13 · fs 14 · fs 15 · fs 16   ← the line no MP_INTSRC covers
 ```
 

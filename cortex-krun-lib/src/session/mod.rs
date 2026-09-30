@@ -51,7 +51,6 @@ mod session;
 pub use channel::{Channel, Incoming, Listener, Outgoing};
 pub use ext4::Ext4;
 pub use mount::Mount;
-pub use net::Network;
 pub use session::Session;
 
 /// The host's physical memory in bytes, or `None` where it cannot be read.

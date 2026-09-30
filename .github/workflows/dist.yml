@@ -1,19 +1,26 @@
 # Build cortex-krun for every platform it is published for, and upload each to the dist
-# bucket, all under the one commit this runs on -- `cargo xtask upload` files a release by
-# the sha of HEAD. Moving each platform's `latest` to it -- what `ensure_cortex` fetches when
-# told no version, so what every such user gets next -- is a separate decision, made by:
+# bucket, all under the one commit this runs on. Every name a release has is one directory
+# of the same shape:
 #
-# | run                      | cortex it builds against     | platforms          | `latest` |
-# |--------------------------|------------------------------|--------------------|----------|
-# | a tag pushed             | the same tag in cortex       | all                | moved    |
-# | a dispatch               | `cortex-ref`, else `main`     | all                | if `latest` is set |
+#   cortex-krun/<ref>/cortex-krun-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
+#
+# Each platform's job uploads its archive under the sha (`cargo xtask upload`). The names a
+# whole release goes by -- `latest`, what `ensure_cortex` fetches when told no version, and a
+# tag -- are given by `verify`, once all four platforms' archives are up, and all four at
+# once, so no name ever holds some platforms of one release and some of another:
+#
+# | run                      | cortex it builds against     | named `latest`     | named for its tag |
+# |--------------------------|------------------------------|--------------------|-------------------|
+# | a tag pushed             | the same tag in cortex       | yes                | yes               |
+# | a dispatch               | `cortex-ref`, else `main`     | if `latest` is set | on a tag's ref    |
 #
 # A push to a branch runs nothing: a build is either a release, or asked for.
 #
-# A run that moves `latest` builds every platform, so the four `latest`s always name one
-# commit. A tag is a release of both repositories at once: cortex-krun speaks the protocol
-# of the cortex it is built with, so the tag has to exist in brekkylab/cortex too, and the
-# checkout fails if it does not.
+# A tag is a release of both repositories at once: cortex-krun speaks the protocol of the
+# cortex it is built with, so the tag has to exist in brekkylab/cortex too, and the checkout
+# fails if it does not. brekkylab/cortex's `packages` workflow, releasing the same tag,
+# refuses to run until `cortex-krun/<tag>/` holds all four platforms, and pins its packages
+# to that tag.
 #
 # # Platforms
 #
@@ -341,10 +348,8 @@ jobs:
         run: |
           # `inputs` is empty on a push, which uploads; only a dispatch can say not to.
           if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.upload }}" != true ]; then flags=--dry-run; fi
-          # Only on a tag or when asked, and only on a run that builds every platform -- which
-          # both always are -- so that no `latest` names a commit another platform has no
-          # release for.
-          if [ "$LATEST" = true ] && [ "${{ needs.plan.outputs.all }}" = true ]; then flags="${flags:-} --latest"; fi
+          # By sha only. `latest` and a tag are names for a whole release, which `verify`
+          # gives it once every platform's archive is up.
           cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" ${flags:-}
 
   verify:
@@ -353,19 +358,50 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      # Every platform's archive for this commit, and -- on a run that moved them -- every
-      # platform's `latest` naming it.
+      # Every platform's archive for this commit, under its sha.
       - name: Every platform has this commit's release
-        env:
-          MOVED: ${{ env.LATEST }}
         run: |
           fail=0
           for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            latest=$(curl -fsS "$DIST_URL/cortex-krun/$release/latest" || echo none)
-            archive="$DIST_URL/cortex-krun/$release/$GITHUB_SHA/cortex-krun-$release.tar.gz"
+            archive="$DIST_URL/cortex-krun/$GITHUB_SHA/cortex-krun-$release.tar.gz"
             size=$(curl -fsSI "$archive" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
-            printf '%-15s archive=%s bytes latest=%s\n' "$release" "${size:-missing}" "$latest"
+            printf '%-15s %s bytes\n' "$release" "${size:-missing}"
             [ -n "$size" ] || fail=1
-            if [ "$MOVED" = true ] && [ "$latest" != "$GITHUB_SHA" ]; then fail=1; fi
+          done
+          exit $fail
+
+      # Then the release's names, all four platforms at once and only now that all four are
+      # there: `latest` when asked, and the tag on a tag. Copied within the bucket, as the
+      # same bytes, with the sha they were built from kept on each; and read back.
+      - name: Assume the publishing role
+        if: env.LATEST == 'true' || github.ref_type == 'tag'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Name the release
+        if: env.LATEST == 'true' || github.ref_type == 'tag'
+        run: |
+          names=""
+          [ "$LATEST" = true ] && names="latest"
+          [ "${{ github.ref_type }}" = tag ] && names="$names $GITHUB_REF_NAME"
+          for name in $names; do
+            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+              archive="cortex-krun-$release.tar.gz"
+              aws s3 cp --only-show-errors \
+                "s3://$BUCKET/cortex-krun/$GITHUB_SHA/$archive" "s3://$BUCKET/cortex-krun/$name/$archive" \
+                --metadata-directive REPLACE --metadata "sha=$GITHUB_SHA" \
+                --content-type application/gzip --cache-control no-cache
+            done
+          done
+          fail=0
+          for name in $names; do
+            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+              sha=$(curl -fsSI "$DIST_URL/cortex-krun/$name/cortex-krun-$release.tar.gz" \
+                | awk 'tolower($1)=="x-amz-meta-sha:"{print $2}' | tr -d '\r')
+              printf 'cortex-krun/%s/%-35s sha=%s\n' "$name" "cortex-krun-$release.tar.gz" "${sha:-missing}"
+              [ "$sha" = "$GITHUB_SHA" ] || fail=1
+            done
           done
           exit $fail

@@ -43,9 +43,9 @@ usage: cargo xtask init     [--force]
   --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
                       the environment's keys, or `default`)
   --region <region>   (upload) the bucket's region (default: the profile's)
-  --latest            (upload) also points this platform's `latest` at the release, which is
-                      what `ensure_cortex` fetches when told no version; without it
-                      `latest` names whatever it named before
+  --latest            (upload) also puts the archive under `latest`, which is what
+                      `ensure_cortex` fetches when told no version; without it `latest`
+                      holds whatever it held before
   --allow-dirty       (upload) publishes from a tree with uncommitted changes, filed under
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
@@ -626,14 +626,18 @@ fn download(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where a release is filed in the bucket, under which every platform has a directory of
-/// its own: `cortex-krun/<os>-<arch>/<sha>/cortex-krun-<os>-<arch>.tar.gz`, and beside the
-/// shas `latest`, one line naming the one `ensure_cortex` fetches when told nothing.
+/// Where a release is filed in the bucket: `cortex-krun/<ref>/cortex-krun-<os>-<arch>.tar.gz`,
+/// one archive per platform under a directory named for the release.
 ///
-/// **One `latest` per platform, not one for all of them**, unlike `abin/latest`. abin is
-/// cross-compiled for every architecture in one run; this is built on the machine it is
-/// for, one platform at a time, so a single pointer would name a sha some platforms have
-/// not uploaded yet.
+/// **One level for every name a release has.** `<ref>` is the sha of the commit it was built
+/// from, which this writes; or `latest`, which `--latest` writes as well, and which
+/// `ensure_cortex` fetches when told no version; or a tag, which the dist workflow writes
+/// once every platform has its archive. A fetch is the same URL whichever name it is given,
+/// and a name is a directory of archives rather than a file naming one, so nothing reads one
+/// thing to find out where another is.
+///
+/// Every archive carries the sha it was built from as `x-amz-meta-sha`, so what a name holds
+/// is a HEAD away.
 const DIST_ROOT: &str = "cortex-krun";
 
 /// The platforms a release is published for, as `std::env::consts` spells them -- which
@@ -720,29 +724,28 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
         .status()
         .context("running tar")?;
     ensure!(status.success(), "archiving {} failed", stage.display());
-    let latest = dist.join(format!("{name}.latest"));
-    fs::write(&latest, format!("{version}\n"))
-        .with_context(|| format!("writing {}", latest.display()))?;
 
-    let prefix = format!("s3://{}/{DIST_ROOT}/{platform}", upload.bucket);
+    let prefix = format!("s3://{}/{DIST_ROOT}", upload.bucket);
     let archive_key = format!("{prefix}/{version}/{archive}");
-    let latest_key = format!("{prefix}/latest");
+    let latest_key = format!("{prefix}/latest/{archive}");
     if upload.dry_run {
         eprintln!(
             "xtask: would upload {} to {archive_key}",
             dist.join(&archive).display()
         );
         if upload.latest {
-            eprintln!("xtask: would point {latest_key} at {version}");
+            eprintln!("xtask: would upload it to {latest_key} too");
         } else {
-            eprintln!("xtask: would leave {latest_key} as it is (--latest moves it)");
+            eprintln!("xtask: would leave {latest_key} as it is (--latest replaces it)");
         }
         return Ok(());
     }
 
     let aws = |from: &Path, to: &str, cache: &str| -> anyhow::Result<()> {
         let mut aws = Command::new("aws");
-        aws.args(["s3", "cp", "--only-show-errors", "--cache-control", cache]);
+        aws.args(["s3", "cp", "--only-show-errors", "--cache-control", cache])
+            .args(["--content-type", "application/gzip"])
+            .args(["--metadata", &format!("sha={version}")]);
         if let Some(profile) = &upload.profile {
             aws.args(["--profile", profile]);
         }
@@ -757,9 +760,9 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
         ensure!(status.success(), "uploading {to} failed");
         Ok(())
     };
-    // The archive under its version never changes, so it may be cached forever; `latest`
-    // is the one key that moves, and is written last, so that it never names a version
-    // whose archive is not there yet.
+    // The archive under its sha never changes, so it may be cached forever; `latest` is a
+    // name that moves, so it may not be, and is written second, so that the sha's archive is
+    // there by the time it names it.
     aws(
         &dist.join(&archive),
         &archive_key,
@@ -767,10 +770,10 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
     )?;
     eprintln!("xtask: uploaded {archive_key}");
     if upload.latest {
-        aws(&latest, &latest_key, "no-cache")?;
+        aws(&dist.join(&archive), &latest_key, "no-cache")?;
         eprintln!("xtask: {latest_key} is now {version}");
     } else {
-        eprintln!("xtask: left {latest_key} as it is (--latest moves it)");
+        eprintln!("xtask: left {latest_key} as it is (--latest replaces it)");
     }
     Ok(())
 }

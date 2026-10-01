@@ -13,7 +13,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use super::policy::Policy;
+use super::policy::{Listeners, Policy};
 
 /// Accept on `listener` for as long as the process lives, carrying each connection to the
 /// guest's listener on `console`.
@@ -23,26 +23,31 @@ pub(super) fn spawn(console: u16, listener: TcpListener, policy: Arc<Policy>) ->
         .spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
-                let Some(port) = policy.listener(console) else {
+                let Some(listeners) = policy.listener(console) else {
                     continue;
                 };
                 let _ = thread::Builder::new()
                     .name(format!("relay-{console}-conn"))
-                    .spawn(move || carry(client, port));
+                    .spawn(move || carry(client, listeners));
             }
         })?;
     Ok(())
 }
 
-/// Join `client` to the guest's listener at `port` on this host's loopback, in both
-/// directions, until either end is done.
+/// Join `client` to the guest's listener on this host's loopback, in both directions, until
+/// either end is done.
 ///
-/// v4 first and v6 after, because the guest listened in whichever family its program chose
-/// and the port is the same in both.
-fn carry(client: TcpStream, port: u16) {
-    let Ok(guest) = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-        .or_else(|_| TcpStream::connect((Ipv6Addr::LOCALHOST, port)))
-    else {
+/// v4 first and v6 after, because the guest listened in whichever family its program chose,
+/// or in both.
+fn carry(client: TcpStream, listeners: Listeners) {
+    let v4 = listeners
+        .v4
+        .map(|port| TcpStream::connect((Ipv4Addr::LOCALHOST, port)));
+    let Some(Ok(guest)) = v4.filter(Result::is_ok).or_else(|| {
+        listeners
+            .v6
+            .map(|port| TcpStream::connect((Ipv6Addr::LOCALHOST, port)))
+    }) else {
         return;
     };
     let _ = client.set_nodelay(true);

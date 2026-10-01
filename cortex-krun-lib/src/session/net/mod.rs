@@ -55,10 +55,17 @@ use super::{Error, Result};
 /// so. Each gets a thread that carries its connections to wherever the guest is listening on
 /// that port by then.
 pub(crate) fn attach(published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
-    let policy = Arc::new(Policy::new(
-        resolver::host_resolvers().first().copied(),
-        published.iter().map(|(console, _)| *console),
-    ));
+    let policy = Arc::new(
+        Policy::new(
+            resolver::host_resolvers().first().copied(),
+            published.iter().map(|(console, _)| *console),
+        )
+        .with_relays(
+            published
+                .iter()
+                .filter_map(|(console, listener)| Some((*console, listener.local_addr().ok()?))),
+        ),
+    );
     for (console, listener) in published {
         relay::spawn(console, listener, policy.clone())
             .map_err(|e| Error::io(format!("relaying into guest port {console}"), e))?;

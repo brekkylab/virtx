@@ -41,6 +41,7 @@
 //! nothing can run after a session starts, so nothing can ask a second thing of it.
 
 mod channel;
+pub mod doors;
 pub(crate) mod ext4;
 #[cfg(feature = "gpu")]
 mod gpu;

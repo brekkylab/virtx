@@ -110,4 +110,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_NetworkManagement_Ndis",
     # `GlobalMemoryStatusEx`, for `session::host_memory`.
     "Win32_System_SystemInformation",
+    # `OpenProcess`, for `session::doors::alive`.
+    "Win32_System_Threading",
 ] }

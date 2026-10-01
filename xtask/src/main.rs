@@ -14,7 +14,7 @@ usage: cargo xtask init     [--force]
        cargo xtask download <guest|abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask upload   --bucket <name> [--profile <name>] [--region <region>]
-                            [--latest] [--allow-dirty] [--dry-run]
+                            [--latest] [--with-abin] [--allow-dirty] [--dry-run]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
@@ -46,6 +46,8 @@ usage: cargo xtask init     [--force]
   --latest            (upload) also puts the archive under `latest`, which is what
                       `ensure_cortex` fetches when told no version; without it `latest`
                       holds whatever it held before
+  --with-abin         (upload) puts the abin that was built in the archive too; without it
+                      the archive has no abin, and sessions from the release no /abin
   --allow-dirty       (upload) publishes from a tree with uncommitted changes, filed under
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
@@ -183,6 +185,9 @@ struct Upload {
     /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
     /// `latest` changes what every `ensure_cortex` told no version fetches next.
     latest: bool,
+    /// Whether the archive carries abin, and only when asked (`--with-abin`): abin is built
+    /// from the sibling cortex checkout, which a release of cortex-krun alone need not match.
+    abin: bool,
     allow_dirty: bool,
     dry_run: bool,
 }
@@ -196,6 +201,7 @@ fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Uplo
         profile: None,
         region: None,
         latest: false,
+        abin: false,
         allow_dirty: false,
         dry_run: false,
     };
@@ -210,6 +216,7 @@ fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Uplo
             Some("--profile") => upload.profile = Some(value("--profile", &mut args)?),
             Some("--region") => upload.region = Some(value("--region", &mut args)?),
             Some("--latest") => upload.latest = true,
+            Some("--with-abin") => upload.abin = true,
             Some("--allow-dirty") => upload.allow_dirty = true,
             Some("--dry-run") => upload.dry_run = true,
             _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
@@ -699,9 +706,15 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
     if stage.exists() {
         fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
     }
-    stage_bin(&target_path().join("release"), &stage)?;
-    if !stage.join("abin").is_dir() {
-        eprintln!("xtask: warning: no abin was built; sessions from this release get no /abin");
+    let built = target_path().join("release");
+    ensure!(
+        !upload.abin || built.join("abin").is_dir(),
+        "--with-abin, but no abin in {} -- run `cargo xtask build abin` first",
+        built.display()
+    );
+    stage_bin(&built, &stage, upload.abin)?;
+    if !upload.abin {
+        eprintln!("xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)");
     }
 
     // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
@@ -784,14 +797,15 @@ fn install(options: &Options) -> anyhow::Result<()> {
         None => cortex::cache_root(),
     };
     let bin = prefix.join("bin");
-    stage_bin(&options.out(), &bin)?;
+    stage_bin(&options.out(), &bin, true)?;
     eprintln!("xtask: installed to {}", bin.display());
     Ok(())
 }
 
 /// Put the set a `bin/` holds -- the host halves, the guest, the guest kernel, and abin if
-/// it was built -- from `built` into `bin`. What `install` does, and what `upload` archives.
-fn stage_bin(built: &Path, bin: &Path) -> anyhow::Result<()> {
+/// it was built and `abin` asks for it -- from `built` into `bin`. What `install` does, and
+/// what `upload` archives.
+fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {
     let host_exes: Vec<String> = HOST_BINS
         .iter()
         .map(|name| format!("{name}{}", env::consts::EXE_SUFFIX))
@@ -824,7 +838,7 @@ fn stage_bin(built: &Path, bin: &Path) -> anyhow::Result<()> {
         place(&built.join(exe), &bin.join(exe))?;
     }
     place(&built.join(GUEST_BIN), &bin.join(GUEST_BIN))?;
-    if built.join("abin").is_dir() {
+    if abin && built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;
     }
     Ok(())

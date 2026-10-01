@@ -349,8 +349,8 @@ jobs:
           # `inputs` is empty on a push, which uploads; only a dispatch can say not to.
           if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.upload }}" != true ]; then flags=--dry-run; fi
           # By sha only. `latest` and a tag are names for a whole release, which `verify`
-          # gives it once every platform's archive is up.
-          cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" ${flags:-}
+          # gives it once every platform's archive is up. With the abin put in place above.
+          cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" --with-abin ${flags:-}
 
   verify:
     needs: [plan, dist]

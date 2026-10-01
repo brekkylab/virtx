@@ -15,13 +15,25 @@
 //! [`sessions`], and writes the host ports it published to a `ports` file there -- one a
 //! line, by a rename so that a reader sees all of them or none. The directory goes when the
 //! session does, and one whose owner died is ignored until a later server sweeps it: a port
-//! is published while the process that holds it is [`alive`].
+//! is published while the process that recorded it holds its [`Record`].
+//!
+//! **A lock, not a pid.** What a [`Record`] holds is a lock on a file beside `ports`, and
+//! the operating system lets go of it when the process dies, however it dies. A pid would
+//! not do here: one can be reused, and a crashed server's `ports` under a reused pid would
+//! let every guest reach whatever the operator later binds on that port. That is safe for
+//! [`alive`], which only decides what a sweep may delete, and not for this, which grants
+//! access.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// The file in a session's directory that names its published host ports.
 const PORTS: &str = "ports";
+
+/// The file a session holds locked while its ports are published. Apart from [`PORTS`],
+/// because a lock on Windows is mandatory: one on `ports` itself would keep every other
+/// session from reading it.
+const LOCK: &str = "ports.lock";
 
 /// Where the servers on this host keep their sessions: one directory apiece, named by the
 /// pid of the process that owns it.
@@ -30,13 +42,51 @@ pub fn sessions() -> PathBuf {
 }
 
 /// Say that the session in `dir` published `hosts`, the ports on this host's loopback that
-/// lead into it.
-pub fn record(dir: &Path, hosts: &[u16]) -> io::Result<()> {
+/// lead into it, for as long as the [`Record`] this answers is held.
+///
+/// The lock is taken before `ports` is written, so a reader that finds the file finds it
+/// held -- unless its owner has since died, which is what the lock is there to tell.
+pub fn record(dir: &Path, hosts: &[u16]) -> io::Result<Record> {
     std::fs::create_dir_all(dir)?;
+    let lock = std::fs::File::create(dir.join(LOCK))?;
+    lock.lock()?;
     let text: String = hosts.iter().map(|port| format!("{port}\n")).collect();
     let partial = dir.join(format!("{PORTS}.partial"));
     std::fs::write(&partial, text)?;
-    std::fs::rename(partial, dir.join(PORTS))
+    std::fs::rename(partial, dir.join(PORTS))?;
+    Ok(Record {
+        dir: dir.to_path_buf(),
+        _lock: lock,
+    })
+}
+
+/// A session's published ports, published for as long as this is held. Dropped, it takes
+/// `ports` away and lets go of the lock -- so a session that fails after recording, and
+/// goes on running, does not leave its ports open to every guest.
+#[must_use = "the ports are published only while the Record is held"]
+pub struct Record {
+    dir: PathBuf,
+    /// Held, never read: what it is for is the lock, which closing it releases.
+    _lock: std::fs::File,
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        // `ports` before the lock, which goes with `_lock` after this: a reader never sees
+        // the file without the lock that vouches for it.
+        let _ = std::fs::remove_file(self.dir.join(PORTS));
+    }
+}
+
+/// Whether the session in `dir` still holds its [`Record`]: someone else has `ports.lock`
+/// locked, which a lock asked for alongside it is refused for.
+fn held(dir: &Path) -> bool {
+    std::fs::File::open(dir.join(LOCK)).is_ok_and(|file| {
+        matches!(
+            file.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        )
+    })
 }
 
 /// Whether `port` on this host's loopback is one a live session published.
@@ -48,13 +98,6 @@ pub(crate) fn published(port: u16) -> bool {
         return false;
     };
     entries.flatten().any(|entry| {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
-            return false;
-        };
         let Ok(text) = std::fs::read_to_string(entry.path().join(PORTS)) else {
             return false;
         };
@@ -104,14 +147,22 @@ pub fn alive(pid: i32) -> bool {
 mod tests {
     use super::*;
 
-    /// A port is read back from the file it was recorded in, and only while its owner lives.
+    /// A port is read back from the file it was recorded in, and only while its record is held.
     #[test]
-    fn a_recorded_port_is_published_while_its_owner_lives() {
+    fn a_recorded_port_is_published_while_its_record_is_held() {
         let dir = std::env::temp_dir().join(format!("virtx-doors-{}", std::process::id()));
-        record(&dir, &[3977, 5901]).unwrap();
+        let record = record(&dir, &[3977, 5901]).unwrap();
         let text = std::fs::read_to_string(dir.join(PORTS)).unwrap();
         assert_eq!(text, "3977\n5901\n");
         assert!(!dir.join(format!("{PORTS}.partial")).exists());
+        assert!(held(&dir), "a held record's lock is refused to anyone else");
+
+        drop(record);
+        assert!(
+            !dir.join(PORTS).exists(),
+            "dropping the record takes `ports` away"
+        );
+        assert!(!held(&dir), "and lets go of the lock");
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert!(alive(std::process::id() as i32));

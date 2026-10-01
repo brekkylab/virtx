@@ -54,13 +54,20 @@ struct Session {
     _doors: Listening,
 }
 
-/// Tasks that end when this does. What a session's doors are held by, so that dropping the
-/// session is what closes them.
-struct Listening(Vec<tokio::task::JoinHandle<()>>);
+/// Tasks that end when this does, and the record that says where they lead. What a
+/// session's doors are held by, so that dropping the session is what closes them -- and
+/// dropping it on the way out of a `start` that failed, too.
+struct Listening {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// The published ports, said where other sessions read them -- see `doors`. `None` for a
+    /// session that publishes none. After `tasks`, so the listeners are aborted before the
+    /// ports stop being published.
+    said: Option<doors::Record>,
+}
 
 impl Drop for Listening {
     fn drop(&mut self) {
-        for task in &self.0 {
+        for task in &self.tasks {
             task.abort();
         }
     }
@@ -253,7 +260,10 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
     // something the client can change and the cheapest moment to hear it is now.
     let relays: Relays = std::sync::Arc::new(tokio::sync::watch::Sender::new(None));
     // Before the first bind, so every early return aborts the doors already open.
-    let mut listening = Listening(Vec::with_capacity(published.len()));
+    let mut listening = Listening {
+        tasks: Vec::with_capacity(published.len()),
+        said: None,
+    };
     for asked in &published {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, asked.host))
             .await
@@ -266,7 +276,7 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Machine, InitResp)> {
                     ),
                 )
             })?;
-        listening.0.push(tokio::spawn(door(
+        listening.tasks.push(tokio::spawn(door(
             listener,
             asked.console,
             relays.subscribe(),

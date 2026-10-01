@@ -1,25 +1,25 @@
-# Build cortex-krun for every platform it is published for, and upload each to the dist
+# Build virtx-uvm for every platform it is published for, and upload each to the dist
 # bucket, all under the one commit this runs on. Every name a release has is one directory
 # of the same shape:
 #
-#   cortex-krun/<ref>/cortex-krun-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
+#   virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
 #
 # Each platform's job uploads its archive under the sha (`cargo xtask upload`). The names a
-# whole release goes by -- `latest`, what `ensure_cortex` fetches when told no version, and a
+# whole release goes by -- `latest`, what `ensure_virtx` fetches when told no version, and a
 # tag -- are given by `verify`, once all four platforms' archives are up, and all four at
 # once, so no name ever holds some platforms of one release and some of another:
 #
-# | run                      | cortex it builds against     | named `latest`     | named for its tag |
+# | run                      | virtx it builds against      | named `latest`     | named for its tag |
 # |--------------------------|------------------------------|--------------------|-------------------|
-# | a tag pushed             | the same tag in cortex       | yes                | yes               |
-# | a dispatch               | `cortex-ref`, else `main`     | if `latest` is set | on a tag's ref    |
+# | a tag pushed             | the same tag in virtx        | yes                | yes               |
+# | a dispatch               | `virtx-ref`, else `main`     | if `latest` is set | on a tag's ref    |
 #
 # A push to a branch runs nothing: a build is either a release, or asked for.
 #
-# A tag is a release of both repositories at once: cortex-krun speaks the protocol of the
-# cortex it is built with, so the tag has to exist in brekkylab/cortex too, and the checkout
-# fails if it does not. brekkylab/cortex's `packages` workflow, releasing the same tag,
-# refuses to run until `cortex-krun/<tag>/` holds all four platforms, and pins its packages
+# A tag is a release of both repositories at once: virtx-uvm speaks the protocol of the
+# virtx it is built with, so the tag has to exist in brekkylab/virtx too, and the checkout
+# fails if it does not. brekkylab/virtx's `packages` workflow, releasing the same tag,
+# refuses to run until `virtx-uvm/<tag>/` holds all four platforms, and pins its packages
 # to that tag.
 #
 # # Platforms
@@ -42,9 +42,7 @@
 # # What it needs
 #
 # - `AWS_ROLE_ARN`: the role `aws-actions/configure-aws-credentials` assumes over OIDC,
-#   trusted for this repository and allowed `s3:PutObject` under `cortex-krun/` only.
-# - `CORTEX_DEPLOY_KEY`: a read-only deploy key for brekkylab/cortex, which this workspace
-#   builds against as `../cortex`. Not needed once that repository is public.
+#   trusted for this repository and allowed `s3:PutObject` under `virtx-uvm/` only.
 name: dist
 
 on:
@@ -52,15 +50,15 @@ on:
     tags: ["*"]
   workflow_dispatch:
     inputs:
-      cortex-ref:
-        description: The brekkylab/cortex ref to build against (empty is main, or the tag on a tag)
+      virtx-ref:
+        description: The brekkylab/virtx ref to build against (empty is main, or the tag on a tag)
         default: ""
       upload:
         description: Upload to the dist bucket
         type: boolean
         default: true
       latest:
-        description: Point every platform's latest at this commit (what ensure_cortex fetches by default)
+        description: Point every platform's latest at this commit (what ensure_virtx fetches by default)
         type: boolean
         default: false
 
@@ -73,11 +71,11 @@ permissions:
   id-token: write
 
 env:
-  BUCKET: cortex-dist-044443350235-us-east-1-an
+  BUCKET: virtx-dist
   AWS_REGION: us-east-1
-  DIST_URL: https://cortex-dist-044443350235-us-east-1-an.s3.us-east-1.amazonaws.com
+  DIST_URL: https://virtx-dist.s3.us-east-1.amazonaws.com
   # A dispatch's word first, then a tag's own name, then main -- see the table above.
-  CORTEX_REF: ${{ inputs.cortex-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
+  VIRTX_REF: ${{ inputs.virtx-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
   # "true" on a pushed tag or a dispatch that asks; every other run leaves `latest` alone.
   LATEST: ${{ inputs.latest == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
   CARGO_TERM_COLOR: always
@@ -99,30 +97,29 @@ jobs:
     timeout-minutes: 90
     defaults:
       run:
-        working-directory: cortex-krun
+        working-directory: virtx-uvm
     steps:
       # With the submodules, which only the kernel does not need: `cargo xtask` loads the
       # whole workspace, and that names crates in them.
       - uses: actions/checkout@v4
         with:
-          path: cortex-krun
+          path: virtx-uvm
           submodules: true
 
-      # abin's programs are written in brekkylab/cortex, as `../cortex`.
+      # The workspace builds against brekkylab/virtx, as `../virtx`, and `cargo xtask` loads it.
       - uses: actions/checkout@v4
         with:
-          repository: brekkylab/cortex
-          ref: ${{ env.CORTEX_REF }}
-          path: cortex
-          ssh-key: ${{ secrets.CORTEX_DEPLOY_KEY }}
+          repository: brekkylab/virtx
+          ref: ${{ env.VIRTX_REF }}
+          path: virtx
 
       # A kernel is only its tag, its config and this script; the Makefile and configs come
       # from the libkrunfw clone, pinned by tag in the script.
       - uses: actions/cache@v4
         id: cache
         with:
-          path: cortex-krun/build/krunfw
-          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('cortex-krun/xtask/scripts/build-libkrunfw.sh') }}
+          path: virtx-uvm/build/krunfw
+          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('virtx-uvm/xtask/scripts/build-libkrunfw.sh') }}
 
       - name: Kernel
         if: steps.cache.outputs.cache-hit != 'true'
@@ -138,7 +135,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ matrix.arch }}
-          path: cortex-krun/build/krunfw/*
+          path: virtx-uvm/build/krunfw/*
           if-no-files-found: error
 
       - uses: dtolnay/rust-toolchain@stable
@@ -147,7 +144,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: cortex-krun
+          workspaces: virtx-uvm
           key: abin-${{ matrix.arch }}
 
       - name: abin
@@ -206,7 +203,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: cortex-krun
+        working-directory: virtx-uvm
     steps:
       # Before any checkout: Windows' git converts to CRLF by default, and the submodule
       # patches, written against LF, then find no context to apply to.
@@ -216,15 +213,14 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          path: cortex-krun
+          path: virtx-uvm
           submodules: true
 
       - uses: actions/checkout@v4
         with:
-          repository: brekkylab/cortex
-          ref: ${{ env.CORTEX_REF }}
-          path: cortex
-          ssh-key: ${{ secrets.CORTEX_DEPLOY_KEY }}
+          repository: brekkylab/virtx
+          ref: ${{ env.VIRTX_REF }}
+          path: virtx
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -232,7 +228,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: cortex-krun
+          workspaces: virtx-uvm
           key: ${{ matrix.release }}
 
       - name: Toolchain (Linux)
@@ -266,8 +262,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            cortex-krun/3rdparty/MoltenVK/Package
-          key: moltenvk-${{ hashFiles('cortex-krun/.git/modules/3rdparty/MoltenVK/HEAD', 'cortex-krun/3rdparty/_patches/MoltenVK-*.patch', 'cortex-krun/xtask/scripts/build-deps.sh') }}
+            virtx-uvm/3rdparty/MoltenVK/Package
+          key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK-*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -313,9 +309,9 @@ jobs:
 
       - name: What was built
         run: |
-          ls -la target/release | grep -E "cortex-krun|libkrunfw" || true
+          ls -la target/release | grep -E "virtx-uvm|libkrunfw" || true
           ls target/release/abin || true
-          exe=target/release/cortex-krun-host; [ -f "$exe" ] || exe=$exe.exe
+          exe=target/release/virtx-uvm-host; [ -f "$exe" ] || exe=$exe.exe
           echo "capabilities: [$("$exe" --capabilities | tr '\n' ' ')]"
 
       # What each executable needs from the loader at start-up, delay-loaded or not -- the
@@ -325,12 +321,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           readobj="/c/Program Files/LLVM/bin/llvm-readobj.exe"
-          for exe in target/release/cortex-krun.exe target/release/cortex-krun-host.exe; do
+          for exe in target/release/virtx-uvm.exe target/release/virtx-uvm-host.exe; do
             echo "== $exe"
             "$readobj" --coff-imports "$exe" | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' | sort -u | tee "$RUNNER_TEMP/imports.txt"
             # Nothing a release does not carry and Windows may not have, loaded at start-up:
             # the C++ runtime is linked in, and the rest are delay-loaded, so a host without
-            # them still runs cortex-krun far enough to say what to install.
+            # them still runs virtx-uvm far enough to say what to install.
             if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv|dokan)" "$RUNNER_TEMP/imports.txt"; then
               echo "::error::$exe needs the DLLs above to start"; fail=1
             fi
@@ -363,7 +359,7 @@ jobs:
         run: |
           fail=0
           for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            archive="$DIST_URL/cortex-krun/$GITHUB_SHA/cortex-krun-$release.tar.gz"
+            archive="$DIST_URL/virtx-uvm/$GITHUB_SHA/virtx-uvm-$release.tar.gz"
             size=$(curl -fsSI "$archive" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
             printf '%-15s %s bytes\n' "$release" "${size:-missing}"
             [ -n "$size" ] || fail=1
@@ -388,9 +384,9 @@ jobs:
           [ "${{ github.ref_type }}" = tag ] && names="$names $GITHUB_REF_NAME"
           for name in $names; do
             for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-              archive="cortex-krun-$release.tar.gz"
+              archive="virtx-uvm-$release.tar.gz"
               aws s3 cp --only-show-errors \
-                "s3://$BUCKET/cortex-krun/$GITHUB_SHA/$archive" "s3://$BUCKET/cortex-krun/$name/$archive" \
+                "s3://$BUCKET/virtx-uvm/$GITHUB_SHA/$archive" "s3://$BUCKET/virtx-uvm/$name/$archive" \
                 --metadata-directive REPLACE --metadata "sha=$GITHUB_SHA" \
                 --content-type application/gzip --cache-control no-cache
             done
@@ -398,9 +394,9 @@ jobs:
           fail=0
           for name in $names; do
             for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-              sha=$(curl -fsSI "$DIST_URL/cortex-krun/$name/cortex-krun-$release.tar.gz" \
+              sha=$(curl -fsSI "$DIST_URL/virtx-uvm/$name/virtx-uvm-$release.tar.gz" \
                 | awk 'tolower($1)=="x-amz-meta-sha:"{print $2}' | tr -d '\r')
-              printf 'cortex-krun/%s/%-35s sha=%s\n' "$name" "cortex-krun-$release.tar.gz" "${sha:-missing}"
+              printf 'virtx-uvm/%s/%-35s sha=%s\n' "$name" "virtx-uvm-$release.tar.gz" "${sha:-missing}"
               [ "$sha" = "$GITHUB_SHA" ] || fail=1
             done
           done

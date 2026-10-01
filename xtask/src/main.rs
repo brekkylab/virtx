@@ -23,7 +23,7 @@ usage: cargo xtask init     [--force]
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
   upload    archives what install would put in <prefix>/bin, for this platform, and
-            publishes it to S3 for cortex's ensure_cortex to fetch
+            publishes it to S3 for virtx's ensure_virtx to fetch
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
@@ -34,17 +34,17 @@ usage: cargo xtask init     [--force]
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
-  --prefix <dir>  where to install (default: $CORTEX_HOME, else cortex under
+  --prefix <dir>  where to install (default: $VIRTX_HOME, else virtx under
                   ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
                   ~/.cache otherwise)
   --debug         builds unoptimized (the guest is always optimized)
 
-  --bucket <name>     (upload) the bucket to publish to (default: $CORTEX_DIST_BUCKET)
+  --bucket <name>     (upload) the bucket to publish to (default: $VIRTX_DIST_BUCKET)
   --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
                       the environment's keys, or `default`)
   --region <region>   (upload) the bucket's region (default: the profile's)
   --latest            (upload) also puts the archive under `latest`, which is what
-                      `ensure_cortex` fetches when told no version; without it `latest`
+                      `ensure_virtx` fetches when told no version; without it `latest`
                       holds whatever it held before
   --with-abin         (upload) puts the abin that was built in the archive too; without it
                       the archive has no abin, and sessions from the release no /abin
@@ -52,9 +52,9 @@ usage: cargo xtask init     [--force]
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
 
-const HOST_BINS: &[&str] = &["cortex-krun", "cortex-krun-host"];
-const GUEST_BIN: &str = "cortex-krun-guest";
-const ABINS: &[(&str, &str)] = &[("cortex-exec-index", "index"), ("cortex-exec-mem", "mem")];
+const HOST_BINS: &[&str] = &["virtx-uvm", "virtx-uvm-host"];
+const GUEST_BIN: &str = "virtx-uvm-guest";
+const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
@@ -183,19 +183,17 @@ struct Upload {
     region: Option<String>,
     /// Whether to move this platform's `latest` to the release, and only when asked
     /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
-    /// `latest` changes what every `ensure_cortex` told no version fetches next.
+    /// `latest` changes what every `ensure_virtx` told no version fetches next.
     latest: bool,
     /// Whether the archive carries abin, and only when asked (`--with-abin`): abin is built
-    /// from the sibling cortex checkout, which a release of cortex-krun alone need not match.
+    /// from the sibling virtx checkout, which a release of virtx-uvm alone need not match.
     abin: bool,
     allow_dirty: bool,
     dry_run: bool,
 }
 
 fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Upload> {
-    let mut bucket = env::var("CORTEX_DIST_BUCKET")
-        .ok()
-        .filter(|b| !b.is_empty());
+    let mut bucket = env::var("VIRTX_DIST_BUCKET").ok().filter(|b| !b.is_empty());
     let mut upload = Upload {
         bucket: String::new(),
         profile: None,
@@ -222,7 +220,7 @@ fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Uplo
             _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
         }
     }
-    upload.bucket = bucket.context("name a bucket with --bucket or $CORTEX_DIST_BUCKET")?;
+    upload.bucket = bucket.context("name a bucket with --bucket or $VIRTX_DIST_BUCKET")?;
     Ok(upload)
 }
 
@@ -387,7 +385,7 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     for bin in HOST_BINS {
         cargo.args(["-p", bin]);
     }
-    cargo.args(["--features", "cortex-krun-host/gpu"]);
+    cargo.args(["--features", "virtx-uvm-host/gpu"]);
     if !options.debug {
         cargo.arg("--release");
     }
@@ -396,7 +394,7 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     sign(
         &options
             .out()
-            .join(format!("cortex-krun-host{}", env::consts::EXE_SUFFIX)),
+            .join(format!("virtx-uvm-host{}", env::consts::EXE_SUFFIX)),
     )
 }
 
@@ -507,7 +505,7 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
 
 fn build_guest(options: &Options) -> anyhow::Result<()> {
     let target = guest_target()?;
-    let mut cargo = cross_cargo(&root_path().join("cortex-krun-guest"));
+    let mut cargo = cross_cargo(&root_path().join("virtx-uvm-guest"));
     cargo.args(["build", "--release", "--target", target]);
     run(
         cargo,
@@ -536,7 +534,7 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
         ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
     }
 
-    let crate_dir = root.join("cortex-abins");
+    let crate_dir = root.join("virtx-abins");
     let mut cargo = cross_cargo(&crate_dir);
     cargo.args(["build", "--target", target]);
     if !options.debug {
@@ -633,22 +631,22 @@ fn download(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where a release is filed in the bucket: `cortex-krun/<ref>/cortex-krun-<os>-<arch>.tar.gz`,
+/// Where a release is filed in the bucket: `virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz`,
 /// one archive per platform under a directory named for the release.
 ///
 /// **One level for every name a release has.** `<ref>` is the sha of the commit it was built
 /// from, which this writes; or `latest`, which `--latest` writes as well, and which
-/// `ensure_cortex` fetches when told no version; or a tag, which the dist workflow writes
+/// `ensure_virtx` fetches when told no version; or a tag, which the dist workflow writes
 /// once every platform has its archive. A fetch is the same URL whichever name it is given,
 /// and a name is a directory of archives rather than a file naming one, so nothing reads one
 /// thing to find out where another is.
 ///
 /// Every archive carries the sha it was built from as `x-amz-meta-sha`, so what a name holds
 /// is a HEAD away.
-const DIST_ROOT: &str = "cortex-krun";
+const DIST_ROOT: &str = "virtx-uvm";
 
 /// The platforms a release is published for, as `std::env::consts` spells them -- which
-/// is what `ensure_cortex` builds its URL from. macOS is Apple silicon only and Windows
+/// is what `ensure_virtx` builds its URL from. macOS is Apple silicon only and Windows
 /// x86_64 only for now.
 fn dist_platform() -> anyhow::Result<String> {
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
@@ -714,7 +712,9 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
     );
     stage_bin(&built, &stage, upload.abin)?;
     if !upload.abin {
-        eprintln!("xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)");
+        eprintln!(
+            "xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)"
+        );
     }
 
     // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
@@ -794,7 +794,7 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
 fn install(options: &Options) -> anyhow::Result<()> {
     let prefix = match &options.prefix {
         Some(prefix) => prefix.clone(),
-        None => cortex::cache_root(),
+        None => virtx::cache_root(),
     };
     let bin = prefix.join("bin");
     stage_bin(&options.out(), &bin, true)?;

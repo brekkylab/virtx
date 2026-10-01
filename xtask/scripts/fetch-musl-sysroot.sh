@@ -1,6 +1,6 @@
 #!/bin/sh
 # Unpack a musl sysroot -- headers and the static libc -- for cross-compiling the C that
-# `cortex-abins/` pulls in. Only one crate needs it: `rusqlite`'s `bundled` feature, which
+# `virtx-abins/` pulls in. Only one crate needs it: `rusqlite`'s `bundled` feature, which
 # compiles SQLite's amalgamation, and which is `bundled` on purpose -- the schemas are FTS5
 # indexes and FTS5 is a compile-time option no host's SQLite has to have been built with.
 #

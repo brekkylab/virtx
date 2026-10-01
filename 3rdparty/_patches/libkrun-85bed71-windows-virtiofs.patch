@@ -286,7 +286,7 @@ index 17687d12..762fde07 100644
 +/// The root is followed rather than opened as a link, and is allowed to be one. A mount point
 +/// is a reparse point on Windows -- a junction onto the volume behind it -- so a userspace
 +/// filesystem attached to the host and then handed to a guest arrives here as one, which is
-+/// how `cortex` shares a tree it holds in memory. `FILE_OPEN_REPARSE_POINT` would open the
++/// how `virtx` shares a tree it holds in memory. `FILE_OPEN_REPARSE_POINT` would open the
 +/// junction itself, which is not a directory anything can be enumerated from.
 +///
 +/// It used to refuse a reparse point outright, and that check is gone rather than relaxed,

@@ -7,7 +7,7 @@ index 67845feb..fd182f71 100644
  #[cfg(all(target_os = "linux", feature = "tdx"))]
  const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
 +// `@loader_path/` and not a leaf name, which is what every other target here uses. The
-+// kernel is shipped beside the binary that opens it -- see `cortex-krun-lib/build.rs` --
++// kernel is shipped beside the binary that opens it -- see `virtx-uvm-lib/build.rs` --
 +// and on the other two platforms a leaf name finds it there: Windows searches the
 +// executable's own directory first, and Linux the calling object's `DT_RUNPATH`, which
 +// the link sets to `$ORIGIN`. dyld does neither. A `dlopen` argument with no slash in it

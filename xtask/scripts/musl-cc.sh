@@ -1,6 +1,6 @@
 #!/bin/sh
-# The C compiler cargo hands to `cc-rs` when building `cortex-abins/` for the guest. Named by
-# `cortex-abins/.cargo/config.toml`.
+# The C compiler cargo hands to `cc-rs` when building `virtx-abins/` for the guest. Named by
+# `virtx-abins/.cargo/config.toml`.
 #
 # It is Apple's own clang: a clang is a cross-compiler for every target LLVM was built with,
 # and the two things it is missing for this one are a target triple and somewhere to find a

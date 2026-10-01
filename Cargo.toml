@@ -1,31 +1,31 @@
-# The four halves of cortex-krun, kept apart because they are built apart.
+# The four halves of virtx-uvm, kept apart because they are built apart.
 #
-# `cortex-krun-lib` is the whole of the machinery -- images, disks, sessions --
-# and links libkrun. `cortex-krun` is what a user runs and what answers a
-# console; it holds no hypervisor. `cortex-krun-host` is the process that
-# becomes a micro-VM, spawned as a file beside `cortex-krun` rather than
+# `virtx-uvm-lib` is the whole of the machinery -- images, disks, sessions --
+# and links libkrun. `virtx-uvm` is what a user runs and what answers a
+# console; it holds no hypervisor. `virtx-uvm-host` is the process that
+# becomes a micro-VM, spawned as a file beside `virtx-uvm` rather than
 # depended on by it, because on macOS creating a VM needs an entitlement, an
 # entitlement is carried by a code signature, and a signature is read at `exec`
 # -- so the process that creates a VM can never be the process that decided to.
-# `cortex-krun-guest` is the init that runs inside one.
+# `virtx-uvm-guest` is the init that runs inside one.
 [workspace]
 resolver = "3"
-members = ["cortex-krun", "cortex-krun-host", "cortex-krun-lib", "xtask"]
+members = ["virtx-uvm", "virtx-uvm-host", "virtx-uvm-lib", "xtask"]
 
 # `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
 # workspace. Without this, cargo would auto-adopt the path dependencies as
 # members and collide with that workspace.
 #
-# `cortex-krun-guest/` and `cortex-abins/` are workspace roots of their own: both are
+# `virtx-uvm-guest/` and `virtx-abins/` are workspace roots of their own: both are
 # cross-compiled to `*-unknown-linux-musl`, and a member would be built for the host
 # by a bare `cargo build` -- for a target that has no host to run on. Listed here and
 # not merely left out of `members`: a package under this directory that is neither
-# resolves against this root, and the ones in `cortex-abins/` inherit dependencies
+# resolves against this root, and the ones in `virtx-abins/` inherit dependencies
 # this workspace has no reason to declare.
 #
 # `virglrenderer-sys/` builds virglrenderer with meson, and is reached only through
 # rutabaga_gfx under the `gpu` feature. As a member a bare `cargo build` would run it.
-exclude = ["3rdparty/libkrun", "cortex-krun-guest", "cortex-abins", "virglrenderer-sys"]
+exclude = ["3rdparty/libkrun", "virtx-uvm-guest", "virtx-abins", "virglrenderer-sys"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,16 +38,16 @@ rust-version = "1.89"
 anyhow = "1"
 # The console protocol the server answers and the guest speaks: the frames, the calls and
 # the codes a refusal carries. A path to the sibling checkout, because the two repositories
-# are developed together -- `cortex` is what decides what a session *is*, and this one is one
+# are developed together -- `virtx` is what decides what a session *is*, and this one is one
 # backend for it.
 #
-# No default features: what is wanted is the console, and every binding cortex offers brings
+# No default features: what is wanted is the console, and every binding virtx offers brings
 # a libfuse provider or an HTTP stack with it. That includes the default `ensure`, which
-# fetches a published cortex-krun -- this server has no use for fetching itself.
-cortex = { path = "../cortex", default-features = false }
-cortex-krun-host = { path = "cortex-krun-host", default-features = false }
-cortex-krun-lib = { path = "cortex-krun-lib" }
-# The wire's codec, which `cortex` already carries in its public API: two versions of it in
+# fetches a published virtx-uvm -- this server has no use for fetching itself.
+virtx = { path = "../virtx", default-features = false }
+virtx-uvm-host = { path = "virtx-uvm-host", default-features = false }
+virtx-uvm-lib = { path = "virtx-uvm-lib" }
+# The wire's codec, which `virtx` already carries in its public API: two versions of it in
 # one build would be a type error nobody could read.
 bson = { version = "3", features = ["serde"] }
 libc = "0.2"

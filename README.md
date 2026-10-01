@@ -1,9 +1,9 @@
-# cortex-krun
+# virtx-uvm
 
 Rust host-side bindings and runtime built on [libkrun](https://github.com/libkrun/libkrun) 2.0.
 
 libkrun is vendored as a submodule and linked as an rlib, so there is no
-`libkrun.so`/`libkrun.dylib` to ship and no C ABI in the middle — `cortex-krun`
+`libkrun.so`/`libkrun.dylib` to ship and no C ABI in the middle — `virtx-uvm`
 depends on the `libkrun` crate directly.
 
 > libkrun 2.0 is still under active development and its API is not stable. The
@@ -24,7 +24,7 @@ brew install lld meson ninja krunvm
 |---|---|
 | `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
-| `llvm` | Only for `cortex-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
+| `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host`. |
 
 ## Setup
@@ -35,23 +35,23 @@ cargo xtask init                        # patches the submodules (--force resets
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
 cargo xtask build host guest            # -> target/release/ (builds MoltenVK and virglrenderer
                                         #    first; add abin for /abin)
-cargo xtask install                     # -> ~/.cache/cortex/bin, or --prefix <dir>
+cargo xtask install                     # -> ~/.cache/virtx/bin, or --prefix <dir>
 ```
 
 ## Running
 
 ```sh
 cargo xtask run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
-CORTEX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
-CORTEX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+VIRTX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
+VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
 ```
 
 One example, because there is one thing to show: a machine made out of the parts
 this repository has. What a *session* is — the agent, the console protocol, `/abin`
-— is the server's, and a client reaches that by spawning `cortex-krun` rather than
+— is the server's, and a client reaches that by spawning `virtx-uvm` rather than
 by running an example.
 
-`run` is the [`session`](cortex-krun-lib/src/session/) module end to end: it pulls the
+`run` is the [`session`](virtx-uvm-lib/src/session/) module end to end: it pulls the
 image, stitches its layers into one disk, formats a writable ext4 beside it and
 boots the guest on an overlay of the two. The session is the ext4 file, so the
 second run of the same image sees what the first one did:
@@ -89,16 +89,16 @@ built, silently, since the GPU still came up.
 A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not
 sign, and a binary that creates a VM fails without it. The one exception is
 the one that matters for a console server: `cargo xtask build host` signs
-`cortex-krun-host` once cargo has built it. A console server is started by
+`virtx-uvm-host` once cargo has built it. A console server is started by
 whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
 is not on that path, so the binary that calls `hv_vm_create` has to come out of
 the build already entitled. A plain `cargo build` leaves it unsigned.
 
 ## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
 
-[`image`](cortex-krun-lib/src/image/) answers with a disk: the layers stitched into one
+[`image`](virtx-uvm-lib/src/image/) answers with a disk: the layers stitched into one
 read-only EROFS filesystem, shared by every machine ever booted from that image.
-[`session`](cortex-krun-lib/src/session/) is what makes one of those machines writable, by
+[`session`](virtx-uvm-lib/src/session/) is what makes one of those machines writable, by
 stacking an ext4 of its own over it:
 
 ```
@@ -121,7 +121,7 @@ need no patch at all and does not work. The guest kernel refuses a FUSE
 filesystem as an upperdir outright — `filesystem on %s not supported as
 upperdir` — and even past that, deleting a file the image shipped is recorded as
 a character device numbered `0:0`, which `mknod` on a macOS host refuses to
-anything but root. It is the same wall [`image::ingest`](cortex-krun-lib/src/image/blob.rs) is
+anything but root. It is the same wall [`image::ingest`](virtx-uvm-lib/src/image/blob.rs) is
 written around, and the reason layers become EROFS images rather than extracted
 directories.
 
@@ -215,7 +215,7 @@ interface. The patch adds `TsiPolicy`, which the vsock muxer asks before a
 | `listen` on a published port | a listener on this host's loopback, which the relay joins to the published one |
 | `listen` on any other port | `EPERM`, which the guest kernel takes as "listen on your own stack" |
 
-The policy itself is [`net/policy.rs`](cortex-krun-lib/src/session/net/policy.rs).
+The policy itself is [`net/policy.rs`](virtx-uvm-lib/src/session/net/policy.rs).
 In the muxer rather than in each proxy, because the muxer is the one place every
 request passes through on every host — the unix and Windows proxies below it are
 two implementations of the same thing.
@@ -248,16 +248,16 @@ refusing to start, so a caller never has to `cfg` around the call. The image
 carries the guest half either way (`apk add mesa-vulkan-virtio vulkan-loader`);
 one without it boots and finds no device.
 
-**The console server does not ignore it.** `cortex-krun` answers a `gpu` member on
+**The console server does not ignore it.** `virtx-uvm` answers a `gpu` member on
 `init`, and there what is asked for is what is given: it asks the boot beside it
-(`cortex-krun-host --capabilities`) whether a device can be attached and refuses
+(`virtx-uvm-host --capabilities`) whether a device can be attached and refuses
 the session with `UNSUPPORTED_MACHINE` when it cannot. A client on the other end
 of a pipe cannot `cfg` around anything, and a session that silently ran on the CPU
 costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
-with `CORTEX_KRUN_GPU`, `CORTEX_KRUN_VCPUS` and `CORTEX_KRUN_MEMORY_MIB` as this
+with `VIRTX_UVM_GPU`, `VIRTX_UVM_VCPUS` and `VIRTX_UVM_MEMORY_MIB` as this
 server's own defaults for a client that says nothing. So does `disk_gib`, how much
 a session may write on top of its image (a sparse ceiling, 2 GiB by default), with
-`CORTEX_KRUN_DISK_GIB` as the default -- which is also the size a build's disk gets.
+`VIRTX_UVM_DISK_GIB` as the default -- which is also the size a build's disk gets.
 
 ### Which Vulkan version the guest device reports
 
@@ -345,7 +345,7 @@ of a real macOS path:
 
 Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so the
 session asks for it wherever the render server is built -- macOS and Linux, not
-Windows (see `cortex-krun-lib/src/session/gpu.rs`). The patch carries what
+Windows (see `virtx-uvm-lib/src/session/gpu.rs`). The patch carries what
 upstream main still gets wrong there:
 
 - **`vkr_metal_helpers.m` includes `venus-protocol/vulkan_metal.h`**, a path
@@ -365,7 +365,7 @@ upstream main still gets wrong there:
 `-Dvulkan-dload=false` still links MoltenVK rather than `dlopen`ing it: the
 dload path asks dyld for `libvulkan.1.dylib` or `libMoltenVK.dylib` by leaf
 name, and Homebrew's `lib` is not on its default search path. Linux does the
-opposite: `-Dvulkan-dload=true`, so `cortex-krun-host` starts on a host with no
+opposite: `-Dvulkan-dload=true`, so `virtx-uvm-host` starts on a host with no
 Vulkan loader, and reports a GPU (`--capabilities`) only where it finds one.
 
 ### virglrenderer on Linux — `3rdparty/_patches/virglrenderer-8167744-linux-host-memory.patch`
@@ -509,7 +509,7 @@ clang cross-linker for the guest init.
 
 The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
 `BorrowedHandle` where it takes `BorrowedFd` elsewhere, which is why
-[`session`](cortex-krun-lib/src/session/) owns that call rather than leaving it to
+[`session`](virtx-uvm-lib/src/session/) owns that call rather than leaving it to
 a caller: the two spellings differ by little more than `AsFd` → `AsHandle`, and
 holding the difference in one place is what lets everything above it be written
 once.
@@ -519,7 +519,7 @@ once.
 What a console *session* runs on is a named virtio-console port, and the host end
 of one is a descriptor the server and the boot share — a unix socket on macOS.
 Windows gets **two named pipes** instead, and
-[`session::channel`](cortex-krun-lib/src/session/channel.rs) is where both ends of
+[`session::channel`](virtx-uvm-lib/src/session/channel.rs) is where both ends of
 that live so that nothing above it has to know which host it is on.
 
 Two, because libkrun's Windows console reads the port's input handle with a
@@ -608,7 +608,7 @@ cargo xtask build host                  # builds libepoxy and virglrenderer firs
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
-The kernel first, because a build of `cortex-krun-lib` stops without one -- it is
+The kernel first, because a build of `virtx-uvm-lib` stops without one -- it is
 what copies the kernel beside the binaries, which is how they find it.
 
 `cargo xtask run` adds `build/epoxy/bin/` to `PATH`, when a `gpu` build made one.
@@ -669,7 +669,7 @@ builds again over what is already there.
 One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
 beside the binary that opens it.**
 
-`cortex-krun-lib/build.rs` puts it there, and libkrun opens it by name at run time rather
+`virtx-uvm-lib/build.rs` puts it there, and libkrun opens it by name at run time rather
 than linking it. On Windows a bare name is enough, because the loader searches the
 executable's own directory before anywhere else. On Linux it is enough too, because
 `dlopen` consults the *calling object's* `DT_RUNPATH` and the link sets that to `$ORIGIN`
@@ -749,7 +749,7 @@ error says what it is about.
   point on Windows is. `openat` opened the root with `FILE_OPEN_REPARSE_POINT`
   and then refused anything carrying `FILE_ATTRIBUTE_REPARSE_POINT` — so a tree
   attached to the host by a userspace filesystem and then handed to a guest,
-  which is how `cortex` shares one it holds in memory, was refused. The root is
+  which is how `virtx` shares one it holds in memory, was refused. The root is
   followed rather than opened as a link now, and the refusal is gone rather
   than relaxed.
 
@@ -956,7 +956,7 @@ fs 13 · fs 14 · fs 15 · fs 16   ← the line no MP_INTSRC covers
 ```
 
 The guest's boot then stops where that fs device is mounted, which is before
-`cortex-krun-guest` is started at all — libkrun's init mounts the shares first.
+`virtx-uvm-guest` is started at all — libkrun's init mounts the shares first.
 What a server sees is the handshake never arriving: "the guest connected but
 did not say it was there within 60s", naming nothing that would lead here. The
 `ioapic: write: ioredtbl register N` line for 16 is simply absent from a debug
@@ -1068,16 +1068,16 @@ from — its `src/` is byte-identical to the crate on crates.io — rather than 
 
 ## `/abin`
 
-Every guest gets one directory of cortex's own executables at `/abin`, **first on a
+Every guest gets one directory of virtx's own executables at `/abin`, **first on a
 command's `PATH`**. Today that is `index` and `mem` -- the programs in
-[`cortex-abins/`](cortex-abins), which are written in the sibling `cortex` checkout and built
+[`virtx-abins/`](virtx-abins), which are written in the sibling `virtx` checkout and built
 here for the machine that runs them.
 
 `docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
 C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
 that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built for
 `<arch>-unknown-linux-musl` somewhere that has that toolchain, dropped at
-`~/.cache/cortex/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
+`~/.cache/virtx/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
 and `docread` added to `ABINS` in [`xtask`](xtask/src/main.rs).
 
 ```sh
@@ -1086,14 +1086,14 @@ cargo xtask build abin                     # -> target/release/abin, beside the 
 cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
 ```
 
-Everything this host keeps is under that one root -- `$CORTEX_HOME`, or `cortex` under the
+Everything this host keeps is under that one root -- `$VIRTX_HOME`, or `virtx` under the
 user's cache directory (`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows,
 `XDG_CACHE_HOME` or `~/.cache` otherwise): `abin/` here, `images/` that every tool in this
 repository pulls into, and `session/{pid}/` while a server is up. One rule, in
-`cortex::cache_root`, because a host has one answer to where its things go. `CORTEX_IMAGE_CACHE_ROOT` still moves the images out from
+`virtx::cache_root`, because a host has one answer to where its things go. `VIRTX_IMAGE_CACHE_ROOT` still moves the images out from
 under it on their own, being the narrower of the two.
 
-What each program is travels with it: `cortex-abins/{program}/SKILLS.md` is installed at
+What each program is travels with it: `virtx-abins/{program}/SKILLS.md` is installed at
 `/abin/skills/{program}/SKILLS.md`, so a session gets the programs and the reading of them from
 the one mount. Under `skills/` rather than beside the executables, because the top of `/abin`
 is what goes on `PATH` -- a file there that is not a program is something a shell would offer
@@ -1117,20 +1117,19 @@ refuses the write whatever the guest mounted it with, so a guest that is root in
 cannot remount it away. Prepended to `PATH` rather than appended, because `/abin` is what this
 backend undertakes to provide -- an image that happens to carry a program of the same name
 would make that undertaking untrue, and nothing would say which one a session got. The path is
-reserved for the same reason `/.cortex` is: a client that asks for a tree there is refused.
+reserved for the same reason `/.virtx` is: a client that asks for a tree there is refused.
 
 ## Layout
 
 ```
-cortex-krun-lib/            the machinery: images, disks, sessions (lib `cortex_krun`)
-cortex-krun/                the console server a user runs; spawns the VM, is not one
-cortex-krun-host/           the process that becomes a VM, and -- as its library half --
+virtx-uvm-lib/              the machinery: images, disks, sessions (lib `virtx_uvm`)
+virtx-uvm/                  the console server a user runs; spawns the VM, is not one
+virtx-uvm-host/             the process that becomes a VM, and -- as its library half --
                             the command line the server starts one with; signed on macOS
-cortex-krun-guest/          the half inside the VM; its own workspace, built for musl
-cortex-abins/               the programs in the guest's /abin -- index and mem, with docread
+virtx-uvm-guest/            the half inside the VM; its own workspace, built for musl
+virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
                             beside them and not on it -- and a SKILLS.md each, saying what one
-                            is; copied from cortex/cortex-execs/; its own workspace, built for
-                            musl
+                            is; its own workspace, built for musl
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
 3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at 8167744
@@ -1141,7 +1140,7 @@ xtask/                      `cargo xtask init` / `build` / `install` / `run` / `
                             server, the boot, the guest and abin/ built and placed as one
                             set; xtask/scripts/ has what it runs -- the GPU libraries'
                             build, the musl sysroot fetch, and the musl cc/ar that
-                            cortex-abins/ cross-compiles with
+                            virtx-abins/ cross-compiles with
 data/                       untracked: musl sysroot, sessions, build outputs
 ```
 
@@ -1149,7 +1148,7 @@ data/                       untracked: musl sysroot, sessions, build outputs
 scripts.
 
 `cargo xtask build` is what puts all three binaries in one directory:
-`cortex-krun` finds the other two by looking beside itself. A plain `cargo build`
+`virtx-uvm` finds the other two by looking beside itself. A plain `cargo build`
 links the server and the boot but not the guest, which is a musl cross-build of its
 own workspace; `cargo xtask install` copies the whole set into `<prefix>/bin`. On macOS
 the boot needs the hypervisor entitlement, which `cargo xtask build host` puts on

@@ -16,7 +16,7 @@ if [ "$(uname -s)" = Darwin ]; then
 
     MoltenVK_src="$ROOT/3rdparty/MoltenVK"
     MoltenVK_lib="$MoltenVK_src/Package/Release/MoltenVK/static/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a"
-    MoltenVK_stamp="$MoltenVK_src/Package/.cortex-stamp"
+    MoltenVK_stamp="$MoltenVK_src/Package/.virtx-stamp"
 
     if [ ! -f "$MoltenVK_src/Makefile" ]; then
         echo "MoltenVK is not checked out; run: git submodule update --init" >&2
@@ -105,9 +105,9 @@ fi
 
 # How venus reaches Vulkan. Linked on macOS, where the Vulkan is MoltenVK built into the
 # binary above and there is no loader to open. Opened at run time everywhere else: linked,
-# `cortex-krun-host` needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
+# `virtx-uvm-host` needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
 # could run no session at all rather than only no GPU one. The boot asks for the loader
-# itself before it reports or attaches a GPU -- see `vulkan` in `cortex-krun-host`.
+# itself before it reports or attaches a GPU -- see `vulkan` in `virtx-uvm-host`.
 if [ "$(uname -s)" = Darwin ]; then
     vulkan_dload=false
 else

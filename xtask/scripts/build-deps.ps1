@@ -94,7 +94,7 @@ $(if ($llvmLib) { "ar = '$($llvmLib -replace '\\','/')'" })
 # Vulkan SDK when one is installed (`VULKAN_SDK`), and otherwise from what is already here --
 # the Vulkan headers virglrenderer carries in its tree, and an import library made from
 # them. That one is enough because the host delay-loads `vulkan-1.dll`
-# (cortex-krun-host/build.rs): the link needs only the names, and a name the loader does
+# (virtx-uvm-host/build.rs): the link needs only the names, and a name the loader does
 # not export would fail only if something called it. Any Windows
 # with a GPU driver has the DLL itself; it is the driver's, not ours to ship.
 #

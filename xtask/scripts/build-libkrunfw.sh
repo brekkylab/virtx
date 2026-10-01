@@ -77,8 +77,8 @@ TARGET="${LIBKRUNFW_TARGET:-$HOST}"
 # when it unpacks a tree -- so a tree shared with the Linux build would keep the Linux one.
 # macOS and Linux share, since on one architecture they build the same kernel.
 case "$TARGET" in
-    windows) VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw-windows}" ;;
-    *) VOLUME="${LIBKRUNFW_VOLUME:-cortex-krun-libkrunfw}" ;;
+    windows) VOLUME="${LIBKRUNFW_VOLUME:-virtx-uvm-libkrunfw-windows}" ;;
+    *) VOLUME="${LIBKRUNFW_VOLUME:-virtx-uvm-libkrunfw}" ;;
 esac
 
 # What the library is called, which is also how this tells a build it already has from

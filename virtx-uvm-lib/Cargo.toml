@@ -1,0 +1,115 @@
+[package]
+name = "virtx-uvm-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Everything the binaries are made of: OCI images, the disks they are stitched
+# into, and the sessions that boot from them. The package carries the `-lib`
+# suffix only because `virtx-uvm` is the binary a user runs; the library it
+# provides is still `virtx_uvm`, which is what every consumer spells.
+[lib]
+name = "virtx_uvm"
+path = "src/lib.rs"
+
+[features]
+# Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus
+# support -- `cargo xtask build host` builds it first, and always turns this on.
+gpu = ["krun/gpu", "dep:krun_display"]
+
+[dependencies]
+virtx = { workspace = true }
+log = "0.4"
+
+# libkrun 2.0-dev, pinned via the `3rdparty/libkrun` submodule.
+# The package is named `libkrun`; its lib target is `krun`.
+# `blk` is off by default in libkrun; without it there is no `BlockDevice` and
+# so no way to hand the guest an EROFS image to mount.
+krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = [
+    "blk",
+] }
+
+# Guest init binary + config builder, split out of libkrun in 2.0.
+# `direct` links libkrun as an rlib instead of going through its C ABI.
+krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = [
+    "direct",
+] }
+
+# Needed to hand libkrun a display backend for the virtio-gpu device.
+krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
+
+# The registry side of the OCI distribution spec: reference parsing, token
+# auth, manifest negotiation and blob downloads. `native-tls` rather than the
+# default `rustls-tls`, which drags in aws-lc-sys and therefore cmake and a C
+# toolchain -- on Windows that is a build this repo does not want to own. With
+# native-tls, TLS is Schannel on Windows and Security.framework on macOS.
+oci-client = { version = "0.18", default-features = false, features = [
+    "native-tls",
+] }
+
+# A download reports itself as it goes, and the natural shape for that is a
+# stream. `async-stream` is the generator macro that lets the download be written
+# as the loop it is instead of a hand-rolled state machine; `futures-core` is only
+# the `Stream` trait, to name it in a signature. Both are already compiled here as
+# dependencies of oci-client.
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# oci-client is async and its blob downloads write into an `AsyncWrite`.
+# `net` for the console channel -- a unix socket on one host and a pair of named pipes on
+# the other, both of which a server drives asynchronously. See `session::channel`.
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "macros"] }
+
+# Reading layer blobs. `tar` parses the archive and reports where each entry's
+# bytes are, which is what lets the tree hold offsets instead of contents;
+# `flate2` is the gzip nearly every registry serves them under, on its pure-Rust
+# backend so no C toolchain comes with it.
+tar = "0.4"
+flate2 = "1"
+
+# Reading that layer back out again, which is what turns what a build wrote
+# into a layer. A reader rather than the formatter above, and a different crate
+# because they are different jobs: what this one answers is what an OCI layer is
+# made of -- the extended attributes on a file, the major and minor of a device
+# node, and which inode a name points at, so that a hard link is one and not a
+# copy. Without those three a layer cannot say "this directory hides what is
+# under it", "this deletion happened", or "these two names are one file".
+ext4 = "0.9"
+
+# The writable layer a session runs on. An ext4 image has to be made on the host, and
+# macOS has no `mke2fs` -- nor does Windows -- so a formatter that is a library rather
+# than a program is the only form that works on the hosts this runs on. Pure Rust, so it
+# brings no C toolchain with it, and it writes the file sparse: a session's ceiling costs
+# nothing until it is used.
+arcbox-ext4 = "0.1"
+
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# What this host has to say about itself: its memory, and the resolvers a session's names are
+# sent to -- see `session::net::resolver`. Only the platform that has one takes the crate that
+# names it: `sysctl` and `sysconf` are libc's, and a Windows host's resolvers are
+# `GetAdaptersAddresses`'s.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The same release libkrun's own Windows code takes, so one version is resolved rather
+# than two compiled.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an
+    # adapter's shape is NDIS's, and windows-sys gates the whole call on it.
+    "Win32_NetworkManagement_Ndis",
+    # `GlobalMemoryStatusEx`, for `session::host_memory`.
+    "Win32_System_SystemInformation",
+    # `OpenProcess`, for `session::doors::alive`.
+    "Win32_System_Threading",
+] }

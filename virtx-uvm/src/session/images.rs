@@ -96,7 +96,8 @@ fn discard(name: &str) -> anyhow::Result<()> {
 }
 
 pub async fn build_image(call: BuildImageCall) -> anyhow::Result<BuildImageResp> {
-    let (built, _) = resolve(&call.recipe.into()).await?;
+    // Held past `tag`: dropped earlier, it discards the build before the ref claims it.
+    let (built, _guard) = resolve(&call.recipe.into()).await?;
 
     let name = canonical(&built)?;
     let mut index = Cache::new().image_index()?;

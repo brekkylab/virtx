@@ -40,13 +40,9 @@ krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-
 krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: reference parsing, token
-# auth, manifest negotiation and blob downloads. `native-tls` rather than the
-# default `rustls-tls`, which drags in aws-lc-sys and therefore cmake and a C
-# toolchain -- on Windows that is a build this repo does not want to own. With
-# native-tls, TLS is Schannel on Windows and Security.framework on macOS.
-oci-client = { version = "0.18", default-features = false, features = [
-    "native-tls",
-] }
+# auth, manifest negotiation and blob downloads. Its TLS is chosen per platform,
+# below.
+oci-client = { version = "0.18", default-features = false }
 
 # A download reports itself as it goes, and the natural shape for that is a
 # stream. `async-stream` is the generator macro that lets the download be written
@@ -113,3 +109,16 @@ windows-sys = { version = "0.61.2", features = [
     # `OpenProcess`, for `session::doors::alive`.
     "Win32_System_Threading",
 ] }
+
+# oci-client's TLS. `native-tls` where the OS has its own -- Schannel on Windows,
+# Security.framework on macOS -- rather than the default `rustls-tls`, which drags
+# in aws-lc-sys and therefore cmake and a C toolchain, a build this repo does not
+# want to own on Windows. On Linux native-tls would be a dynamic OpenSSL, whose
+# soname is the distribution's (libssl.so.1.1 on RHEL 8, .so.3 on Ubuntu 22.04),
+# so one binary would run on one family and not the other; rustls instead, built
+# with the C toolchain a Linux build has anyway.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls"] }

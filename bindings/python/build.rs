@@ -5,8 +5,11 @@
 //! with `DLL load failed` on hosts without Dokany, even for callers that never mount; with it
 //! the DLL loads at the first mount, which `virtx::fs::mount_support` checks for first.
 //!
-//! macOS needs nothing: the FUSE-T shim opens libfuse-t itself at run time.
+//! Also emits what this cdylib needs to link as a Python extension module: cargo builds it
+//! under a caller that wants only the `rlib`, and the flags that caller passes are its own.
 fn main() {
+    pyo3_build_config::add_extension_module_link_args();
+
     if std::env::var_os("CARGO_FEATURE_MOUNT").is_some()
         && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")

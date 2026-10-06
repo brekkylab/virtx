@@ -86,7 +86,14 @@ impl Drop for Sigchld {
         }
         // SAFETY: `was` is the value `sigaction` itself wrote when this guard was
         // taken, so it is a disposition this process had.
-        unsafe { libc::sigaction(libc::SIGCHLD, &was, std::ptr::null_mut()) };
+        unsafe {
+            libc::sigaction(libc::SIGCHLD, &was, std::ptr::null_mut());
+            // A child that exited in the window raised a SIGCHLD nobody saw.
+            // Signals coalesce, so a handler copes with one that has no new exit.
+            if was.sa_sigaction != libc::SIG_DFL && was.sa_sigaction != libc::SIG_IGN {
+                libc::raise(libc::SIGCHLD);
+            }
+        }
     }
 }
 

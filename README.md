@@ -67,6 +67,10 @@ try {
 
 ### Rust
 
+```sh
+cargo add virtx
+```
+
 ```rust
 use virtx::{console::ConsoleClient, ensure_virtx, image::Recipe};
 

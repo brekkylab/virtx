@@ -20,8 +20,9 @@
 mod claim;
 mod r#impl;
 mod mount;
-// Only a binding mounts, and only mounting disturbs what this puts back.
-#[cfg(any(feature = "fuse", feature = "fuse-t"))]
+// Only a binding mounts, and only mounting disturbs what this puts back. Unix
+// only: `SIGCHLD` is what it is about, and Dokan has no such thing.
+#[cfg(all(feature = "mount", unix))]
 mod sigchld;
 #[cfg(unix)]
 mod signal;

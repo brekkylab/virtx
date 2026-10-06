@@ -44,13 +44,16 @@
 //! same offence it exists to undo. A disposition of `SIG_DFL` or `SIG_IGN` is
 //! nobody's handler, so restoring over one takes nothing away.
 //!
-//! # What it cannot promise
+//! # The window
 //!
-//! The window is not closed, only shut afterwards. A `SIGCHLD` delivered *during*
-//! the mount arrives at `SIG_DFL` and is not delivered again, so a child that
-//! exits in those seconds goes unnoticed until something else wakes the wait. The
-//! only complete answer is the one a caller owns: mount before spawning children,
-//! or wait on them without depending on the notification.
+//! Restoring alone would leave a gap: a `SIGCHLD` delivered *while* the mount
+//! runs (about half a millisecond) arrives at `SIG_DFL` and is not sent again, so
+//! a child that exits then would never be collected. A signal carries no
+//! information, though. The child's exit status is still in the kernel, and all
+//! that was lost is the notification to go and ask for it, so one is sent after
+//! the restore and whatever is listening collects what it missed. That one is
+//! spurious costs nothing: `SIGCHLD` coalesces, and every handler already copes
+//! with waking to nothing new.
 
 /// The process's `SIGCHLD` disposition, held across a call that does not know it
 /// is borrowing it, and put back if the call dropped it.
@@ -90,8 +93,11 @@ impl Drop for Sigchld {
             libc::sigaction(libc::SIGCHLD, &was, std::ptr::null_mut());
             // A child that exited in the window raised a SIGCHLD nobody saw.
             // Signals coalesce, so a handler copes with one that has no new exit.
+            // Sent to the process rather than with `raise`, which goes to this
+            // thread: a thread that blocks SIGCHLD would keep it pending here,
+            // where nothing is waiting for it.
             if was.sa_sigaction != libc::SIG_DFL && was.sa_sigaction != libc::SIG_IGN {
-                libc::raise(libc::SIGCHLD);
+                libc::kill(libc::getpid(), libc::SIGCHLD);
             }
         }
     }

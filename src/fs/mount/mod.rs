@@ -20,6 +20,9 @@
 mod claim;
 mod r#impl;
 mod mount;
+// Used only by the mount bindings; Dokan (Windows) has no SIGCHLD.
+#[cfg(all(feature = "mount", unix))]
+mod sigchld;
 #[cfg(unix)]
 mod signal;
 #[cfg(all(feature = "mount", any(unix, windows)))]

@@ -1,0 +1,52 @@
+//! One module per concrete filesystem interface, each binding it to the layer below.
+//!
+//! A binding only translates: decode the interface's arguments, call a shared operation,
+//! encode the reply. It decides only the errno numbering its consumer expects (a guest kernel
+//! is always Linux; the host's is the host's) and the attribute type it fills.
+//!
+//! Each binding exports a guard whose `try_new` mounts, `join` waits for the mount to end, and
+//! `Drop` takes it down, plus its mount options; vtables, callbacks and session handles stay
+//! private.
+
+#[cfg(all(feature = "mount", windows))]
+mod dokan;
+#[cfg(all(feature = "mount", unix, not(target_os = "macos")))]
+mod fuse;
+#[cfg(all(feature = "mount", target_os = "macos"))]
+mod fuse_t;
+
+// `self::` because a bare `dokan::` in a `use` names the crate, not this module.
+// Re-exported so callers need no direct dependency on `dokan`.
+#[cfg(all(feature = "mount", windows))]
+pub use ::dokan::MountFlags;
+#[cfg(all(feature = "mount", unix, not(target_os = "macos")))]
+pub use fuse::FuseMount;
+#[cfg(all(feature = "mount", target_os = "macos"))]
+pub use fuse_t::{FuseTBackend, FuseTMount};
+// Re-exported so callers need no direct dependency on `fuser`.
+#[cfg(all(feature = "mount", unix, not(target_os = "macos")))]
+pub use fuser::MountOption;
+
+#[cfg(all(feature = "mount", windows))]
+pub use self::dokan::DokanMount;
+
+/// Drive an async [`Posix`](crate::fs::Posix) operation to completion from a binding's
+/// *synchronous* callback.
+///
+/// Bindings are called on their own threads (never a Tokio worker) while the stores are
+/// async, so they block here rather than each store embedding a runtime.
+///
+/// One lazily created runtime serves every mount and is **never dropped**: a `Runtime`'s
+/// `Drop` blocks, which would panic on the binding threads that reach this.
+#[cfg(all(feature = "mount", any(unix, windows)))]
+pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build virtx binding runtime")
+    })
+    .block_on(fut)
+}

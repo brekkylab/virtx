@@ -1,0 +1,42 @@
+{
+  "name": "@brekkylab/virtx",
+  "version": "0.1.1",
+  "description": "The environment an agent works in: what it can see, and what it can do.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brekkylab/virtx.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://github.com/brekkylab/virtx/tree/main/bindings/node#readme",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "napi": {
+    "binaryName": "virtx",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test '__test__/**/*.spec.mjs'"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.10.5"
+  }
+}

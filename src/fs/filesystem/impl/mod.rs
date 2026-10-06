@@ -1,0 +1,25 @@
+//! Concrete [`FileSystem`](super::FileSystem) stores. The `std`-only ones are always built;
+//! each network store is behind its own feature, so a local-files build compiles no HTTP and
+//! TLS stack.
+
+#[cfg(feature = "gdrive")]
+mod gdrive;
+mod inmem;
+#[cfg(feature = "notion")]
+mod notion;
+#[cfg(feature = "onedrive")]
+mod onedrive;
+mod passthrough;
+#[cfg(feature = "s3")]
+mod s3;
+
+#[cfg(feature = "gdrive")]
+pub use gdrive::*;
+pub use inmem::*;
+#[cfg(feature = "notion")]
+pub use notion::*;
+#[cfg(feature = "onedrive")]
+pub use onedrive::*;
+pub use passthrough::*;
+#[cfg(feature = "s3")]
+pub use s3::*;

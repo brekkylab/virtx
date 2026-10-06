@@ -20,8 +20,7 @@
 mod claim;
 mod r#impl;
 mod mount;
-// Only a binding mounts, and only mounting disturbs what this puts back. Unix
-// only: `SIGCHLD` is what it is about, and Dokan has no such thing.
+// Used only by the mount bindings; Dokan (Windows) has no SIGCHLD.
 #[cfg(all(feature = "mount", unix))]
 mod sigchld;
 #[cfg(unix)]

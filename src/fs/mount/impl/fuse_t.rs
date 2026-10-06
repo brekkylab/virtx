@@ -543,9 +543,7 @@ impl FuseTMount {
         let fs_ptr = &*fs as *const Posix<T> as *mut c_void;
         let ops = ops_for::<T>();
 
-        // Scoped to the call and no wider: libfuse-t resets the process's SIGCHLD
-        // handling on its way to forking the mount helper, and what that costs is
-        // paid by whatever else in the program waits on a child. See `sigchld`.
+        // libfuse-t resets SIGCHLD to SIG_DFL while mounting; the guard restores it.
         let session = {
             let _sigchld = Sigchld::held();
             unsafe {

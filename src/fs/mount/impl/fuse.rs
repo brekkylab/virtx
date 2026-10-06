@@ -87,11 +87,7 @@ impl FuseMount {
         // `Config` is `#[non_exhaustive]`, so no struct literal.
         let mut config = Config::default();
         config.mount_options = options;
-        // Held across the mount for the reason in `sigchld`: on macOS this goes
-        // through the same libfuse2 mount ABI FUSE-T exports, which resets the
-        // process's SIGCHLD handling before forking its helper. On Linux `fuser`
-        // opens `/dev/fuse` itself and forks nothing, and the guard finds nothing
-        // to put back.
+        // A no-op unless the mount changed SIGCHLD; fuser is not known to.
         let session = {
             let _sigchld = Sigchld::held();
             fuser::spawn_mount2(Posix::new(fs), mountpoint, &config)?

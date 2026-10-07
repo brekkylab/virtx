@@ -257,12 +257,19 @@ impl PyConsoleClient {
         })
     }
 
-    /// End the session now. Closing twice is the same as closing once.
+    /// End the session and resolve once the server is gone and its mounts are let go of.
+    /// Closing twice is the same as closing once.
+    ///
+    /// A garbage-collected console ends on a task nothing waits for, so a program exiting right
+    /// after may leave its mounts up; close it, or use `async with`, when they must be down.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let console = self.console.clone();
         future_into_py(py, async move {
-            // Dropping on the runtime is what lets `quit` go out.
-            console.lock().await.take();
+            let taken = console.lock().await.take();
+            if let Some(console) = taken {
+                // The server's exit status is not raised: the session is over either way.
+                let _ = console.close().await;
+            }
             Ok(())
         })
     }

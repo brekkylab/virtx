@@ -357,13 +357,20 @@ impl JsConsoleClient {
         })
     }
 
-    /// End the session now. Closing twice is the same as closing once.
+    /// End the session and settle once the server is gone and its mounts are let go of.
+    /// Closing twice is the same as closing once.
+    ///
+    /// A garbage-collected console ends on a task nothing waits for, and `process.exit()` runs
+    /// no finalizer at all; close it when its mounts must be down.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn close<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {
         let console = self.console.clone();
         promise(env, async move {
-            // Dropping on the runtime is what lets `quit` go out.
-            console.lock().await.take();
+            let taken = console.lock().await.take();
+            if let Some(console) = taken {
+                // The server's exit status is not thrown: the session is over either way.
+                let _ = console.close().await;
+            }
             Ok(())
         })
     }

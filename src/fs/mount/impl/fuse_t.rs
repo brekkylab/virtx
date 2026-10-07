@@ -19,7 +19,6 @@ use std::{
 
 use super::super::{
     claim::{Claim, claim, reclaim_abandoned},
-    sigchld::Sigchld,
     table::{mounts_under, resolved, unmount_under},
 };
 use crate::fs::{
@@ -543,18 +542,14 @@ impl FuseTMount {
         let fs_ptr = &*fs as *const Posix<T> as *mut c_void;
         let ops = ops_for::<T>();
 
-        // libfuse-t resets SIGCHLD to SIG_DFL while mounting; the guard restores it.
-        let session = {
-            let _sigchld = Sigchld::held();
-            unsafe {
-                virtx_fuse_t_mount(
-                    c_mountpoint.as_ptr(),
-                    FSNAME.as_ptr(),
-                    backend,
-                    fs_ptr,
-                    &ops,
-                )
-            }
+        let session = unsafe {
+            virtx_fuse_t_mount(
+                c_mountpoint.as_ptr(),
+                FSNAME.as_ptr(),
+                backend,
+                fs_ptr,
+                &ops,
+            )
         };
         if session.is_null() {
             return Err(io::Error::other(format!(

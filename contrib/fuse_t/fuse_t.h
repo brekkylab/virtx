@@ -27,8 +27,11 @@
  * version, or of another libfuse API than 2.x, is refused before any call is made into it
  * -- a layout it disagrees with would be a crash, not an error -- unless
  * `VIRTX_FUSE_T_UNCHECKED` says to go ahead. */
-#define VIRTX_FUSE_T_CHECKED "1.2.7"
+#define VIRTX_FUSE_T_CHECKED "1.2.9"
 #define VIRTX_FUSE_T_MAJOR 1
+/* The oldest release the shim accepts. Earlier ones reset the process's SIGCHLD handler on
+ * every mount, and unmounting the first of two mounts waits for the second to go. */
+#define VIRTX_FUSE_T_MIN "1.2.9"
 /* libfuse's own API version, `fuse_version()`: these are 2.x's, 2.6 to 2.9. */
 #define VIRTX_FUSE_T_API_MIN 26
 #define VIRTX_FUSE_T_API_MAX 29

@@ -19,17 +19,21 @@ export declare class ConsoleClient {
   /** Put `data` in a file, settling with the file's size afterwards. */
   write(path: string, data: Buffer | string, offset?: number | undefined | null): Promise<number>
   snapshot(): Promise<Buffer>
+  /**
+   * Answer one protocol frame on this console's channel, for an addon that drives this
+   * session as a console of its own (see `virtx::console::Relay`); not for JavaScript
+   * callers. Rejects when the channel is broken or this console closed, after which the
+   * other side hears nothing more.
+   */
+  _relay(frame: Buffer): Promise<Buffer>
   /** End the session now. Closing twice is the same as closing once. */
   close(): Promise<void>
 }
 export type JsConsoleClient = ConsoleClient
 
 /**
- * A [`ConsoleClientBuilder`], filled in place and emptied by `build()`.
- *
- * In place rather than by value, unlike `Recipe`: the Rust builder is consumed by each call
- * and is not `Clone`, so there is exactly one of it to hand along. Each method returns the
- * same object so calls chain as they do in Rust.
+ * A [`ConsoleClientBuilder`], mutated in place (the Rust one is consumed per call and is not
+ * `Clone`) and emptied by `build()`; every method returns this same object, so calls chain.
  */
 export declare class ConsoleClientBuilder {
   constructor()
@@ -49,36 +53,39 @@ export declare class ConsoleClientBuilder {
   gpu(gpu: boolean): this
   gpuMemoryMib(gpuMemoryMib: number): this
   diskGib(diskGib: number): this
-  /** Announce the session, and settle with the `ConsoleClient` the server answered. */
+  /** Announce the session to the server and settle with the resulting `ConsoleClient`. */
   build(): Promise<ConsoleClient>
 }
 export type JsConsoleClientBuilder = ConsoleClientBuilder
 
+/**
+ * A tree assembled in place. Mounting it with `HostMount` takes it: the mount owns the tree,
+ * and this `Directory` is empty afterwards and refuses further use.
+ */
 export declare class Directory {
   constructor()
   addFile(path: string, content: Buffer | string): void
   removeFile(path: string): void
   mount(path: string, hostDir: string): void
   unmount(path: string): void
-  /** `addFile`, handing back this same `Directory` so calls chain. */
+  /** `addFile`, returning this same `Directory` so calls chain. */
   withFile(path: string, content: Buffer | string): this
-  /** `mount`, handing back this same `Directory` so calls chain. */
+  /** `mount`, returning this same `Directory` so calls chain. */
   withMount(path: string, hostDir: string): this
 }
 export type JsDirectory = Directory
 
 /**
- * A tree mounted on this host, until `unmount` or until nothing holds it.
+ * A tree mounted on this host until `unmount()` or until nothing holds it.
  *
- * Held behind an [`Arc`] so that passing one to a console builder does not take it from
- * the JavaScript object: both hold the mount, and without an `unmount` it comes down when
- * the last of them lets go — the builder's copy with the console, the JavaScript one with
- * garbage collection.
+ * Passing it to a console builder shares it rather than taking it: without `unmount()` it
+ * comes down when the last holder lets go (the builder's copy with the console, this object
+ * with garbage collection).
  *
- * **Garbage collection is not an exit.** Node runs no finalizer on `process.exit()`, and
- * none at all on a signal or a crash, so a mount left to one is taken down by virtx's
- * watchdog, from outside the process, once the process is gone. `unmount` is how a
- * program that wants it down *now* says so.
+ * **Garbage collection is not an exit.** Node runs no finalizer on `process.exit()`, and none
+ * on a signal or crash; a mount left to one is taken down from outside the process once it
+ * is gone (by virtx's watchdog on unix, by Dokany on Windows). Call `unmount()` to take it
+ * down *now*.
  */
 export declare class HostMount {
   constructor(fs: Directory, mountpoint: string)
@@ -86,22 +93,18 @@ export declare class HostMount {
   /**
    * Take the mount down now, and settle once it is down.
    *
-   * Whoever else holds it — a console it was handed to — holds a mount point that is no
-   * longer mounted from here on, so this belongs after the console using it is closed.
-   * A second call, or one after the mount already came down, settles at once.
+   * Consoles it was handed to are left with an unmounted mount point, so call this after
+   * closing them. A repeat call, or one after the mount already came down, settles at once.
    *
-   * Off the JavaScript thread: a guard comes down by unmounting and then waiting for the
-   * thread serving it, which waits for every holder of the tree to let go.
+   * Runs off the JavaScript thread: dropping a guard unmounts and then waits for the thread
+   * serving it, which waits for every holder of the tree to let go.
    */
   unmount(): Promise<void>
 }
 export type JsHostMount = HostMount
 
 export declare class ImageClient {
-  /**
-   * `virtx-uvm` under the stdio server directory, settling with the client once the
-   * server has answered.
-   */
+  /** Start `virtx-uvm` from virtx's cache `bin`; settles once the server answers. */
   static tryNew(): Promise<ImageClient>
   static tryFromCmd(cmd: Array<string>): Promise<ImageClient>
   version(): Promise<string>
@@ -149,10 +152,11 @@ export interface BuildImageResult {
 }
 
 /**
- * Fetch the console server into virtx's cache if it is not there, and settle with the
- * directory it is in.
+ * Fetch the console server into virtx's cache if missing, and settle with its directory.
  *
- * A server already there is left alone, whether it was fetched or installed by hand.
+ * Console builders and `ImageClient` start `virtx-uvm` from that cache, which a host that
+ * installed only this package lacks, so such a host calls this first. An existing server,
+ * fetched or installed by hand, is left alone.
  */
 export declare function ensureVirtx(): Promise<string>
 
@@ -171,9 +175,8 @@ export interface ImageEntry {
 /**
  * Throw, saying what to install, if this host cannot mount.
  *
- * `HostMount` checks the same before it mounts, so this is for a caller that wants to know
- * ahead of asking for one. An addon built with `mount` loads on a host without the
- * provider: what a missing FUSE-T or Dokany costs is a mount, never the `require`.
+ * `HostMount` checks the same before mounting; this lets a caller find out ahead. An addon
+ * built with `mount` still loads without FUSE-T or Dokany: only mounting fails, never `require`.
  */
 export declare function mountSupport(): void
 

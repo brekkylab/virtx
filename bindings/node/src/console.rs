@@ -357,6 +357,25 @@ impl JsConsoleClient {
         })
     }
 
+    /// Answer one protocol frame on this console's channel, for an addon that drives this
+    /// session as a console of its own (see `virtx::console::Relay`); not for JavaScript
+    /// callers. Rejects when the channel is broken or this console closed, after which the
+    /// other side hears nothing more.
+    #[napi(js_name = "_relay", ts_return_type = "Promise<Buffer>")]
+    pub fn relay<'env>(
+        &self,
+        env: &'env Env,
+        frame: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, Buffer>> {
+        let console = self.console.clone();
+        let frame = frame.to_vec();
+        promise(env, async move {
+            let mut slot = console.lock().await;
+            let answer = held(&mut slot)?.relay(&frame).await;
+            answer.map(Buffer::from).map_err(error::failure)
+        })
+    }
+
     /// End the session now. Closing twice is the same as closing once.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn close<'env>(&self, env: &'env Env) -> napi::Result<PromiseRaw<'env, ()>> {

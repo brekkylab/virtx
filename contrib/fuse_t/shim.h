@@ -115,10 +115,9 @@ int virtx_fuse_t_loop(void *session);
 /* End the serving loop so `virtx_fuse_t_loop` returns and its thread can be
  * joined. Idempotent.
  *
- * **Does not unmount.** `fuse_unmount` breaks with a second mount alive: it
- * ends in a blocking `waitpid` on a process-global pid every mount overwrites,
- * so it waits on another session's helper. The caller unmounts through the
- * operating system instead. */
+ * **Does not unmount.** `fuse_unmount` ends in a `waitpid` on the FUSE-T server
+ * with no deadline. The caller unmounts through the operating system instead,
+ * with one. */
 void virtx_fuse_t_stop(void *session);
 
 /* Release the session and channel. Must not run while `virtx_fuse_t_loop` does. */

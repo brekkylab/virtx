@@ -666,11 +666,10 @@ impl Drop for FuseTMount {
     ///
     /// # Why not `fuse_unmount`
     ///
-    /// It breaks with two mounts in one process: libfuse-t keeps the helper's pid in one global
-    /// (`_cpid`, overwritten by every mount) and `fuse_kern_unmount` blocks in `waitpid` on it,
-    /// so `drop(a)` waits on `b`'s helper, which will not exit until its own mount goes. So
-    /// unmounting is a bounded `umount` in a child process; the rest is per-session: the shim
-    /// ends the loop, this joins its thread, the shim frees the session.
+    /// It ends in a `waitpid` on the FUSE-T server with no deadline, so a server that does not
+    /// exit would hang `drop`. Unmounting is a bounded `umount` in a child process instead; the
+    /// rest is per-session: the shim ends the loop, this joins its thread, the shim frees the
+    /// session.
     ///
     /// Every step is bounded; a mount refusing both attempts is reported on stderr.
     ///

@@ -337,9 +337,10 @@ struct Tree {
 
 /// A console: something to run commands in.
 ///
-/// An [`exec`](Self::exec) per command, and drop it to end the session. The session was
-/// described at build, booting happens under the first command that needs it, and
-/// everything goes away with the console. [`start`](Self::start) and [`stop`](Self::stop)
+/// An [`exec`](Self::exec) per command, and drop it to end the session, or
+/// [`close`](Self::close) it to wait until the session is over. The session was described at
+/// build, booting happens under the first command that needs it, and everything goes away
+/// with the console. [`start`](Self::start) and [`stop`](Self::stop)
 /// are optional resource management.
 ///
 /// Every method that reaches the server is one message, [`exec`](Self::exec) included; only
@@ -535,6 +536,29 @@ impl ConsoleClient {
         };
         self.client.write(write).await
     }
+
+    /// End the session and return once it is over: `quit` said, the server gone, and this
+    /// console's mounts let go of.
+    ///
+    /// Dropping also ends the session, but on a task nothing waits for, so a program exiting
+    /// right after may leave its mounts up (on Windows, a Dokan mount point stays a junction
+    /// to a gone volume).
+    ///
+    /// Mounts are let go of only after the server exits, since it may still be serving them;
+    /// one that something else holds stays up. Returns how the server ended (over stdio, its
+    /// exit status); the mounts are let go of either way.
+    pub async fn close(mut self) -> Result<(), Failure> {
+        // Leave a spent client and no mounts behind, so dropping `self` has nothing to end.
+        let mut client = std::mem::replace(&mut self.client, Box::new(Spent));
+        let mounts = std::mem::take(&mut self.mounts);
+        drop(self);
+
+        let ended = client.quit().await;
+        drop(client);
+        // Dropping a mount's guard blocks until it is unmounted, so not on this task's thread.
+        let _ = tokio::task::spawn_blocking(move || drop(mounts)).await;
+        ended
+    }
 }
 
 impl Drop for ConsoleClient {
@@ -572,6 +596,19 @@ pub(crate) fn stdio_factory(cmd: &[impl AsRef<OsStr>]) -> ClientFactory {
     })
 }
 
+/// Stands in for a client once the session has ended.
+struct Spent;
+
+impl Client for Spent {
+    fn call(&mut self, _: Call) -> BoxFuture<'_, Result<Response, Failure>> {
+        Box::pin(async { Err(Failure::broken("the session has ended")) })
+    }
+
+    fn notify(&mut self, _: Notification) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async { Err(Failure::broken("the session has ended")) })
+    }
+}
+
 /// Say `quit` on a task, leaving a client behind that answers nothing, and drop `keep`
 /// only after the client.
 ///
@@ -581,19 +618,6 @@ pub(crate) fn stdio_factory(cmd: &[impl AsRef<OsStr>]) -> ClientFactory {
 ///
 /// `keep` is what the server may still be using (a console's mounts).
 pub(crate) fn hang_up<K: Send + 'static>(client: &mut Box<dyn Client>, keep: K) {
-    /// Stands in once the session has ended.
-    struct Spent;
-
-    impl Client for Spent {
-        fn call(&mut self, _: Call) -> BoxFuture<'_, Result<Response, Failure>> {
-            Box::pin(async { Err(Failure::broken("the session has ended")) })
-        }
-
-        fn notify(&mut self, _: Notification) -> BoxFuture<'_, Result<(), Failure>> {
-            Box::pin(async { Err(Failure::broken("the session has ended")) })
-        }
-    }
-
     // Zero-sized, so boxing it allocates nothing.
     let client = std::mem::replace(client, Box::new(Spent));
 
@@ -838,6 +862,57 @@ mod tests {
         drop(console);
 
         // `quit` runs on a spawned task; let it.
+        tokio::task::yield_now().await;
+        assert_eq!(log.methods(), [Method::Init, Method::Quit]);
+    }
+
+    /// `close` returns with the session over: `quit` said, and the mounts let go of after it.
+    #[tokio::test]
+    async fn closing_a_console_returns_once_its_mounts_are_let_go() {
+        /// A tree that notes what the server had been told when this end let go of it.
+        struct Watched {
+            at: PathBuf,
+            log: Log,
+            let_go_after: Arc<Mutex<Option<Vec<Method>>>>,
+        }
+
+        impl Mount for Watched {
+            fn mountpoint(&self) -> &Path {
+                &self.at
+            }
+        }
+
+        impl Drop for Watched {
+            fn drop(&mut self) {
+                *self.let_go_after.lock().unwrap() = Some(self.log.methods());
+            }
+        }
+
+        let (client, log) = recorder(vec![initialized()]);
+        let let_go_after = Arc::new(Mutex::new(None));
+        let console = ConsoleClient::builder()
+            .client(client)
+            .mount(
+                Watched {
+                    // Absolute on every host, as a mount point must be to be named.
+                    at: std::env::temp_dir(),
+                    log: log.clone(),
+                    let_go_after: let_go_after.clone(),
+                },
+                "/work",
+            )
+            .build()
+            .await
+            .unwrap();
+
+        console.close().await.unwrap();
+
+        // Already let go of, with no yield: after `quit`, before `close` returned.
+        assert_eq!(
+            *let_go_after.lock().unwrap(),
+            Some(vec![Method::Init, Method::Quit])
+        );
+        // And the console dropped inside `close` had nothing left to say.
         tokio::task::yield_now().await;
         assert_eq!(log.methods(), [Method::Init, Method::Quit]);
     }

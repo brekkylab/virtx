@@ -4,7 +4,11 @@
 use std::sync::Arc;
 use std::{io, path::PathBuf};
 
+#[cfg(feature = "mount")]
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::{exceptions::PyValueError, prelude::*};
+#[cfg(feature = "mount")]
+use pyo3_async_runtimes::tokio::future_into_py;
 // `HostMount` wraps whichever guard this platform compiles, so callers need not know which.
 #[cfg(all(feature = "mount", windows))]
 use virtx::fs::DokanMount as Platform;
@@ -97,14 +101,31 @@ impl PyDirectory {
     }
 }
 
-/// A tree mounted on this host, for as long as something holds it.
+/// A tree mounted on this host until `unmount()` or until nothing holds it.
 ///
-/// Passing it to a console builder shares it rather than taking it: it comes down when the
-/// last holder lets go (the builder's copy with the console, this object with garbage
-/// collection).
+/// A console builder shares it rather than taking it, so without `unmount()` it comes down
+/// when the last holder lets go: the console's copy with the console, this one with garbage
+/// collection.
 #[cfg(feature = "mount")]
 #[pyclass(name = "HostMount", module = "virtx", frozen)]
-pub struct PyHostMount(pub Arc<Platform>);
+pub struct PyHostMount(pub Arc<Shared>);
+
+/// The guard behind a `HostMount`, shared with every console it was handed to.
+///
+/// In an `Option` so `unmount` can take the mount down while consoles still hold the `Arc`;
+/// the mount point is kept beside it because consoles still ask for it afterwards.
+#[cfg(feature = "mount")]
+pub struct Shared {
+    guard: std::sync::Mutex<Option<Platform>>,
+    mountpoint: PathBuf,
+}
+
+#[cfg(feature = "mount")]
+impl Mount for Shared {
+    fn mountpoint(&self) -> &std::path::Path {
+        &self.mountpoint
+    }
+}
 
 #[cfg(feature = "mount")]
 #[pymethods]
@@ -114,12 +135,38 @@ impl PyHostMount {
         let directory = fs.borrow_mut().take()?;
         // Mounting waits on the host's FUSE provider; no need to hold the GIL meanwhile.
         let mount = py.detach(|| Platform::try_new(directory, &mountpoint))?;
-        Ok(PyHostMount(Arc::new(mount)))
+        let mountpoint = mount.mountpoint().to_path_buf();
+        Ok(PyHostMount(Arc::new(Shared {
+            guard: std::sync::Mutex::new(Some(mount)),
+            mountpoint,
+        })))
     }
 
     #[getter]
     fn mountpoint(&self) -> PathBuf {
         self.0.mountpoint().to_path_buf()
+    }
+
+    /// Take the mount down now, whatever consoles still hold it, and resolve once it is down.
+    ///
+    /// Consoles it was handed to are left with an unmounted mount point, so call this after
+    /// closing them. A repeat call resolves at once.
+    fn unmount<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let shared = self.0.clone();
+        future_into_py(py, async move {
+            let guard = shared
+                .guard
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(guard) = guard {
+                // Dropping the guard blocks until the tree is unmounted, so not on the runtime.
+                tokio::task::spawn_blocking(move || drop(guard))
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(format!("unmounting panicked: {e}")))?;
+            }
+            Ok(())
+        })
     }
 
     fn __repr__(&self) -> String {

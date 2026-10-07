@@ -75,6 +75,22 @@ def test_host_mount_serves_the_directory(tmp_path):
         del mount
 
 
+@pytest.mark.skipif(not hasattr(virtx, "HostMount"), reason="built without `mount`")
+async def test_unmount_takes_a_host_mount_down_now(tmp_path):
+    mountpoint = tmp_path / "mnt"
+    mountpoint.mkdir()
+    mount = virtx.HostMount(Directory().with_file("notes.md", b"hi"), mountpoint)
+    assert (mountpoint / "notes.md").read_bytes() == b"hi"
+
+    await mount.unmount()
+    # Down while the object lives on, and the mount point is the empty directory it was.
+    assert mountpoint.is_dir()
+    assert list(mountpoint.iterdir()) == []
+    assert os.fspath(mount.mountpoint) == str(mountpoint)
+    # A second call has nothing to take down.
+    await mount.unmount()
+
+
 async def test_building_without_a_server_fails_and_spends_the_builder(tmp_path, monkeypatch):
     # Point the default server lookup at an empty directory.
     monkeypatch.setenv("VIRTX_STDIO_SERVER_PATH", str(tmp_path))

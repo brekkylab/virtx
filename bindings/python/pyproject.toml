@@ -1,5 +1,7 @@
 [build-system]
-requires = ["maturin>=1.9,<2"]
+# maturin sets `PYO3_BUILD_EXTENSION_MODULE` for the build (since 1.9.4), which is what leaves
+# libpython unlinked: see `Cargo.toml`.
+requires = ["maturin>=1.15,<2"]
 build-backend = "maturin"
 
 [project]
@@ -22,12 +24,11 @@ Repository = "https://github.com/brekkylab/virtx"
 Documentation = "https://github.com/brekkylab/virtx/tree/main/bindings/python#readme"
 
 [dependency-groups]
-dev = ["maturin>=1.9,<2", "pytest>=8", "pytest-asyncio>=1"]
+dev = ["maturin>=1.15,<2", "pytest>=8", "pytest-asyncio>=1"]
 
 [tool.maturin]
 python-source = "python"
 module-name = "virtx._virtx"
-features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

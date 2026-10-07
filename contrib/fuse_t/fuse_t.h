@@ -24,9 +24,8 @@
 
 /* The FUSE-T these declarations were last checked against with `check-abi.sh`, and the
  * releases the shim trusts them for: the same major version. A libfuse-t of another major
- * version, or of another libfuse API than 2.x, is refused before any call is made into it
- * -- a layout it disagrees with would be a crash, not an error -- unless
- * `VIRTX_FUSE_T_UNCHECKED` says to go ahead. */
+ * version, or of another libfuse API than 2.x, is refused before any call is made into it:
+ * a layout it disagrees with would be a crash, not an error. */
 #define VIRTX_FUSE_T_CHECKED "1.2.9"
 #define VIRTX_FUSE_T_MAJOR 1
 /* The oldest release the shim accepts. Earlier ones reset the process's SIGCHLD handler on

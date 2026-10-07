@@ -62,8 +62,7 @@ fn check() -> io::Result<()> {
     // A libfuse-t the shim's declarations may not match is refused before a call could crash
     // on it, naming the release to install instead.
     let install = format!(
-        "install FUSE-T {checked} from https://github.com/macos-fuse-t/fuse-t/releases/tag/{checked}, \
-         or set VIRTX_FUSE_T_UNCHECKED=1 to mount with this one anyway, at the risk of a crash"
+        "install FUSE-T {checked} from https://github.com/macos-fuse-t/fuse-t/releases/tag/{checked}"
     );
     match status {
         OK => {}

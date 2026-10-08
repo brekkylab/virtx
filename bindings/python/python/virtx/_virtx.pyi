@@ -89,11 +89,14 @@ class Directory:
     def with_mount(self, path: _Path, host_dir: _Path) -> Self: ...
 
 class HostMount:
-    """A ``Directory`` mounted on this host, for as long as something holds it."""
+    """A ``Directory`` mounted on this host until ``unmount()`` or until nothing holds it."""
 
     def __init__(self, fs: Directory, mountpoint: _Path) -> None: ...
     @property
     def mountpoint(self) -> str: ...
+    async def unmount(self) -> None:
+        """Take the mount down now, whatever consoles still hold it; call it after closing
+        them. A repeat call returns at once."""
 
 def mount_support() -> None:
     """Raise ``OSError``, saying what to install, if this host cannot mount.
@@ -144,7 +147,9 @@ class ConsoleClient:
     ) -> ReadResult: ...
     async def write(self, path: str, data: _Content, offset: int | None = None) -> int: ...
     async def snapshot(self) -> bytes: ...
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        """End the session, and return once the server is gone and this console has let go
+        of its mounts. Leaving a console to garbage collection does not wait for that."""
     async def __aenter__(self) -> Self: ...
     async def __aexit__(
         self,

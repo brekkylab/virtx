@@ -2,12 +2,12 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use pyo3::{exceptions::PyValueError, prelude::*};
+use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::Mutex;
 use virtx::{
     console::{ConsoleClient, ConsoleClientBuilder},
-    protocol::{ExecResp, Port, ReadResp},
+    protocol::{ExecResp, Failure, Port, ReadResp},
 };
 
 use crate::{
@@ -126,9 +126,8 @@ fn held(slot: &mut Option<ConsoleClient>) -> PyResult<&mut ConsoleClient> {
         .ok_or_else(|| VirtxError::new_err("this console has been closed"))
 }
 
-/// A console slot: the console, or `None` once closed. A plain type, so an agent can hold
-/// [`PyConsoleClient::slot`] as its console.
-pub type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+/// A console slot: the console, or `None` once closed.
+type Slot = Arc<Mutex<Option<ConsoleClient>>>;
 
 #[pyclass(name = "ConsoleClient", module = "virtx", frozen)]
 pub struct PyConsoleClient {
@@ -150,15 +149,6 @@ impl PyConsoleClient {
                 .collect(),
             console: Arc::new(Mutex::new(Some(console))),
         }
-    }
-
-    /// The slot this console lives in, for sharing it with another holder.
-    ///
-    /// Both then share one session: calls take turns on the lock, and `close()` ends it for
-    /// both. Whichever lets go last ends it, so every other holder must also drop it inside the
-    /// binding's runtime.
-    pub fn slot(&self) -> Slot {
-        self.console.clone()
     }
 }
 
@@ -255,6 +245,37 @@ impl PyConsoleClient {
             let mut slot = console.lock().await;
             held(&mut slot)?.snapshot().await.map_err(error::failure)
         })
+    }
+
+    /// Answer one protocol frame on this console's channel, for an extension that drives this
+    /// session as a console of its own (see `virtx::console::Relay`); not for Python callers.
+    ///
+    /// Runs on this module's runtime, then calls `reply(answer, None)` with the answer frame,
+    /// or `reply(None, reason)` when the channel is broken or this console closed. A callback
+    /// rather than an awaitable, so the caller needs no event loop: it may be a thread of
+    /// another extension's runtime.
+    fn _relay(&self, frame: &[u8], reply: Py<PyAny>) {
+        let console = self.console.clone();
+        let frame = frame.to_vec();
+        get_runtime().spawn(async move {
+            let answer = match console.lock().await.as_mut() {
+                Some(console) => console.relay(&frame).await.map_err(|f| match f {
+                    // The other side wraps it as its own broken channel.
+                    Failure::Broken(e) => format!("{e:#}"),
+                    refused => refused.to_string(),
+                }),
+                None => Err("this console has been closed".to_string()),
+            };
+            Python::attach(|py| {
+                let (frame, broken) = match answer {
+                    Ok(frame) => (Some(PyBytes::new(py, &frame)), None),
+                    Err(reason) => (None, Some(reason)),
+                };
+                if let Err(e) = reply.call1(py, (frame, broken)) {
+                    e.write_unraisable(py, Some(reply.bind(py)));
+                }
+            });
+        });
     }
 
     /// End the session now. Closing twice is the same as closing once.

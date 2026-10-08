@@ -1,5 +1,7 @@
+import asyncio
 import os
 import shutil
+import struct
 
 import pytest
 
@@ -76,11 +78,13 @@ def test_host_mount_serves_the_directory(tmp_path):
 
 
 async def test_building_without_a_server_fails_and_spends_the_builder(tmp_path, monkeypatch):
-    # Point the default server lookup at an empty directory.
-    monkeypatch.setenv("VIRTX_STDIO_SERVER_PATH", str(tmp_path))
+    # Point the default server lookup (virtx's cache) at an empty directory.
+    monkeypatch.setenv("VIRTX_HOME", str(tmp_path))
     builder = ConsoleClient.builder()
-    with pytest.raises(VirtxError):
+    # `VirtxError` itself: not a refusal from a server found after all.
+    with pytest.raises(VirtxError) as raised:
         await builder.build()
+    assert raised.type is VirtxError
     with pytest.raises(ValueError):
         builder.vcpus(2)
 
@@ -134,3 +138,35 @@ async def test_build_list_remove():
         assert all(
             built.reference not in entry.refs for entry in await images.list()
         )
+
+
+def strings_doc(**members):
+    """A BSON document of string members: enough for a notification frame."""
+    body = b"".join(
+        b"\x02" + k.encode() + b"\x00" + struct.pack("<i", len(v.encode()) + 1) + v.encode() + b"\x00"
+        for k, v in members.items()
+    )
+    return struct.pack("<i", len(body) + 5) + body + b"\x00"
+
+
+async def relay(console, frame):
+    """`_relay`'s answer, as the `(frame, broken)` its callback was called with."""
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    console._relay(frame, lambda *answer: loop.call_soon_threadsafe(done.set_result, answer))
+    return await done
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_relay_answers_through_its_callback():
+    console = await ConsoleClient.builder().cmd([SERVER]).image(Recipe("alpine:3.20")).build()
+
+    # `quit` is the owner's to say: relayed, it is dropped, and the session goes on.
+    assert await relay(console, strings_doc(jsonrpc="2.0", method="quit")) == (b"", None)
+    assert (await console.exec(["true"])).code == 0
+
+    frame, broken = await relay(console, b"not a message")
+    assert frame is None and "relayed message" in broken
+
+    await console.close()
+    assert await relay(console, b"") == (None, "this console has been closed")

@@ -17,7 +17,7 @@ use std::io;
 ///
 /// | Target | Checked | Otherwise |
 /// |---|---|---|
-/// | macOS | libfuse-t loaded, of a FUSE-T release the shim is checked for (1.x), and the NFS server it starts is where it starts it from | `brew install --cask fuse-t`, or the release named |
+/// | macOS | libfuse-t loaded, of a FUSE-T release the shim is checked for (1.x, 1.2.9 or later), and the NFS server it starts is where it starts it from | `brew install --cask fuse-t`, or the release named |
 /// | Windows | `dokan2.dll` loads, and the `dokan2.sys` driver is installed | the Dokany 2 installer |
 /// | Linux | `/dev/fuse`, and `fusermount3` or `fusermount` for a user that is not root | `fuse3` from the distribution |
 ///
@@ -40,27 +40,29 @@ fn check() -> io::Result<()> {
     const OK: c_int = 1;
     const OTHER_API: c_int = 2;
     const OTHER_MAJOR: c_int = 3;
+    const TOO_OLD: c_int = 4;
     unsafe extern "C" {
         fn virtx_fuse_t_status() -> c_int;
         fn virtx_fuse_t_api() -> c_int;
         fn virtx_fuse_t_release() -> *const c_char;
         fn virtx_fuse_t_checked() -> *const c_char;
+        fn virtx_fuse_t_min() -> *const c_char;
     }
     // SAFETY: each reports what the shim found opening libfuse-t once, calling nothing in it
     // but `fuse_version`; the strings are the shim's own statics.
-    let (status, api, release, checked) = unsafe {
+    let (status, api, release, checked, min) = unsafe {
         (
             virtx_fuse_t_status(),
             virtx_fuse_t_api(),
             CStr::from_ptr(virtx_fuse_t_release()).to_string_lossy(),
             CStr::from_ptr(virtx_fuse_t_checked()).to_string_lossy(),
+            CStr::from_ptr(virtx_fuse_t_min()).to_string_lossy(),
         )
     };
     // A libfuse-t the shim's declarations may not match is refused before a call could crash
     // on it, naming the release to install instead.
     let install = format!(
-        "install FUSE-T {checked} from https://github.com/macos-fuse-t/fuse-t/releases/tag/{checked}, \
-         or set VIRTX_FUSE_T_UNCHECKED=1 to mount with this one anyway, at the risk of a crash"
+        "install FUSE-T {checked} from https://github.com/macos-fuse-t/fuse-t/releases/tag/{checked}"
     );
     match status {
         OK => {}
@@ -74,6 +76,13 @@ fn check() -> io::Result<()> {
             return Err(missing(&format!(
                 "FUSE-T {release} is installed, and virtx is checked against FUSE-T 1.x \
                  (last {checked}): {install}"
+            )));
+        }
+        TOO_OLD => {
+            return Err(missing(&format!(
+                "FUSE-T {release} is installed, and virtx needs FUSE-T {min} or later: \
+                 brew upgrade --cask fuse-t, or install it from \
+                 https://github.com/macos-fuse-t/fuse-t/releases"
             )));
         }
         _ => {

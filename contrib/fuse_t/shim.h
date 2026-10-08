@@ -80,6 +80,7 @@ struct virtx_fuse_t_ops {
 #define VIRTX_FUSE_T_OK 1
 #define VIRTX_FUSE_T_OTHER_API 2 /* a libfuse API other than 2.x: `virtx_fuse_t_api` */
 #define VIRTX_FUSE_T_OTHER_MAJOR 3 /* a FUSE-T release of another major version: `virtx_fuse_t_release` */
+#define VIRTX_FUSE_T_TOO_OLD 4 /* a FUSE-T release older than `virtx_fuse_t_min` */
 
 /* Open libfuse-t once per process, check the shim's declarations fit it, and resolve every
  * function the shim calls. The shim does not link it, so call nothing else here unless this
@@ -96,6 +97,9 @@ const char *virtx_fuse_t_release(void);
 /* The FUSE-T release `fuse_t.h` was last checked against. */
 const char *virtx_fuse_t_checked(void);
 
+/* The oldest FUSE-T release the shim accepts. */
+const char *virtx_fuse_t_min(void);
+
 /* Mount and build a session. Returns NULL on failure. The returned pointer owns
  * the channel and session and must be freed with `virtx_fuse_t_destroy`.
  *
@@ -111,10 +115,9 @@ int virtx_fuse_t_loop(void *session);
 /* End the serving loop so `virtx_fuse_t_loop` returns and its thread can be
  * joined. Idempotent.
  *
- * **Does not unmount.** `fuse_unmount` breaks with a second mount alive: it
- * ends in a blocking `waitpid` on a process-global pid every mount overwrites,
- * so it waits on another session's helper. The caller unmounts through the
- * operating system instead. */
+ * **Does not unmount.** `fuse_unmount` ends in a `waitpid` on the FUSE-T server
+ * with no deadline. The caller unmounts through the operating system instead,
+ * with one. */
 void virtx_fuse_t_stop(void *session);
 
 /* Release the session and channel. Must not run while `virtx_fuse_t_loop` does. */

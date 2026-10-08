@@ -17,7 +17,6 @@ use fuser::{
 
 use super::super::{
     claim::{Claim, claim, reclaim_abandoned},
-    sigchld::Sigchld,
     table::{resolved, unmount_under},
 };
 use crate::fs::{
@@ -87,11 +86,7 @@ impl FuseMount {
         // `Config` is `#[non_exhaustive]`, so no struct literal.
         let mut config = Config::default();
         config.mount_options = options;
-        // A no-op unless the mount changed SIGCHLD; fuser is not known to.
-        let session = {
-            let _sigchld = Sigchld::held();
-            fuser::spawn_mount2(Posix::new(fs), mountpoint, &config)?
-        };
+        let session = fuser::spawn_mount2(Posix::new(fs), mountpoint, &config)?;
         Ok(FuseMount {
             session: Some(session),
             mountpoint: mountpoint.to_path_buf(),

@@ -104,6 +104,14 @@ impl ConsoleClient {
 /// The client an [attached](ConsoleClient::attach) console speaks through.
 struct Relayed<R> {
     relay: R,
+
+    /// The id the next request goes out under, so an answer can be checked against it.
+    ///
+    /// Not what pairs an answer with its request, as on the stdio channel: each
+    /// [`Relay::relay`] resolves to its own frame's answer, and one call is outstanding at a
+    /// time. A fresh id per call is what lets a `Relay` that hands back some other call's
+    /// answer (out of order, or a stale one) be caught as [`Broken`](Failure::Broken) rather
+    /// than taken for this call's.
     next_id: RequestId,
 }
 

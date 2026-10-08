@@ -200,7 +200,7 @@ struct Roots {
 /// A Notion workspace's pages, served as a read-only tree:
 ///
 /// ```text
-/// /pages/<title>__<page-id>/page.json         — metadata + markdown body + raw blocks
+/// /pages/<title>__<page-id>/page.json         — metadata + markdown body
 /// /pages/<title>__<page-id>/<child>__<id>/    — nested child pages, recursively
 /// /pages/<title>__<page-id>/<db>__db__<id>/   — a database in the page
 /// /pages/.../<db>__db__<id>/database.json     — its schema and a row index
@@ -1057,8 +1057,11 @@ fn page_time(v: &Value, key: &str) -> Option<SystemTime> {
         .and_then(rfc3339_to_systemtime)
 }
 
-/// Page metadata + markdown body + raw blocks. `child_page`/`child_database`
-/// blocks carry no content here (it surfaces in their subdirectories).
+/// Page metadata + the body as markdown. `child_page`/`child_database` blocks carry no content
+/// here (it surfaces in their subdirectories).
+///
+/// The block tree is left out: it is mostly Notion's per-block bookkeeping (ids, authors,
+/// timestamps, annotation flags), and `markdown` carries all of its content.
 fn normalize_page(page: &Value, blocks: &[Value]) -> Value {
     let parent = page.get("parent").cloned().unwrap_or_else(|| json!({}));
     let parent_type = parent.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -1080,7 +1083,6 @@ fn normalize_page(page: &Value, blocks: &[Value]) -> Value {
         // shape per property type.
         "properties": page.get("properties").cloned().unwrap_or_else(|| json!({})),
         "markdown": blocks_to_markdown(blocks),
-        "blocks": blocks,
     })
 }
 
@@ -1263,34 +1265,21 @@ fn block_to_md(block: &Value, indent: usize) -> String {
             format!("{prefix}> {emoji} {text}")
         }
         "divider" => "---".to_string(),
-        "image" => {
-            let inner = content.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            let img = content.get(inner).cloned().unwrap_or_else(|| json!({}));
-            let url = img.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let caption = rich_text_to_md(
-                &content
-                    .get("caption")
-                    .and_then(|c| c.as_array())
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-            format!("![{caption}]({url})")
-        }
-        "bookmark" => {
+        "file" | "pdf" | "video" | "audio" | "image" => media_to_md(btype, &content, &prefix),
+        "bookmark" | "link_preview" | "embed" => {
             let url = content.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let caption = rich_text_to_md(
-                &content
-                    .get("caption")
-                    .and_then(|c| c.as_array())
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-            let label = if caption.is_empty() {
-                url.to_string()
-            } else {
-                caption
-            };
-            format!("[{label}]({url})")
+            let caption = caption_of(&content);
+            match (url.is_empty(), caption.is_empty()) {
+                (true, _) => String::new(),
+                (false, true) => format!("{prefix}{url}"),
+                (false, false) => format!("{prefix}[{caption}]({url})"),
+            }
+        }
+        "table" => table_to_md(block, &prefix),
+        "link_to_page" => {
+            let kind = content.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let id = content.get(kind).and_then(|v| v.as_str()).unwrap_or("");
+            format!("{prefix}[link to {}: {id}]", kind.trim_end_matches("_id"))
         }
         "equation" => {
             let expr = content
@@ -1312,6 +1301,89 @@ fn block_to_md(block: &Value, indent: usize) -> String {
             }
         }
     }
+}
+
+fn caption_of(content: &Value) -> String {
+    rich_text_to_md(
+        &content
+            .get("caption")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// A medium as `[kind: name]`, linked only when external: a Notion-hosted URL is signed and
+/// expires within the hour, while a render is kept until the page is edited. With neither a
+/// name nor a URL it is Notion's empty upload placeholder and renders nothing.
+fn media_to_md(btype: &str, content: &Value, prefix: &str) -> String {
+    let name = content
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| caption_of(content));
+    let label = if name.is_empty() {
+        btype.to_string()
+    } else {
+        format!("{btype}: {name}")
+    };
+    let url = match content.get("type").and_then(|t| t.as_str()) {
+        Some("external") => content
+            .get("external")
+            .and_then(|e| e.get("url"))
+            .and_then(|u| u.as_str())
+            .unwrap_or(""),
+        _ => "",
+    };
+    let hosted = content.get("type").and_then(|t| t.as_str()) != Some("external");
+    match (url.is_empty(), name.is_empty()) {
+        (true, true) if !hosted => String::new(),
+        (true, _) => format!("{prefix}[{label}]"),
+        (false, _) => format!("{prefix}[{label}]({url})"),
+    }
+}
+
+/// A `table` block's rows as a markdown table. The rows are its children with their text in
+/// `cells`, not `rich_text`, so they render here and as nothing on their own. Markdown has no
+/// headerless table, so the first row heads it whether or not Notion marked it as a header.
+fn table_to_md(block: &Value, prefix: &str) -> String {
+    let rows: Vec<Vec<String>> = block
+        .get("children")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("table_row")?.get("cells")?.as_array().cloned())
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|cell| {
+                    rich_text_to_md(cell.as_array().map(Vec::as_slice).unwrap_or_default())
+                        .replace('|', "\\|")
+                        .replace('\n', " ")
+                })
+                .collect()
+        })
+        .collect();
+    let Some(width) = rows.iter().map(Vec::len).max() else {
+        return String::new();
+    };
+    let line = |cells: &[String]| {
+        let mut out = format!("{prefix}|");
+        for i in 0..width {
+            out.push_str(&format!(
+                " {} |",
+                cells.get(i).map(String::as_str).unwrap_or("")
+            ));
+        }
+        out
+    };
+    let mut out = vec![
+        line(&rows[0]),
+        format!("{prefix}|{}", " --- |".repeat(width)),
+    ];
+    out.extend(rows[1..].iter().map(|r| line(r)));
+    out.join("\n")
 }
 
 fn walk_block(block: &Value, indent: usize, lines: &mut Vec<String>) {
@@ -1586,6 +1658,55 @@ mod tests {
         // Confirming a missing id inserts nothing: there are no bytes to carry.
         renders.confirm("missing");
         assert!(renders.get("missing", 0).is_none());
+    }
+
+    /// Each block kind with content renders into the markdown, the only copy of the body in
+    /// `page.json`.
+    #[test]
+    fn every_block_with_content_reaches_the_markdown() {
+        let rt = |s: &str| json!([{ "plain_text": s }]);
+        let signed = "https://files.example.com/cert.pdf?signature=1";
+        let blocks = vec![
+            json!({"type": "file", "file": {"type": "file", "name": "cert.pdf",
+                "caption": [], "file": {"url": signed}}}),
+            json!({"type": "image", "image": {"type": "file", "caption": [], "file": {"url": signed}}}),
+            json!({"type": "image", "image": {"type": "external", "caption": rt("diagram"),
+                "external": {"url": "https://example.com/a.png"}}}),
+            // The empty upload placeholder renders nothing.
+            json!({"type": "file", "file": {"type": "external", "name": "", "caption": [],
+                "external": {"url": ""}}}),
+            json!({"type": "link_preview", "link_preview": {"url": "https://example.com/repo"}}),
+            json!({"type": "bookmark", "bookmark": {"url": "https://example.org/",
+                "caption": rt("Example")}}),
+            json!({"type": "link_to_page", "link_to_page": {"type": "page_id", "page_id": "p1"}}),
+            json!({"type": "table", "table": {"table_width": 2, "has_column_header": true},
+            "children": [
+                {"type": "table_row", "table_row": {"cells": [rt("Name"), rt("Value")]}},
+                {"type": "table_row", "table_row": {"cells": [rt("alpha"), rt("x|y")]}},
+            ]}),
+        ];
+        let md = blocks_to_markdown(&blocks);
+        assert_eq!(
+            md.split("\n\n").collect::<Vec<_>>(),
+            [
+                "[file: cert.pdf]",
+                "[image]",
+                "[image: diagram](https://example.com/a.png)",
+                "https://example.com/repo",
+                "[Example](https://example.org/)",
+                "[link to page: p1]",
+                "| Name | Value |\n| --- | --- |\n| alpha | x\\|y |\n",
+            ]
+        );
+        assert!(
+            !md.contains("signature="),
+            "a signed URL expires, so it is not kept"
+        );
+        let page = normalize_page(&json!({ "id": "abc" }), &blocks);
+        assert!(
+            page.get("blocks").is_none(),
+            "the raw tree is not in page.json"
+        );
     }
 
     fn child(btype: &str, title: &str, id: &str) -> Value {

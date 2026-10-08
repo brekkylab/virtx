@@ -23,8 +23,8 @@ async with await (
     print(result.code, result.stdout.decode())
 ```
 
-Without `.cmd(..)` a console runs `virtx-uvm` from the stdio server directory
-(`$VIRTX_STDIO_SERVER_PATH`, or `~/.cache/virtx/bin`).
+Without `.cmd(..)` a console runs `virtx-uvm` from the `bin` directory of virtx's cache
+(`$VIRTX_HOME`, or the host's cache directory: see [Cache](https://github.com/brekkylab/virtx#cache)).
 
 An image can also be built ahead of the session that runs on it, and then named by its ref or
 its digest:

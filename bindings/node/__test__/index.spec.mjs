@@ -57,11 +57,17 @@ test('a HostMount serves the Directory', { skip: !virtx.HostMount && 'built with
 })
 
 test('building without a server fails and spends the builder', async () => {
-  // Point the default server lookup at an empty directory.
-  process.env.VIRTX_STDIO_SERVER_PATH = tempDir()
-  const builder = ConsoleClient.builder()
-  await assert.rejects(builder.build(), { code: 'VIRTX_ERROR' })
-  assert.throws(() => builder.vcpus(2), { code: 'INVALID_ARG' })
+  // Point the default server lookup (virtx's cache) at an empty directory.
+  const home = process.env.VIRTX_HOME
+  process.env.VIRTX_HOME = tempDir()
+  try {
+    const builder = ConsoleClient.builder()
+    await assert.rejects(builder.build(), { code: 'VIRTX_ERROR' })
+    assert.throws(() => builder.vcpus(2), { code: 'INVALID_ARG' })
+  } finally {
+    if (home === undefined) delete process.env.VIRTX_HOME
+    else process.env.VIRTX_HOME = home
+  }
 })
 
 test('building against a missing binary fails', async () => {
@@ -115,4 +121,31 @@ test('build, list and remove', { skip: !SERVER && 'set $VIRTX_CONSOLE' }, async 
   } finally {
     await images.close()
   }
+})
+
+/** A BSON document of string members: enough for a notification frame. */
+const stringsDoc = (members) => {
+  const body = Buffer.concat(
+    Object.entries(members).map(([k, v]) => {
+      const len = Buffer.alloc(4)
+      len.writeInt32LE(Buffer.byteLength(v) + 1)
+      return Buffer.concat([Buffer.from([2]), Buffer.from(k + '\0'), len, Buffer.from(v + '\0')])
+    }),
+  )
+  const size = Buffer.alloc(4)
+  size.writeInt32LE(body.length + 5)
+  return Buffer.concat([size, body, Buffer.from([0])])
+}
+
+test('_relay answers a frame on the console it relays to', { skip: !SERVER && 'set $VIRTX_CONSOLE' }, async () => {
+  const console_ = await ConsoleClient.builder().cmd([SERVER]).image(new Recipe('alpine:3.20')).build()
+
+  // `quit` is the owner's to say: relayed, it is dropped, and the session goes on.
+  assert.equal((await console_._relay(stringsDoc({ jsonrpc: '2.0', method: 'quit' }))).length, 0)
+  assert.equal((await console_.exec(['true'])).code, 0)
+
+  await assert.rejects(console_._relay(Buffer.from('not a message')), { code: 'CONSOLE_BROKEN' })
+
+  await console_.close()
+  await assert.rejects(console_._relay(Buffer.alloc(0)), { message: /closed/ })
 })

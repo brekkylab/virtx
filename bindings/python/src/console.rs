@@ -126,9 +126,8 @@ fn held(slot: &mut Option<ConsoleClient>) -> PyResult<&mut ConsoleClient> {
         .ok_or_else(|| VirtxError::new_err("this console has been closed"))
 }
 
-/// A console slot: the console, or `None` once closed. A plain type, so an agent can hold
-/// [`PyConsoleClient::slot`] as its console.
-pub type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+/// A console slot: the console, or `None` once closed.
+type Slot = Arc<Mutex<Option<ConsoleClient>>>;
 
 #[pyclass(name = "ConsoleClient", module = "virtx", frozen)]
 pub struct PyConsoleClient {
@@ -150,15 +149,6 @@ impl PyConsoleClient {
                 .collect(),
             console: Arc::new(Mutex::new(Some(console))),
         }
-    }
-
-    /// The slot this console lives in, for sharing it with another holder.
-    ///
-    /// Both then share one session: calls take turns on the lock, and `close()` ends it for
-    /// both. Whichever lets go last ends it, so every other holder must also drop it inside the
-    /// binding's runtime.
-    pub fn slot(&self) -> Slot {
-        self.console.clone()
     }
 }
 

@@ -42,6 +42,10 @@ async with await ImageClient.try_new() as images:
 console = await ConsoleClient.builder().image(ImageSource.digest(built.digest)).build()
 ```
 
+A `ConsoleClient` from this package can be handed to an [ailoy](https://github.com/brekkylab/ailoy)
+agent as is (`AgentBuilder(...).console(console)`): the agent shares its session, taking turns
+with your own calls one at a time, and `close()` ends the session for both.
+
 ## Building
 
 The extension is built with [maturin](https://www.maturin.rs). The `mount` feature is on by

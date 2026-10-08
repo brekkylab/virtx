@@ -176,9 +176,8 @@ fn held(slot: &mut Option<ConsoleClient>) -> Result<&mut ConsoleClient> {
         .ok_or_else(|| napi::Error::new("VIRTX_ERROR".to_string(), "this console has been closed"))
 }
 
-/// A console slot: the console, or `None` once closed. A plain type, so an agent can hold
-/// [`JsConsoleClient::slot`] as its console.
-pub type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+/// A console slot: the console, or `None` once closed.
+type Slot = Arc<Mutex<Option<ConsoleClient>>>;
 
 #[napi(js_name = "ConsoleClient")]
 pub struct JsConsoleClient {
@@ -203,20 +202,6 @@ impl JsConsoleClient {
             console: Arc::new(Mutex::new(Some(console))),
             runtime: Handle::current(),
         }
-    }
-
-    /// The slot this console lives in, for sharing it with another holder.
-    ///
-    /// Both then share one session: calls take turns on the lock, and `close()` ends it for
-    /// both. Whichever lets go last ends it, so every other holder must also drop it inside
-    /// [`runtime`](Self::runtime).
-    pub fn slot(&self) -> Slot {
-        self.console.clone()
-    }
-
-    /// The runtime a holder of [`slot`](Self::slot) enters to let go of it.
-    pub fn runtime(&self) -> Handle {
-        self.runtime.clone()
     }
 }
 

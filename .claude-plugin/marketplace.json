@@ -1,0 +1,15 @@
+{
+  "name": "brekkylab",
+  "description": "Plugins from brekkylab: virtx, for running a task in a disposable Linux micro-VM.",
+  "owner": {
+    "name": "brekkylab",
+    "url": "https://github.com/brekkylab"
+  },
+  "plugins": [
+    {
+      "name": "virtx",
+      "source": "./",
+      "description": "Run a task in a disposable Linux micro-VM from Python, Node.js or Rust: the environment an agent works in."
+    }
+  ]
+}

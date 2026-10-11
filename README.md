@@ -107,6 +107,13 @@ OK: 9426 KiB in 18 packages
 virtx
 ```
 
+Or let a coding agent do it: this repo is its own plugin marketplace, so the [agent skill](skills/virtx/SKILL.md) installs with no clone first.
+
+```bash
+claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
+codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
+```
+
 ## Features
 
 ### Coverage

@@ -42,7 +42,11 @@ A bare `cargo test` covers the default features. A change under `s3`, `notion`, 
 
 ## Reporting bugs and requesting features
 
-Open an issue at https://github.com/brekkylab/virtx/issues with what you ran, what you expected, and what happened, including the language you used virtx from and the host OS.
+Open an issue at https://github.com/brekkylab/virtx/issues with what you ran, what you expected, and what happened, including the language you used virtx from and the host OS. A suspected vulnerability goes through [SECURITY.md](SECURITY.md) instead, never a public issue.
+
+## Code of Conduct
+
+Taking part in this project means following our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

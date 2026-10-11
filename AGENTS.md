@@ -34,6 +34,7 @@ cd bindings/python && uv run maturin develop && uv run pytest   # Python
 cd bindings/node && npm install && npm run build:debug && npm test   # Node
 ```
 
+- `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and clippy plus the library's tests on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - A bare `cargo test` runs the default features' tests. A change under a feature (`s3`, `notion`, `gdrive`, `onedrive`) runs with that feature on, and a change to shared code runs the sweep in `Cargo.toml`'s `[features]` comment.
 - The mount tests are `#[ignore]` because they mount a real filesystem: on macOS they need FUSE-T 1.2.9 or later, on Windows Dokany, on Linux `fusermount3`. Run them with `--ignored` whenever `src/fs/mount/` changes.
 - The endpoint tests skip without their service: `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_REFRESH_TOKEN`, `BACKLOT_URL` for Google Drive, a reachable object store for S3. Say which ran when you report a run.

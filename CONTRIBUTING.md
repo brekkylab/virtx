@@ -4,6 +4,8 @@ Thanks for your interest in improving **virtx**. One Rust crate carries the beha
 
 ## Development setup
 
+The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on the first `cargo` call.
+
 ```bash
 git clone https://github.com/brekkylab/virtx
 cd virtx
@@ -25,7 +27,7 @@ cd bindings/python && uv run pytest   # after `maturin develop`
 cd bindings/node && npm test          # after `npm run build:debug`
 ```
 
-There is no pull-request CI, so what you run locally is the gate.
+There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and clippy plus the library's tests on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 
 A bare `cargo test` covers the default features. A change under `s3`, `notion`, `gdrive` or `onedrive` runs with that feature on, and the `[features]` comment in `Cargo.toml` has the full sweep. The endpoint tests under `tests/` skip without their service and say so; name which ran when you report a run.
 

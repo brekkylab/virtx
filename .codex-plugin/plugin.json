@@ -1,7 +1,7 @@
 {
   "name": "virtx",
   "version": "0.1.0",
-  "description": "Run a task in a disposable Linux micro-VM from Python, Node.js or Rust: the environment an agent works in.",
+  "description": "Run tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with a filesystem you compose.",
   "author": {
     "name": "brekkylab",
     "url": "https://github.com/brekkylab"
@@ -25,7 +25,7 @@
     "shortDescription": "Disposable Linux micro-VMs from your own code",
     "developerName": "brekkylab",
     "category": "Developer Tools",
-    "longDescription": "virtx runs tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with no Docker and no daemon to install. A console boots a VM from an image you declare, runs commands in it, and is gone when you are done; what the VM sees is a filesystem you compose from host directories, in-memory files and remote stores, mounted read-write or read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too. It is the environment an agent works in.",
+    "longDescription": "virtx runs tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with no Docker and no daemon to install. A console boots a VM from an image you declare, runs commands in it, and is gone when you are done; what the VM sees is a filesystem you compose from host directories, in-memory files and remote stores, mounted read-write or read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
     "capabilities": [
       "Boot a Linux micro-VM from an image recipe, in one builder call",
       "Run commands in it and read their output, from Python, Node.js or Rust",

@@ -19,7 +19,7 @@ Work the steps below in order. Step 2 is the one that gets skipped: a command th
 | Node.js | `npm install @brekkylab/virtx` | `import { ConsoleClient, Recipe, ensureVirtx } from '@brekkylab/virtx'` |
 | Rust | `cargo add virtx` | `use virtx::{console::ConsoleClient, image::Recipe, ensure_virtx};` |
 
-Call `ensure_virtx()` (`ensureVirtx()` in Node) before the first console: it fetches the console server into virtx's cache the first time and is a no-op after. Mounting a host directory needs a FUSE provider on macOS (FUSE-T 1.2.9 or later, `brew install --cask fuse-t`) and Windows (Dokany); Linux needs nothing. A host without one still builds and runs commands; only a mount fails, with an error that names what to install.
+Call `ensure_virtx()` (`ensureVirtx()` in Node) before the first console: it fetches the console server into virtx's cache the first time and is a no-op after. A host directory passed to `.mount(host_path, …)` needs nothing on the host. Only `HostMount`, which serves a `Directory` or a remote store as a tree on the host, needs a FUSE provider: `fusermount3` on Linux, FUSE-T 1.2.9 or later on macOS (`brew install --cask fuse-t`), Dokany on Windows. A host without one still builds and runs commands; only a `HostMount` fails, with an error that names what to install.
 
 ## 2. Declare the image
 
@@ -57,7 +57,7 @@ console = await (
 | the host's GPU | `.gpu(True)` and a Vulkan loader plus the venus driver in the image; `build()` fails if the host cannot give one |
 | more CPUs, memory or disk | `.vcpus(n)`, `.memory_mib(n)`, `.disk_gib(n)` |
 
-Mount what the task must read or write, and nothing more. Guest paths are absolute, and a writable mount is the only way a result reaches the host.
+Mount what the task must read or write, and nothing more. Guest paths are absolute. A file the task writes reaches the host only through a writable mount or `read`; everything else comes back as the command's output.
 
 ## 4. Run commands, and read what came back
 

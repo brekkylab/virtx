@@ -1,4 +1,4 @@
-"""The environment an agent works in: what it can see, and what it can do.
+"""Run tasks in disposable Linux VMs from your own code, with a filesystem you compose.
 
 What it sees is a filesystem: a ``Directory`` assembled in memory and grafted onto host
 directories, mounted on the host with ``HostMount``. What it does is run commands through a

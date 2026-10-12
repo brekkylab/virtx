@@ -1,13 +1,14 @@
 //! # Virtx
 //!
-//! The environment an agent works in: what it can see, and what it can do.
+//! Run tasks in disposable Linux VMs from your own code: what a task reads, and what it runs.
 //!
-//! Both are ordinary on purpose: an agent handed a filesystem and a shell already knows both
-//! interfaces, and every added capability arrives as a file to read or a command to run.
+//! Both are ordinary on purpose: a script, a build or a model handed a filesystem and a shell
+//! already knows both interfaces, and every added capability arrives as a file to read or a
+//! command to run.
 //!
-//! * **What it sees is a filesystem**, read with `cat`, `grep` or anything else once a
-//!   binding mounts it on the host.
-//! * **What it does is run commands**, each an argv sent over one channel, with everything the
+//! * **What it reads is a filesystem**, with `cat`, `grep` or anything else once a binding
+//!   mounts it on the host.
+//! * **What it runs is commands**, each an argv sent over one channel, with everything the
 //!   command wrote coming back.
 //!
 //! ## Quickstart
@@ -23,7 +24,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // What the agent sees: an in-memory file beside a host directory.
+//!     // What the task reads: an in-memory file beside a host directory.
 //!     let context = Directory::new()
 //!         .with_file("notes/today.md", "ship the release".as_bytes())?
 //!         .with_mount("project", "/home/me/project")?;
@@ -31,7 +32,7 @@
 //!     // Constructing the guard mounts, dropping it unmounts; the console holds it for the session.
 //!     let mount = FuseMount::try_new(context, Path::new("/tmp/session"))?;
 //!
-//!     // What the agent can do. A session's shape, including where each tree appears to
+//!     // What the task runs. A session's shape, including where each tree appears to
 //!     // commands, is fixed when the console is built.
 //!     let mut console = ConsoleClient::builder()
 //!         .mount(mount, "/work")
@@ -46,9 +47,9 @@
 //!
 //! ## Structure
 //!
-//! * [`fs`]: what the agent sees. Stores, the in-memory [`Directory`](fs::Directory), and the
+//! * [`fs`]: what a session reads and writes. Stores, the in-memory [`Directory`](fs::Directory), and the
 //!   bindings that mount them on the host.
-//! * [`console`]: what the agent does. [`ConsoleClient`](console::ConsoleClient) runs commands
+//! * [`console`]: what a session runs. [`ConsoleClient`](console::ConsoleClient) runs commands
 //!   in a session, which [`Relay`](console::Relay) shares with another native module in the
 //!   same process (ailoy's, say).
 //! * [`protocol`]: the wire between a console client and a console server. The server is a

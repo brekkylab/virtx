@@ -2,7 +2,7 @@
 name = "virtx"
 version = "0.1.1"
 edition = "2024"
-description = "Run tasks in disposable Linux VMs from your own code: the environment an agent works in."
+description = "Run tasks in disposable Linux VMs from your own code, with a filesystem you compose."
 license = "Apache-2.0"
 repository = "https://github.com/brekkylab/virtx"
 readme = "README.md"

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md
+    about: Development setup, running the tests, and what a pull request carries.
+  - name: Security report
+    url: https://github.com/brekkylab/virtx/blob/main/SECURITY.md
+    about: A vulnerability goes through SECURITY.md, never a public issue.

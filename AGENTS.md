@@ -7,7 +7,7 @@ virtx is a library for running tasks in disposable Linux micro-VMs from your own
 - The library is `src/`. A feature goes into the crate first and the bindings connect to it; `bindings/python/` and `bindings/node/` carry only what one language needs of its own.
 - A change to what the library does moves the bindings in the same pull request, and, when a public API they show changes, the three Quickstart blocks in `README.md`, each binding's own `README.md`, and the examples under `examples/`.
 - Names follow each language's convention and nothing else: `mount_readonly` and `ensure_virtx` in Rust and Python, `mountReadonly` and `ensureVirtx` in Node. The thing they name is the same.
-- The wire between client and server is `src/protocol/`, and both ends of it are here: the messages, the client, and the `StdioServer` the released server is built on. A change there can be made and unit-tested in this repository, but it reaches a user only through a new server release, which a maintainer makes: open an issue first so the two can be planned together.
+- The wire between client and server is `src/protocol/`, and both ends of it are here: the messages, the client, and the `StdioServer` the released server is built on. A change there can be made and unit-tested in this repository, but it reaches a user only through a new server release, which a maintainer makes: open an issue first, with the protocol change template, so the two can be planned together.
 
 ## Where a change goes
 

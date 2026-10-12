@@ -208,7 +208,7 @@ jobs:
         with:
           ref: ${{ env.REF }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
 
@@ -370,7 +370,7 @@ jobs:
         with:
           ref: ${{ env.REF }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -535,7 +535,7 @@ jobs:
           SMOKE_MOUNT: ${{ matrix.mount }}
         run: '"$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/python.py"'
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       # A registry on localhost holding only the packed crate, published from that archive
       # as it is, and a project of its own that takes `virtx` from it -- built here, with
@@ -655,7 +655,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: actions/download-artifact@v4
         with:

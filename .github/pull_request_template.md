@@ -22,7 +22,7 @@ Title: one sentence saying what virtx does once this is merged, with no issue nu
 
 <!-- Fill in the lines below rather than summarizing them. The mount tests run only with `--ignored` and a FUSE provider, and the endpoint tests skip without their service, so say which ran: a green run with them skipped covers less than the suite. AGENTS.md lists the commands. -->
 
-- **Rust** — `cargo clippy --workspace && cargo test`, with `--ignored` and features:
+- **Rust** — `cargo clippy --workspace -- -D warnings && cargo test`, with `--ignored` and features:
 - **Python** — `uv run pytest` in `bindings/python`:
 - **Node** — `npm test` in `bindings/node`:
 

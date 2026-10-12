@@ -51,8 +51,8 @@
 //! * [`console`]: what the agent does. [`ConsoleClient`](console::ConsoleClient) runs commands
 //!   in a session, which [`Relay`](console::Relay) shares with another native module in the
 //!   same process (ailoy's, say).
-//! * [`protocol`]: the wire between a console client and a console server. The server lives in
-//!   its own repository (virtx-uvm).
+//! * [`protocol`]: the wire between a console client and a console server. The server is a
+//!   prebuilt binary, `virtx-uvm`, that `ensure_virtx` fetches into the cache's `bin`.
 //! * [`image`]: the images a session runs on, declared or built ahead of time.
 //!
 //! [`fs`] and [`console`] meet only at [`Mount`](fs::Mount): a console takes trees already

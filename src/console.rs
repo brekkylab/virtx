@@ -1,6 +1,7 @@
 //! The public end: a console server to run commands in, over one channel.
 //!
 //! [`ConsoleClientBuilder`] describes the session; [`ConsoleClient`] runs commands in it.
+//! [`Relay`] drives one session from a second place, such as another native extension.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -10,6 +11,10 @@ use std::{
 use anyhow::Context as _;
 use futures_core::future::BoxFuture;
 use tokio::process::Command;
+
+mod relay;
+
+pub use relay::Relay;
 
 use crate::{
     cache_root,

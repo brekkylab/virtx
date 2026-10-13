@@ -10,8 +10,9 @@
 //! enough, given `--device /dev/fuse` and `--cap-add SYS_ADMIN`.
 //!
 //! One set of bodies for both unix bindings, since [`Mount`]'s contract is what is under test.
-//! A binding's library may assume one mount per process (libfuse-t keeps the FUSE-T helper's
-//! pid in a single process-global slot), so teardowns run with a second mount alive.
+//! Teardowns run with a second mount alive: a binding's library may keep per-process state
+//! that one mount's teardown trips over (FUSE-T before 1.2.9 kept its server's pid in one
+//! process-wide slot).
 
 #![cfg(all(feature = "mount", unix))]
 

@@ -5,8 +5,7 @@
 //! with `DLL load failed` on hosts without Dokany, even for callers that never mount; with it
 //! the DLL loads at the first mount, which `virtx::fs::mount_support` checks for first.
 //!
-//! Also emits what this cdylib needs to link as a Python extension module: cargo builds it
-//! under a caller that wants only the `rlib`, and the flags that caller passes are its own.
+//! Also emits the link arguments this cdylib needs as a Python extension module.
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
 

@@ -176,9 +176,8 @@ fn held(slot: &mut Option<ConsoleClient>) -> Result<&mut ConsoleClient> {
         .ok_or_else(|| napi::Error::new("VIRTX_ERROR".to_string(), "this console has been closed"))
 }
 
-/// A console slot: the console, or `None` once closed. A plain type, so an agent can hold
-/// [`JsConsoleClient::slot`] as its console.
-pub type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+/// A console slot: the console, or `None` once closed.
+type Slot = Arc<Mutex<Option<ConsoleClient>>>;
 
 #[napi(js_name = "ConsoleClient")]
 pub struct JsConsoleClient {
@@ -203,20 +202,6 @@ impl JsConsoleClient {
             console: Arc::new(Mutex::new(Some(console))),
             runtime: Handle::current(),
         }
-    }
-
-    /// The slot this console lives in, for sharing it with another holder.
-    ///
-    /// Both then share one session: calls take turns on the lock, and `close()` ends it for
-    /// both. Whichever lets go last ends it, so every other holder must also drop it inside
-    /// [`runtime`](Self::runtime).
-    pub fn slot(&self) -> Slot {
-        self.console.clone()
-    }
-
-    /// The runtime a holder of [`slot`](Self::slot) enters to let go of it.
-    pub fn runtime(&self) -> Handle {
-        self.runtime.clone()
     }
 }
 
@@ -354,6 +339,25 @@ impl JsConsoleClient {
             let mut slot = console.lock().await;
             let blob = held(&mut slot)?.snapshot().await;
             blob.map(Buffer::from).map_err(error::failure)
+        })
+    }
+
+    /// Answer one protocol frame on this console's channel, for an addon that drives this
+    /// session as a console of its own (see `virtx::console::Relay`); not for JavaScript
+    /// callers. Rejects when the channel is broken or this console closed, after which the
+    /// other side hears nothing more.
+    #[napi(js_name = "_relay", ts_return_type = "Promise<Buffer>")]
+    pub fn relay<'env>(
+        &self,
+        env: &'env Env,
+        frame: Buffer,
+    ) -> napi::Result<PromiseRaw<'env, Buffer>> {
+        let console = self.console.clone();
+        let frame = frame.to_vec();
+        promise(env, async move {
+            let mut slot = console.lock().await;
+            let answer = held(&mut slot)?.relay(&frame).await;
+            answer.map(Buffer::from).map_err(error::failure)
         })
     }
 

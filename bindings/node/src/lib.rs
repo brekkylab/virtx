@@ -15,13 +15,14 @@
 //! `quit` only on a runtime, and a garbage-collection finalizer runs off one, so the last holder
 //! drops it inside the kept runtime: a collected client ends like a closed one, and `close()`
 //! only picks when.
-//!
-//! The modules are public for a binding that links this crate into its own addon (the `rlib` in
-//! `Cargo.toml`). Linking is enough: napi registers every class here into whichever addon links it.
 
-pub mod console;
+// A `#[napi]` function is reached only through the registration napi emits, which a test build
+// does not, so there it looks unused.
+#![cfg_attr(test, allow(dead_code))]
+
+mod console;
 #[cfg(feature = "ensure")]
-pub mod ensure;
-pub mod error;
-pub mod fs;
-pub mod image;
+mod ensure;
+mod error;
+mod fs;
+mod image;

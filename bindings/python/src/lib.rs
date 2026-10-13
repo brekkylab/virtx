@@ -18,21 +18,16 @@
 
 use pyo3::prelude::*;
 
-pub mod console;
+mod console;
 #[cfg(feature = "ensure")]
-pub mod ensure;
-pub mod error;
-pub mod fs;
-pub mod image;
+mod ensure;
+mod error;
+mod fs;
+mod image;
 
+/// Every class, exception and constant, added to the module.
 #[pymodule]
 fn _virtx(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register(m)
-}
-
-/// Add every class, exception and constant to `m`; public so a binding linking this crate (the
-/// `rlib` in `Cargo.toml`) can add them to its own extension.
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(m)?;
     image::register(m)?;
     fs::register(m)?;

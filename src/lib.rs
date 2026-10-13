@@ -49,7 +49,8 @@
 //! * [`fs`]: what the agent sees. Stores, the in-memory [`Directory`](fs::Directory), and the
 //!   bindings that mount them on the host.
 //! * [`console`]: what the agent does. [`ConsoleClient`](console::ConsoleClient) runs commands
-//!   in a session.
+//!   in a session, which [`Relay`](console::Relay) shares with another native module in the
+//!   same process (ailoy's, say).
 //! * [`protocol`]: the wire between a console client and a console server. The server lives in
 //!   its own repository (virtx-uvm).
 //! * [`image`]: the images a session runs on, declared or built ahead of time.

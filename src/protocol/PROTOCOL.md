@@ -13,7 +13,7 @@ Two things make it more than a remote `exec`:
 **Each end of the channel does one job.** The client only asks; the server only answers.
 There is no request a server ever issues, which is what leaves one channel, one end that asks and one end that answers — see [The channel](#the-channel).
 
-Source: [`message/`](message/) for the objects, [`stdio/channel.rs`](stdio/channel.rs) for the wire, [`base.rs`](base.rs) for what each end can do, [`stdio/`](stdio/) for the ends themselves, [`client.rs`](client.rs) for the public end.
+Source: [`message/`](message/) for the objects, [`stdio/channel.rs`](stdio/channel.rs) for the wire, [`base.rs`](base.rs) for what each end can do, [`stdio/`](stdio/) for the ends themselves, [`client.rs`](client.rs) for the public end, [`../console/relay.rs`](../console/relay.rs) for a session relayed between two native modules.
 
 ---
 
@@ -56,6 +56,25 @@ Reading distinguishes three outcomes, which is the whole reason for the loop in 
 > A BSON document does — its first four bytes are an `int32`, little-endian, of the whole document including those four — so the header now duplicates what the payload already carries.
 > Retiring it would also remove the one layer of this protocol that no peer can guess, which is worth more than the four bytes.
 > Not done yet because it is a wire change and the codec swap already was one; `stdio/channel.rs` has what it takes.
+
+### Relayed
+
+```
+[BSON document]       one message, handed across in memory
+```
+
+Two native modules in one process (virtx's Python or Node binding, and another that links this crate, such as ailoy's) cannot share a `ConsoleClient`: each links its own copy, and neither can see into the other's.
+So a session is shared by relaying it.
+The other module wraps whatever carries bytes to the owner in a `Relay` and drives the session through `ConsoleClient::attach`; the owner answers each frame with `ConsoleClient::relay`, on its own channel and under its own lock.
+The bindings expose the owner's half as `ConsoleClient._relay`.
+
+A frame is one message exactly as framed above, minus the length prefix: a request goes over and its response comes back, a notification comes back empty.
+Nothing else changes — the same methods, the same ids, a refusal still a response's `error` — so the two modules need only speak one version of this protocol, not share a build of the crate.
+Nor is it a second channel: every relayed frame goes out on the owner's one.
+
+The session stays the owner's.
+A relayed `init` is refused with `INVALID_REQUEST`, since the session was announced when the owner was built, and a relayed `quit` is dropped; an attached console never sends one.
+A broken channel on the owner's side, or an owner already closed, is the relay's error, after which the attached side hears nothing more.
 
 ---
 
@@ -564,6 +583,8 @@ A client that wants its commands finished first waits for their responses — wh
 
 No `id` and no response: there is nothing a process can say after this that a closed channel does not say better.
 Sending it at all is what lets the other end tell a finished session from a peer that died.
+
+A console attached through a relay never sends it: the session ends when its owner does (see [Relayed](#relayed)).
 
 An `exec` still running is still answered — a request the server accepted is one it owes a response for, and `quit` arriving first is the client's ordering rather than permission to drop it.
 

@@ -94,11 +94,19 @@ static void virtx_fuse_t_read_release(void *symbol) {
     virtx_fuse_t_release_name[len] = 0;
 }
 
-/* `VIRTX_FUSE_T_UNCHECKED`, set to anything but empty or `0`: use a libfuse-t these
- * declarations were not checked against, at the risk of a crash. */
-static int virtx_fuse_t_unchecked(void) {
-    const char *v = getenv("VIRTX_FUSE_T_UNCHECKED");
-    return v && *v && strcmp(v, "0") != 0;
+/* Whether release `r` is older than `min`, comparing dot-separated numbers in turn. Letters
+ * after a part's number are ignored: FUSE-T has shipped releases like `1.0.39d`. */
+static int virtx_fuse_t_older(const char *r, const char *min) {
+    while (*r || *min) {
+        char *r_end, *min_end;
+        long a = strtol(r, &r_end, 10), b = strtol(min, &min_end, 10);
+        if (a != b) return a < b;
+        r = r_end + strcspn(r_end, ".");
+        min = min_end + strcspn(min_end, ".");
+        if (*r) r++;
+        if (*min) min++;
+    }
+    return 0;
 }
 
 static void virtx_fuse_t_load(void) {
@@ -116,20 +124,22 @@ static void virtx_fuse_t_load(void) {
         return;
     virtx_fuse_t_api_version = version();
     virtx_fuse_t_read_release((void *)version);
-    if (!virtx_fuse_t_unchecked()) {
-        if (virtx_fuse_t_api_version < VIRTX_FUSE_T_API_MIN ||
-            virtx_fuse_t_api_version > VIRTX_FUSE_T_API_MAX) {
-            virtx_fuse_t_state = VIRTX_FUSE_T_OTHER_API;
-            return;
-        }
-        /* A release the name does not say -- no name of that form, or one that does not
-         * start with a number -- is let through on its API alone: refusing it would
-         * refuse an install that is only named differently. */
-        const char *r = virtx_fuse_t_release_name;
-        if (r[0] >= '0' && r[0] <= '9' && atoi(r) != VIRTX_FUSE_T_MAJOR) {
-            virtx_fuse_t_state = VIRTX_FUSE_T_OTHER_MAJOR;
-            return;
-        }
+    if (virtx_fuse_t_api_version < VIRTX_FUSE_T_API_MIN ||
+        virtx_fuse_t_api_version > VIRTX_FUSE_T_API_MAX) {
+        virtx_fuse_t_state = VIRTX_FUSE_T_OTHER_API;
+        return;
+    }
+    /* A release the name does not say -- no name of that form, or one that does not
+     * start with a number -- is let through on its API alone: refusing it would
+     * refuse an install that is only named differently. */
+    const char *r = virtx_fuse_t_release_name;
+    if (r[0] >= '0' && r[0] <= '9' && atoi(r) != VIRTX_FUSE_T_MAJOR) {
+        virtx_fuse_t_state = VIRTX_FUSE_T_OTHER_MAJOR;
+        return;
+    }
+    if (r[0] >= '0' && r[0] <= '9' && virtx_fuse_t_older(r, VIRTX_FUSE_T_MIN)) {
+        virtx_fuse_t_state = VIRTX_FUSE_T_TOO_OLD;
+        return;
     }
 
     /* Never closed: every mount this process makes calls through these. */
@@ -153,6 +163,10 @@ int virtx_fuse_t_api(void) {
 const char *virtx_fuse_t_release(void) {
     pthread_once(&virtx_fuse_t_once, virtx_fuse_t_load);
     return virtx_fuse_t_release_name;
+}
+
+const char *virtx_fuse_t_min(void) {
+    return VIRTX_FUSE_T_MIN;
 }
 
 const char *virtx_fuse_t_checked(void) {

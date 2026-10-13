@@ -8,11 +8,10 @@ publish = false
 # Imported as `virtx._virtx` and re-exported by `python/virtx/__init__.py`. Must match the
 # `#[pymodule]` name, or the import finds a library with no init function.
 #
-# `rlib` for a binding that builds virtx into its own extension (e.g. ailoy). Two extension
-# modules cannot pass each other a `ConsoleClient`, since each links its own virtx and runtime, so
-# such a binding links this crate and registers its classes through `register` (src/lib.rs).
+# Only the extension: another extension that drives one of its consoles (ailoy's) does so
+# through `ConsoleClient._relay` and `virtx::console::Relay`, not by linking this crate.
 name = "_virtx"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 # No default features, so this crate's `[features]` alone decide what a wheel carries.

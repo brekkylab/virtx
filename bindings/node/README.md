@@ -27,8 +27,8 @@ try {
 }
 ```
 
-Without `.cmd(..)` a console runs `virtx-uvm` from the stdio server directory
-(`$VIRTX_STDIO_SERVER_PATH`, or `~/.cache/virtx/bin`).
+Without `.cmd(..)` a console runs `virtx-uvm` from the `bin` directory of virtx's cache
+(`$VIRTX_HOME`, or the host's cache directory: see [Cache](https://github.com/brekkylab/virtx#cache)).
 
 An image can also be built ahead of the session that runs on it, and then named by its ref or
 its digest:
@@ -43,6 +43,10 @@ await images.close()
 
 const console_ = await ConsoleClient.builder().image(ImageSource.digest(built.digest)).build()
 ```
+
+A `ConsoleClient` from this package can be handed to an [ailoy](https://github.com/brekkylab/ailoy)
+agent as is (`new AgentBuilder(...).console(console_)`): the agent shares its session, taking
+turns with your own calls one at a time, and `close()` ends the session for both.
 
 ## Errors
 

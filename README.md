@@ -313,7 +313,7 @@ For macOS
 brew install --cask fuse-t
 ```
 
-virtx mounts through FUSE-T 1.x, and is checked against 1.2.7. A FUSE-T of another major version is refused before a mount, with the release to install instead, rather than risk a crash on a layout that changed; `VIRTX_FUSE_T_UNCHECKED=1` mounts with it anyway.
+virtx mounts through FUSE-T 1.x from 1.2.9 on, and is checked against 1.2.9. An older release is refused before a mount: it resets the process's `SIGCHLD` handler on every mount, and unmounting the first of two mounts waits for the second. A FUSE-T of another major version is refused too, with the release to install instead, rather than risk a crash on a layout that changed.
 
 And for windows
 

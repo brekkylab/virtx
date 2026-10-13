@@ -5,10 +5,9 @@ edition = "2024"
 publish = false
 
 [lib]
-# `rlib` for a binding that builds virtx into its own addon (e.g. ailoy). Two addons cannot
-# pass each other a `ConsoleClient`, since each links its own virtx and runtime, so such a binding
-# links this crate and napi registers these classes into its addon.
-crate-type = ["cdylib", "rlib"]
+# Only the addon: another addon that drives one of its consoles (ailoy's) does so through
+# `ConsoleClient._relay` and `virtx::console::Relay`, not by linking this crate.
+crate-type = ["cdylib"]
 
 [build-dependencies]
 napi-build = "2"

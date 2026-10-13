@@ -10,8 +10,8 @@ The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on the fi
 git clone https://github.com/brekkylab/virtx
 cd virtx
 cargo build
-(cd bindings/python && uv run maturin develop)     # Python
-(cd bindings/node && npm install && npm run build)  # Node
+(cd bindings/python && uv run maturin develop)       # Python
+(cd bindings/node && npm install && npm run build)   # Node
 ```
 
 A console runs on the console server, a prebuilt binary that is not in this repository: `ensure_virtx()` fetches the release this build was tested with into `$VIRTX_HOME/bin` on first use, and `VIRTX_UVM_VERSION` names another release to fetch instead. Mounting a tree on the host needs a FUSE provider: `fusermount3` on Linux, FUSE-T 1.2.9 or later on macOS (`brew install --cask fuse-t`), Dokany on Windows.
@@ -22,7 +22,7 @@ A console runs on the console server, a prebuilt binary that is not in this repo
 cargo fmt --all --check
 cargo clippy --workspace -- -D warnings
 cargo test
-cargo test -- --ignored               # the real-mount tests; needs the FUSE provider above
+cargo test -- --ignored                 # the real-mount tests; needs the FUSE provider above
 (cd bindings/python && uv run pytest)   # after `maturin develop`
 (cd bindings/node && npm test)          # after `npm run build:debug`
 ```

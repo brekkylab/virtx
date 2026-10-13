@@ -30,8 +30,8 @@ Run these before pushing. There is no pull-request CI, so what you run locally i
 cargo fmt --all --check
 cargo clippy --workspace -- -D warnings
 cargo test
-cargo test -- --ignored                                        # real mounts; needs a FUSE provider
-(cd bindings/python && uv run maturin develop && uv run pytest)   # Python
+cargo test -- --ignored                                                # real mounts; needs a FUSE provider
+(cd bindings/python && uv run maturin develop && uv run pytest)        # Python
 (cd bindings/node && npm install && npm run build:debug && npm test)   # Node
 ```
 

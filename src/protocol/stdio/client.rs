@@ -20,9 +20,11 @@ use crate::protocol::{
 /// client, or the whole process exiting, ends it the same way minus the wait, since
 /// nothing may await on drop.
 ///
-/// **The server is never killed**, so it can release what the session made (a machine, a
-/// disk, a built image) when its input ends. The cost: a server stuck in a call outlives
-/// the client until that call returns.
+/// **The server is given time to end on its own**, so it can release what the session made
+/// (a machine, a disk, a built image) when its input ends. A server stuck in a call outlives
+/// the client until that call returns; one still running [`QUIT_GRACE`] after `quit` is
+/// killed, so a hang on its way out cannot keep `quit` (or a console's `close`) from
+/// returning.
 ///
 /// The process lives here, not on [`ConsoleClient`], because only a pipe-to-child
 /// transport has one; [`ConsoleClient`] adds the session and is what a caller normally wants.
@@ -44,9 +46,19 @@ pub struct StdioClient {
 
     stderr: Option<JoinHandle<()>>,
 
+    /// How long `quit` waits for the server to exit before killing it: [`QUIT_GRACE`], or
+    /// less in tests.
+    grace: Duration,
+
     /// Unique only among this client's calls; see [`RequestId`].
     next_id: RequestId,
 }
+
+/// How long [`quit`](Client::quit) waits for the server to exit on its own before killing it.
+///
+/// Ten seconds, as `docker stop` gives a container: room to shut a machine down and remove
+/// what a session made, and a bound on a server that hangs instead.
+pub const QUIT_GRACE: Duration = Duration::from_secs(10);
 
 impl StdioClient {
     /// Start `server` and drive the session over its pipes.
@@ -75,6 +87,7 @@ impl StdioClient {
             outgoing: Box::new(outgoing),
             server: Some(server),
             stderr: Some(stderr),
+            grace: QUIT_GRACE,
             next_id: 0,
         })
     }
@@ -91,6 +104,7 @@ impl StdioClient {
             outgoing: Box::new(outgoing),
             server: None,
             stderr: None,
+            grace: QUIT_GRACE,
             next_id: 0,
         }
     }
@@ -177,6 +191,9 @@ impl Client for StdioClient {
     /// the server was already gone): a non-zero exit is [`Broken`](Failure::Broken) with
     /// the status. With no process, the notification's result is returned.
     ///
+    /// A server still running [`QUIT_GRACE`] later is killed, and that is
+    /// [`Broken`](Failure::Broken) too.
+    ///
     /// Idempotent: a second call has nothing to collect.
     fn quit(&mut self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async move {
@@ -187,15 +204,28 @@ impl Client for StdioClient {
                 return said;
             };
 
-            let status = server
-                .wait()
-                .await
-                .map_err(broke("waiting for the console server"))?;
+            let waited = tokio::time::timeout(self.grace, server.wait()).await;
+            let killed = waited.is_err();
+            let status = match waited {
+                Ok(status) => status,
+                // `kill` also reaps it, so the `wait` after answers at once.
+                Err(_) => match server.kill().await {
+                    Ok(()) => server.wait().await,
+                    Err(e) => Err(e),
+                },
+            }
+            .map_err(broke("waiting for the console server"))?;
 
             if let Some(stderr) = self.stderr.take() {
                 let _ = tokio::time::timeout(Duration::from_secs(1), stderr).await;
             }
 
+            if killed {
+                return Err(Failure::broken(format!(
+                    "the console server was still running {:?} after quit, so it was killed",
+                    self.grace
+                )));
+            }
             if !status.success() {
                 return Err(Failure::broken(format!(
                     "the console server ended with {status}"
@@ -375,6 +405,25 @@ mod tests {
         let mut ends_well = Command::new("sh");
         ends_well.args(["-c", "exit 0"]);
         StdioClient::new(ends_well).unwrap().quit().await.unwrap();
+    }
+
+    /// A server that does not exit after `quit` is killed once the grace runs out, so `quit`
+    /// returns rather than waiting on it forever.
+    #[tokio::test]
+    async fn a_server_that_hangs_on_its_way_out_is_killed() {
+        // `exec`, so the process killed is `sleep` itself rather than a shell around it.
+        let mut hangs = Command::new("sh");
+        hangs.args(["-c", "exec sleep 60"]);
+        let mut client = StdioClient::new(hangs).unwrap();
+        client.grace = Duration::from_millis(200);
+
+        let quitting = tokio::time::timeout(Duration::from_secs(10), client.quit());
+        let failure = quitting.await.expect("quit returned").unwrap_err();
+        assert_eq!(failure.code(), None, "a killed server is not a refusal");
+        assert!(failure.to_string().contains("was killed"), "{failure}");
+
+        // Collected on the way: a second `quit` has nothing left to wait for.
+        client.quit().await.unwrap();
     }
 
     /// A failed call still spends its id (visible only on the wire).

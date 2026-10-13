@@ -547,6 +547,10 @@ impl ConsoleClient {
     /// Mounts are let go of only after the server exits, since it may still be serving them;
     /// one that something else holds stays up. Returns how the server ended (over stdio, its
     /// exit status); the mounts are let go of either way.
+    ///
+    /// Bounded over stdio: a server still running
+    /// [`QUIT_GRACE`](crate::protocol::stdio::QUIT_GRACE) after `quit` is killed, so a server
+    /// that hangs on its way out cannot keep this from returning.
     pub async fn close(mut self) -> Result<(), Failure> {
         // Leave a spent client and no mounts behind, so dropping `self` has nothing to end.
         let mut client = std::mem::replace(&mut self.client, Box::new(Spent));

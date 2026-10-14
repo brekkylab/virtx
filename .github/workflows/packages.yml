@@ -520,9 +520,14 @@ jobs:
           cd "$RUNNER_TEMP/project" && node "$GITHUB_WORKSPACE/scripts/packages/smoke/node.mjs"
           "$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/python.py"
 
+      # The runner image's Homebrew never updates itself (HOMEBREW_NO_AUTO_UPDATE), so its
+      # casks are as old as the image: without `brew update` it installs the FUSE-T of the
+      # day the image was built, which may be older than virtx needs.
       - name: FUSE-T
         if: runner.os == 'macOS'
-        run: brew install --cask fuse-t
+        run: |
+          brew update --quiet
+          brew install --cask fuse-t
 
       # What the shim declares of libfuse-t (`contrib/fuse_t/fuse_t.h`), which is what lets
       # every build here go without FUSE-T, against FUSE-T's own headers: every layout and

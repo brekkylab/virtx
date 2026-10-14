@@ -6,7 +6,7 @@ build-backend = "maturin"
 
 [project]
 name = "virtx"
-version = "0.1.1"
+version = "0.1.2"
 description = "Run tasks in disposable Linux VMs from your own code, with a filesystem you compose."
 readme = "README.md"
 requires-python = ">=3.10"

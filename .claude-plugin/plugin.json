@@ -1,6 +1,6 @@
 {
   "name": "virtx",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Run tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with a filesystem you compose.",
   "author": {
     "name": "brekkylab",

@@ -141,12 +141,6 @@ jobs:
 
       - run: ls -la build/krunfw
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kernel-${{ matrix.arch }}
-          path: virtx-uvm/build/krunfw/*
-          if-no-files-found: error
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.arch }}-unknown-linux-musl
@@ -162,14 +156,21 @@ jobs:
           sudo apt-get install -y -qq clang lld llvm
           cargo xtask build abin
           ls -la target/release/abin
-          # A tarball, since an artifact keeps no file modes, and these are executables.
-          tar -C target/release -czf "$RUNNER_TEMP/abin.tar.gz" abin
 
-      - uses: actions/upload-artifact@v4
+      - name: Hand the kernel and abin on
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/handoff/kernel"
+          cp -v build/krunfw/* "$GITHUB_WORKSPACE/handoff/kernel/"
+          cp -R target/release/abin "$GITHUB_WORKSPACE/handoff/abin"
+
+      # Through the cache rather than as artifacts: this repository's artifacts count against
+      # the organization's storage quota, and its cache does not. One entry per run, which
+      # every `dist` job of the arch restores, whatever its OS.
+      - uses: actions/cache/save@v4
         with:
-          name: abin-${{ matrix.arch }}
-          path: ${{ runner.temp }}/abin.tar.gz
-          if-no-files-found: error
+          path: handoff
+          key: handoff-${{ matrix.arch }}-${{ github.run_id }}
+          enableCrossOsArchive: true
 
   # Which platforms this run builds: all of them, unless the commit says
   # `[dist:<release>]`, as a change that touches one platform's build does to try it
@@ -251,7 +252,9 @@ jobs:
       - name: Toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
-          dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel
+          # zstd too: the handoff below is compressed with it, and a cache restores only where
+          # it is decompressed the way it was compressed.
+          dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
           py=/opt/python/cp312-cp312/bin
           "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako awscli
           echo "$py" >> "$GITHUB_PATH"
@@ -285,31 +288,27 @@ jobs:
             virtx-uvm/3rdparty/MoltenVK/Package
           key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK-*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/cache/restore@v4
         with:
-          name: kernel-${{ matrix.kernel }}
-          path: kernel
+          path: handoff
+          key: handoff-${{ matrix.kernel }}-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
       - name: Put the kernel in place
         run: |
           mkdir -p build/krunfw
           case "${{ matrix.release }}" in
-            macos-*)   LIBKRUNFW_KERNEL_C="$GITHUB_WORKSPACE/kernel/kernel.c" cargo xtask build kernel ;;
-            linux-*)   cp -v "$GITHUB_WORKSPACE"/kernel/libkrunfw.so.* build/krunfw/ ;;
-            windows-*) cp -v "$GITHUB_WORKSPACE"/kernel/libkrunfw.dll build/krunfw/ ;;
+            macos-*)   LIBKRUNFW_KERNEL_C="$GITHUB_WORKSPACE/handoff/kernel/kernel.c" cargo xtask build kernel ;;
+            linux-*)   cp -v "$GITHUB_WORKSPACE"/handoff/kernel/libkrunfw.so.* build/krunfw/ ;;
+            windows-*) cp -v "$GITHUB_WORKSPACE"/handoff/kernel/libkrunfw.dll build/krunfw/ ;;
           esac
           ls -la build/krunfw
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: abin-${{ matrix.kernel }}
-          path: abin
 
       - name: Put abin in place
         run: |
           mkdir -p target/release
-          # From stdin: GNU tar takes the `D:` of a Windows path for a remote host.
-          tar -C target/release -xzf - < "$GITHUB_WORKSPACE/abin/abin.tar.gz"
+          cp -R "$GITHUB_WORKSPACE/handoff/abin" target/release/
           ls -la target/release/abin
 
       - name: Build

@@ -8,10 +8,13 @@
 mod build_image;
 mod exec;
 mod init;
+mod kill;
 mod list_images;
+mod poll;
 mod read;
 mod remove_image;
 mod snapshot;
+mod spawn;
 mod version;
 mod write;
 
@@ -21,7 +24,9 @@ use bson::{Bson, Document, doc};
 pub use build_image::{BuildImageCall, BuildImageResp};
 pub use exec::{ExecCall, ExecResp};
 pub use init::{InitCall, InitResp, InvalidMount, InvalidPort, MountSpec, Port};
+pub use kill::{KillCall, KillResp};
 pub use list_images::{ListImagesCall, ListImagesResp};
+pub use poll::{PollCall, PollResp};
 pub use read::{ReadCall, ReadResp};
 pub use remove_image::{RemoveImageCall, RemoveImageResp};
 use serde::{
@@ -30,6 +35,7 @@ use serde::{
     ser::SerializeMap,
 };
 pub use snapshot::{SnapshotCall, SnapshotResp};
+pub use spawn::{JobId, SpawnResp};
 pub use version::{VersionCall, VersionResp};
 pub use write::{WriteCall, WriteResp};
 
@@ -47,6 +53,9 @@ use crate::protocol::Error;
 /// ```text
 /// {"method":"init","params":{"mounts":["file:///srv/project:/work:ro"]}}
 /// {"method":"exec","params":{"cmd":["sh","-c","ls"],"timeout_ms":1000}}
+/// {"method":"spawn","params":{"cmd":["make"],"timeout_ms":600000}}
+/// {"method":"poll","params":{"job":0,"wait_ms":1000}}
+/// {"method":"kill","params":{"job":0,"signal":15}}
 /// {"method":"read","params":{"path":"out/log.txt","offset":4096,"len":1024}}
 /// {"method":"write","params":{"path":"in/data","data":<Binary>}}
 /// {"method":"version","params":{}}
@@ -93,6 +102,17 @@ pub enum Call {
     /// Run this command.
     Exec(ExecCall),
 
+    /// Start this command and answer at once with a job, leaving it running.
+    ///
+    /// The same `params` as `exec`, and the same command: only when it is answered differs.
+    Spawn(ExecCall),
+
+    /// What a job wrote since the last `poll`, and how it ended once it has.
+    Poll(PollCall),
+
+    /// Signal a job.
+    Kill(KillCall),
+
     /// Hand back part of a file.
     Read(ReadCall),
 
@@ -112,6 +132,9 @@ impl Call {
             Call::ListImages(_) => Method::ListImages,
             Call::Init(_) => Method::Init,
             Call::Exec(_) => Method::Exec,
+            Call::Spawn(_) => Method::Spawn,
+            Call::Poll(_) => Method::Poll,
+            Call::Kill(_) => Method::Kill,
             Call::Read(_) => Method::Read,
             Call::Write(_) => Method::Write,
             Call::Snapshot(_) => Method::Snapshot,
@@ -158,6 +181,8 @@ impl Call {
 /// ```text
 /// {"method":"init","result":{"cwd":"/work"}}
 /// {"method":"exec","result":{"code":0,"stdout":<Binary>,"stderr":<Binary>,"truncated":false}}
+/// {"method":"spawn","result":{"job":0}}
+/// {"method":"poll","result":{"stdout":<Binary>,"stderr":<Binary>,"truncated":false,"code":0}}
 /// {"method":"read","result":{"data":<Binary>,"size":4096}}
 /// {"error":{"code":-32000,"message":"timed out after 1000ms"}}
 /// ```
@@ -183,6 +208,9 @@ pub enum Response {
     ListImages(ListImagesResp),
     Init(InitResp),
     Exec(ExecResp),
+    Spawn(SpawnResp),
+    Poll(PollResp),
+    Kill(KillResp),
     Read(ReadResp),
     Write(WriteResp),
     Snapshot(SnapshotResp),
@@ -203,6 +231,9 @@ impl Response {
             Response::Snapshot(_) => Method::Snapshot,
             Response::Init(_) => Method::Init,
             Response::Exec(_) => Method::Exec,
+            Response::Spawn(_) => Method::Spawn,
+            Response::Poll(_) => Method::Poll,
+            Response::Kill(_) => Method::Kill,
             Response::Read(_) => Method::Read,
             Response::Write(_) => Method::Write,
             Response::Error(_) => return None,
@@ -261,6 +292,9 @@ impl Serialize for Response {
             Response::ListImages(list) => map.serialize_entry("result", list)?,
             Response::Init(init) => map.serialize_entry("result", init)?,
             Response::Exec(exec) => map.serialize_entry("result", exec)?,
+            Response::Spawn(spawn) => map.serialize_entry("result", spawn)?,
+            Response::Poll(poll) => map.serialize_entry("result", poll)?,
+            Response::Kill(kill) => map.serialize_entry("result", kill)?,
             Response::Read(read) => map.serialize_entry("result", read)?,
             Response::Write(write) => map.serialize_entry("result", write)?,
             Response::Snapshot(snapshot) => map.serialize_entry("result", snapshot)?,
@@ -334,6 +368,9 @@ fn typed_result<E: de::Error>(method: Method, result: Bson) -> Result<Response, 
         Method::Snapshot => Response::Snapshot(payload(method, result)?),
         Method::Init => Response::Init(payload(method, result)?),
         Method::Exec => Response::Exec(payload(method, result)?),
+        Method::Spawn => Response::Spawn(payload(method, result)?),
+        Method::Poll => Response::Poll(payload(method, result)?),
+        Method::Kill => Response::Kill(payload(method, result)?),
         Method::Read => Response::Read(payload(method, result)?),
         Method::Write => Response::Write(payload(method, result)?),
         Method::Start | Method::Stop | Method::Quit => {

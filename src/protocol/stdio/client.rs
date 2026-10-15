@@ -146,6 +146,10 @@ impl StdioClient {
                     };
                 }
 
+                // An earlier call's answer, owed to a caller that stopped waiting for it (an
+                // `ExecStream` dropped mid-poll, say).
+                Message::Response { id: answered, .. } if answered < id => {}
+
                 Message::Response { id: answered, .. } => eprintln!(
                     "console: a response arrived for request {answered}, which nobody made"
                 ),
@@ -163,8 +167,8 @@ impl StdioClient {
 impl Client for StdioClient {
     /// Send one call and read until the response with its id arrives.
     ///
-    /// A response to an unissued id is logged and dropped; a request from the server
-    /// breaks the channel.
+    /// A response to an earlier call is dropped, and one to an unissued id is logged and
+    /// dropped; a request from the server breaks the channel.
     ///
     /// The round trip holds both descriptors in one borrow, so no other frame can come
     /// between the request and its response.

@@ -131,6 +131,8 @@ Nothing on the answering side reads a meaning into the number.
 There is a single request outstanding at a time.
 So what an `id` earns is not concurrency but **certainty about what an answer answers** — a response carrying an id nobody issued is a peer that has lost its place, and it can be dropped instead of being mistaken for the answer that was due.
 
+A response carrying an *earlier* id is something else: the answer to a call whose caller stopped waiting for it — a stream dropped while its `poll` waited, say. The server owed it and answers in order, so it arrives ahead of the next call's and is skipped by the same pairing. Only a caller that stops between frames leaves that behind; one that stops partway through reading a frame has lost its place in the stream.
+
 **Pair by `id`, not by position.**
 
 ### Where this departs from the spec
@@ -174,6 +176,9 @@ Member order is free — `params` may arrive before the `method` that types it.
 | `list_images` | `{}` | `{images}` |
 | `init` | `{image?, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, disk_gib?, mounts?}` | `{cwd?}` |
 | `exec` | `{cmd, timeout_ms?}` | `{code, stdout, stderr, truncated}` |
+| `spawn` | `{cmd, timeout_ms?}` | `{job}` |
+| `poll` | `{job, wait_ms?, max_bytes?}` | `{stdout, stderr, truncated, code?}` |
+| `kill` | `{job, signal?}` | `{}` |
 | `read` | `{path, offset?, len?}` | `{data, size}` |
 | `write` | `{path, data?, offset?}` | `{size}` |
 | `snapshot` | `{}` | `{blob}` |
@@ -190,7 +195,7 @@ There is no method a server issues — see [The channel](#the-channel).
 ### Booting is not a method
 
 **Anything that needs a booted session boots one.**
-An `exec`, a `read`, a `write` and a `snapshot` are each served by a server that brings the session up first if it is not up already — so `start` and `stop` are entirely optional, and a client that sends neither runs the same commands to the same results.
+An `exec`, a `spawn`, a `read`, a `write` and a `snapshot` are each served by a server that brings the session up first if it is not up already — so `start` and `stop` are entirely optional, and a client that sends neither runs the same commands to the same results.
 
 That leaves the pair as **this protocol's resource management, and nothing else**.
 Neither unlocks anything; both are about what the far end is *holding*, and when it paid to hold it.
@@ -425,7 +430,7 @@ Minimal form — no timeout of its own:
 | field | |
 |---|---|
 | `cmd` | the command, already split into argv. Nothing consults a shell, so quoting and word rules stay wherever the command was composed; a caller that wants shell semantics asks outright — `["sh","-c","…"]`. Empty is `INVALID_PARAMS`. |
-| `timeout_ms` | a **kill** on expiry: no grace period, no second signal, no negotiation. |
+| `timeout_ms` | a **kill** on expiry: no grace period, no second signal, no negotiation. What the command wrote until then comes back in the error — see [A killed command keeps what it wrote](#a-killed-command-keeps-what-it-wrote). |
 | `code` | the command's exit status; `128 + signal` when a signal killed it. |
 | `stdout`/`stderr` | `Binary`, byte-exact, kept apart. |
 | `truncated` | the command wrote more than the executor would hold, and this is the beginning of it. |
@@ -452,6 +457,18 @@ The `bytes` helper no longer asks the codec whether it is human-readable, and th
 `params` and `result` pass through a `Bson` value before reaching the wire — they must, since a `result` is typed by a method only the caller knows — and `bson`'s value-level serializer reports itself human-readable.
 Asking would therefore re-encode base64 at exactly the point the byte type was the point, and nothing on the wire would show it had happened.
 `message/method/mod.rs` holds the reasoning; a test asserts on the frame's bytes rather than on a round trip, because a round trip passes either way.
+
+#### A killed command keeps what it wrote
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"exec","params":{"cmd":["sh","-c","echo started; echo err >&2; sleep 5"],"timeout_ms":1000}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"killed after 1000ms","data":{"code":137,"stdout":{"$binary":{"base64":"c3RhcnRlZAo=","subType":"00"}},"stderr":{"$binary":{"base64":"ZXJyCg==","subType":"00"}},"truncated":false}}}
+```
+
+A command killed at its `timeout_ms` is refused with `TIMED_OUT`, and the error's `data` is what an `exec` result would have been: the code the kill left it with, and everything it wrote up to the kill.
+That output is the one thing that says *why* it hung — a test waiting on a prompt, a server that never bound its port, a download that stalled — and an agent told only that it did has nothing to try differently.
+
+It is in `data` rather than in a result because the command did not end by itself, and a client that branches on the code should not have to look at `code` to learn that; and `data` rather than a new member because `error.data` is the spec's place for it — a reader that does not know it ignores it, so an older client reads the refusal it always read.
 
 #### Where the session stands
 
@@ -488,6 +505,64 @@ One of them has to be authoritative, and it can only be the end that watches the
 
 What that costs is that a client cannot run one command somewhere else without moving the session to get there — `sh -c 'cd elsewhere && …'`, and back again if it cares.
 That is the trade, and it is worth taking: a shell has the same one, and an agent driving this reads its own transcript the way a person reads a terminal.
+
+### `spawn`, `poll`, `kill` — a command that is watched while it runs
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"spawn","params":{"cmd":["sh","-c","for i in 1 2 3; do echo tick $i; sleep 1; done"]}}
+{"jsonrpc":"2.0","id":3,"method":"spawn","result":{"job":0}}
+{"jsonrpc":"2.0","id":4,"method":"poll","params":{"job":0,"wait_ms":5000}}
+{"jsonrpc":"2.0","id":4,"method":"poll","result":{"stdout":{"$binary":{"base64":"dGljayAxCg==","subType":"00"}},"stderr":{"$binary":{"base64":"","subType":"00"}},"truncated":false}}
+{"jsonrpc":"2.0","id":5,"method":"read","params":{"path":"/work/out/log.txt"}}
+{"jsonrpc":"2.0","id":5,"method":"read","result":{"data":…,"size":…}}
+{"jsonrpc":"2.0","id":6,"method":"poll","params":{"job":0,"wait_ms":5000}}
+{"jsonrpc":"2.0","id":6,"method":"poll","result":{"stdout":{"$binary":{"base64":"dGljayAyCg==","subType":"00"}},"stderr":{"$binary":{"base64":"","subType":"00"}},"truncated":false}}
+…
+{"jsonrpc":"2.0","id":9,"method":"poll","result":{"stdout":{"$binary":{"base64":"","subType":"00"}},"stderr":{"$binary":{"base64":"","subType":"00"}},"truncated":false,"code":0}}
+```
+
+An `exec` answers once, when the command has ended — which for a build, a test suite or a server is minutes of silence, then everything at once, and a console that can be asked nothing else meanwhile.
+A **job** is the same command split into calls that each answer at once:
+
+| method | does | answers |
+|---|---|---|
+| `spawn` | starts the command, exactly as `exec` would — same `params`, same session directory, same `timeout_ms` | `{job}`, at once |
+| `poll` | collects what the job wrote since the last `poll` | `stdout`, `stderr`, `truncated`, and `code` once it has ended |
+| `kill` | sends a signal to the job and everything it started | `{}` |
+
+| field | |
+|---|---|
+| `job` | a number the server chose, naming the job from its `spawn` until the `poll` that reports its end. Never reused within the session, across a `stop` and the boot after it too, so an id kept past its job is `UNKNOWN_JOB` rather than another job's. Nothing else is read into it. |
+| `wait_ms` | how long a `poll` waits for new output, or for the end, when there is none yet. It answers as soon as either arrives, so a client polling in a loop sets this rather than spinning. Omitted is an answer at once, empty if nothing is new. |
+| `max_bytes` | at most this many bytes of each stream in this answer; the rest waits for the next `poll`. Omitted is as much as one frame holds. `0` is `-32602`: a `poll` that may take nothing could never reach the end behind what is waiting. |
+| `stdout`/`stderr` | `Binary`, what was written since the last `poll`, kept apart as an `exec`'s are. |
+| `truncated` | the job wrote more than the server holds between two `poll`s, and the **oldest** of it was dropped before these bytes. How much a server holds is its own; a client that polls with a `wait_ms` rarely meets it. |
+| `code` | present on the last answer, once the job has ended and everything it wrote has been handed back — the same code an `exec` would have answered. The job is gone after that answer. |
+| `signal` | the signal `kill` sends, by its Linux number; omitted is `SIGKILL` (9), what a timeout sends. |
+
+**Between two `poll`s the console is free.** A `read` of the log the job is writing, a `write`, another `exec` or another `spawn` goes out and comes back while the job runs, because nothing of it is on the channel — which is what a blocking `exec` could not give.
+There is still one call outstanding at a time; a `poll` that waits is that call, for as long as it waits.
+
+**The ending is a `poll`'s.** A job killed at its `timeout_ms` ends in the `poll` that would have carried its `code`: `TIMED_OUT`, with that answer's bytes in `data` as for an `exec`.
+A job a `kill` ended reports an ordinary `code` — `128 + signal` — because the client asked for it.
+A `kill` is answered as soon as the signal is sent and says nothing of whether it took: a process may handle `SIGTERM`, and the next `poll` is what says how it went. A job that has already ended is not signalled, and the `kill` is answered the same.
+
+**A job lasts as long as the boot it runs in.** A `stop` releases what booting took, and the commands running in it end with it; so does a second `init`, which drops whatever was booted. A `poll` or `kill` naming a job the server does not hold — reported already, ended that way, or never spawned — is `UNKNOWN_JOB`.
+A backend that has to release the boot for some other call — a `snapshot`, where the session's writes are read off a disk the machine is holding — ends its jobs too; a client that keeps a server running across calls takes its snapshot when it has nothing running.
+
+**A server holds a bounded number of jobs**, running or ended and not yet polled to their end, and a `spawn` past it is `TOO_MANY_JOBS`. The bound is what keeps a client that spawns and never polls from filling the server with output nobody will read; a client that polls every job to its end never meets it. A `kill` frees nothing by itself: the slot is the job's until the `poll` that reports its end.
+
+**Which servers speak it.** A `TIMED_OUT` carrying `data` reaches any client, since a reader that does not know the member ignores it. The three methods do not: a server that predates them cannot read the frame, and an unknown method is [refused when reading](#what-is-refused-when-reading), which ends the channel rather than answering. So a client uses them only against a server release that has them — which is what `ensure_virtx` fetches, the release a build was tested with.
+
+#### Why the client pulls
+
+The alternative is the server *pushing* output — a notification per chunk, sent while the request is open.
+That breaks the one thing this protocol is built on: [one end asks, the other answers](#the-channel).
+A client would need a reader that never blocks, a table to demultiplex chunks by id, and backpressure for a command that writes faster than it is read; a JSON-RPC response cannot be sent twice, so the chunks would be a second shape beside it.
+
+Pulling keeps every arrow where it was.
+Each `poll` is an ordinary request with one answer, so a [relayed](#relayed) console streams with no change to the relay, and backpressure is the server's buffer and the `truncated` that says when it overflowed.
+What it costs is a round trip per piece of output, which `wait_ms` bounds from below: a silent job costs one round trip per wait, and a busy one is collected as fast as it is asked for.
 
 ### `read` — hand back part of a file
 
@@ -575,6 +650,9 @@ What `quit` costs to carry out is the transport's — over stdio it also closes 
 `stop` does **not** wait for an `exec` that is still running.
 A client that wants its commands finished first waits for their responses — which it can, since it is the only thing asking on that channel.
 
+It ends every [job](#spawn-poll-kill--a-command-that-is-watched-while-it-runs) the boot was running, and a `poll` naming one afterwards is `UNKNOWN_JOB`.
+A client whose server should outlive an idle stretch leaves the session up instead: a `stop` is a promise that nothing needs to be running.
+
 ### `quit` — the session is over
 
 ```json
@@ -587,6 +665,8 @@ Sending it at all is what lets the other end tell a finished session from a peer
 A console attached through a relay never sends it: the session ends when its owner does (see [Relayed](#relayed)).
 
 An `exec` still running is still answered — a request the server accepted is one it owes a response for, and `quit` arriving first is the client's ordering rather than permission to drop it.
+
+Every job still running ends with the session, as it does with a `stop`.
 
 ---
 
@@ -652,21 +732,23 @@ An `error` is the only failure channel, and the numeric `code` is what makes it 
 
 | code | method | means |
 |---|---|---|
-| `-32000` | `exec` | **timed out** — killed at `timeout_ms`. There is no result: a killed command has no exit code, and whatever it wrote is gone with it. |
-| `-32001` | `exec` | **not executable** — the program was not there, or would not start. |
-| `-32002` | `exec`, `read`, `write`, `snapshot` | **boot failed** — the backend could not be brought up. Booting is nobody's own request, so this reaches whoever asked for the call that needed one. |
+| `-32000` | `exec`, `poll` | **timed out** — killed at `timeout_ms`. There is no result, because the command did not end by itself; `data` is what the result would have been — the code the kill left, and what it wrote up to it. |
+| `-32001` | `exec`, `spawn` | **not executable** — the program was not there, or would not start. |
+| `-32002` | `exec`, `spawn`, `read`, `write`, `snapshot` | **boot failed** — the backend could not be brought up. Booting is nobody's own request, so this reaches whoever asked for the call that needed one. |
 | `-32005` | `read`, `write` | **not found** — nothing at the path. For a `write` that means a directory above it, since the file itself is created if it is missing. |
 | `-32006` | `read`, `write` | **is a directory** — the name is taken, and by something a retry will not turn into a file. |
 | `-32007` | `read`, `write` | **io failed** — the path named a file and the executor still could not go on: permissions, a full disk, a backend that went away mid-operation. |
 | `-32008` | `init` | **unsupported mount** — a URL whose scheme this server has no provider for, with the message naming which entry. `init`'s own and not deferred, because which kinds a build can realize is knowable as the frame is read, and taking a session whose tree can never be there would make every later path under it a lie. One code for every entry, because a session's trees are a list the client wrote and not a set of members with fixed names. Distinct from `BOOT_FAILED` because the fix is different: the mount is well formed and the *build* is wrong for it — a different binary, or a different URL. |
-| `-32009` | `exec`, `read`, `write`, `snapshot` | **mount failed** — a tree could not be put where `init` said it would be: no mount binding compiled in, no FUSE provider installed, the mount point busy, the store itself unreachable. Deferred like `BOOT_FAILED` and for the same reason — mounting happens at boot — so it reaches whoever asked for the call that needed one. The session is described correctly; the environment is what has to change. |
+| `-32009` | `exec`, `spawn`, `read`, `write`, `snapshot` | **mount failed** — a tree could not be put where `init` said it would be: no mount binding compiled in, no FUSE provider installed, the mount point busy, the store itself unreachable. Deferred like `BOOT_FAILED` and for the same reason — mounting happens at boot — so it reaches whoever asked for the call that needed one. The session is described correctly; the environment is what has to change. |
 | `-32010` | `init` | **unsupported network** — a network this server cannot give the way it was asked for: a server whose commands run on this host cannot take the network away from them, so it refuses `network: false`. Never used to narrow a session. |
 | `-32011` | `init` | **unsupported image** — the backend has no base to swap at all, because its commands run on the server's own filesystem. Not a reference that could not be fetched, which is a boot that failed. |
 | `-32012` | `init` | **unknown image** — the session named a built image this server does not have. Apart from `UNSUPPORTED_IMAGE` because a client hearing this one can build the thing. |
 | `-32013` | `init` | **unsupported machine** — a GPU this server has no device for, or more vCPUs or memory than it will give. `init`'s own for the reason `UNSUPPORTED_MOUNT` is: what shapes a server can make is a fact about its build and its host, knowable as the frame is read. Apart from `BOOT_FAILED` because asking again will not make it true, and never used to narrow a session. |
+| `-32015` | `poll`, `kill` | **unknown job** — no job by that id: its end was already reported, a `stop` or an `init` ended it, or it was never spawned. Nothing to retry; the job is over. |
+| `-32016` | `spawn` | **too many jobs** — the server already holds as many as it will. Apart from `BOOT_FAILED` because the fix is the client's: poll a job to its end, killing it first if it should not finish, and spawn again. |
 | `-32600` | any | invalid request. |
 | `-32601` | any | method not found |
-| `-32602` | any | invalid params — an empty argv `cmd`, a mount that is not one, two mounts asking for the same path, a port on a session with `network: false`, a port of `0`, or a host port already taken on the server's machine. Apart from `UNSUPPORTED_MOUNT` because it says something different: the frame is wrong, rather than well formed and asking for a kind this build has not got. |
+| `-32602` | any | invalid params — an empty argv `cmd`, a `kill` with no such signal, a `poll` with a `max_bytes` of `0`, a mount that is not one, two mounts asking for the same path, a port on a session with `network: false`, a port of `0`, or a host port already taken on the server's machine. Apart from `UNSUPPORTED_MOUNT` because it says something different: the frame is wrong, rather than well formed and asking for a kind this build has not got. |
 | `-32603` | any | internal error |
 
 `-32010` through `-32012` are taken by parts of this protocol the document above does not yet describe, which is why they are not in the table; `-32003`, `-32004` and `-32014` name nothing and stay that way.
@@ -677,8 +759,9 @@ A code is a wire contract, so a gap is left as a gap rather than filled by the n
 
 ### Why a timeout is an error and not a result
 
-Because there is nothing to put in a result.
+Because the command did not end — it was ended, by a rule the client set, and its code says only that a `SIGKILL` arrived.
 It is also something a requester acts on specifically — retry with more time, or give up — which is exactly what a code is for.
+What it wrote is still worth having, so it rides in `data`, in the shape of the result it is not.
 
 ### Why an error is not an exit code
 
@@ -696,8 +779,8 @@ stateDiagram-v2
     Idle --> Up: start
     Idle --> Up: exec / read / write — boots first
     Idle --> Idle: boot failed → BOOT_FAILED
-    Up --> Up: exec / read / write → result
-    Up --> Idle: stop
+    Up --> Up: exec / spawn / poll / kill / read / write → result
+    Up --> Idle: stop — every job ends
     Idle --> [*]: quit
     Up --> [*]: quit
 ```
@@ -706,7 +789,7 @@ stateDiagram-v2
 `Idle` is therefore not a session that cannot work — it is a session that is not occupying anything, and the two edges a client controls by hand are there to keep it in that state while it is idle and out of it before it is busy.
 A boot that fails leaves `Idle`, so nothing thinks it is up, and the call that needed one hears `BOOT_FAILED`.
 
-What a session carries across all of this is small and worth naming: the tree from `init`, and **where it stands** — which the states above do not show because it is not one. It is seeded by `init`'s answer, moved by an execution that moves it, read back with `pwd`, and untouched by `start` and `stop`.
+What a session carries across all of this is small and worth naming: the tree from `init`, its jobs while it is `Up`, and **where it stands** — which the states above do not show because it is not one. It is seeded by `init`'s answer, moved by an execution that moves it, read back with `pwd`, and untouched by `start` and `stop`.
 
 `init` is not an edge at all. It is legal in either state, it boots and mounts nothing, and what it changes is the shape a future boot will take — its trees — which is why it drops back to `Idle` when it arrives in `Up`.
 The paths it named are a fact about every state after it: in `Idle` nothing is mounted there, in `Up` something is, and they are the same paths throughout.
@@ -727,10 +810,11 @@ Each of these is a capability given up on purpose, and each has one line of reas
 
 | not possible | why not |
 |---|---|
-| watch a command work | an agent cannot use a partial answer, so early output arrives to nobody. Streaming would cost a second shape for every ending and a second code path in every consumer — and JSON-RPC has no spelling for it: a request has one response. |
+| be told a command wrote something | the server never speaks first. A command watched while it runs is a [job](#spawn-poll-kill--a-command-that-is-watched-while-it-runs), and its output is *pulled* with `poll` — see [why the client pulls](#why-the-client-pulls). |
 | drive an interactive command | its prompt would arrive after the answer was due. An `exec` carries no input at all; what a command is to read goes where it will find it with a `write` beforehand. |
-| run something that never ends | `tail -f` has no result to send. `timeout_ms` is what ends it; without one, such an execution simply never answers. |
-| cancel one execution | `stop` hands back the whole session's resources, not a command, and nothing answers it. Let the timeout expire. |
-| output larger than 64 MiB | one frame, one result. `truncated` says when it happened — and an agent cannot read 64 MiB either, so the bound is closer to a feature. A *file* larger than that is readable, because `read` is bounded on purpose and `size` says where to ask next. |
+| run something that never ends, *in an `exec`* | `tail -f` has no result to send, and `timeout_ms` is what ends it. `spawn` it instead: a job answers at once, and its output is polled for as long as it runs. |
+| cancel an `exec` | the console is waiting on it, so there is no moment to ask. `spawn` a command that may need stopping, and `kill` the job. |
+| keep a job across a `stop` | a job is a process in the boot, and `stop` releases the boot. Leave the session up while something has to keep running. |
+| output larger than 64 MiB, *from an `exec`* | one frame, one result. `truncated` says when it happened — and an agent cannot read 64 MiB either, so the bound is closer to a feature. A *file* larger than that is readable, because `read` is bounded on purpose and `size` says where to ask next, and so is a job's output, a `poll` at a time. |
 | run one command somewhere else | there is no `cwd` on a request, because the session's own is the only authority on where a command runs — see [Where the session stands](#where-the-session-stands). `sh -c 'cd there && …'` is how, and moving back is the caller's. |
 | put a *fourth* tree in one session | the three members are fixed, and each says what its tree is for. A session that needs several workspaces gets them the way a session gets one tree of many stores: composed behind a single URL, where the composing is [`fs`](../fs/ARCHITECTURE.md)'s and not this protocol's. A fourth *role* would be a new member here, argued the way [the trees](#the-trees--what-can-be-reached-and-where-it-ends-up) argues these. |

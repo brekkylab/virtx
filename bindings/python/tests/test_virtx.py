@@ -1,13 +1,17 @@
 import asyncio
+import gc
 import os
 import shutil
 import struct
+import time
+import uuid
 
 import pytest
 
 import virtx
 from virtx import (
     ConsoleClient,
+    ConsoleRefused,
     VirtxError,
     Directory,
     ErrorCode,
@@ -53,6 +57,14 @@ def test_a_port_is_spelled_the_way_docker_spells_it():
 def test_error_codes_are_virtx_s():
     assert ErrorCode.TIMED_OUT == -32000
     assert ErrorCode.INTERNAL_ERROR == -32603
+    assert ErrorCode.UNKNOWN_JOB == -32015
+    assert ErrorCode.TOO_MANY_JOBS == -32016
+
+
+def test_jobs_are_exported():
+    for name in ("Job", "Chunk", "ExecStream"):
+        assert name in virtx.__all__
+        assert getattr(virtx, name).__module__ == "virtx"
 
 
 def test_directory_refuses_a_file_under_a_mount(tmp_path):
@@ -186,3 +198,136 @@ async def test_relay_answers_through_its_callback():
 
     await console.close()
     assert await relay(console, b"") == (None, "this console has been closed")
+
+
+async def job_console():
+    """A booted console for the job tests."""
+    console = await ConsoleClient.builder().cmd([SERVER]).image(Recipe("alpine:3.20")).build()
+    # Booted first, so the boot is not counted against what a test times.
+    await console.exec(["true"])
+    return console
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_a_command_printing_once_a_second_is_seen_once_a_second():
+    async with await job_console() as console:
+        ticks, codes = [], []
+        stream = console.exec_stream(["sh", "-c", "for i in 1 2 3; do echo tick $i; sleep 1; done"])
+        async for chunk in stream:
+            now = time.monotonic()
+            ticks += [(line, now) for line in chunk.stdout.decode().splitlines()]
+            codes.append(chunk.code)
+
+        assert [line for line, _ in ticks] == ["tick 1", "tick 2", "tick 3"]
+        for (_, earlier), (_, later) in zip(ticks, ticks[1:]):
+            assert later - earlier > 0.5
+        # Only the last chunk carries the code.
+        assert codes[-1] == 0 and all(code is None for code in codes[:-1])
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_a_timeout_keeps_the_output_up_to_the_kill():
+    cmd = ["sh", "-c", "echo started; echo err >&2; sleep 5"]
+    async with await job_console() as console:
+        with pytest.raises(ConsoleRefused) as raised:
+            await console.exec(cmd, timeout_ms=1000)
+        assert raised.value.code == ErrorCode.TIMED_OUT
+        assert raised.value.stdout == b"started\n"
+        assert raised.value.stderr == b"err\n"
+        assert raised.value.truncated is False
+
+        # A stream ends in the same refusal, with what the chunks before it did not carry.
+        stdout, stderr = b"", b""
+        with pytest.raises(ConsoleRefused) as raised:
+            async for chunk in console.exec_stream(cmd, timeout_ms=1000):
+                stdout, stderr = stdout + chunk.stdout, stderr + chunk.stderr
+        assert raised.value.code == ErrorCode.TIMED_OUT
+        assert stdout + raised.value.stdout == b"started\n"
+        assert stderr + raised.value.stderr == b"err\n"
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_a_console_answers_while_a_job_runs():
+    log = f"/tmp/virtx-{uuid.uuid4().hex}.log"
+    async with await job_console() as console:
+        job = await console.spawn(["sh", "-c", f"echo partial | tee {log}; sleep 3; echo done"])
+        started = time.monotonic()
+        first = await job.poll(wait_ms=2000)
+        assert first.stdout == b"partial\n" and first.code is None
+
+        # The log the job is writing, read while it runs.
+        assert (await console.read(log)).data == b"partial\n"
+        assert (await console.exec(["echo", "meanwhile"])).stdout == b"meanwhile\n"
+        assert time.monotonic() - started < 3
+
+        stdout = b""
+        while (chunk := await job.poll(wait_ms=1000)).code is None:
+            stdout += chunk.stdout
+        assert stdout + chunk.stdout == b"done\n"
+        assert chunk.code == 0
+
+        # Its end was reported, so the server holds it no longer.
+        with pytest.raises(ConsoleRefused) as raised:
+            await job.poll()
+        assert raised.value.code == ErrorCode.UNKNOWN_JOB
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_leaving_a_stream_early_kills_its_command():
+    async def size(path):
+        return (await console.read(path)).size
+
+    async def beating(path):
+        """A stream of a command that appends to `path` five times a second, one chunk in."""
+        stream = console.exec_stream(
+            ["sh", "-c", f"while :; do echo beat; echo x >> {path}; sleep 0.2; done"]
+        )
+        async for chunk in stream:
+            if b"beat" in chunk.stdout:
+                break
+        return stream
+
+    async with await job_console() as console:
+        closed = f"/tmp/virtx-{uuid.uuid4().hex}"
+        await (await beating(closed)).aclose()
+        before = await size(closed)
+        await asyncio.sleep(1)
+        assert await size(closed) == before
+
+        # Dropped rather than closed: the kill goes out on its own.
+        collected = f"/tmp/virtx-{uuid.uuid4().hex}"
+        stream = await beating(collected)
+        del stream
+        gc.collect()
+        await asyncio.sleep(0.5)
+        before = await size(collected)
+        await asyncio.sleep(1)
+        assert await size(collected) == before
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_a_job_in_async_with_is_discarded_when_the_block_is_left():
+    async with await job_console() as console:
+        async with await console.spawn(["sleep", "60"]) as job:
+            assert (await job.poll()).code is None
+        with pytest.raises(ConsoleRefused) as gone:
+            await job.poll()
+        assert gone.value.code == ErrorCode.UNKNOWN_JOB
+
+
+@pytest.mark.skipif(not SERVER or not shutil.which(SERVER), reason="set $VIRTX_CONSOLE")
+async def test_a_job_let_go_of_is_reached_again_by_its_id():
+    async with await job_console() as console:
+        id = (await console.spawn(["sh", "-c", "echo hi; sleep 60"])).id
+        gc.collect()
+
+        job = console.job(id)
+        assert job.id == id
+        assert (await job.poll(wait_ms=5000)).stdout == b"hi\n"
+        await job.discard()
+        with pytest.raises(ConsoleRefused) as gone:
+            await console.job(id).poll()
+        assert gone.value.code == ErrorCode.UNKNOWN_JOB
+
+        # A job already gone leaves nothing to do.
+        await job.discard()

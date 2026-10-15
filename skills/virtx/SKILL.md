@@ -69,6 +69,8 @@ print(result.code, result.stdout.decode(), result.stderr.decode())
 
 `exec` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. The result carries the exit code and both output streams as bytes. `read` and `write` move a file between the host and a mounted path without a command. In Python the console is an async context manager; in Node call `close()` in a `finally`; in Rust dropping the client ends the session. A server that refuses the session, such as a missing image or a mount the host cannot make, fails at `build()` with a coded error, not at the first command.
 
+A command that runs for minutes, or never ends, is better not `exec`ed: `async for chunk in console.exec_stream([...])` shows its output as it is written, and `job = await console.spawn([...])` leaves it running while the console takes other calls, with `job.poll(wait_ms=...)` for its output and `job.kill()` to stop it. Spawn it as `async with await console.spawn([...]) as job:` so leaving the block discards it, or call `await job.discard()`: a job the server holds and nobody polls takes one of a bounded number of slots until the session stops. A command killed at `timeout_ms` raises `ConsoleRefused` with `code == ErrorCode.TIMED_OUT`, and its `stdout` and `stderr` hold what it wrote up to the kill, which is usually what says why it hung.
+
 ## 5. Check the result where it landed
 
 Look at the writable mount on the host, or at `result.stdout`, rather than at the command's exit code alone: a session that printed "done" into a mount the task never declared has written nothing the host can see. If a file is missing, the usual causes are a path outside the mounts, a read-only mount, or a step the image needed and lacked.

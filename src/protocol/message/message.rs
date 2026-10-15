@@ -24,7 +24,8 @@ pub const VERSION: &str = "2.0";
 ///
 /// Allocated by the client, counting up from zero; the server attaches no meaning to it.
 /// With one request outstanding, the id buys certainty rather than concurrency: an
-/// answer carrying an unissued id is from a peer that lost its place, and is dropped.
+/// answer carrying an unissued id is from a peer that lost its place, and is dropped. One
+/// carrying an earlier id answers a call its caller stopped waiting for, and is skipped.
 ///
 /// JSON-RPC also allows string or null ids; this protocol issues only numbers.
 pub type RequestId = u64;
@@ -316,6 +317,52 @@ mod tests {
                 Message::Response {
                     id: 7,
                     result: Response::Error(Error::new(Error::NOT_FOUND, "out/log.txt")),
+                },
+                // A job: started, polled while it runs, signalled, and its ending collected.
+                Message::Request {
+                    id: 13,
+                    call: Call::Spawn(ExecCall {
+                        cmd: vec!["make".into()],
+                        timeout_ms: Some(600_000),
+                    }),
+                },
+                Message::Response {
+                    id: 13,
+                    result: Response::Spawn(super::super::SpawnResp { job: 0 }),
+                },
+                Message::Request {
+                    id: 14,
+                    call: Call::Poll(super::super::PollCall {
+                        job: 0,
+                        wait_ms: Some(1000),
+                        max_bytes: None,
+                    }),
+                },
+                Message::Response {
+                    id: 14,
+                    result: Response::Poll(super::super::PollResp {
+                        stdout: b"tick 1\n".to_vec(),
+                        ..Default::default()
+                    }),
+                },
+                Message::Request {
+                    id: 15,
+                    call: Call::Kill(super::super::KillCall {
+                        job: 0,
+                        signal: Some(15),
+                    }),
+                },
+                Message::Response {
+                    id: 15,
+                    result: Response::Kill(super::super::KillResp {}),
+                },
+                Message::Response {
+                    id: 16,
+                    result: Response::Poll(super::super::PollResp {
+                        code: Some(143),
+                        truncated: true,
+                        ..Default::default()
+                    }),
                 },
                 // A whole-file write: no offset.
                 Message::Request {

@@ -9,6 +9,8 @@ use std::fmt;
 use bson::Bson;
 use serde::{Deserialize, Serialize};
 
+use super::ExecResp;
+
 /// Why a request could not be answered with a result.
 ///
 /// `data` is optional extra context, boxed because a [`Bson`] is several times the size
@@ -24,11 +26,12 @@ pub struct Error {
 /// The `init` codes depend only on the frame and the server (its build, host and stored
 /// images), so they are raised before any boot.
 impl Error {
-    /// `exec`: the execution outlived its [`timeout_ms`](super::ExecCall::timeout_ms) and
-    /// was killed.
+    /// `exec`, `poll`: the execution outlived its [`timeout_ms`](super::ExecCall::timeout_ms)
+    /// and was killed.
     ///
-    /// An error, not a result: a killed command has no exit code, and its output is
-    /// discarded. Retry with more time, or give up.
+    /// An error, not a result, because the command did not end by itself. What it wrote up
+    /// to the kill is in `data`, read with [`output`](Self::output). Retry with more time, or
+    /// give up.
     pub const TIMED_OUT: i64 = -32000;
 
     /// `exec`: the program was not there, or could not be started.
@@ -93,6 +96,15 @@ impl Error {
     /// A retry will not help: the request, or the server, has to change.
     pub const UNSUPPORTED_MACHINE: i64 = -32013;
 
+    /// `poll`, `kill`: the server holds no job by that id. Its end was already reported, or
+    /// a `stop` or an `init` ended it, or it was never spawned.
+    pub const UNKNOWN_JOB: i64 = -32015;
+
+    /// `spawn`: the server already holds as many jobs as it will. A job is held until the
+    /// `poll` that reports its end, so poll one to it, killing it first if it should not
+    /// finish ([`ConsoleClient::discard`](crate::console::ConsoleClient::discard) does both).
+    pub const TOO_MANY_JOBS: i64 = -32016;
+
     /// The spec codes a peer can hit here. `-32700` (parse error) belongs to the frame
     /// reader.
     pub const INVALID_REQUEST: i64 = -32600;
@@ -106,6 +118,21 @@ impl Error {
             message: message.into(),
             data: None,
         }
+    }
+
+    /// The same refusal, carrying what the command wrote before it was killed.
+    pub fn with_output(mut self, output: &ExecResp) -> Self {
+        // Serializing an `ExecResp` to a value cannot fail: every member has a BSON type.
+        self.data = bson::serialize_to_bson(output).ok().map(Box::new);
+        self
+    }
+
+    /// What the command wrote before it was killed: the `data` of a
+    /// [`TIMED_OUT`](Self::TIMED_OUT). `None` for any other refusal, and for one from a server
+    /// that sends no `data`.
+    pub fn output(&self) -> Option<ExecResp> {
+        let data = self.data.as_deref()?;
+        bson::deserialize_from_bson(data.clone()).ok()
     }
 }
 
@@ -136,6 +163,9 @@ mod tests {
             ("UNSUPPORTED_NETWORK", Error::UNSUPPORTED_NETWORK),
             ("UNSUPPORTED_IMAGE", Error::UNSUPPORTED_IMAGE),
             ("UNKNOWN_IMAGE", Error::UNKNOWN_IMAGE),
+            ("UNSUPPORTED_MACHINE", Error::UNSUPPORTED_MACHINE),
+            ("UNKNOWN_JOB", Error::UNKNOWN_JOB),
+            ("TOO_MANY_JOBS", Error::TOO_MANY_JOBS),
             ("INVALID_REQUEST", Error::INVALID_REQUEST),
             ("METHOD_NOT_FOUND", Error::METHOD_NOT_FOUND),
             ("INVALID_PARAMS", Error::INVALID_PARAMS),
@@ -147,5 +177,36 @@ mod tests {
                 panic!("{code} is both {taken} and {name}");
             }
         }
+    }
+
+    /// A killed command's output survives the frame byte for byte, and a refusal without it
+    /// has none to give.
+    #[test]
+    fn a_timeout_carries_what_was_written() {
+        use crate::protocol::{ExecResp, Message, Response};
+
+        let written = ExecResp {
+            code: 137,
+            stdout: b"started\n".to_vec(),
+            stderr: vec![0xff, 0x00],
+            truncated: false,
+        };
+        let refused = Error::new(Error::TIMED_OUT, "killed after 1000ms").with_output(&written);
+
+        let message = Message::Response {
+            id: 2,
+            result: Response::Error(refused),
+        };
+        let frame = bson::serialize_to_vec(&message).unwrap();
+        let Message::Response {
+            result: Response::Error(read),
+            ..
+        } = bson::deserialize_from_slice(&frame).unwrap()
+        else {
+            panic!("an error went out and something else came back");
+        };
+        assert_eq!(read.output(), Some(written));
+
+        assert_eq!(Error::new(Error::TIMED_OUT, "old server").output(), None);
     }
 }

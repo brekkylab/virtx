@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::message::utils::bytes;
 
-/// One execution. The `params` of `exec`.
+/// One execution. The `params` of `exec`, and of `spawn`, which runs the same command as a job.
 ///
 /// Only a command and a time bound: where it runs is the session's, what it runs with is
 /// the executor's. It takes no stdin: stage input with a [`WriteCall`](super::WriteCall)
@@ -20,7 +20,9 @@ pub struct ExecCall {
     ///
     /// Expiry is an immediate kill with no grace period or second signal: a simple rule
     /// every backend (including a micro-VM guest) can keep. The requester gets
-    /// [`TIMED_OUT`](crate::protocol::Error::TIMED_OUT).
+    /// [`TIMED_OUT`](crate::protocol::Error::TIMED_OUT), carrying what the command wrote up to
+    /// the kill ([`Error::output`](crate::protocol::Error::output)): from `exec`, or from the
+    /// `poll` that reports a job's end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
@@ -37,12 +39,14 @@ impl ExecCall {
 ///
 /// An execution with no result (killed at its timeout, never started) is an `error` with
 /// a code instead (see [`Error`](crate::protocol::Error)), since an exit code (e.g.
-/// 126/127) could be forged by `exit()`.
+/// 126/127) could be forged by `exit()`. A timed-out one carries this shape in the error's
+/// `data`: what it wrote up to the kill.
 ///
 /// Sent unwrapped, so later additions are new members, which older peers ignore.
 ///
-/// Whole, never streamed: the caller is an agent that cannot act on partial output before
-/// its next inference, so streaming would buy only a second shape and code path.
+/// Whole: an `exec` answers once, when the command has ended. A command whose output is
+/// wanted while it runs is `spawn`ed instead, and what it writes comes back a
+/// [`PollResp`](super::PollResp) at a time.
 ///
 /// The session's current directory is not reported, even if the command moved it: a
 /// result describes the command, not the machine. Run `pwd` to ask.

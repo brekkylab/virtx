@@ -12,14 +12,14 @@ virtx is a library for running tasks in disposable Linux micro-VMs from your own
 
 ## Where a change goes
 
-- `src/console.rs` — the console client: the builder (image, mounts, network, GPU, resources) and `exec`, `read`, `write` on a session.
+- `src/console.rs` — the console client: the builder (image, mounts, network, GPU, resources) and `exec`, `read`, `write` on a session, plus the jobs `spawn`, `poll`, `kill` and `exec_stream` that watch a command while it runs.
 - `src/protocol/` — the messages and the stdio channel a console client and server speak. `message/` is the vocabulary, `stdio/` the transport.
 - `src/fs/` — what a session reads and writes: the in-memory `Directory`, the `FileSystem` trait and its backends under `filesystem/impl/` (host passthrough, S3, Notion, Google Drive, OneDrive), and the per-OS mount bindings under `mount/impl/` (FUSE on Linux, FUSE-T on macOS, Dokany on Windows).
 - `src/image.rs` — recipes, references and digests, and the client that builds and lists images.
 - `src/ensure.rs` — fetching the console server binary into `$VIRTX_HOME/bin`: the release is `$VIRTX_UVM_VERSION` if set, else the one this build was pinned to, else `latest`, from `$VIRTX_DIST_URL` or the default bucket.
 - `contrib/fuse_t/` — the C shim FUSE-T is loaded through on macOS, and the ABI check against its headers.
 - `bindings/python/src/` and `bindings/node/src/` — the wrappers, in Rust. The Python package itself is `bindings/python/python/virtx/`; the Node package is `bindings/node/index.js` and its `.d.ts`.
-- `tests/` — integration tests: real mounts (`host_mount`, `mount_teardown`, `mount_sigchld`) and the remote backends (`s3_endpoint`, `gdrive_endpoint`, `onedrive_endpoint`). Unit tests are in-module under `#[cfg(test)]`.
+- `tests/` — integration tests: real mounts (`host_mount`, `mount_teardown`, `mount_sigchld`) the remote backends (`s3_endpoint`, `gdrive_endpoint`, `onedrive_endpoint`), and a real console server (`console_jobs`). Unit tests are in-module under `#[cfg(test)]`.
 - `scripts/packages/` — what the release workflow runs to pack and smoke-test every package.
 
 ## Tests and lint
@@ -38,7 +38,7 @@ cargo test -- --ignored                                                # real mo
 - `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and clippy plus the library's tests on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - A bare `cargo test` runs the default features' tests. A change under a feature (`s3`, `notion`, `gdrive`, `onedrive`) runs with that feature on, and a change to shared code runs the sweep in `Cargo.toml`'s `[features]` comment.
 - The mount tests are `#[ignore]` because they mount a real filesystem: on macOS they need FUSE-T 1.2.9 or later, on Windows Dokany, on Linux `fusermount3`. Run them with `--ignored` whenever `src/fs/mount/` changes.
-- The endpoint tests skip without their service: `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_REFRESH_TOKEN`, `BACKLOT_URL` for Google Drive, a reachable object store for S3. Say which ran when you report a run.
+- The endpoint tests skip without their service: `ONEDRIVE_CLIENT_ID` and `ONEDRIVE_REFRESH_TOKEN`, `BACKLOT_URL` for Google Drive, a reachable object store for S3. `console_jobs` and the bindings' console tests skip without `VIRTX_CONSOLE`, the path of a console server to run. Say which ran when you report a run.
 - A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the same surface the behaviour lives in: the library's tests are in-module or under `tests/`, the bindings' are `bindings/python/tests/` and `bindings/node/__test__/`.
 
 ## Comments and docs

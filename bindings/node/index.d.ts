@@ -15,6 +15,22 @@ export declare class ConsoleClient {
   start(): Promise<void>
   stop(): Promise<void>
   exec(cmd: Array<string>, timeoutMs?: number | undefined | null): Promise<ExecResult>
+  /**
+   * Start a command and settle with its `Job` at once, leaving it running; the console takes
+   * other calls meanwhile.
+   */
+  spawn(cmd: Array<string>, timeoutMs?: number | undefined | null): Promise<Job & AsyncDisposable>
+  /**
+   * Run a command and iterate its output as it is written, with `for await`. Spawned on the
+   * first `next()`, which rejects with any refusal to start it.
+   */
+  execStream(cmd: Array<string>, timeoutMs?: number | undefined | null): ExecStream & AsyncIterable<Chunk>
+  /**
+   * A handle to the job this console spawned under `id`, for one whose `Job` was let go of.
+   * Nothing is asked of the server: an id it does not hold is `UNKNOWN_JOB` at the first
+   * call.
+   */
+  job(id: number): Job & AsyncDisposable
   read(path: string, offset?: number | undefined | null, len?: number | undefined | null): Promise<ReadResult>
   /** Put `data` in a file, settling with the file's size afterwards. */
   write(path: string, data: Buffer | string, offset?: number | undefined | null): Promise<number>
@@ -82,6 +98,19 @@ export declare class Directory {
 export type JsDirectory = Directory
 
 /**
+ * A command's output as it is written, iterated with `for await`: each `Chunk` is what arrived
+ * since the last, and the last carries the `code`. A command killed at its timeout rejects
+ * with `TIMED_OUT` instead, carrying its last bytes. Left by `break` (which calls `return()`),
+ * or garbage-collected, before its command ended, it kills the command.
+ */
+export declare class ExecStream {
+  next(): Promise<IteratorResult<Chunk, undefined>>
+  /** Kill the command if it is still running, and settle once the server has let it go. */
+  return(): Promise<IteratorResult<Chunk, undefined>>
+}
+export type JsExecStream = ExecStream
+
+/**
  * A tree mounted on this host until `unmount()` or until nothing holds it.
  *
  * Passing it to a console builder shares it rather than taking it: without `unmount()` it
@@ -131,6 +160,32 @@ export declare class ImageSource {
 }
 export type JsImageSource = ImageSource
 
+/**
+ * A spawned command. The server holds it until the poll that carries its `code`, so poll it to
+ * its end or discard it; garbage collection does not kill it. Declared with `await using`, it is
+ * discarded when its block is left; `ConsoleClient.job(id)` makes another handle to it.
+ */
+export declare class Job {
+  get id(): number
+  /**
+   * What the job wrote since the last poll, waiting up to `waitMs` when there is nothing
+   * yet; `maxBytes` bounds each stream. A job killed at its timeout rejects with
+   * `TIMED_OUT`, carrying its last bytes.
+   */
+  poll(waitMs?: number | undefined | null, maxBytes?: number | undefined | null): Promise<Chunk>
+  /**
+   * Kill the job and collect it, dropping what it wrote, so the server no longer holds it. A
+   * job already gone, or a console already closed, leaves nothing to do.
+   */
+  discard(): Promise<void>
+  /**
+   * Send `signal` (`SIGKILL` when omitted) to the job and everything it started; the next
+   * poll reports how it ended.
+   */
+  kill(signal?: number | undefined | null): Promise<void>
+}
+export type JsJob = Job
+
 export declare class Recipe {
   constructor(base: string, steps?: Array<Step | string>)
   static fromDockerfile(content: string): Recipe
@@ -155,6 +210,15 @@ export type JsStep = Step
 export interface BuildImageResult {
   reference: string
   digest: string
+}
+
+/** What a job wrote since the last poll. */
+export interface Chunk {
+  stdout: Buffer
+  stderr: Buffer
+  truncated: boolean
+  /** How the job ended: set on the last chunk only, after which the job is gone. */
+  code?: number
 }
 
 /**

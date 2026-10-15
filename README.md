@@ -374,6 +374,45 @@ async fn main() -> anyhow::Result<()> {
 Rebuilding under the same ref moves it to the new build, while `ImageSource::digest(&built.digest)` stays on this one.  
 `images.list()` shows what's built, and `images.remove(...)` deletes an image by its ref or digest.
 
+### Long-running commands
+
+`exec` answers once, when the command ends. A build, a test suite or a server is better watched while it runs: `exec_stream` yields its output as it is written, and `spawn` leaves it running as a job whose output you poll while the console takes other calls.
+
+```python
+import asyncio
+
+from virtx import ConsoleClient, ConsoleRefused, ErrorCode, Recipe, ensure_virtx
+
+
+async def main() -> None:
+    await ensure_virtx()
+    async with await ConsoleClient.builder().image(Recipe("alpine:latest")).build() as console:
+        # Each chunk is what arrived since the last; the last one carries the exit code.
+        async for chunk in console.exec_stream(
+            ["sh", "-c", "for i in 1 2 3; do echo tick $i; sleep 1; done"]
+        ):
+            print(chunk.stdout.decode(), end="")
+
+        # Left running while the console answers other calls, and discarded with the block.
+        async with await console.spawn(
+            ["sh", "-c", "while true; do date >> /tmp/log; sleep 1; done"]
+        ):
+            await asyncio.sleep(2)
+            print((await console.read("/tmp/log")).data.decode(), end="")
+
+        # A command killed at its timeout still says what it wrote.
+        try:
+            await console.exec(["sh", "-c", "echo started; sleep 5"], timeout_ms=1000)
+        except ConsoleRefused as e:
+            assert e.code == ErrorCode.TIMED_OUT
+            print(e.stdout.decode(), end="")
+
+
+asyncio.run(main())
+```
+
+A job is held until the poll that carries its code, or until it is discarded, as leaving the `async with` block does; `stop` ends every job still running. Node has the same as `execStream` and `spawn`, and Rust as `exec_stream`, `spawn`, `poll` and `kill` on `ConsoleClient`.
+
 ## Cache
 
 virtx keeps all persistent state in a single cache directory that you can safely delete at any time:

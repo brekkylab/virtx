@@ -50,8 +50,9 @@
 //! * [`fs`]: what a session reads and writes. Stores, the in-memory [`Directory`](fs::Directory), and the
 //!   bindings that mount them on the host.
 //! * [`console`]: what a session runs. [`ConsoleClient`](console::ConsoleClient) runs commands
-//!   in a session, which [`Relay`](console::Relay) shares with another native module in the
-//!   same process (ailoy's, say).
+//!   in a session, to their end with `exec` or as jobs watched while they run with `spawn`,
+//!   `poll` and [`ExecStream`](console::ExecStream). [`Relay`](console::Relay) shares the
+//!   session with another native module in the same process (ailoy's, say).
 //! * [`protocol`]: the wire between a console client and a console server. The server is a
 //!   prebuilt binary, `virtx-uvm`, that `ensure_virtx` fetches into the cache's `bin`.
 //! * [`image`]: the images a session runs on, declared or built ahead of time.

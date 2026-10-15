@@ -42,6 +42,9 @@
 //! | `list_images` | [`ListImagesCall`] | [`ListImagesResp`] | — |
 //! | `init` | [`InitCall`] | [`InitResp`] | [`INVALID_PARAMS`](Error::INVALID_PARAMS), [`UNSUPPORTED_MOUNT`](Error::UNSUPPORTED_MOUNT), [`UNSUPPORTED_NETWORK`](Error::UNSUPPORTED_NETWORK), [`UNSUPPORTED_IMAGE`](Error::UNSUPPORTED_IMAGE), [`UNKNOWN_IMAGE`](Error::UNKNOWN_IMAGE), [`UNSUPPORTED_MACHINE`](Error::UNSUPPORTED_MACHINE) |
 //! | `exec` | [`ExecCall`] | [`ExecResp`] | [`INVALID_PARAMS`](Error::INVALID_PARAMS), [`TIMED_OUT`](Error::TIMED_OUT), [`NOT_EXECUTABLE`](Error::NOT_EXECUTABLE), [`BOOT_FAILED`](Error::BOOT_FAILED), [`MOUNT_FAILED`](Error::MOUNT_FAILED) |
+//! | `spawn` | [`ExecCall`] | [`SpawnResp`] | [`INVALID_PARAMS`](Error::INVALID_PARAMS), [`NOT_EXECUTABLE`](Error::NOT_EXECUTABLE), [`TOO_MANY_JOBS`](Error::TOO_MANY_JOBS), [`BOOT_FAILED`](Error::BOOT_FAILED), [`MOUNT_FAILED`](Error::MOUNT_FAILED) |
+//! | `poll` | [`PollCall`] | [`PollResp`] | [`UNKNOWN_JOB`](Error::UNKNOWN_JOB), [`TIMED_OUT`](Error::TIMED_OUT) |
+//! | `kill` | [`KillCall`] | [`KillResp`] | [`UNKNOWN_JOB`](Error::UNKNOWN_JOB), [`INVALID_PARAMS`](Error::INVALID_PARAMS) |
 //! | `read` | [`ReadCall`] | [`ReadResp`] | [`NOT_FOUND`](Error::NOT_FOUND), [`IS_A_DIRECTORY`](Error::IS_A_DIRECTORY), [`IO_FAILED`](Error::IO_FAILED), [`BOOT_FAILED`](Error::BOOT_FAILED), [`MOUNT_FAILED`](Error::MOUNT_FAILED) |
 //! | `write` | [`WriteCall`] | [`WriteResp`] | [`NOT_FOUND`](Error::NOT_FOUND), [`IS_A_DIRECTORY`](Error::IS_A_DIRECTORY), [`IO_FAILED`](Error::IO_FAILED), [`BOOT_FAILED`](Error::BOOT_FAILED), [`MOUNT_FAILED`](Error::MOUNT_FAILED) |
 //! | `snapshot` | [`SnapshotCall`] | [`SnapshotResp`] | [`BOOT_FAILED`](Error::BOOT_FAILED), [`MOUNT_FAILED`](Error::MOUNT_FAILED) |
@@ -57,10 +60,11 @@
 //!   *is*, and its answer is the first thing a client can act on.
 //! - **Failure is an `error` with a code**, the only failure channel: a requester branches
 //!   on [`Error::code`], and an `error` cannot be mistaken for a command's exit status.
-//! - **An execution is one request and one response, never a stream.** The caller is an
-//!   agent that cannot act on partial output, so [`ExecResp`] arrives whole, bounded by
-//!   [`MAX_PAYLOAD`]. It takes no stdin (stage files with `write`, collect them with
-//!   `read`), and a command that never ends needs [`timeout_ms`](ExecCall::timeout_ms).
+//! - **An `exec` is one request and one response.** [`ExecResp`] arrives whole, bounded by
+//!   [`MAX_PAYLOAD`]. A command whose output is wanted while it runs is a `spawn`ed job
+//!   instead, whose output the client *pulls* with `poll`: still one answer per request, so
+//!   the server never speaks first and the console is free between two polls. Neither takes
+//!   stdin (stage files with `write`, collect them with `read`).
 //! - **Program bytes are bytes; names are text.** Output and file contents are raw bytes;
 //!   an argv and a path are UTF-8, since both ends must interpret them.
 //!
@@ -113,8 +117,8 @@ pub use message::*;
 /// [`Response`] becomes what its method returns.
 ///
 /// `&mut self` throughout, with no `&self`-plus-lock: one call is outstanding at a time,
-/// and a `read` interleaved with a running command is a question the server cannot answer
-/// yet. The exclusive borrow checks this; for concurrency, open a second console.
+/// and the exclusive borrow checks this. A command that should run while other calls go out
+/// is [`spawn`](Self::spawn)ed and polled; for calls that truly overlap, open a second console.
 pub trait Client: Send {
     /// Make one call and wait for its response.
     ///
@@ -124,8 +128,10 @@ pub trait Client: Send {
     /// An [`Error`](crate::protocol::Response::Error) arrives as
     /// [`Refused`](Failure::Refused), so a caller handles "no answer" in one shape.
     ///
-    /// Not cancel-safe: dropping this future mid-call may leave a half-read frame, so the
-    /// client is unusable afterwards. Bound an execution with
+    /// Not cancel-safe: dropping this future while its answer is being read leaves a
+    /// half-read frame, and the client unusable afterwards. Dropped after its request went
+    /// out and before any of its answer arrived, the answer is still owed: the server sends it
+    /// before the next call's, and the transport skips it. Bound an execution with
     /// [`timeout_ms`](ExecCall::timeout_ms), not by cancelling the wait.
     fn call(&mut self, call: Call) -> BoxFuture<'_, Result<Response, Failure>>;
 
@@ -196,13 +202,47 @@ pub trait Client: Send {
     /// Run one command and return everything it produced.
     ///
     /// A command that failed is still `Ok`, with a non-zero [`code`](ExecResp::code).
-    /// [`Refused`](Failure::Refused) means no result at all: it timed out, or there was
-    /// nothing to run, or the session could not be brought up.
+    /// [`Refused`](Failure::Refused) means no result: it timed out (its output up to the kill
+    /// is in [`Error::output`]), or there was nothing to run, or the session could not be
+    /// brought up.
     fn exec(&mut self, exec: ExecCall) -> BoxFuture<'_, Result<ExecResp, Failure>> {
         Box::pin(async move {
             match self.call(Call::Exec(exec)).await? {
                 Response::Exec(answer) => Ok(answer),
                 other => Err(mismatched(Method::Exec, other)),
+            }
+        })
+    }
+
+    /// Start a command and answer at once with its job, leaving it running.
+    fn spawn(&mut self, spawn: ExecCall) -> BoxFuture<'_, Result<SpawnResp, Failure>> {
+        Box::pin(async move {
+            match self.call(Call::Spawn(spawn)).await? {
+                Response::Spawn(answer) => Ok(answer),
+                other => Err(mismatched(Method::Spawn, other)),
+            }
+        })
+    }
+
+    /// What a job wrote since the last poll, and its code once it has ended.
+    ///
+    /// A job that timed out ends in [`TIMED_OUT`](Error::TIMED_OUT) instead, with these bytes
+    /// in [`Error::output`].
+    fn poll(&mut self, poll: PollCall) -> BoxFuture<'_, Result<PollResp, Failure>> {
+        Box::pin(async move {
+            match self.call(Call::Poll(poll)).await? {
+                Response::Poll(answer) => Ok(answer),
+                other => Err(mismatched(Method::Poll, other)),
+            }
+        })
+    }
+
+    /// Signal a job; the next poll reports how it ended.
+    fn kill(&mut self, kill: KillCall) -> BoxFuture<'_, Result<KillResp, Failure>> {
+        Box::pin(async move {
+            match self.call(Call::Kill(kill)).await? {
+                Response::Kill(answer) => Ok(answer),
+                other => Err(mismatched(Method::Kill, other)),
             }
         })
     }

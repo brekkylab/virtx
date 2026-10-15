@@ -7,13 +7,14 @@ use pyo3_async_runtimes::tokio::{future_into_py, get_runtime};
 use tokio::sync::Mutex;
 use virtx::{
     console::{ConsoleClient, ConsoleClientBuilder},
-    protocol::{ExecResp, Failure, Port, ReadResp},
+    protocol::{ExecResp, Failure, JobId, Port, ReadResp},
 };
 
 use crate::{
     error::{self, VirtxError},
     fs::{Content, MountLike},
     image::ImageSourceLike,
+    job::{PyExecStream, PyJob},
 };
 
 /// A [`ConsoleClientBuilder`], mutated in place (the Rust one is consumed per call and is not
@@ -121,13 +122,21 @@ impl PyConsoleClientBuilder {
 }
 
 /// The console a slot holds, or the error for one that has been closed.
-fn held(slot: &mut Option<ConsoleClient>) -> PyResult<&mut ConsoleClient> {
+pub(crate) fn held(slot: &mut Option<ConsoleClient>) -> PyResult<&mut ConsoleClient> {
     slot.as_mut()
         .ok_or_else(|| VirtxError::new_err("this console has been closed"))
 }
 
 /// A console slot: the console, or `None` once closed.
-type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+pub(crate) type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+
+/// Drop the console if `slot` is its last holder, inside the runtime so `quit` goes out.
+pub(crate) fn release(slot: &mut Slot) {
+    if let Some(slot) = Arc::get_mut(slot) {
+        let _entered = get_runtime().enter();
+        slot.get_mut().take();
+    }
+}
 
 #[pyclass(name = "ConsoleClient", module = "virtx", frozen)]
 pub struct PyConsoleClient {
@@ -152,13 +161,9 @@ impl PyConsoleClient {
     }
 }
 
-/// Only the last holder drops the console, inside the runtime so `quit` goes out.
 impl Drop for PyConsoleClient {
     fn drop(&mut self) {
-        if let Some(slot) = Arc::get_mut(&mut self.console) {
-            let _entered = get_runtime().enter();
-            slot.get_mut().take();
-        }
+        release(&mut self.console);
     }
 }
 
@@ -203,6 +208,39 @@ impl PyConsoleClient {
             let resp = held(&mut slot)?.exec(cmd, timeout_ms).await;
             resp.map(PyExecResult::from).map_err(error::failure)
         })
+    }
+
+    /// Start a command and resolve to its `Job` at once, leaving it running.
+    #[pyo3(signature = (cmd, timeout_ms = None))]
+    fn spawn<'py>(
+        &self,
+        py: Python<'py>,
+        cmd: Vec<String>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let console = self.console.clone();
+        future_into_py(py, async move {
+            let id = {
+                let mut slot = console.lock().await;
+                let job = held(&mut slot)?.spawn(cmd, timeout_ms).await;
+                job.map_err(error::failure)?
+            };
+            Ok(PyJob::new(console, id))
+        })
+    }
+
+    /// A handle to the job this console spawned under `id`, for one whose `Job` was let go
+    /// of. Nothing is asked of the server: an id it does not hold is `UNKNOWN_JOB` at the
+    /// first call.
+    fn job(&self, id: JobId) -> PyJob {
+        PyJob::new(self.console.clone(), id)
+    }
+
+    /// Run a command and iterate its output as it is written; spawned on the first
+    /// `__anext__`.
+    #[pyo3(signature = (cmd, timeout_ms = None))]
+    fn exec_stream(&self, cmd: Vec<String>, timeout_ms: Option<u64>) -> PyExecStream {
+        PyExecStream::new(self.console.clone(), cmd, timeout_ms)
     }
 
     #[pyo3(signature = (path, offset = None, len = None))]

@@ -23,6 +23,30 @@ async with await (
     print(result.code, result.stdout.decode())
 ```
 
+A command's output can also be read while it runs. `exec_stream` yields what arrived since the
+last chunk, the last one carrying the exit `code`; `spawn` leaves a command running as a `Job`
+whose output you poll, while the console takes other calls:
+
+```python
+async for chunk in console.exec_stream(["sh", "-c", "make test"], timeout_ms=600_000):
+    print(chunk.stdout.decode(), end="")
+
+async with await console.spawn(["python", "-u", "-m", "http.server", "8000"]) as server:
+    print((await server.poll(wait_ms=1000)).stdout.decode())  # what it has written so far
+    ...  # test against it
+# Leaving the block discards the job: killed, and let go of by the server.
+```
+
+The server holds a job until the poll that carries its `code`, up to a bound on how many it
+holds. A job that should outlive the code that started it is spawned without `async with`, and
+`await job.discard()` ends it later; if the `Job` itself was let go of, `console.job(id)` makes
+another handle from the id it had.
+
+Breaking out of an `exec_stream` leaves its command running until the stream is closed
+(`await stream.aclose()`, or `contextlib.aclosing`) or garbage-collected, which kills it. A
+command killed at its `timeout_ms`, by `exec` or a stream, raises `ConsoleRefused` with
+`code == ErrorCode.TIMED_OUT` and what it wrote until then in `stdout` and `stderr`.
+
 Without `.cmd(..)` a console runs `virtx-uvm` from the `bin` directory of virtx's cache
 (`$VIRTX_HOME`, or the host's cache directory: see [Cache](https://github.com/brekkylab/virtx#cache)).
 

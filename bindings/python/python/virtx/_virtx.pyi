@@ -11,6 +11,10 @@ class VirtxError(Exception): ...
 
 class ConsoleRefused(VirtxError):
     code: int
+    stdout: bytes | None
+    """What a command killed at its timeout wrote until then; ``None`` on any other refusal."""
+    stderr: bytes | None
+    truncated: bool | None
 
 class ConsoleBroken(VirtxError): ...
 
@@ -114,6 +118,45 @@ class ReadResult:
     data: bytes
     size: int
 
+class Chunk:
+    """What a job wrote since the last poll. ``code`` is set on the last one, after which the
+    job is gone."""
+
+    stdout: bytes
+    stderr: bytes
+    truncated: bool
+    code: int | None
+
+class Job:
+    """A spawned command. The server holds it until the poll that carries its ``code``, so poll
+    it to its end or discard it; garbage collection does not kill it. As an ``async with``
+    block, it is discarded when the block is left."""
+
+    @property
+    def id(self) -> int: ...
+    async def poll(self, wait_ms: int | None = None, max_bytes: int | None = None) -> Chunk:
+        """What the job wrote since the last poll, waiting up to ``wait_ms`` when there is
+        nothing yet; ``max_bytes`` bounds each stream. A job killed at its timeout raises
+        ``ConsoleRefused``, with its last bytes."""
+    async def kill(self, signal: int | None = None) -> None:
+        """Send ``signal`` (``SIGKILL`` when ``None``) to the job and everything it started;
+        the next poll reports how it ended."""
+    async def discard(self) -> None:
+        """Kill the job and collect it, dropping what it wrote, so the server no longer holds
+        it. A job already gone, or a console already closed, leaves nothing to do."""
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None: ...
+
+class ExecStream:
+    """A command's output as it is written: each ``Chunk`` is what arrived since the last, and
+    the last carries the ``code``. A command killed at its timeout raises ``ConsoleRefused``
+    instead, with its last bytes. Closed with ``aclose()``, or garbage-collected, before its
+    command ended, it kills the command."""
+
+    def __aiter__(self) -> Self: ...
+    async def __anext__(self) -> Chunk: ...
+    async def aclose(self) -> None: ...
+
 class ConsoleClientBuilder:
     """Filled in place and emptied by ``build()``. Every setter returns this builder."""
 
@@ -141,7 +184,20 @@ class ConsoleClient:
     def mounts(self) -> list[str]: ...
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
-    async def exec(self, cmd: list[str], timeout_ms: int | None = None) -> ExecResult: ...
+    async def exec(self, cmd: list[str], timeout_ms: int | None = None) -> ExecResult:
+        """Run a command to its end. One killed at ``timeout_ms`` raises ``ConsoleRefused``
+        with what it wrote until then."""
+    async def spawn(self, cmd: list[str], timeout_ms: int | None = None) -> Job:
+        """Start a command and return its ``Job`` at once; the console takes other calls while
+        it runs."""
+    def job(self, id: int) -> Job:
+        """A handle to the job this console spawned under ``id``, for one whose ``Job`` was let
+        go of. Nothing is asked of the server: an id it does not hold raises ``UNKNOWN_JOB`` at
+        the first call."""
+    def exec_stream(self, cmd: list[str], timeout_ms: int | None = None) -> ExecStream:
+        """Run a command and iterate its output as it is written:
+        ``async for chunk in console.exec_stream(cmd)``. Spawned on the first iteration,
+        which raises any refusal to start it."""
     async def read(
         self, path: str, offset: int | None = None, len: int | None = None
     ) -> ReadResult: ...

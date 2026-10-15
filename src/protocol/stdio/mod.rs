@@ -21,15 +21,20 @@
 //! takes no one else's bytes.
 //!
 //! A command's own stdio never appears here; it is captured where the command runs and
-//! returned inside an [`ExecResp`](crate::protocol::ExecResp), so one descriptor pair suffices.
+//! returned inside an [`ExecResp`](crate::protocol::ExecResp) or a
+//! [`PollResp`](crate::protocol::PollResp), so one descriptor pair suffices.
 //!
 //! # Neither is cancel-safe
 //!
-//! Dropping either future mid-await leaves the descriptor mid-frame (a header without its
+//! Dropping either future mid-frame leaves the descriptor there (a header without its
 //! payload, or a payload half consumed), undetectably and unrecoverably. So neither goes
 //! in a [`select!`](tokio::select) branch; wait on other things around a frame, as
 //! [`StdioClient::call`](StdioClient#method.call) does by owning its descriptors for the
 //! whole round trip.
+//!
+//! The one drop a client recovers from is a call abandoned between frames: its request
+//! went out and nothing of its answer had been read. That answer still arrives, ahead of the
+//! next call's, and [`StdioClient`] skips it by its earlier id.
 
 mod channel;
 mod client;

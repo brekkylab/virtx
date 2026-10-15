@@ -4,8 +4,9 @@
 //! the crate: [`console`] runs commands in a [`ConsoleClient`](virtx::console::ConsoleClient)
 //! built by a builder and awaited, [`fs`] assembles a [`Directory`](virtx::fs::Directory) for
 //! a host mount, [`image`] covers a [`Recipe`](virtx::image::Recipe) (a base plus steps) and
-//! the [`ImageClient`](virtx::image::ImageClient) that builds it ahead of a session, [`error`]
-//! maps failures to JavaScript errors, and `ensure` fetches the console server.
+//! the [`ImageClient`](virtx::image::ImageClient) that builds it ahead of a session, [`job`]
+//! follows a command left running, [`error`] maps failures to JavaScript errors, and `ensure`
+//! fetches the console server.
 //!
 //! Every call that waits returns a `Promise` settled on napi's tokio runtime, since a stdio
 //! client spawns and reads its server, which needs a reactor. `ConsoleClient` and `ImageClient`
@@ -26,3 +27,10 @@ mod ensure;
 mod error;
 mod fs;
 mod image;
+mod job;
+
+/// Run once the classes are registered: see [`job::symbols`].
+#[napi_derive::napi(module_exports)]
+pub fn symbols(exports: napi::bindgen_prelude::Object, env: napi::Env) -> napi::Result<()> {
+    job::symbols(&env, &exports)
+}

@@ -14,6 +14,7 @@ from enum import IntEnum
 from . import _virtx
 from ._virtx import (
     BuildImageResult,
+    Chunk,
     ConsoleBroken,
     ConsoleClient,
     ConsoleClientBuilder,
@@ -21,9 +22,11 @@ from ._virtx import (
     VirtxError,
     Directory,
     ExecResult,
+    ExecStream,
     ImageClient,
     ImageEntry,
     ImageSource,
+    Job,
     ReadResult,
     Recipe,
     Step,
@@ -34,6 +37,7 @@ ErrorCode = IntEnum("ErrorCode", _virtx.ERROR_CODES)
 
 __all__ = [
     "BuildImageResult",
+    "Chunk",
     "ConsoleBroken",
     "ConsoleClient",
     "ConsoleClientBuilder",
@@ -42,9 +46,11 @@ __all__ = [
     "Directory",
     "ErrorCode",
     "ExecResult",
+    "ExecStream",
     "ImageClient",
     "ImageEntry",
     "ImageSource",
+    "Job",
     "ReadResult",
     "Recipe",
     "Step",

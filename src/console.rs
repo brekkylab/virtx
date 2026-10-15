@@ -6,10 +6,12 @@
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use anyhow::Context as _;
-use futures_core::future::BoxFuture;
+use futures_core::{Stream, future::BoxFuture};
 use tokio::process::Command;
 
 mod relay;
@@ -21,8 +23,9 @@ use crate::{
     fs::Mount,
     image::ImageSource,
     protocol::{
-        Call, Client, ExecCall, ExecResp, Failure, InitCall, MountSpec, Notification, Port,
-        ReadCall, ReadResp, Response, WriteCall, WriteResp, stdio::StdioClient,
+        Call, Client, ExecCall, ExecResp, Failure, InitCall, JobId, KillCall, MountSpec,
+        Notification, PollCall, PollResp, Port, ReadCall, ReadResp, Response, WriteCall, WriteResp,
+        stdio::StdioClient,
     },
 };
 
@@ -350,7 +353,10 @@ struct Tree {
 ///
 /// Every method that reaches the server is one message, [`exec`](Self::exec) included; only
 /// [`start`](Self::start) and [`stop`](Self::stop) go unanswered. One console is not
-/// concurrent: its methods take `&mut self` (see [`Client`]).
+/// concurrent: its methods take `&mut self` (see [`Client`]). A command that should run while
+/// the console does other things is [`spawn`](Self::spawn)ed instead, and its output
+/// [`poll`](Self::poll)ed; [`exec_stream`](Self::exec_stream) does both for a command whose
+/// output is wanted as it is written.
 ///
 /// ```no_run
 /// use virtx::console::ConsoleClient;
@@ -374,6 +380,10 @@ pub struct ConsoleClient {
 
     /// Every tree this session was given, in the order named.
     mounts: Vec<Tree>,
+
+    /// Jobs whose [`ExecStream`] was dropped before their end, killed before the next call
+    /// goes out: a drop cannot wait for an answer.
+    abandoned: Vec<JobId>,
 }
 
 impl ConsoleClient {
@@ -436,6 +446,7 @@ impl ConsoleClient {
         Ok(ConsoleClient {
             client,
             mounts: held,
+            abandoned: Vec::new(),
         })
     }
 
@@ -463,9 +474,13 @@ impl ConsoleClient {
     /// Not an ending and not owed: dropping the console releases everything. The next
     /// command pays a cold start again, so use it before long idle stretches only.
     ///
+    /// Every job still running ends with it.
+    ///
     /// `Ok` means the message went out; nothing answers it.
     pub async fn stop(&mut self) -> Result<(), Failure> {
-        self.client.stop().await
+        self.client.stop().await?;
+        self.abandoned.clear();
+        Ok(())
     }
 
     /// Run one command, and return everything it produced.
@@ -476,19 +491,130 @@ impl ConsoleClient {
     /// It runs in the session's current directory, kept by the server; to run elsewhere,
     /// say so in the command (`sh -c 'cd there && ..'`).
     ///
-    /// `timeout_ms` is the only way to bound it; `None` may run forever. Dropping this
-    /// future instead leaves the command running and an answer pending on the channel.
+    /// `timeout_ms` is the only way to bound it; `None` may run forever. A command killed at
+    /// it is [`TIMED_OUT`](crate::protocol::Error::TIMED_OUT), with what it wrote until then in
+    /// [`Error::output`](crate::protocol::Error::output). Dropping this future instead leaves the
+    /// command running and its answer owed: the server answers one call at a time, so the
+    /// next call waits for the command to end and its late answer is skipped. A command that
+    /// may need stopping is [`spawn`](Self::spawn)ed, and its job killed.
     pub async fn exec(
         &mut self,
         cmd: impl IntoIterator<Item = impl AsRef<str>>,
         timeout_ms: Option<u64>,
     ) -> Result<ExecResp, Failure> {
-        let exec = ExecCall {
-            cmd: cmd.into_iter().map(|s| s.as_ref().to_string()).collect(),
-            timeout_ms,
-        };
+        self.settle().await?;
+        self.client.exec(argv(cmd, timeout_ms)).await
+    }
 
-        self.client.exec(exec).await
+    /// Start one command and return its job at once, leaving it running.
+    ///
+    /// The command is as for [`exec`](Self::exec), and so is `timeout_ms`. Its output waits on
+    /// the server until [`poll`](Self::poll)ed, and the console takes any other call
+    /// meanwhile, another `spawn` included.
+    ///
+    /// The server holds the job until the poll that reports its end, so poll every job
+    /// spawned to its end (or [`kill`](Self::kill) it first). [`stop`](Self::stop) ends them
+    /// all.
+    pub async fn spawn(
+        &mut self,
+        cmd: impl IntoIterator<Item = impl AsRef<str>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<JobId, Failure> {
+        self.settle().await?;
+        Ok(self.client.spawn(argv(cmd, timeout_ms)).await?.job)
+    }
+
+    /// What `job` wrote since the last poll, and its [`code`](PollResp::code) once it has
+    /// ended; the job is gone after that answer.
+    ///
+    /// `wait_ms` waits that long for new output or the end when there is none yet, rather
+    /// than answering empty at once. `max_bytes` bounds each stream, leaving the rest for the
+    /// next poll.
+    ///
+    /// A job killed at its `timeout_ms` ends in [`TIMED_OUT`](crate::protocol::Error::TIMED_OUT) instead, with
+    /// these bytes in [`Error::output`](crate::protocol::Error::output).
+    pub async fn poll(
+        &mut self,
+        job: JobId,
+        wait_ms: Option<u64>,
+        max_bytes: Option<u64>,
+    ) -> Result<PollResp, Failure> {
+        self.settle().await?;
+        let poll = PollCall {
+            job,
+            wait_ms,
+            max_bytes,
+        };
+        self.client.poll(poll).await
+    }
+
+    /// Send `signal` (`None` for `SIGKILL`) to `job` and everything it started.
+    ///
+    /// The next [`poll`](Self::poll) reports how it ended.
+    pub async fn kill(&mut self, job: JobId, signal: Option<i32>) -> Result<(), Failure> {
+        self.settle().await?;
+        self.client.kill(KillCall { job, signal }).await?;
+        Ok(())
+    }
+
+    /// Run one command and yield its output as it is written.
+    ///
+    /// [`spawn`](Self::spawn) and then [`poll`](Self::poll) until it ends: each item is what
+    /// arrived since the last, and the last carries the [`code`](PollResp::code). A command
+    /// killed at `timeout_ms` ends the stream with [`TIMED_OUT`](crate::protocol::Error::TIMED_OUT) and its last
+    /// bytes in [`Error::output`](crate::protocol::Error::output).
+    ///
+    /// The stream holds the console. Dropping it before the job's end, between items or while
+    /// one is awaited, kills the job before this console's next call; an answer that was on its
+    /// way is skipped when it arrives.
+    pub async fn exec_stream(
+        &mut self,
+        cmd: impl IntoIterator<Item = impl AsRef<str>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecStream<'_>, Failure> {
+        let job = self.spawn(cmd, timeout_ms).await?;
+        Ok(ExecStream {
+            job,
+            state: Streaming::Idle(self),
+        })
+    }
+
+    /// Kill `job` and collect it, so the server no longer holds it: what to do with a job
+    /// whose output nobody will read.
+    ///
+    /// Collecting is bounded, since a process that left the job's group can hold its output
+    /// open past the kill; such a job is left to the server. A job already gone is not an
+    /// error. `Err` is only a broken channel.
+    pub async fn discard(&mut self, job: JobId) -> Result<(), Failure> {
+        match self.client.kill(KillCall { job, signal: None }).await {
+            Ok(_) => {}
+            // Already gone, or a refusal that will not change by asking again.
+            Err(Failure::Refused(_)) => return Ok(()),
+            Err(broken) => return Err(broken),
+        }
+        for _ in 0..DISCARD_POLLS {
+            let poll = PollCall {
+                job,
+                wait_ms: Some(STREAM_WAIT_MS),
+                max_bytes: None,
+            };
+            match self.client.poll(poll).await {
+                Ok(chunk) if chunk.code.is_none() => {}
+                Ok(_) | Err(Failure::Refused(_)) => break,
+                Err(broken) => return Err(broken),
+            }
+        }
+        Ok(())
+    }
+
+    /// [`discard`](Self::discard) every job whose stream was dropped, before the call that
+    /// comes next.
+    pub(crate) async fn settle(&mut self) -> Result<(), Failure> {
+        while let Some(&job) = self.abandoned.last() {
+            self.discard(job).await?;
+            self.abandoned.pop();
+        }
+        Ok(())
     }
 
     /// Read part of a file where commands run.
@@ -504,6 +630,7 @@ impl ConsoleClient {
         offset: Option<u64>,
         len: Option<u64>,
     ) -> Result<ReadResp, Failure> {
+        self.settle().await?;
         let read = ReadCall {
             path: path.as_ref().to_string(),
             offset,
@@ -519,6 +646,7 @@ impl ConsoleClient {
     ///
     /// Cumulative since the session began, not since the last snapshot.
     pub async fn snapshot(&mut self) -> Result<Vec<u8>, Failure> {
+        self.settle().await?;
         self.client.snapshot().await.map(|answer| answer.blob)
     }
 
@@ -534,6 +662,7 @@ impl ConsoleClient {
         data: impl Into<Vec<u8>>,
         offset: Option<u64>,
     ) -> Result<WriteResp, Failure> {
+        self.settle().await?;
         let write = WriteCall {
             path: path.as_ref().to_string(),
             data: data.into(),
@@ -584,6 +713,137 @@ impl Drop for ConsoleClient {
     /// current-thread runtime.
     fn drop(&mut self) {
         hang_up(&mut self.client, std::mem::take(&mut self.mounts));
+    }
+}
+
+/// How long one poll of an [`ExecStream`] waits for output. It answers as soon as any
+/// arrives, so this bounds only how often a silent command costs a round trip.
+const STREAM_WAIT_MS: u64 = 1000;
+
+/// How many polls, of [`STREAM_WAIT_MS`] each, a killed job is given to end before
+/// [`ConsoleClient::discard`] leaves it to the server.
+const DISCARD_POLLS: usize = 5;
+
+/// An argv and a timeout, as the `params` of `exec` and `spawn`.
+fn argv(cmd: impl IntoIterator<Item = impl AsRef<str>>, timeout_ms: Option<u64>) -> ExecCall {
+    ExecCall {
+        cmd: cmd.into_iter().map(|s| s.as_ref().to_string()).collect(),
+        timeout_ms,
+    }
+}
+
+/// A command's output as it is written: [`ConsoleClient::exec_stream`].
+///
+/// A [`Stream`] of what each poll brought, skipping polls that brought nothing; the last item
+/// carries the [`code`](PollResp::code), or is the refusal that ended the job. For use
+/// without a `StreamExt` in scope, [`next`](Self::next) is the same.
+pub struct ExecStream<'a> {
+    job: JobId,
+    state: Streaming<'a>,
+}
+
+/// Where an [`ExecStream`] is: holding the console between polls, lending it to one, or done.
+enum Streaming<'a> {
+    Idle(&'a mut ConsoleClient),
+    /// The poll owns the console while it is out, and hands it back with the answer.
+    Polling(BoxFuture<'a, (&'a mut ConsoleClient, Result<PollResp, Failure>)>),
+    Done,
+}
+
+/// The console as one poll of an [`ExecStream`] holds it. A poll dropped before its answer
+/// leaves the job to be killed before the console's next call, as a stream dropped between
+/// items does.
+struct Lent<'a> {
+    console: Option<&'a mut ConsoleClient>,
+    job: JobId,
+}
+
+impl<'a> Lent<'a> {
+    /// The console back, answered: nothing is left to kill.
+    fn give_back(mut self) -> &'a mut ConsoleClient {
+        self.console
+            .take()
+            .expect("a lent console is given back once")
+    }
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        if let Some(console) = self.console.take() {
+            console.abandoned.push(self.job);
+        }
+    }
+}
+
+impl ExecStream<'_> {
+    /// The job this stream is following.
+    pub fn job(&self) -> JobId {
+        self.job
+    }
+
+    /// The next piece of output; `None` once the job has ended.
+    pub async fn next(&mut self) -> Option<Result<PollResp, Failure>> {
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+}
+
+impl Stream for ExecStream<'_> {
+    type Item = Result<PollResp, Failure>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let job = self.job;
+        loop {
+            match std::mem::replace(&mut self.state, Streaming::Done) {
+                Streaming::Done => return Poll::Ready(None),
+                Streaming::Idle(console) => {
+                    let mut lent = Lent {
+                        console: Some(console),
+                        job,
+                    };
+                    self.state = Streaming::Polling(Box::pin(async move {
+                        let poll = PollCall {
+                            job,
+                            wait_ms: Some(STREAM_WAIT_MS),
+                            max_bytes: None,
+                        };
+                        let console = lent.console.as_deref_mut().expect("lent until answered");
+                        let answer = console.client.poll(poll).await;
+                        (lent.give_back(), answer)
+                    }));
+                }
+                Streaming::Polling(mut polling) => {
+                    let (console, answer) = match polling.as_mut().poll(cx) {
+                        Poll::Pending => {
+                            self.state = Streaming::Polling(polling);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(ready) => ready,
+                    };
+                    match answer {
+                        Ok(chunk) if chunk.is_empty() => self.state = Streaming::Idle(console),
+                        Ok(chunk) => {
+                            if chunk.code.is_none() {
+                                self.state = Streaming::Idle(console);
+                            }
+                            return Poll::Ready(Some(Ok(chunk)));
+                        }
+                        // A refusal is the job's end (a timeout) or its absence; either way
+                        // there is nothing more to poll.
+                        Err(failure) => return Poll::Ready(Some(Err(failure))),
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ExecStream<'_> {
+    /// A job still running when its stream goes is killed before the console's next call. A
+    /// poll still out does this through the console it was lent.
+    fn drop(&mut self) {
+        if let Streaming::Idle(console) = &mut self.state {
+            console.abandoned.push(self.job);
+        }
     }
 }
 
@@ -729,6 +989,34 @@ mod tests {
         fn notify(&mut self, notification: Notification) -> BoxFuture<'_, Result<(), Failure>> {
             self.log.methods.lock().unwrap().push(notification.method());
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// A [`Recorder`] whose first poll never answers, as a silent command's does not within
+    /// its wait.
+    struct Silent {
+        recorder: Recorder,
+        stalled: bool,
+    }
+
+    impl Client for Silent {
+        fn call(&mut self, call: Call) -> BoxFuture<'_, Result<Response, Failure>> {
+            if matches!(call, Call::Poll(_)) && !self.stalled {
+                self.stalled = true;
+                self.recorder
+                    .log
+                    .methods
+                    .lock()
+                    .unwrap()
+                    .push(call.method());
+                self.recorder.log.calls.lock().unwrap().push(call);
+                return Box::pin(std::future::pending());
+            }
+            self.recorder.call(call)
+        }
+
+        fn notify(&mut self, notification: Notification) -> BoxFuture<'_, Result<(), Failure>> {
+            self.recorder.notify(notification)
         }
     }
 
@@ -988,5 +1276,208 @@ mod tests {
             panic!("a console over a relative guest path should not build");
         };
         assert!(e.to_string().contains("guest path is absolute"), "{e}");
+    }
+
+    /// What a poll answers with.
+    fn polled(stdout: &[u8], code: Option<i32>) -> Response {
+        Response::Poll(PollResp {
+            stdout: stdout.to_vec(),
+            code,
+            ..PollResp::default()
+        })
+    }
+
+    /// A stream yields what each poll brought, skips the polls that brought nothing, and ends
+    /// with the one that carries the code.
+    #[tokio::test]
+    async fn a_stream_is_the_jobs_output_as_it_arrives() {
+        let (client, log) = recorder(vec![
+            initialized(),
+            Response::Spawn(crate::protocol::SpawnResp { job: 7 }),
+            polled(b"tick 1\n", None),
+            polled(b"", None),
+            polled(b"tick 2\n", None),
+            polled(b"", Some(0)),
+        ]);
+        let mut console = ConsoleClient::builder()
+            .client(client)
+            .build()
+            .await
+            .unwrap();
+
+        let mut stream = console
+            .exec_stream(["sh", "-c", "for i in 1 2; do echo tick $i; done"], None)
+            .await
+            .unwrap();
+        assert_eq!(stream.job(), 7);
+        let mut seen = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            seen.push(chunk.unwrap());
+        }
+        drop(stream);
+
+        assert_eq!(
+            seen.iter().map(|c| c.stdout.as_slice()).collect::<Vec<_>>(),
+            [b"tick 1\n".as_slice(), b"tick 2\n", b""]
+        );
+        assert_eq!(seen.last().unwrap().code, Some(0));
+
+        // Every poll names the job and waits rather than spinning.
+        assert_eq!(
+            log.methods(),
+            [
+                Method::Init,
+                Method::Spawn,
+                Method::Poll,
+                Method::Poll,
+                Method::Poll,
+                Method::Poll
+            ]
+        );
+        let Call::Poll(poll) = log.call(2) else {
+            panic!("{:?} is not a poll", log.call(2));
+        };
+        assert_eq!(poll.job, 7);
+        assert!(poll.wait_ms.is_some());
+
+        // A finished stream leaves nothing for the next call to clean up.
+        assert!(console.abandoned.is_empty());
+    }
+
+    /// A job killed at its timeout ends the stream in the refusal, which carries its last
+    /// bytes.
+    #[tokio::test]
+    async fn a_stream_ends_in_its_timeout() {
+        let written = ExecResp {
+            code: 137,
+            stdout: b"started\n".to_vec(),
+            ..ExecResp::default()
+        };
+        let (client, _) = recorder(vec![
+            initialized(),
+            Response::Spawn(crate::protocol::SpawnResp { job: 0 }),
+            Response::Error(
+                Error::new(Error::TIMED_OUT, "killed after 1000ms").with_output(&written),
+            ),
+        ]);
+        let mut console = ConsoleClient::builder()
+            .client(client)
+            .build()
+            .await
+            .unwrap();
+
+        let mut stream = console
+            .exec_stream(["sh", "-c", "echo started; sleep 5"], Some(1000))
+            .await
+            .unwrap();
+        let Some(Err(Failure::Refused(refused))) = stream.next().await else {
+            panic!("a timed-out job should end its stream in a refusal");
+        };
+        assert_eq!(refused.code, Error::TIMED_OUT);
+        assert_eq!(refused.output(), Some(written));
+        assert!(stream.next().await.is_none());
+    }
+
+    /// A stream dropped while a poll is out has the job killed before the console's next call
+    /// too: that is where a stream over a silent command spends its time.
+    #[tokio::test]
+    async fn dropping_a_stream_mid_poll_kills_its_job() {
+        let (recorder, log) = recorder(vec![
+            initialized(),
+            Response::Spawn(crate::protocol::SpawnResp { job: 3 }),
+            // The poll that never answers takes none of these.
+            Response::Kill(crate::protocol::KillResp {}),
+            polled(b"", Some(137)),
+            ran(b"hi\n"),
+        ]);
+        let client = Silent {
+            recorder,
+            stalled: false,
+        };
+        let mut console = ConsoleClient::builder()
+            .client(client)
+            .build()
+            .await
+            .unwrap();
+
+        let mut stream = console.exec_stream(["sleep", "1000"], None).await.unwrap();
+        {
+            let mut next = std::pin::pin!(stream.next());
+            let polled = std::future::poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+            assert!(polled.is_pending(), "the poll should still be waiting");
+        }
+        drop(stream);
+
+        assert_eq!(
+            console.exec(["echo", "hi"], None).await.unwrap().stdout,
+            b"hi\n"
+        );
+        assert_eq!(
+            log.methods(),
+            [
+                Method::Init,
+                Method::Spawn,
+                Method::Poll,
+                Method::Kill,
+                Method::Poll,
+                Method::Exec
+            ]
+        );
+        let Call::Kill(kill) = log.call(3) else {
+            panic!("{:?} is not a kill", log.call(3));
+        };
+        assert_eq!(kill.job, 3);
+    }
+
+    /// A stream dropped before its job ended has the job killed, and collected, before the
+    /// console's next call goes out.
+    #[tokio::test]
+    async fn dropping_a_stream_kills_its_job() {
+        let (client, log) = recorder(vec![
+            initialized(),
+            Response::Spawn(crate::protocol::SpawnResp { job: 3 }),
+            polled(b"serving\n", None),
+            // What the next call sends first: the kill, then polls until the end.
+            Response::Kill(crate::protocol::KillResp {}),
+            polled(b"", None),
+            polled(b"", Some(137)),
+            ran(b"hi\n"),
+        ]);
+        let mut console = ConsoleClient::builder()
+            .client(client)
+            .build()
+            .await
+            .unwrap();
+
+        let mut stream = console.exec_stream(["serve"], None).await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap().stdout, b"serving\n");
+        drop(stream);
+
+        assert_eq!(
+            console.exec(["echo", "hi"], None).await.unwrap().stdout,
+            b"hi\n"
+        );
+        assert_eq!(
+            log.methods(),
+            [
+                Method::Init,
+                Method::Spawn,
+                Method::Poll,
+                Method::Kill,
+                Method::Poll,
+                Method::Poll,
+                Method::Exec
+            ]
+        );
+        let Call::Kill(kill) = log.call(3) else {
+            panic!("{:?} is not a kill", log.call(3));
+        };
+        assert_eq!(
+            kill,
+            KillCall {
+                job: 3,
+                signal: None
+            }
+        );
     }
 }

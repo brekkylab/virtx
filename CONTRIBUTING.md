@@ -29,7 +29,7 @@ cargo test -- --ignored                 # the real-mount tests; needs the FUSE p
 
 There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and clippy plus the library's tests on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 
-A bare `cargo test` covers the default features. A change under `s3`, `notion`, `gdrive` or `onedrive` runs with that feature on, and the `[features]` comment in `Cargo.toml` has the full sweep. The endpoint tests under `tests/` skip without their service and say so; name which ran when you report a run.
+A bare `cargo test` covers the default features. A change under `s3`, `notion`, `gdrive` or `onedrive` runs with that feature on, and the `[features]` comment in `Cargo.toml` has the full sweep. The endpoint tests under `tests/` skip without their service and say so, and `tests/console_jobs.rs` and the bindings' console tests skip without `VIRTX_CONSOLE`, the path of a console server to run them against; name which ran when you report a run.
 
 ## Pull requests
 

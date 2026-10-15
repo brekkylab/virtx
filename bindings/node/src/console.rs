@@ -14,12 +14,14 @@ use virtx::{
 };
 
 use crate::{
-    error::{self, Result, unsigned},
+    error::{self, Result, Thrown, unsigned},
     fs::{Content, MountLike, bytes, into_mount},
     image::{ImageSourceLike, image_source},
+    job::{JsExecStream, JsJob},
 };
 
-/// Run `fut` on napi's runtime, rejecting with its error's own `code`.
+/// Run `fut` on napi's runtime, rejecting with its error's own `code` (and a killed command's
+/// output; see [`Thrown`]).
 ///
 /// Not napi's `async fn` or `spawn_future`, which reject with a [`Status`](napi::Status) as the
 /// `code`: this runs `fut` to a plain `Result` and builds the JavaScript error back on the main
@@ -27,10 +29,10 @@ use crate::{
 pub fn promise<'env, T, F>(env: &'env Env, fut: F) -> napi::Result<PromiseRaw<'env, T>>
 where
     T: ToNapiValue + Send + 'static,
-    F: Future<Output = Result<T>> + Send + 'static,
+    F: Future<Output = std::result::Result<T, Thrown>> + Send + 'static,
 {
     env.spawn_future_with_callback(async move { Ok(fut.await) }, |env, result| {
-        result.map_err(|e| napi::Error::from(JsError::from(e).into_unknown(*env)))
+        result.map_err(|e| e.into_js(env))
     })
 }
 
@@ -171,13 +173,21 @@ impl JsConsoleClientBuilder {
 }
 
 /// The console a slot holds, or the error for one that has been closed.
-fn held(slot: &mut Option<ConsoleClient>) -> Result<&mut ConsoleClient> {
+pub(crate) fn held(slot: &mut Option<ConsoleClient>) -> Result<&mut ConsoleClient> {
     slot.as_mut()
         .ok_or_else(|| napi::Error::new("VIRTX_ERROR".to_string(), "this console has been closed"))
 }
 
 /// A console slot: the console, or `None` once closed.
-type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+pub(crate) type Slot = Arc<Mutex<Option<ConsoleClient>>>;
+
+/// Drop the console if `slot` is its last holder, inside `runtime` so `quit` goes out.
+pub(crate) fn release(slot: &mut Slot, runtime: &Handle) {
+    if let Some(slot) = Arc::get_mut(slot) {
+        let _entered = runtime.enter();
+        slot.get_mut().take();
+    }
+}
 
 #[napi(js_name = "ConsoleClient")]
 pub struct JsConsoleClient {
@@ -205,13 +215,9 @@ impl JsConsoleClient {
     }
 }
 
-/// Only the last holder drops the console, inside its runtime so `quit` goes out.
 impl Drop for JsConsoleClient {
     fn drop(&mut self) {
-        if let Some(slot) = Arc::get_mut(&mut self.console) {
-            let _entered = self.runtime.enter();
-            slot.get_mut().take();
-        }
+        release(&mut self.console, &self.runtime);
     }
 }
 
@@ -294,6 +300,52 @@ impl JsConsoleClient {
             let resp = held(&mut slot)?.exec(cmd, timeout_ms).await;
             resp.map(ExecResult::from).map_err(error::failure)
         })
+    }
+
+    /// Start a command and settle with its `Job` at once, leaving it running; the console takes
+    /// other calls meanwhile.
+    #[napi(ts_return_type = "Promise<Job & AsyncDisposable>")]
+    pub fn spawn<'env>(
+        &self,
+        env: &'env Env,
+        cmd: Vec<String>,
+        timeout_ms: Option<i64>,
+    ) -> napi::Result<PromiseRaw<'env, JsJob>> {
+        let (console, runtime) = (self.console.clone(), self.runtime.clone());
+        promise(env, async move {
+            let timeout_ms = unsigned(timeout_ms, "timeoutMs")?;
+            let id = {
+                let mut slot = console.lock().await;
+                let job = held(&mut slot)?.spawn(cmd, timeout_ms).await;
+                job.map_err(error::failure)?
+            };
+            Ok(JsJob::new(console, runtime, id))
+        })
+    }
+
+    /// Run a command and iterate its output as it is written, with `for await`. Spawned on the
+    /// first `next()`, which rejects with any refusal to start it.
+    #[napi(ts_return_type = "ExecStream & AsyncIterable<Chunk>")]
+    pub fn exec_stream(
+        &self,
+        env: &Env,
+        cmd: Vec<String>,
+        timeout_ms: Option<i64>,
+    ) -> napi::Result<JsExecStream> {
+        let timeout_ms = unsigned(timeout_ms, "timeoutMs").map_err(|e| thrown(env, e))?;
+        let (console, runtime) = (self.console.clone(), self.runtime.clone());
+        Ok(JsExecStream::new(console, runtime, cmd, timeout_ms))
+    }
+
+    /// A handle to the job this console spawned under `id`, for one whose `Job` was let go of.
+    /// Nothing is asked of the server: an id it does not hold is `UNKNOWN_JOB` at the first
+    /// call.
+    #[napi(ts_return_type = "Job & AsyncDisposable")]
+    pub fn job(&self, env: &Env, id: i64) -> napi::Result<JsJob> {
+        let id = unsigned(Some(id), "id")
+            .map_err(|e| thrown(env, e))?
+            .unwrap_or_default();
+        Ok(JsJob::new(self.console.clone(), self.runtime.clone(), id))
     }
 
     #[napi(ts_return_type = "Promise<ReadResult>")]

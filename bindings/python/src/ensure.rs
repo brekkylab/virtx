@@ -5,12 +5,12 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 use crate::error;
 
-/// Fetch the console server into virtx's cache if missing; the awaitable resolves to its
+/// Fetch the console server into virtx's cache unless it is there; the awaitable resolves to its
 /// directory.
 ///
 /// Console builders and `ImageClient` start `virtx-uvm` from that cache, which a host that
-/// installed only this package lacks, so such a host calls this first. An existing server,
-/// fetched or installed by hand, is left alone.
+/// installed only this package lacks, so such a host calls this first. A server fetched for another
+/// release is fetched again; one built with `cargo xtask install` is left alone.
 #[pyfunction]
 fn ensure_virtx(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     future_into_py(py, async move {

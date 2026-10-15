@@ -159,9 +159,9 @@ class ConsoleClient:
     ) -> None: ...
 
 async def ensure_virtx() -> str:
-    """Fetch the console server into virtx's cache if missing; resolves to its directory.
+    """Fetch the console server into virtx's cache unless it is there; resolves to its directory.
 
     Console builders and ``ImageClient`` start ``virtx-uvm`` from that cache, which a host
-    that installed only this package lacks, so such a host calls this first. An existing
-    server, fetched or installed by hand, is left alone.
+    that installed only this package lacks, so such a host calls this first. A server fetched
+    for another release is fetched again; one built with ``cargo xtask install`` is left alone.
     """

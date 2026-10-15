@@ -186,3 +186,9 @@ async def test_relay_answers_through_its_callback():
 
     await console.close()
     assert await relay(console, b"") == (None, "this console has been closed")
+
+
+def test_a_door_is_its_port_until_closed():
+    with virtx.Door(3977) as door:
+        assert door.port == 3977
+    door.close()

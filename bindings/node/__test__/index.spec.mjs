@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { createRequire } from 'node:module'
 
 const virtx = createRequire(import.meta.url)('../index.js')
-const { ConsoleClient, Directory, ImageClient, ImageSource, Recipe, Step } = virtx
+const { ConsoleClient, Directory, Door, ImageClient, ImageSource, Recipe, Step } = virtx
 
 const tempDir = () => mkdtempSync(join(tmpdir(), 'virtx-'))
 
@@ -148,4 +148,11 @@ test('_relay answers a frame on the console it relays to', { skip: !SERVER && 's
 
   await console_.close()
   await assert.rejects(console_._relay(Buffer.alloc(0)), { message: /closed/ })
+})
+
+test('a Door is its port until closed', () => {
+  const door = new Door(3977)
+  assert.equal(door.port, 3977)
+  door.close()
+  door.close()
 })

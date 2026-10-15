@@ -375,5 +375,49 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConsoleClient>()?;
     m.add_class::<PyExecResult>()?;
     m.add_class::<PyReadResult>()?;
+    m.add_class::<PyDoor>()?;
     Ok(())
+}
+
+/// A port on this host's loopback that sessions reach as `127.0.0.1:<port>`, until `close()`,
+/// the end of a `with` block, or until nothing holds it. Anything in any session can then
+/// connect, so the listener behind it checks who it is talking to.
+#[pyclass(name = "Door", module = "virtx", frozen)]
+pub struct PyDoor {
+    door: std::sync::Mutex<Option<virtx::console::Door>>,
+    port: u16,
+}
+
+#[pymethods]
+impl PyDoor {
+    #[new]
+    fn new(port: u16) -> PyResult<Self> {
+        Ok(PyDoor {
+            door: std::sync::Mutex::new(Some(virtx::console::Door::open(port)?)),
+            port,
+        })
+    }
+
+    #[getter]
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Close the door now; a repeat call does nothing.
+    fn close(&self) {
+        self.door.lock().unwrap().take();
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __exit__(
+        &self,
+        _type: Option<Bound<'_, PyAny>>,
+        _value: Option<Bound<'_, PyAny>>,
+        _traceback: Option<Bound<'_, PyAny>>,
+    ) {
+        self.close();
+    }
 }

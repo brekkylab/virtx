@@ -82,6 +82,19 @@ export declare class Directory {
 export type JsDirectory = Directory
 
 /**
+ * A port on this host's loopback that sessions reach as `127.0.0.1:<port>`, until `close()`
+ * or until it is garbage-collected. Anything in any session can then connect, so the listener
+ * behind it checks who it is talking to.
+ */
+export declare class Door {
+  constructor(port: number)
+  get port(): number
+  /** Close the door now; a repeat call does nothing. */
+  close(): void
+}
+export type JsDoor = Door
+
+/**
  * A tree mounted on this host until `unmount()` or until nothing holds it.
  *
  * Passing it to a console builder shares it rather than taking it: without `unmount()` it

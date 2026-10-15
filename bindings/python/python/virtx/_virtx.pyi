@@ -104,6 +104,19 @@ def mount_support() -> None:
     ``HostMount`` checks the same before it mounts; this is for knowing ahead.
     """
 
+class Door:
+    """A port on this host's loopback that sessions reach as ``127.0.0.1:<port>``, until
+    ``close()``, the end of a ``with`` block, or until nothing holds it. Anything in any session
+    can then connect, so the listener behind it checks who it is talking to."""
+
+    def __init__(self, port: int) -> None: ...
+    @property
+    def port(self) -> int: ...
+    def close(self) -> None:
+        """Close the door now; a repeat call does nothing."""
+    def __enter__(self) -> Door: ...
+    def __exit__(self, *exc: object) -> None: ...
+
 class ExecResult:
     code: int
     stdout: bytes

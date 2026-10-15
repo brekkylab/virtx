@@ -374,6 +374,16 @@ async fn main() -> anyhow::Result<()> {
 Rebuilding under the same ref moves it to the new build, while `ImageSource::digest(&built.digest)` stays on this one.  
 `images.list()` shows what's built, and `images.remove(...)` deletes an image by its ref or digest.
 
+### Reaching this host
+
+A session with its network on reaches what this host reaches, except this host's loopback: what listens there is yours, not the session's. A `Door` opens one loopback port to every session, as `127.0.0.1:<port>`, until it is closed or dropped. Any session can then connect, so the listener behind it checks who it is talking to, with a secret in the request, say.
+
+```python
+door = virtx.Door(port)   # Node: new Door(port); Rust: virtx::console::Door::open(port)?
+...
+door.close()              # or `with virtx.Door(port):`
+```
+
 ## Cache
 
 virtx keeps all persistent state in a single cache directory that you can safely delete at any time:

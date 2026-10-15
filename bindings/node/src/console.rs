@@ -379,3 +379,34 @@ impl JsConsoleClient {
         })
     }
 }
+
+/// A port on this host's loopback that sessions reach as `127.0.0.1:<port>`, until `close()`
+/// or until it is garbage-collected. Anything in any session can then connect, so the listener
+/// behind it checks who it is talking to.
+#[napi(js_name = "Door")]
+pub struct JsDoor {
+    door: Option<virtx::console::Door>,
+    port: u16,
+}
+
+#[napi]
+impl JsDoor {
+    #[napi(constructor)]
+    pub fn new(port: u16) -> Result<Self> {
+        Ok(JsDoor {
+            door: Some(virtx::console::Door::open(port).map_err(error::io)?),
+            port,
+        })
+    }
+
+    #[napi(getter)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Close the door now; a repeat call does nothing.
+    #[napi]
+    pub fn close(&mut self) {
+        self.door.take();
+    }
+}

@@ -2,6 +2,7 @@
 //!
 //! [`ConsoleClientBuilder`] describes the session; [`ConsoleClient`] runs commands in it.
 //! [`Relay`] drives one session from a second place, such as another native extension.
+//! [`Door`] lets sessions reach a port on this host's loopback.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -12,8 +13,10 @@ use anyhow::Context as _;
 use futures_core::future::BoxFuture;
 use tokio::process::Command;
 
+mod door;
 mod relay;
 
+pub use door::Door;
 pub use relay::Relay;
 
 use crate::{

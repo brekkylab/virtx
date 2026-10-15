@@ -158,11 +158,11 @@ export interface BuildImageResult {
 }
 
 /**
- * Fetch the console server into virtx's cache if missing, and settle with its directory.
+ * Fetch the console server into virtx's cache unless it is there, and settle with its directory.
  *
  * Console builders and `ImageClient` start `virtx-uvm` from that cache, which a host that
- * installed only this package lacks, so such a host calls this first. An existing server,
- * fetched or installed by hand, is left alone.
+ * installed only this package lacks, so such a host calls this first. A server fetched for another
+ * release is fetched again; one built with `cargo xtask install` is left alone.
  */
 export declare function ensureVirtx(): Promise<string>
 

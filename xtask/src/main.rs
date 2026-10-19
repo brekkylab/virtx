@@ -798,6 +798,10 @@ fn install(options: &Options) -> anyhow::Result<()> {
     };
     let bin = prefix.join("bin");
     stage_bin(&options.out(), &bin, true)?;
+    // virtx's `ensure_virtx` replaces a `bin/` whose `.release` is not the release it wants,
+    // and leaves one that reads `local` alone.
+    fs::write(bin.join(".release"), "local")
+        .with_context(|| format!("marking {} as built here", bin.display()))?;
     eprintln!("xtask: installed to {}", bin.display());
     Ok(())
 }

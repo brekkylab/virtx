@@ -22,7 +22,7 @@
 //!   cargo xtask run --example run -- alpine:3.21 'ls /mnt' ./scripts
 //!
 //! A session reaches nothing by default. `VIRTX_NET=1` gives it what this machine reaches,
-//! less this machine's loopback, and an image needs nothing in it for that:
+//! its loopback included, and an image needs nothing in it for that:
 //!
 //!   VIRTX_NET=1 cargo xtask run --example run -- alpine:3.21 'wget -qO- http://example.com'
 //!   VIRTX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'

@@ -205,16 +205,16 @@ Session::new(rootfs, image.config)
 ```
 
 **What TSI lacks is a say in where a socket goes.** Upstream opens whatever the
-guest asked for, so a guest reaches this host's loopback — every service the
-operator runs there — and a guest's `listen` binds the host's own port on every
-interface. The patch adds `TsiPolicy`, which the vsock muxer asks before a
+guest asked for, so a guest's `listen` binds the host's own port on every
+interface, and its own published port is reached at the host's port rather than
+the guest's listener. The patch adds `TsiPolicy`, which the vsock muxer asks before a
 `connect`, a datagram's destination or a `listen` reaches any proxy, and
 `VsockDevice::set_policy` to hand one over. An answer is an address, not a yes:
 
 | the guest asks for | it gets |
 |---|---|
 | `10.0.2.3:53` | this host's resolver |
-| loopback or `0.0.0.0` | its own published listener on that port, or `ECONNREFUSED` |
+| loopback or `0.0.0.0` | its own published listener on that port (`ECONNREFUSED` until it listens), else that port on this host's loopback |
 | anywhere else | where it asked |
 | `listen` on a published port | a listener on this host's loopback, which the relay joins to the published one |
 | `listen` on any other port | `EPERM`, which the guest kernel takes as "listen on your own stack" |

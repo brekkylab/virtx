@@ -15,26 +15,18 @@
 //!   ───────────────────────────────────────────────────────────────────────────
 //!   NAMESERVER:53               this host's resolver
 //!   loopback, or 0.0.0.0        its own published listener on that port, refused while
-//!                               there is none, else another session's published port on
-//!                               this host, or refused
+//!                               there is none, else that port on this host's loopback
 //!   anywhere else               where it asked
 //!   listen on a published port  a listener on this host's loopback
 //!   listen on any other port    a listener in the guest, and nothing here
 //! ```
 //!
-//! **This host's loopback is not the guest's to reach.** What listens there is the
-//! operator's -- an agent, a database, a model server -- and a session given a network is
-//! not thereby given all of them. A guest only falls through to here for loopback when its
-//! own stack had nothing listening on that port, so a refusal is exactly what it would have
-//! been told without a network.
+//! **This host's loopback is the guest's to reach**, as it is every other process's here: a
+//! dev server, the person's own browser, another session's published port. A guest only
+//! falls through to here for loopback when its own stack had nothing listening on that port,
+//! so `127.0.0.1:<port>` in the guest is first its own and then this host's.
 //!
-//! **Except a port a session published.** That one is not the operator's: a server opened
-//! it so that something could come in, and a program in another session is as much
-//! something as a viewer on this host. So `127.0.0.1:<port>` reaches it from any session
-//! with a network, the same address it is reached at here -- see
-//! [`doors`](crate::machine::doors) for how one session knows what another published.
-//!
-//! **Everything else is.** On is what this host reaches, its LAN included. A session that
+//! **So is everything else.** On is what this host reaches, its LAN included. A session that
 //! has to be kept off part of a network is kept off it by the host, which is where every
 //! other process on this machine is kept off it too.
 //!
@@ -53,7 +45,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::Mutex;
 
 use super::NAMESERVER;
-use crate::machine::doors;
 
 /// The DNS port, the one [`NAMESERVER`] answers on.
 const DNS_PORT: u16 = 53;
@@ -73,10 +64,6 @@ pub(crate) struct Policy {
     /// and sometimes twice in one, and a second listen in one family must not take the
     /// port away from the other.
     listening: Mutex<HashMap<u16, Listeners>>,
-
-    /// Whether a port on this host's loopback is one a session published, which the guest
-    /// may reach whoever published it. [`doors::published`] but in the tests.
-    published_here: fn(u16) -> bool,
 
     /// Where each published console port's relay listens on this host -- see
     /// [`relay`](super::relay) -- for a guest reaching its own port over v4.
@@ -114,7 +101,6 @@ impl Policy {
             resolver,
             published: published.into_iter().collect(),
             listening: Mutex::new(HashMap::new()),
-            published_here: doors::published,
             relays: HashMap::new(),
         }
     }
@@ -194,10 +180,14 @@ impl krun::TsiPolicy for Policy {
             if self.published.contains(&to.port()) {
                 return None;
             }
-            // A published port is on this host's v4 loopback, so a v6 socket asking for one
-            // is given `::1`, where it is not, and is refused as it would be anyway.
-            return (self.published_here)(to.port())
-                .then(|| SocketAddr::new(loopback(ip), to.port()));
+            // `0.0.0.0` is this host's loopback in the socket's family; any other loopback
+            // address is reached as asked.
+            let host = if ip.is_unspecified() {
+                loopback(ip)
+            } else {
+                ip
+            };
+            return Some(SocketAddr::new(host, to.port()));
         }
         Some(to)
     }
@@ -235,40 +225,38 @@ mod tests {
         SocketAddr::new(ip.into(), port)
     }
 
-    /// A policy on a host where no session published anything but `elsewhere`.
-    fn policy(published: impl IntoIterator<Item = u16>, elsewhere: fn(u16) -> bool) -> Policy {
-        Policy {
-            published_here: elsewhere,
-            ..Policy::new(None, published)
-        }
+    fn policy(published: impl IntoIterator<Item = u16>) -> Policy {
+        Policy::new(None, published)
     }
 
-    fn nothing(_: u16) -> bool {
-        false
-    }
-
-    /// On is what this host reaches: anywhere but its loopback goes where it was asked.
+    /// On is what this host reaches: anywhere goes where it was asked.
     #[test]
     fn the_outside_is_where_it_was_asked_for() {
-        let policy = policy([], nothing);
+        let policy = policy([]);
         assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
         let lan = at(Ipv4Addr::new(192, 168, 1, 1), 80);
         assert_eq!(policy.connect(lan), Some(lan));
     }
 
-    /// This host's loopback is the operator's, whatever the port and however it is spelled.
+    /// This host's loopback is reached, whatever the port and however it is spelled.
     #[test]
-    fn this_hosts_loopback_is_refused() {
-        let policy = policy([], nothing);
+    fn this_hosts_loopback_is_reached() {
+        let policy = policy([]);
         for to in [
             at(Ipv4Addr::LOCALHOST, 8080),
             at(Ipv4Addr::new(127, 1, 2, 3), 22),
-            at(Ipv4Addr::UNSPECIFIED, 8080),
             at(Ipv6Addr::LOCALHOST, 8080),
-            at(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 8080),
         ] {
-            assert_eq!(policy.connect(to), None, "{to}");
+            assert_eq!(policy.connect(to), Some(to), "{to}");
         }
+        assert_eq!(
+            policy.connect(at(Ipv4Addr::UNSPECIFIED, 8080)),
+            Some(at(Ipv4Addr::LOCALHOST, 8080))
+        );
+        assert_eq!(
+            policy.connect(at(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 8080)),
+            Some(at(Ipv4Addr::LOCALHOST, 8080))
+        );
     }
 
     /// The guest's resolver is this host's, for DNS and nothing else.
@@ -285,7 +273,7 @@ mod tests {
     /// it keeps -- and that the guest's own loopback then reaches too.
     #[test]
     fn a_published_port_is_listened_on_here_and_nothing_else_is() {
-        let policy = policy([80], nothing);
+        let policy = policy([80]);
         assert_eq!(policy.listen(at(Ipv4Addr::UNSPECIFIED, 8080)), None);
         assert_eq!(policy.listener(80), None);
 
@@ -307,38 +295,22 @@ mod tests {
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(here));
     }
 
-    /// Another session's published port is reached at the same address it is here, and a
-    /// port nobody published is still the operator's.
-    #[test]
-    fn another_sessions_published_port_is_reached_on_loopback() {
-        let policy = policy([], |port| port == 3977);
-        assert_eq!(
-            policy.connect(at(Ipv4Addr::LOCALHOST, 3977)),
-            Some(at(Ipv4Addr::LOCALHOST, 3977))
-        );
-        assert_eq!(
-            policy.connect(at(Ipv4Addr::UNSPECIFIED, 3977)),
-            Some(at(Ipv4Addr::LOCALHOST, 3977))
-        );
-        assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 8080)), None);
-    }
-
     /// Its own port over v4 goes through the relay, which reaches a guest listener in either
     /// family; over v6 it goes straight to the listener.
     #[test]
     fn its_own_port_over_v4_goes_through_the_relay() {
         let relay = at(Ipv4Addr::LOCALHOST, 40000);
-        let policy = policy([80], nothing).with_relays([(80, relay)]);
+        let policy = policy([80]).with_relays([(80, relay)]);
         let here = policy.listen(at(Ipv6Addr::UNSPECIFIED, 80)).unwrap();
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(relay));
         assert_eq!(policy.connect(at(Ipv6Addr::LOCALHOST, 80)), Some(here));
     }
 
-    /// Its own published port wins over another session's of the same number, and is refused
+    /// Its own published port wins over this host's of the same number, and is refused
     /// until something in it listens there.
     #[test]
     fn its_own_listener_comes_first() {
-        let policy = policy([80], |_| true);
+        let policy = policy([80]);
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), None);
         let here = policy.listen(at(Ipv4Addr::UNSPECIFIED, 80)).unwrap();
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(here));
@@ -348,7 +320,7 @@ mod tests {
     /// where it was: x11vnc listens on `::1` twice, and its v4 listener is the one that serves.
     #[test]
     fn a_second_listen_in_one_family_leaves_the_other_alone() {
-        let policy = policy([5900], nothing);
+        let policy = policy([5900]);
         let v4 = policy.listen(at(Ipv4Addr::LOCALHOST, 5900)).unwrap();
         let _held_v4 = TcpListener::bind(v4).unwrap();
         let v6 = policy.listen(at(Ipv6Addr::LOCALHOST, 5900)).unwrap();

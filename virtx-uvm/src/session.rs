@@ -258,15 +258,10 @@ pub(crate) struct Session {
     _doors: Listening,
 }
 
-/// Tasks that end when this does, and the record that says where they lead. What a
-/// session's doors are held by, so that dropping the session is what closes them -- and
-/// dropping it on the way out of a `start` that failed, too.
+/// Tasks that end when this does. What a session's doors are held by, so that dropping the
+/// session is what closes them -- and dropping it on the way out of a `start` that failed, too.
 struct Listening {
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    /// The published ports, said where other sessions read them -- see `doors`. `None` for a
-    /// session that publishes none. After `tasks`, so the listeners are aborted before the
-    /// ports stop being published.
-    said: Option<doors::Record>,
 }
 
 impl Drop for Listening {
@@ -297,7 +292,6 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Boot, InitResp)> {
     // Before the first bind, so every early return aborts the doors already open.
     let mut listening = Listening {
         tasks: Vec::with_capacity(published.len()),
-        said: None,
     };
     for asked in &published {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, asked.host))
@@ -317,17 +311,6 @@ async fn start(init: InitCall) -> anyhow::Result<(Session, Boot, InitResp)> {
             relays.subscribe(),
         )));
     }
-    // Said where every other session here reads it, so that a guest of theirs can reach
-    // these ports as a program on this host does -- see `doors`. In this process's directory,
-    // which goes when the session does.
-    if !published.is_empty() {
-        let hosts: Vec<u16> = published.iter().map(|port| port.host).collect();
-        listening.said = Some(
-            doors::record(&sessions().join(std::process::id().to_string()), &hosts)
-                .map_err(|e| anyhow::anyhow!("recording the published ports: {e}"))?,
-        );
-    }
-
     let doors = Doors {
         // One relay per guest port, however many ports here lead to it.
         inbound: {

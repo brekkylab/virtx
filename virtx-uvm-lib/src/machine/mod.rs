@@ -312,9 +312,9 @@ impl Machine {
     /// the default because a session that did not say it wanted to reach the network should
     /// not.
     ///
-    /// On is what this process reaches, less this host's loopback -- see the `net` module for the
-    /// whole of the rule, and why a name resolves in a guest whose image was never prepared
-    /// for any of this.
+    /// On is what this process reaches, this host's loopback included -- see the `net` module
+    /// for the whole of the rule, and why a name resolves in a guest whose image was never
+    /// prepared for any of this.
     pub fn network(mut self, network: bool) -> Machine {
         self.network = network;
         self

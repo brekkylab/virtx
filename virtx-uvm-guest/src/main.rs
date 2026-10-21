@@ -22,17 +22,37 @@
 //! that would mean a protocol stream a single kernel warning could corrupt.
 //!
 //! So the session runs over a named virtio-console port --
-//! [`PORT_NAME`](virtx_uvm_host::PORT_NAME) -- opened here before the session starts. Two
+//! [`PORT_NAME`] -- opened here before the session starts. Two
 //! halves from one descriptor, because the driver allows a single opener per port: [`serve`]
 //! `dup`s the handle rather than opening the device twice.
 //!
-//! The first thing on it is [`HANDSHAKE`](virtx_uvm_host::HANDSHAKE), sent by this end. It
+//! The first thing on it is [`HANDSHAKE`], sent by this end. It
 //! is not part of the protocol and it is not politeness -- a virtio-console port discards
 //! what the host writes while no process in the guest has it open, so the host has to be told
 //! when reading has started, and there is nothing in the protocol for this end to say first.
 
 mod port;
 mod session;
+
+// The names this end and `virtx-uvm` both spell, and must spell the same: the port to find,
+// the handshake to send, and where `/abin` is. Written in both places -- the server's are in
+// its `boot.rs` -- so a change to one is a change to the other.
+
+/// The virtio-console port carrying the console session.
+///
+/// The guest's *console* is the kernel's -- it is where a panic and every `printk` land -- so
+/// the protocol runs on a named port beside it rather than on the console itself, which a
+/// single kernel warning would corrupt.
+const PORT_NAME: &str = "virtx-console";
+
+/// Sent once, as soon as the port is open, and consumed by the server before the first frame
+/// goes out: a virtio-console port discards what the host writes while no process in the
+/// guest has it open, so the server has to be told that something is reading.
+const HANDSHAKE: &[u8; 8] = b"VIRTXUVM";
+
+/// Where virtx's own executables are mounted, and what goes first on a command's `PATH`. A
+/// session whose host has none gets no `/abin` at all, rather than an empty one.
+const ABIN_DIR: &str = "/abin";
 
 use std::process::ExitCode;
 

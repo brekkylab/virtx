@@ -1,17 +1,25 @@
-//! Delay-loads `vulkan-1.dll` on Windows MSVC, as `virtx-uvm-host/build.rs` does for the
-//! boot, and for the same reason: a host without a GPU driver has no such DLL, and the
-//! server has to start there all the same.
+//! Delay-loads, on Windows MSVC, the DLLs a host may not have, so that this binary starts
+//! without them and says what is missing rather than failing to load at all.
 //!
-//! The server makes no GPU, but links virglrenderer anyway whenever it is built together with
-//! a `gpu` host -- cargo unifies `virtx-uvm-lib/gpu` across the two -- and that imports the
-//! Vulkan loader. Asked for whatever the build, then, since this package's own features do
-//! not say whether the library it links has the GPU in it; a link that imports nothing from
-//! the DLL only warns (LNK4199).
+//! * `WinHvPlatform.dll` and `WinHvEmulation.dll`, libkrun's hypervisor, which exist only
+//!   where the Windows Hypervisor Platform feature is turned on. Deferred, `image` and
+//!   `session` run on a host without it, and `virtx_uvm::boot::hypervisor` is what tells
+//!   the user to turn it on, before any boot calls into them.
+//! * `vulkan-1.dll`, for a `gpu` build. virglrenderer links the Vulkan loader there, so
+//!   without this the binary needs `vulkan-1.dll` to *start*. Deferred, the DLL is loaded by
+//!   the first call a GPU makes, which `vulkan::loader` in `boot.rs` checks for first.
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
-        println!("cargo::rustc-link-arg-bins=/DELAYLOAD:vulkan-1.dll");
-        println!("cargo::rustc-link-lib=delayimp");
+        return;
     }
+    let mut dlls = vec!["WinHvPlatform.dll", "WinHvEmulation.dll"];
+    if std::env::var_os("CARGO_FEATURE_GPU").is_some() {
+        dlls.push("vulkan-1.dll");
+    }
+    for dll in &dlls {
+        println!("cargo::rustc-link-arg-bins=/DELAYLOAD:{dll}");
+    }
+    println!("cargo::rustc-link-lib=delayimp");
 }

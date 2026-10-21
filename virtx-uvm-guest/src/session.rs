@@ -74,7 +74,7 @@ use virtx::protocol::{
     Call, Error, ExecCall, ExecResp, InitCall, InitResp, MAX_PAYLOAD, Message, MountSpec,
     Notification, ReadCall, ReadResp, Response, Server, VersionResp, WriteCall, WriteResp,
 };
-use virtx_uvm_host::{ABIN_DIR, HANDSHAKE};
+use crate::{ABIN_DIR, HANDSHAKE};
 
 /// A command we found but could not start, and one we could not find at all.
 ///

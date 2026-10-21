@@ -4,7 +4,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use virtx_uvm_host::PORT_NAME;
+use crate::PORT_NAME;
 
 /// How long to wait for the port to appear. The device is probed while the init above this
 /// is still mounting, so it is normally there already; the wait is for the boot where it is

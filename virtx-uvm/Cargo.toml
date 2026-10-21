@@ -5,58 +5,49 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# What a user runs: it answers a console session, and what it does with one is to run it
-# inside a micro-VM. The VM is not in this process -- a session spawns `virtx-uvm-host`, the
-# signed binary sitting beside this one, and talks to the guest down a socket that boot turns
-# into a console port. See `session::halves` for why the hypervisor is somewhere else and how
-# the three files find each other.
+# What a user runs, and what becomes a micro-VM: `session` (the default) answers a console,
+# `image` manages the cache, and `boot` -- spawned by this binary itself -- enters a machine.
+# See `boot.rs` for why the machine is a process of its own, and why it is this same file.
 [[bin]]
 name = "virtx-uvm"
 path = "src/main.rs"
 
-# Only `examples/run.rs` reads this, and it forwards to the library's own: `session.gpu(true)`
-# is a flag a build without a virtio-gpu device ignores, so an example that can ask for one
-# needs the feature on the package it lives in. The server itself has no use for it -- it does
-# not make a machine, it spawns a boot that does, and whether *that* file can attach a device
-# is something it asks the file rather than something this build decides. So it is off, and a
-# `cargo build` of this package links no display backend.
+# virtio-gpu with venus, passed through to the machine. Its own feature because what it costs is
+# a C library this tree neither ships nor builds. The Vulkan loader is not linked but opened,
+# except on macOS where MoltenVK is built in -- which is what `libc` and `windows-sys` below
+# are for.
 [features]
-gpu = ["virtx-uvm-lib/gpu"]
+gpu = ["virtx-uvm-lib/gpu", "dep:libc", "dep:windows-sys"]
 
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-# The protocol this server answers on stdin and stdout.
-virtx = { workspace = true }
-# The boot's command line -- its library half, which links no hypervisor.
-virtx-uvm-host = { workspace = true }
-# Putting the image a session names into the cache. The machine itself is the boot's: what
-# this binary wants from the library is the store.
+# The image cache and the registry it pulls from.
 virtx-uvm-lib = { workspace = true }
+# A recipe, read from a Dockerfile.
+virtx = { workspace = true }
+# A built image is named by a SHA-256 of what was declared, and what it states is part of that.
+sha2 = "0.10"
+serde_json = "1"
+# A snapshot travels gzipped.
+flate2 = "1"
 tokio = { workspace = true, features = [
-    "fs",
     "io-std",
     "io-util",
     "macros",
     "net",
     "rt-multi-thread",
+    "sync",
     "time",
 ] }
 
-# Asking whether the pid a leftover session path is named for is still alive, which each
-# platform spells with its own call -- `kill(pid, 0)` on one, `OpenProcess` on the other.
+# `dlopen`, to find the Vulkan loader a `gpu` boot opens rather than links.
 [target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+libc = { workspace = true, optional = true }
 
+# `LoadLibraryW`, the same question on Windows.
 [target.'cfg(windows)'.dependencies]
-# The same release libkrun's own Windows code takes, so one version is resolved rather than
-# two compiled.
-windows-sys = { version = "0.61.2", features = [
+windows-sys = { version = "0.61.2", optional = true, features = [
     "Win32_Foundation",
-    # Job objects, which is how a boot is tied to this process rather than to its own `Drop`
-    # -- see `reap_with_this_process`.
-    "Win32_System_JobObjects",
-    # Whether the Windows Hypervisor Platform is there -- see `machine::hypervisor`.
     "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
 ] }

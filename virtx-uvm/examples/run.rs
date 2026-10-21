@@ -8,7 +8,7 @@
 //!
 //!   cargo xtask run --example run -- localhost/virtx-uvm-build:<digest> 'jq --version'
 //!
-//! The first run of something not yet here pulls it and stitches it into a disk; later
+//! The first run of something not yet here pulls it and makes its root filesystem; later
 //! ones find both in the cache. The session's writes go to `data/sessions/<image>.ext4`,
 //! so a second run sees what the first one did:
 //!
@@ -36,9 +36,10 @@
 //! `VIRTX_GPU=1` asks for guest Vulkan, which needs the `gpu` feature to be anything
 //! more than a flag and an image carrying Mesa's venus driver:
 //!
-//!   VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+//!   VIRTX_NET=1 VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:latest \
+//!       'apk add mesa-vulkan-virtio vulkan-loader vulkan-tools && vulkaninfo --summary'
 //!
-//! Nothing here is host-specific: [`session`](virtx_uvm::session) attaches the guest's
+//! Nothing here is host-specific: [`machine`](virtx_uvm::machine) attaches the guest's
 //! console itself, which is the one call that would otherwise differ between them. Running
 //! it is, though, which is why it goes through `cargo xtask run`: on macOS that ad-hoc signs
 //! the binary with `com.apple.security.hypervisor`, which Hypervisor.framework will not start
@@ -46,49 +47,58 @@
 //!
 //! **This boots a machine directly, which is not what a session does.** A console client
 //! spawns `virtx-uvm`, which spawns the signed boot beside it; what this example shows is
-//! the layer under both -- an image, a disk, and a command -- with no protocol over it. So
+//! the layer under both -- an image, a root filesystem, and a command -- with no protocol over it. So
 //! there is no agent here and no `/abin`: those are the server's, not the library's.
 
 use std::path::PathBuf;
 
-use virtx_uvm::image;
-use virtx_uvm::session::{Ext4, Mount, Session};
+use virtx_uvm::cache::Cache;
+use virtx_uvm::filesystem::Tree;
+use virtx_uvm::machine::{Machine, Mount, Upper};
+use virtx_uvm::registry::{Reference, Registry};
+use virtx_uvm::rootfs::Rootfs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The machine is entered on this thread, so libkrun logs here rather than in a spawned
     // host: `KRUN_LOG=debug` is what makes a device that refuses to activate say why.
-    virtx_uvm::session::log_from_env();
+    virtx_uvm::machine::log_from_env();
 
     let mut args = std::env::args().skip(1);
     let reference = args.next().unwrap_or_else(|| "alpine:latest".to_string());
     let command = args.next();
     let share = args.next();
 
-    // **Provision first, and pull only if that says the image was never here.** The
-    // cache holds images a registry never served -- what a build left behind is one, and
-    // so is anything `commit` filed -- and reaching for a registry first would ask
-    // `localhost` for those and fail on an image that is sitting in the cache.
-    //
-    // `provision` is the question and the answer at once: it stitches the layers into the
-    // disk a boot attaches, and the one failure that means "nobody pulled this" is the one
-    // worth a round trip. Anything else it says is about this machine and is reported.
+    // **The cache first, and a registry only for an image that is not in it.** The cache
+    // holds images a registry never served -- what a build left behind is one -- and
+    // reaching for a registry first would ask `localhost` for those and fail on an image
+    // that is sitting right here.
     //
     // The pull is the only async thing here, and the only thing that touches the network.
     // A machine is entered on this thread, so the runtime is over before anything of
     // libkrun's starts.
-    match image::provision(reference.as_str(), None) {
-        // Already here, and now stitched. The session below asks for the same disk and
-        // finds it made.
-        Ok(_) => {}
-        Err(image::Error::NotPulled(_)) => {
+    let cache = Cache::default();
+    let parsed: Reference = reference.parse()?;
+    let image = match cache.find(&parsed)? {
+        Some(image) => image,
+        None => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(image::pull(reference.as_str(), None, None))?;
+            let pulled = runtime.block_on(Registry::default().pull(parsed, &cache))?;
             drop(runtime);
+            pulled
         }
-        // Anything else is about this machine rather than about the image being absent,
-        // and a pull would not answer it.
-        Err(e) => return Err(e.into()),
-    }
+    };
+
+    // Its root filesystem, made the first time those layers are booted and found after.
+    let at = cache
+        .rootfs_path(&image.layers)
+        .ok_or("an image with no layers is not a filesystem to boot")?;
+    let rootfs = match Rootfs::open(&at) {
+        Some(rootfs) => rootfs,
+        None => {
+            let layers: Vec<_> = image.layers.iter().map(|l| cache.layer_path(l)).collect();
+            Rootfs::create(&layers, &at)?
+        }
+    };
 
     // One session per image, kept between runs -- named after the image with the
     // characters a path cannot hold replaced, since a reference holds `/` and `:`.
@@ -110,15 +120,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("session: {}", path.display());
 
-    // Formatted here if this is the first run over that path, and found as it was left if
-    // it is not -- which is what makes a later run carry on from this one. `data/sessions`
-    // is made on the way. A session handed no rootfs would get a throwaway instead,
-    // unlinked as soon as the machine had it.
-    let rootfs = Ext4::at(path, Ext4::SIZE)?;
+    // Found as it was left if an earlier run made it -- which is what makes a later run carry
+    // on from this one -- and made here if not, `data/sessions` on the way. A session handed
+    // no upper layer would get a throwaway instead, unlinked as soon as the machine had it.
+    let upper = match Upper::open(&path) {
+        Some(upper) => upper,
+        None => Upper::create(&path, Upper::SIZE, Tree::new())?,
+    };
 
     // What to run: a shell around whatever was asked for, and the image's own command
     // when nothing was.
-    let mut session = Session::new().image(reference.as_str()).rootfs(rootfs);
+    let mut session = Machine::new(rootfs, image.config).upper(upper);
     if let Some(script) = command {
         session = session.command(["/bin/sh".to_string(), "-c".to_string(), script]);
     }

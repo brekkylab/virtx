@@ -27,7 +27,7 @@ usage: cargo xtask init     [--force]
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
-  host      the console server and the VM process, for this machine
+  host      the console server, which is also the VM process, for this machine
   guest     the program that runs inside the VM
   abin      the executables every VM gets at /abin
   kernel    the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
@@ -52,7 +52,7 @@ usage: cargo xtask init     [--force]
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
 
-const HOST_BINS: &[&str] = &["virtx-uvm", "virtx-uvm-host"];
+const HOST_BINS: &[&str] = &["virtx-uvm"];
 const GUEST_BIN: &str = "virtx-uvm-guest";
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
@@ -385,7 +385,7 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     for bin in HOST_BINS {
         cargo.args(["-p", bin]);
     }
-    cargo.args(["--features", "virtx-uvm-host/gpu"]);
+    cargo.args(["--features", "virtx-uvm/gpu"]);
     if !options.debug {
         cargo.arg("--release");
     }
@@ -394,7 +394,7 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
     sign(
         &options
             .out()
-            .join(format!("virtx-uvm-host{}", env::consts::EXE_SUFFIX)),
+            .join(format!("virtx-uvm{}", env::consts::EXE_SUFFIX)),
     )
 }
 
@@ -806,7 +806,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Put the set a `bin/` holds -- the host halves, the guest, the guest kernel, and abin if
+/// Put the set a `bin/` holds -- the host binary, the guest, the guest kernel, and abin if
 /// it was built and `abin` asks for it -- from `built` into `bin`. What `install` does, and
 /// what `upload` archives.
 fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {

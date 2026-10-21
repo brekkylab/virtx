@@ -43,7 +43,8 @@ cargo xtask install                     # -> ~/.cache/virtx/bin, or --prefix <di
 ```sh
 cargo xtask run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
 VIRTX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
-VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:3.21 'vulkaninfo --summary'
+VIRTX_NET=1 VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:latest \
+    'apk add mesa-vulkan-virtio vulkan-loader vulkan-tools && vulkaninfo --summary'
 ```
 
 One example, because there is one thing to show: a machine made out of the parts
@@ -52,8 +53,9 @@ this repository has. What a *session* is — the agent, the console protocol, `/
 by running an example.
 
 `run` is the [`session`](virtx-uvm-lib/src/session/) module end to end: it pulls the
-image, stitches its layers into one disk, formats a writable ext4 beside it and
-boots the guest on an overlay of the two. The session is the ext4 file, so the
+image into the cache, makes its layers into one disk -- the [root
+filesystem](virtx-uvm-lib/src/rootfs.rs) -- formats a writable ext4 beside it and boots
+the guest on an overlay of the two. The session is the ext4 file, so the
 second run of the same image sees what the first one did:
 
 ```sh
@@ -89,15 +91,17 @@ built, silently, since the GPU still came up.
 A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not
 sign, and a binary that creates a VM fails without it. The one exception is
 the one that matters for a console server: `cargo xtask build host` signs
-`virtx-uvm-host` once cargo has built it. A console server is started by
+`virtx-uvm` once cargo has built it -- the one binary, since the process that
+becomes a VM is `virtx-uvm boot`, spawned by the server from its own file. A console server is started by
 whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
 is not on that path, so the binary that calls `hv_vm_create` has to come out of
 the build already entitled. A plain `cargo build` leaves it unsigned.
 
 ## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
 
-[`image`](virtx-uvm-lib/src/image/) answers with a disk: the layers stitched into one
-read-only EROFS filesystem, shared by every machine ever booted from that image.
+[`rootfs`](virtx-uvm-lib/src/rootfs.rs) makes an image's layers into a disk: one
+read-only EROFS filesystem -- the layers merged into a metadata image that points into
+them, rather than a copy of them -- shared by every machine ever booted on those layers.
 [`session`](virtx-uvm-lib/src/session/) is what makes one of those machines writable, by
 stacking an ext4 of its own over it:
 
@@ -121,7 +125,7 @@ need no patch at all and does not work. The guest kernel refuses a FUSE
 filesystem as an upperdir outright — `filesystem on %s not supported as
 upperdir` — and even past that, deleting a file the image shipped is recorded as
 a character device numbered `0:0`, which `mknod` on a macOS host refuses to
-anything but root. It is the same wall [`image::ingest`](virtx-uvm-lib/src/image/blob.rs) is
+anything but root. It is the same wall [`filesystem`](virtx-uvm-lib/src/filesystem/) is
 written around, and the reason layers become EROFS images rather than extracted
 directories.
 
@@ -146,10 +150,10 @@ also what lets it pick up a disk an earlier session left.
 A session can see host directories, each one a virtio-fs share:
 
 ```rust
-Session::new()
+Session::new(rootfs, image.config)
     .mount(Mount::new("./data", "/data").read_only())
     .command(["ls", "/data"])
-    .enter("alpine:3.21", None)?;
+    .enter()?;
 ```
 
 **The host half needs no patch.** Sharing a directory under a tag is what
@@ -194,7 +198,7 @@ no interface, no address and no lease — nothing to configure in the guest and
 nothing to forward on the host.
 
 ```rust
-Session::new()
+Session::new(rootfs, image.config)
     .network(true)
     .publish(80, TcpListener::bind("127.0.0.1:8080")?)
     .command(["httpd", "-f", "-p", "80"])
@@ -235,8 +239,7 @@ MoltenVK turns that into Metal.
 A session asks for one with `.gpu(true)`:
 
 ```rust
-Session::new()
-    .image("alpine:3.21")
+Session::new(rootfs, image.config)
     .gpu(true)
     .command(["vulkaninfo", "--summary"])
     .enter()?;
@@ -249,8 +252,9 @@ carries the guest half either way (`apk add mesa-vulkan-virtio vulkan-loader`);
 one without it boots and finds no device.
 
 **The console server does not ignore it.** `virtx-uvm` answers a `gpu` member on
-`init`, and there what is asked for is what is given: it asks the boot beside it
-(`virtx-uvm-host --capabilities`) whether a device can be attached and refuses
+`init`, and there what is asked for is what is given: it checks whether its own
+build has the `gpu` feature and the host a Vulkan loader -- the boot is the same
+file, so what it can attach is known rather than asked -- and refuses
 the session with `UNSUPPORTED_MACHINE` when it cannot. A client on the other end
 of a pipe cannot `cfg` around anything, and a session that silently ran on the CPU
 costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
@@ -365,8 +369,8 @@ upstream main still gets wrong there:
 `-Dvulkan-dload=false` still links MoltenVK rather than `dlopen`ing it: the
 dload path asks dyld for `libvulkan.1.dylib` or `libMoltenVK.dylib` by leaf
 name, and Homebrew's `lib` is not on its default search path. Linux does the
-opposite: `-Dvulkan-dload=true`, so `virtx-uvm-host` starts on a host with no
-Vulkan loader, and reports a GPU (`--capabilities`) only where it finds one.
+opposite: `-Dvulkan-dload=true`, so `virtx-uvm` starts on a host with no
+Vulkan loader, and offers a GPU only where it finds one.
 
 ### virglrenderer on Linux — `3rdparty/_patches/virglrenderer-8167744-linux-host-memory.patch`
 
@@ -1056,8 +1060,8 @@ One line, on the path every session takes. `FileTree::lookup` walks a path with
 `Path::components()` and skips the root by comparing the component's text
 against `"/"` — which is what `Component::RootDir` renders as on unix and never
 on Windows, where it is `"\"`. So the separator was looked up as a file name,
-every path under the root answered `None`, and `Ext4::at` failed at
-`Formatter::new` with `NotFound("/")` before a guest was ever started. The
+every path under the root answered `None`, and formatting a session's upper layer failed
+at `Formatter::new` with `NotFound("/")` before a guest was ever started. The
 component is now matched as a component, so a root or a drive prefix is skipped
 whatever it is spelled.
 
@@ -1122,10 +1126,11 @@ reserved for the same reason `/.virtx` is: a client that asks for a tree there i
 ## Layout
 
 ```
-virtx-uvm-lib/              the machinery: images, disks, sessions (lib `virtx_uvm`)
-virtx-uvm/                  the console server a user runs; spawns the VM, is not one
-virtx-uvm-host/             the process that becomes a VM, and -- as its library half --
-                            the command line the server starts one with; signed on macOS
+virtx-uvm-lib/              the machinery: images, the root filesystems made of them,
+                            machines and booting them (lib `virtx_uvm`)
+virtx-uvm/                  the one binary: the console server a user runs, and -- as
+                            `virtx-uvm boot`, spawned by itself -- the process that
+                            becomes a VM; signed on macOS
 virtx-uvm-guest/            the half inside the VM; its own workspace, built for musl
 virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
                             beside them and not on it -- and a SKILLS.md each, saying what one
@@ -1137,7 +1142,7 @@ virtx-abins/                the programs in the guest's /abin -- index and mem, 
 3rdparty/_patches/           applied to the submodules above by `cargo xtask init`;
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
 xtask/                      `cargo xtask init` / `build` / `install` / `run` / `test`: the
-                            server, the boot, the guest and abin/ built and placed as one
+                            server, the guest and abin/ built and placed as one
                             set; xtask/scripts/ has what it runs -- the GPU libraries'
                             build, the musl sysroot fetch, and the musl cc/ar that
                             virtx-abins/ cross-compiles with

@@ -26,9 +26,6 @@ anyhow = "1"
 # `ensure` above all: its TLS stack has C in it, which a musl cross-build cannot compile
 # without a cross-compiler.
 virtx = { path = "../../virtx", default-features = false }
-# The two names that are the wire's rather than either end's -- the port to find and the
-# handshake to send. No features, so nothing of the boot's other half is in this graph.
-virtx-uvm-host = { path = "../virtx-uvm-host", default-features = false }
 # Reaping, process groups and the signal a timeout is.
 libc = "0.2"
 tokio = { version = "1", features = [

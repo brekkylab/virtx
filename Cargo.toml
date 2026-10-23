@@ -25,7 +25,7 @@ include = [
 # Members share this crate's target directory and lockfile. A bare `cargo build`/`cargo test`
 # still builds only `virtx`, the default member.
 [workspace]
-members = ["bindings/node", "bindings/python"]
+members = ["bindings/node", "bindings/python", "virtx-core"]
 
 [build-dependencies]
 # Compile `contrib/fuse_t/shim.c` for `mount` on macOS, and read where FUSE-T keeps its

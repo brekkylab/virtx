@@ -15,7 +15,8 @@ anyhow = "1"
 # HTTP for the Streamable HTTP client. The same reqwest 0.13 and rustls the `virtx` crate uses.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # `protocol::http`'s server: the request and response it handles, and the bodies in them.
-bytes = "1"
+# `serde` so a volume's file contents are a CBOR byte string, not an array of integers.
+bytes = { version = "1", features = ["serde"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

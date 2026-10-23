@@ -5,21 +5,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::method::Request;
 
-/// `snapshots.list`: every snapshot the server holds.
+/// `snapshot.list`: every snapshot the server holds.
 pub struct SnapshotList;
 
 impl Request for SnapshotList {
-    const NAME: &'static str = "snapshots.list";
+    const NAME: &'static str = "snapshot.list";
     type Args = SnapshotListArgs;
     type Output = Vec<SnapshotListOutputItem>;
 }
 
-/// What `snapshots.list` takes: nothing.
+/// What `snapshot.list` takes: nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotListArgs {}
 
-/// One snapshot in what `snapshots.list` answers.
+/// One snapshot in what `snapshot.list` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotListOutputItem {
@@ -30,16 +30,16 @@ pub struct SnapshotListOutputItem {
     pub size: u64,
 }
 
-/// `snapshots.create`: keep a new, empty upper layer under a name.
+/// `snapshot.create`: keep a new, empty upper layer under a name.
 pub struct SnapshotCreate;
 
 impl Request for SnapshotCreate {
-    const NAME: &'static str = "snapshots.create";
+    const NAME: &'static str = "snapshot.create";
     type Args = SnapshotCreateArgs;
     type Output = SnapshotCreateOutput;
 }
 
-/// What `snapshots.create` takes.
+/// What `snapshot.create` takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCreateArgs {
@@ -47,9 +47,14 @@ pub struct SnapshotCreateArgs {
     /// [`SnapshotCreateOutput::name`]. A name already in use is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// How much a sandbox standing on it may write over its image, in GiB. Without one the
+    /// server picks it; `0` is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
 }
 
-/// What `snapshots.create` answers.
+/// What `snapshot.create` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCreateOutput {
@@ -57,16 +62,16 @@ pub struct SnapshotCreateOutput {
     pub name: String,
 }
 
-/// `snapshots.remove`: delete a snapshot and its upper layer.
+/// `snapshot.remove`: delete a snapshot and its upper layer.
 pub struct SnapshotRemove;
 
 impl Request for SnapshotRemove {
-    const NAME: &'static str = "snapshots.remove";
+    const NAME: &'static str = "snapshot.remove";
     type Args = SnapshotRemoveArgs;
     type Output = SnapshotRemoveOutput;
 }
 
-/// What `snapshots.remove` takes.
+/// What `snapshot.remove` takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotRemoveArgs {
@@ -74,7 +79,7 @@ pub struct SnapshotRemoveArgs {
     pub name: String,
 }
 
-/// What `snapshots.remove` answers: nothing, once the snapshot is gone.
+/// What `snapshot.remove` answers: nothing, once the snapshot is gone.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotRemoveOutput {}

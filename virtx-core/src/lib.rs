@@ -10,5 +10,7 @@ mod ffi;
 mod image;
 mod method;
 mod transport;
+mod volume;
 
 pub use image::*;
+pub use volume::*;

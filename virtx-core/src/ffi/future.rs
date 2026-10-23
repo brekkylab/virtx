@@ -157,7 +157,6 @@ mod tests {
     use std::{thread, time::Duration};
 
     use ciborium::Value;
-
     use tokio::{runtime::Runtime, sync::oneshot};
 
     use super::{

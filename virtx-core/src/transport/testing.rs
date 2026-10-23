@@ -1,12 +1,17 @@
-//! The methods the tests serve, and a client of them in memory. `images.build` sends
-//! `pulling <base>` as its progress, and fails for the base `missing`.
+//! The methods the tests serve, and a client of them in memory. `image.build` sends
+//! `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
+//! the path itself, as though each file held its own path. `sandbox.exec` runs everything as
+//! `echo`.
 
 use std::io;
 
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 
 use crate::{
-    method::{ImageBuild, ImageBuildOutput, Request},
+    method::{
+        ImageBuild, ImageBuildOutput, Request, SandboxExec, SandboxExecOutput, VolumeFileRead,
+        VolumeFileReadOutput,
+    },
     transport::{
         Dispatcher, ErrorObject, Methods, Notifier, TransportClient,
         r#impl::{
@@ -67,6 +72,26 @@ pub fn methods() -> Methods {
             Ok(ImageBuildOutput {
                 reference: args.reference.unwrap_or_else(|| "built:latest".into()),
                 digest: "sha256:0".into(),
+            })
+        })
+        .add::<SandboxExec, _, _>(|args, _| async move {
+            let stdout = format!("{}\n", args.cmd[1..].join(" "));
+            Ok(SandboxExecOutput {
+                code: 0,
+                stdout: stdout.into(),
+                stderr: Default::default(),
+                truncated: false,
+            })
+        })
+        .add::<VolumeFileRead, _, _>(|args, _| async move {
+            let bytes = args.path.into_bytes();
+            let start = (args.offset as usize).min(bytes.len());
+            let end = match args.length {
+                Some(length) => (start + length as usize).min(bytes.len()),
+                None => bytes.len(),
+            };
+            Ok(VolumeFileReadOutput {
+                data: bytes[start..end].to_vec().into(),
             })
         })
         .add::<Session, _, _>(|_, extensions| async move {

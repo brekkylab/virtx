@@ -127,11 +127,10 @@ where
 mod tests {
     use ciborium::cbor;
     use futures_util::StreamExt;
-
-    use crate::transport::{Event, TransportClient, testing::methods};
     use tokio::runtime::Runtime;
 
     use super::*;
+    use crate::transport::{Event, TransportClient, testing::methods};
 
     /// The methods every test server answers.
     fn dispatcher() -> Dispatcher {

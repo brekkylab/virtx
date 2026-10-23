@@ -1,11 +1,10 @@
 //! Both ends of Streamable HTTP, and the server against `PROTOCOL.md` by hand.
 
 use ciborium::{Value, cbor};
+use futures_util::StreamExt;
 use tokio::net::TcpListener;
 
 use super::*;
-use futures_util::StreamExt;
-
 use crate::transport::{
     Dispatcher, Event, TransportClient, r#impl::frame::Parser, testing::methods,
 };

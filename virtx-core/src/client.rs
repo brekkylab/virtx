@@ -440,7 +440,7 @@ impl Client {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod tests {
     use futures_util::StreamExt;
 

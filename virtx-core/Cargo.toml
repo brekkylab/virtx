@@ -20,11 +20,12 @@ serde = { version = "1", features = ["derive"] }
 
 # HTTP for the Streamable HTTP client. The same reqwest 0.13 and rustls the `virtx` crate uses.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
-# `protocol::http`'s server: the request and response it handles, and the bodies in them.
+# The headers and statuses of Streamable HTTP, and a method's `Extensions`.
 http = { version = "1", optional = true }
+# The Streamable HTTP server: the bodies of the requests and responses it handles.
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-# `protocol::http`'s session ids.
+# The Streamable HTTP server's session ids.
 uuid = { version = "1", features = ["v4"], optional = true }
 # `Stream`, which a call's progress is, and the macro that writes one.
 futures-util = { version = "0.3", default-features = false, optional = true }
@@ -48,19 +49,24 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 tokio = { version = "1", features = ["io-std"] }
 
 [features]
-# The types (`image`, `volume`, the methods' args and outputs) are always built. `transport` adds
-# the client and server of the wire; `ffi` the C ABI over a client, which is what
-# `libvirtx_core` is built for.
+# The types (`image`, `volume`, the methods' args and outputs) are always built. `client` adds
+# the wire's client end, `server` its server end, and `ffi` the C ABI over a client, which is
+# what `libvirtx_core` is built for. The tests of both ends together run with both on.
 default = ["ffi"]
-transport = [
+client = [
     "dep:reqwest",
     "dep:http",
-    "dep:http-body",
-    "dep:http-body-util",
-    "dep:uuid",
     "dep:futures-util",
     "dep:async-stream",
     "dep:ciborium",
     "dep:tokio",
 ]
-ffi = ["transport"]
+server = [
+    "dep:http",
+    "dep:http-body",
+    "dep:http-body-util",
+    "dep:uuid",
+    "dep:ciborium",
+    "dep:tokio",
+]
+ffi = ["client"]

@@ -6,6 +6,9 @@
 //! of frames is a CBOR sequence, and its fixed eight-byte header lets a reader find the next
 //! frame after bytes that are not one, as a server's stray output is skipped.
 
+// Each end uses only its own share of these.
+#![cfg_attr(not(all(feature = "client", feature = "server")), allow(dead_code))]
+
 use std::{collections::VecDeque, io};
 
 use tokio::io::{AsyncRead, AsyncReadExt};

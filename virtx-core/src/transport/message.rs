@@ -1,5 +1,8 @@
 //! JSON-RPC 2.0 messages, as this protocol uses them: one CBOR map each, never a batch.
 
+// Each end uses only its own share of these.
+#![cfg_attr(not(all(feature = "client", feature = "server")), allow(dead_code))]
+
 use std::fmt;
 
 use ciborium::Value;

@@ -1,26 +1,29 @@
 //! The methods the tests serve, and a client of them in memory. `image.build` sends
 //! `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
 //! the path itself, as though each file held its own path. `sandbox.exec` runs everything as
-//! `echo`, sending its line as its progress.
+//! `echo`, sending its line as its progress. The client of them needs the `ffi` feature too.
 
+#[cfg(feature = "ffi")]
 use std::io;
 
+#[cfg(feature = "ffi")]
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 
+#[cfg(feature = "ffi")]
+use crate::transport::{
+    Dispatcher, TransportClient,
+    r#impl::{
+        BoxFuture, Incoming, Outgoing,
+        frame::{Reader, frame},
+        stdio,
+    },
+};
 use crate::{
     method::{
         ImageBuild, ImageBuildOutput, Request, SandboxExec, SandboxExecOutput, VolumeFileRead,
         VolumeFileReadOutput,
     },
-    transport::{
-        Dispatcher, ErrorObject, Methods, Notifier, TransportClient,
-        r#impl::{
-            BoxFuture, Incoming, Outgoing,
-            frame::{Reader, frame},
-            stdio,
-            streamable_http::SessionId,
-        },
-    },
+    transport::{ErrorObject, Methods, Notifier, r#impl::streamable_http::SessionId},
 };
 
 /// `echo`: answers the text it is given.
@@ -97,6 +100,7 @@ pub fn methods() -> Methods {
     methods
 }
 
+#[cfg(feature = "ffi")]
 /// A client of [`methods`], served on this runtime over an in-memory pipe.
 pub fn connect() -> TransportClient {
     let (client, server) = tokio::io::duplex(64 * 1024);
@@ -106,8 +110,10 @@ pub fn connect() -> TransportClient {
     TransportClient::new(Pipe(write), PipeFrames(Reader::new(read)))
 }
 
+#[cfg(feature = "ffi")]
 struct Pipe(WriteHalf<DuplexStream>);
 
+#[cfg(feature = "ffi")]
 impl Outgoing for Pipe {
     fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move { self.0.write_all(&frame(&message)).await })
@@ -118,8 +124,10 @@ impl Outgoing for Pipe {
     }
 }
 
+#[cfg(feature = "ffi")]
 struct PipeFrames(Reader<ReadHalf<DuplexStream>>);
 
+#[cfg(feature = "ffi")]
 impl Incoming for PipeFrames {
     fn receive(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async move {

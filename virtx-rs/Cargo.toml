@@ -20,13 +20,7 @@ serde = "1"
 # A file's contents, as `virtx-core` reads them.
 bytes = "1"
 
-[dev-dependencies]
-# The server the tests spawn: the test binary itself, serving `virtx-core`'s stdio transport.
-virtx-core = { path = "../virtx-core", default-features = false, features = ["transport"] }
-tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread"] }
-futures-util = { version = "0.3", default-features = false }
-
 [[test]]
-# Its own `main`, which serves when spawned as the server and runs the tests otherwise.
+# Its own `main`, which opens the library once before every test.
 name = "client"
 harness = false

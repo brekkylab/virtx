@@ -21,4 +21,4 @@ The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or the copy 
 npm install && npm test
 ```
 
-The tests build `libvirtx_core` and the test server (`virtx-rs/examples/test_server.rs`) with cargo first.
+The tests build `libvirtx_core` with cargo first.

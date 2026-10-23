@@ -26,4 +26,4 @@ The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the
 uv run pytest
 ```
 
-The tests build `libvirtx_core` and the test server (`virtx-rs/examples/test_server.rs`) with cargo first.
+The tests build `libvirtx_core` with cargo first.

@@ -6,10 +6,14 @@
 //! [`connect`].
 //! Both keep to the "Streamable HTTP" section of `PROTOCOL.md`, including its session header.
 
+#[cfg(feature = "client")]
 mod client;
+#[cfg(feature = "server")]
 mod server;
 
+#[cfg(feature = "client")]
 pub use client::{Receiver, Sender, connect};
+#[cfg(feature = "server")]
 pub use server::{HttpBody, Server, SessionId};
 
 /// The header a session's id travels in, both ways.
@@ -27,5 +31,5 @@ fn is_media_type(content_type: &str, media_type: &str) -> bool {
     name.eq_ignore_ascii_case(media_type)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "client", feature = "server"))]
 mod tests;

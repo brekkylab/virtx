@@ -1,36 +1,15 @@
 //! Both ends of Streamable HTTP, and the server against `PROTOCOL.md` by hand.
 
-use jsonrpsee::RpcModule;
 use tokio::net::TcpListener;
 
 use super::*;
-use crate::transport::{Dispatcher, Notifier, Transport, TransportClient};
+use crate::transport::{Dispatcher, Transport, TransportClient, testing::methods};
 
 /// A [`Server`] on localhost, serving `echo`, `count` (which notifies `counted` before it
 /// answers) and `session` (which answers the request's session id).
 async fn serve() -> String {
-    let mut module = RpcModule::new(());
-    module
-        .register_method("echo", |params, _, _| params.one::<String>())
-        .unwrap();
-    module
-        .register_async_method("count", |params, _, extensions| async move {
-            let to: u32 = params.one()?;
-            let notifier = extensions.get::<Notifier>().expect("a notifier");
-            for i in 1..=to {
-                notifier.notify("counted", i);
-                tokio::task::yield_now().await;
-            }
-            jsonrpsee::core::RpcResult::Ok(to)
-        })
-        .unwrap();
-    module
-        .register_method("session", |_, _, extensions| {
-            extensions.get::<SessionId>().expect("a session").0.clone()
-        })
-        .unwrap();
     let server = Server::with_origins(
-        Dispatcher::new(module),
+        Dispatcher::new(methods()),
         vec!["https://allowed.example".into()],
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,7 +62,7 @@ async fn a_client_calls_and_its_session_carries_over() {
 async fn a_client_receives_notifications_over_the_stream() {
     let url = serve().await;
     let session = connect(&url);
-    let mut counted = session.notifications::<u32>("counted").await.unwrap();
+    let mut counted = session.notifications::<u32>("counted");
     let answer: u32 = session.request("count", [3]).await.unwrap();
     assert_eq!(answer, 3);
     for i in 1..=3 {

@@ -1,4 +1,41 @@
-//! The errors a transport answers in the server's place.
+//! Why a call fails, and the errors a transport answers in the server's place.
+
+use std::fmt;
+
+use super::{message::ErrorObject, transport_client::REQUEST_TIMEOUT};
+
+/// Why a call failed.
+#[derive(Debug)]
+pub enum Error {
+    /// The server answered with an error.
+    Call(ErrorObject),
+    /// The request did not reach the server, or its response did not come back: the transport
+    /// failed, or the session ended.
+    Transport(String),
+    /// The params did not serialize, or the result did not read as the type asked for.
+    Json(serde_json::Error),
+    /// No response within [`REQUEST_TIMEOUT`].
+    Timeout,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Call(error) => write!(f, "{error}"),
+            Error::Transport(reason) => f.write_str(reason),
+            Error::Json(error) => write!(f, "{error}"),
+            Error::Timeout => write!(f, "no response within {REQUEST_TIMEOUT:?}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Error {
+        Error::Json(error)
+    }
+}
 
 /// The response to `request`, a message the client sent, saying it failed with `reason`;
 /// `None` if `request` was not one to answer (a notification, or not JSON).

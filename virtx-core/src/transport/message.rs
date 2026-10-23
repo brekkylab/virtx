@@ -1,0 +1,141 @@
+//! JSON-RPC 2.0 messages, as this protocol uses them: one object each, never a batch.
+
+use std::fmt;
+
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Value, value::RawValue};
+
+/// The `error` of a response: why a request failed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ErrorObject {
+    pub code: i64,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl ErrorObject {
+    /// The message was not JSON.
+    pub(crate) const PARSE_ERROR: i64 = -32700;
+    /// The message was JSON, but not a request.
+    pub(crate) const INVALID_REQUEST: i64 = -32600;
+    /// No method has the request's name.
+    pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
+    /// The request's params are not what its method takes.
+    pub(crate) const INVALID_PARAMS: i64 = -32602;
+    /// The method failed in a way that is the server's, not the request's.
+    pub(crate) const INTERNAL_ERROR: i64 = -32603;
+
+    pub fn new(code: i64, message: impl Into<String>) -> ErrorObject {
+        ErrorObject {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+impl fmt::Display for ErrorObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.message, self.code)?;
+        if let Some(data) = &self.data {
+            write!(f, ": {data}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A message as read, before it is told apart: a request has `method` and `id`, a
+/// notification `method` and no `id`, a response `id` and `result` or `error`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Received {
+    #[serde(default)]
+    pub jsonrpc: Option<String>,
+    /// `Some(Value::Null)` for an `"id": null`, which is not the same as no `id`.
+    #[serde(default, deserialize_with = "present")]
+    pub id: Option<Value>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub params: Option<Box<RawValue>>,
+    /// `Some` for a `"result": null` too.
+    #[serde(default, deserialize_with = "present")]
+    pub result: Option<Box<RawValue>>,
+    #[serde(default)]
+    pub error: Option<ErrorObject>,
+}
+
+/// A member that is there, even as `null`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// A request, or with no `id` a notification.
+#[derive(Serialize)]
+pub(crate) struct Request<'a> {
+    pub jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    pub method: &'a str,
+    pub params: &'a RawValue,
+}
+
+/// The response to the request `id`: its result, or why it failed.
+pub(crate) fn response(id: &Value, outcome: Result<Box<RawValue>, ErrorObject>) -> String {
+    #[derive(Serialize)]
+    struct Success<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        result: Box<RawValue>,
+    }
+    #[derive(Serialize)]
+    struct Failure<'a> {
+        jsonrpc: &'static str,
+        id: &'a Value,
+        error: ErrorObject,
+    }
+    let jsonrpc = "2.0";
+    match outcome {
+        Ok(result) => serde_json::to_string(&Success {
+            jsonrpc,
+            id,
+            result,
+        }),
+        Err(error) => serde_json::to_string(&Failure { jsonrpc, id, error }),
+    }
+    .expect("a response serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_null_id_and_result_are_told_from_none() {
+        let received: Received =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":null,"result":null}"#).unwrap();
+        assert_eq!(received.id, Some(Value::Null));
+        assert_eq!(received.result.unwrap().get(), "null");
+
+        let received: Received = serde_json::from_str(r#"{"jsonrpc":"2.0","method":"m"}"#).unwrap();
+        assert_eq!(received.id, None);
+        assert!(received.result.is_none());
+    }
+
+    #[test]
+    fn a_response_keeps_its_members_in_order() {
+        let result = serde_json::value::to_raw_value("hi").unwrap();
+        assert_eq!(
+            response(&Value::from(1), Ok(result)),
+            r#"{"jsonrpc":"2.0","id":1,"result":"hi"}"#
+        );
+        assert_eq!(
+            response(&Value::Null, Err(ErrorObject::new(-1, "no"))),
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-1,"message":"no"}}"#
+        );
+    }
+}

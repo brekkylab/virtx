@@ -1,16 +1,29 @@
 //! The transports a client and server exchange messages over: stdio and Streamable HTTP.
 //!
-//! Each one is a jsonrpsee transport for the client and a way to serve a
+//! Each one is an [`Outgoing`] and an [`Incoming`] for the client and a way to serve a
 //! [`Dispatcher`](super::Dispatcher) for the server. [`Transport`] is what a client holds of
-//! one besides that: what it takes to end the session.
+//! one besides those: what it takes to end the session.
 
 pub mod stdio;
 pub mod streamable_http;
 
-use std::{io, sync::Arc};
+use std::{future::Future, io, pin::Pin, sync::Arc};
 
-use jsonrpsee::core::client::{TransportReceiverT, TransportSenderT};
 use tokio::process::{Child, Command};
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Where a client's messages go. Dropping it is the client's end of the session over stdio.
+pub trait Outgoing: Send {
+    /// Send `message`, one JSON-RPC message. An `Err` means the server is gone.
+    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>>;
+}
+
+/// Where the server's messages to a client come from.
+pub trait Incoming: Send {
+    /// The next message. An `Err` ends the session.
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>>;
+}
 
 /// What a client's session runs over, and what ending it takes.
 pub enum Transport {
@@ -27,11 +40,7 @@ impl Transport {
     /// tokio runtime.
     pub fn spawn(
         command: impl Into<Command>,
-    ) -> io::Result<(
-        impl TransportSenderT + Send,
-        impl TransportReceiverT + Send,
-        Transport,
-    )> {
+    ) -> io::Result<(impl Outgoing + 'static, impl Incoming + 'static, Transport)> {
         let (sender, receiver, child) = stdio::spawn(command.into())?;
         Ok((sender, receiver, Transport::Stdio(child)))
     }
@@ -40,11 +49,7 @@ impl Transport {
     /// client's first call, which opens the session.
     pub fn connect(
         url: &str,
-    ) -> anyhow::Result<(
-        impl TransportSenderT + Send,
-        impl TransportReceiverT + Send,
-        Transport,
-    )> {
+    ) -> anyhow::Result<(impl Outgoing + 'static, impl Incoming + 'static, Transport)> {
         let (sender, receiver, endpoint) = streamable_http::connect(url)?;
         Ok((sender, receiver, Transport::StreamableHttp(endpoint)))
     }

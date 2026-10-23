@@ -1,27 +1,18 @@
 //! The server's side of every transport: the methods, and what one message to them answers.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
-};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use jsonrpsee::{
-    Extensions, Methods,
-    core::middleware::RpcServiceBuilder,
-    server::{
-        ConnectionState, ServerConfig, ServerHandle, StopHandle, http::call_with_service_builder,
-        stop_channel,
-    },
-};
-use serde::Serialize;
-use tokio::sync::{Semaphore, mpsc};
+use http::Extensions;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, value::RawValue};
+use tokio::sync::mpsc;
+
+use super::message::{ErrorObject, Received, response};
+use crate::method::Request;
 
 /// Where a method sends notifications about the request it is answering: the request's SSE
-/// stream over HTTP, the server's stdout over stdio. In a method's
-/// [`Extensions`](jsonrpsee::Extensions) for every request, so a method gets it with
-/// `extensions.get::<Notifier>()`.
+/// stream over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every
+/// request, so a method gets it with `extensions.get::<Notifier>()`.
 #[derive(Clone, Debug)]
 pub struct Notifier(mpsc::UnboundedSender<String>);
 
@@ -42,134 +33,155 @@ impl Notifier {
     }
 }
 
-/// The methods a server answers, and how one message is handed to them.
-///
-/// jsonrpsee's own HTTP handling does the JSON-RPC part (parsing, dispatch, the error
-/// objects); a transport only carries a message in and the answer out. Cheap to clone.
-#[derive(Clone)]
-pub struct Dispatcher {
-    inner: Arc<Inner>,
+type Answering = Pin<Box<dyn Future<Output = Result<Box<RawValue>, ErrorObject>> + Send>>;
+
+type Handler = Arc<dyn Fn(Option<Box<RawValue>>, Extensions) -> Answering + Send + Sync>;
+
+/// The methods a server answers, by name.
+#[derive(Clone, Default)]
+pub struct Methods(HashMap<&'static str, Handler>);
+
+impl Methods {
+    pub fn new() -> Methods {
+        Methods::default()
+    }
+
+    /// Answer `R` with `handler`, given the request's params read as `R::Args` and its
+    /// [`Extensions`]. Params that do not read are refused before `handler` runs.
+    pub fn add<R, F, Fut>(&mut self, handler: F) -> &mut Methods
+    where
+        R: Request,
+        R::Args: Send + 'static,
+        R::Output: Send,
+        F: Fn(R::Args, Extensions) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<R::Output, ErrorObject>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        let handler: Handler = Arc::new(move |params, extensions| {
+            let handler = Arc::clone(&handler);
+            Box::pin(async move {
+                let args = read_params::<R::Args>(params.as_deref())?;
+                let output = handler(args, extensions).await?;
+                serde_json::value::to_raw_value(&output)
+                    .map_err(|e| ErrorObject::new(ErrorObject::INTERNAL_ERROR, e.to_string()))
+            })
+        });
+        self.0.insert(R::NAME, handler);
+        self
+    }
 }
 
-struct Inner {
-    methods: Methods,
-    config: ServerConfig,
-    stop: StopHandle,
-    /// Holds the server open: dropping it stops `stop`, and every call with it.
-    _running: ServerHandle,
-    permits: Arc<Semaphore>,
-    next_connection: AtomicU32,
+/// `params` read as `A`; no params read as `{}`.
+fn read_params<A: DeserializeOwned>(params: Option<&RawValue>) -> Result<A, ErrorObject> {
+    let params = params.map_or("{}", RawValue::get);
+    serde_json::from_str(params)
+        .map_err(|e| ErrorObject::new(ErrorObject::INVALID_PARAMS, e.to_string()))
+}
+
+/// The methods a server answers, and what one message to them answers. Cheap to clone.
+#[derive(Clone)]
+pub struct Dispatcher {
+    methods: Arc<Methods>,
 }
 
 impl Dispatcher {
-    pub fn new(methods: impl Into<Methods>) -> Dispatcher {
-        let (stop, running) = stop_channel();
+    pub fn new(methods: Methods) -> Dispatcher {
         Dispatcher {
-            inner: Arc::new(Inner {
-                methods: methods.into(),
-                config: ServerConfig::default(),
-                stop,
-                _running: running,
-                permits: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-                next_connection: AtomicU32::new(0),
-            }),
+            methods: Arc::new(methods),
         }
     }
 
-    /// Hand `message` to the methods, with `extensions` theirs to read, and return what
-    /// they answer.
-    pub(crate) async fn call(&self, message: Bytes, extensions: Extensions) -> Answer {
-        let inner = &self.inner;
-        let mut request = http::Request::post("/")
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Full::new(message))
-            .expect("a valid request");
-        request.extensions_mut().extend(extensions);
-        let permit = Arc::clone(&inner.permits)
-            .acquire_owned()
-            .await
-            .expect("never closed");
-        let id = inner.next_connection.fetch_add(1, Ordering::Relaxed);
-        let connection = ConnectionState::new(inner.stop.clone(), id, permit);
-        let answer = call_with_service_builder(
-            request,
-            inner.config.clone(),
-            connection,
-            inner.methods.clone(),
-            RpcServiceBuilder::new(),
-        )
-        .await;
-        let status = answer.status();
-        let body = match answer.into_body().collect().await {
-            Ok(body) => body.to_bytes(),
-            Err(_) => {
-                return Answer::Refused(http::StatusCode::INTERNAL_SERVER_ERROR, Bytes::new());
+    /// Hand `message` to its method, with `extensions` the method's to read, and return the
+    /// response; `None` for a message that takes none, a notification or a response.
+    pub(crate) async fn call(&self, message: &[u8], extensions: Extensions) -> Option<String> {
+        let failed = |id: &Value, code, message: &str| {
+            Some(response(id, Err(ErrorObject::new(code, message))))
+        };
+        // An object, or not a request: a batch is not taken.
+        let starts_an_object = message.trim_ascii_start().first() == Some(&b'{');
+        let received = match serde_json::from_slice::<Received>(message) {
+            Ok(received) if starts_an_object => received,
+            _ => {
+                return match serde_json::from_slice::<serde::de::IgnoredAny>(message) {
+                    Ok(_) => failed(
+                        &Value::Null,
+                        ErrorObject::INVALID_REQUEST,
+                        "Invalid request",
+                    ),
+                    Err(_) => failed(&Value::Null, ErrorObject::PARSE_ERROR, "Parse error"),
+                };
             }
         };
-        match status {
-            // jsonrpsee's answer to a notification is `null`.
-            http::StatusCode::OK if body.is_empty() || &body[..] == b"null" => Answer::Nothing,
-            http::StatusCode::OK => Answer::Response(body),
-            status => Answer::Refused(status, body),
-        }
-    }
-}
 
-/// What the methods answer one message with.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Answer {
-    /// A response, as JSON.
-    Response(Bytes),
-    /// Nothing: the message was a notification.
-    Nothing,
-    /// The message was not taken (too large, say): the HTTP status saying why, and text.
-    Refused(http::StatusCode, Bytes),
+        let id = match received.id {
+            None => None,
+            Some(id @ (Value::Null | Value::String(_) | Value::Number(_))) => Some(id),
+            Some(_) => {
+                return failed(
+                    &Value::Null,
+                    ErrorObject::INVALID_REQUEST,
+                    "Invalid request",
+                );
+            }
+        };
+        let params_structured = received.params.as_ref().is_none_or(|params| {
+            matches!(
+                params.get().trim_start().as_bytes().first(),
+                Some(b'{' | b'[')
+            )
+        });
+        let method = match received.method {
+            Some(method) if received.jsonrpc.as_deref() == Some("2.0") && params_structured => {
+                method
+            }
+            // A response: the server sends no requests, so none is awaited.
+            None if received.result.is_some() || received.error.is_some() => return None,
+            _ => {
+                let id = id.unwrap_or(Value::Null);
+                return failed(&id, ErrorObject::INVALID_REQUEST, "Invalid request");
+            }
+        };
+
+        let outcome = match self.methods.0.get(method.as_str()) {
+            Some(handler) => handler(received.params, extensions).await,
+            None => Err(ErrorObject::new(
+                ErrorObject::METHOD_NOT_FOUND,
+                "Method not found",
+            )),
+        };
+        id.map(|id| response(&id, outcome))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use jsonrpsee::RpcModule;
-
     use super::*;
+    use crate::transport::testing::{Count, methods};
 
-    fn dispatcher() -> Dispatcher {
-        let mut module = RpcModule::new(());
-        module
-            .register_method("echo", |params, _, _| params.one::<String>())
-            .unwrap();
-        module
-            .register_method("notify", |_, _, extensions| {
-                let notifier = extensions.get::<Notifier>().expect("a notifier");
-                notifier.notify("progress", 1);
-                "done"
-            })
-            .unwrap();
-        Dispatcher::new(module)
+    async fn call(message: &str) -> Option<String> {
+        Dispatcher::new(methods())
+            .call(message.as_bytes(), Extensions::new())
+            .await
     }
 
     #[tokio::test]
     async fn a_request_answers_its_response() {
-        let answer = dispatcher()
-            .call(
-                Bytes::from(r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#),
-                Extensions::new(),
-            )
-            .await;
+        let answer = call(r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#).await;
         assert_eq!(
-            answer,
-            Answer::Response(Bytes::from(r#"{"jsonrpc":"2.0","id":1,"result":"hi"}"#))
+            answer.as_deref(),
+            Some(r#"{"jsonrpc":"2.0","id":1,"result":"hi"}"#)
         );
     }
 
     #[tokio::test]
     async fn a_notification_answers_nothing() {
-        let answer = dispatcher()
-            .call(
-                Bytes::from(r#"{"jsonrpc":"2.0","method":"echo","params":["hi"]}"#),
-                Extensions::new(),
-            )
-            .await;
-        assert_eq!(answer, Answer::Nothing);
+        let answer = call(r#"{"jsonrpc":"2.0","method":"echo","params":["hi"]}"#).await;
+        assert_eq!(answer, None);
+    }
+
+    #[tokio::test]
+    async fn a_response_answers_nothing() {
+        assert_eq!(call(r#"{"jsonrpc":"2.0","id":1,"result":2}"#).await, None);
     }
 
     #[tokio::test]
@@ -177,19 +189,68 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut extensions = Extensions::new();
         extensions.insert(Notifier::new(sender));
-        let answer = dispatcher()
+        let mut methods = Methods::new();
+        methods.add::<Count, _, _>(|(to,), extensions| async move {
+            let notifier = extensions.get::<Notifier>().expect("a notifier");
+            notifier.notify("progress", to);
+            Ok(to)
+        });
+        let answer = Dispatcher::new(methods)
             .call(
-                Bytes::from(r#"{"jsonrpc":"2.0","id":1,"method":"notify"}"#),
+                br#"{"jsonrpc":"2.0","id":1,"method":"count","params":[1]}"#,
                 extensions,
             )
             .await;
         assert_eq!(
-            answer,
-            Answer::Response(Bytes::from(r#"{"jsonrpc":"2.0","id":1,"result":"done"}"#))
+            answer.as_deref(),
+            Some(r#"{"jsonrpc":"2.0","id":1,"result":1}"#)
         );
         assert_eq!(
             receiver.recv().await.as_deref(),
             Some(r#"{"jsonrpc":"2.0","method":"progress","params":1}"#)
         );
+    }
+
+    /// The `error.code` `message` is answered with.
+    async fn code(message: &str) -> i64 {
+        let answer = call(message).await.expect("a response");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        answer["error"]["code"].as_i64().expect("an error")
+    }
+
+    #[tokio::test]
+    async fn what_is_not_a_request_answers_the_spec_s_errors() {
+        let cases = [
+            ("not json", ErrorObject::PARSE_ERROR),
+            ("[]", ErrorObject::INVALID_REQUEST),
+            (
+                r#"[{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}]"#,
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                r#"{"jsonrpc":"1.0","id":1,"method":"echo"}"#,
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (r#"{"jsonrpc":"2.0","id":1}"#, ErrorObject::INVALID_REQUEST),
+            (
+                r#"{"jsonrpc":"2.0","id":{},"method":"echo"}"#,
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":"hi"}"#,
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#,
+                ErrorObject::METHOD_NOT_FOUND,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":[1]}"#,
+                ErrorObject::INVALID_PARAMS,
+            ),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(code(message).await, expected, "{message}");
+        }
     }
 }

@@ -1,13 +1,15 @@
-//! The client's transport: each message a `POST`, and what it answers fed back to jsonrpsee.
+//! The client's transport: each message a `POST`, and what it answers fed back to the client.
 
 use std::{io, sync::Arc};
 
 use http::{HeaderValue, StatusCode, header};
-use jsonrpsee::core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT};
 use tokio::sync::{Mutex, mpsc};
 
 use super::{EVENT_STREAM, SESSION_HEADER, sse};
-use crate::transport::error::transport_error;
+use crate::transport::{
+    error::transport_error,
+    r#impl::{BoxFuture, Incoming, Outgoing},
+};
 
 /// Where every message goes, and the session they go in.
 pub struct Endpoint {
@@ -52,16 +54,14 @@ pub(crate) async fn close(endpoint: &Endpoint) {
 
 pub(crate) struct Sender {
     endpoint: Arc<Endpoint>,
-    /// Where each `POST`'s answers go, for [`Receiver`] to hand to jsonrpsee.
+    /// Where each `POST`'s answers go, for [`Receiver`] to hand to the client.
     inbox: mpsc::UnboundedSender<String>,
 }
 
-impl TransportSenderT for Sender {
-    type Error = io::Error;
-
+impl Outgoing for Sender {
     /// Start the `POST` and return. Its failure is the request's error, not the transport's:
     /// an `Err` here would end the client, and every call in flight with it.
-    async fn send(&mut self, message: String) -> io::Result<()> {
+    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>> {
         let endpoint = Arc::clone(&self.endpoint);
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -71,20 +71,20 @@ impl TransportSenderT for Sender {
                 let _ = inbox.send(response);
             }
         });
-        Ok(())
+        Box::pin(async { Ok(()) })
     }
 }
 
 pub(crate) struct Receiver(mpsc::UnboundedReceiver<String>);
 
-impl TransportReceiverT for Receiver {
-    type Error = io::Error;
-
-    async fn receive(&mut self) -> io::Result<ReceivedMessage> {
-        match self.0.recv().await {
-            Some(message) => Ok(ReceivedMessage::Text(message)),
-            None => Err(io::ErrorKind::UnexpectedEof.into()),
-        }
+impl Incoming for Receiver {
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {
+        Box::pin(async move {
+            self.0
+                .recv()
+                .await
+                .ok_or(io::ErrorKind::UnexpectedEof.into())
+        })
     }
 }
 

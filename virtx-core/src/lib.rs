@@ -1,4 +1,4 @@
-//! An MCP client behind a C ABI.
+//! A virtx client behind a C ABI.
 //!
 //! The client is an opaque handle: C holds only the pointer `virtx_client_spawn` or
 //! `virtx_client_connect` writes, shared by `virtx_client_retain` and `virtx_client_release`. What
@@ -6,7 +6,9 @@
 //! declares these functions, and changes with them.
 
 mod client;
-pub mod ffi;
+mod ffi;
 mod image;
 mod method;
 mod transport;
+
+pub use image::*;

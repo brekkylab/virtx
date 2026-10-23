@@ -11,7 +11,7 @@ mod sse;
 
 pub use client::Endpoint;
 pub(crate) use client::{close, connect};
-pub use server::{Server, SessionId};
+pub use server::{HttpBody, Server, SessionId};
 
 /// The header a session's id travels in, both ways.
 pub const SESSION_HEADER: &str = "virtx-session-id";

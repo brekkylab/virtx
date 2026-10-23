@@ -2,11 +2,7 @@
 
 use std::{io, process::Stdio, time::Duration};
 
-use bytes::Bytes;
-use jsonrpsee::{
-    Extensions,
-    core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT},
-};
+use http::Extensions;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -14,7 +10,8 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::transport::{Dispatcher, Notifier, dispatch::Answer};
+use super::{BoxFuture, Incoming, Outgoing};
+use crate::transport::{Dispatcher, Notifier};
 
 /// How long [`TransportClient::close`](crate::transport::TransportClient::close) waits for the
 /// server to exit once its stdin is closed.
@@ -29,7 +26,7 @@ pub(super) fn spawn(mut command: Command) -> io::Result<(Sender, Receiver, Child
         .spawn()?;
     let stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
-    let sender = Sender { stdin: Some(stdin) };
+    let sender = Sender { stdin };
     let receiver = Receiver {
         lines: BufReader::new(stdout).lines(),
     };
@@ -47,24 +44,18 @@ pub(super) async fn close(mut child: Child) {
     }
 }
 
+/// The server's stdin, which dropping closes.
 pub(super) struct Sender {
-    /// `None` once closed.
-    stdin: Option<ChildStdin>,
+    stdin: ChildStdin,
 }
 
-impl TransportSenderT for Sender {
-    type Error = io::Error;
-
-    async fn send(&mut self, message: String) -> io::Result<()> {
-        let stdin = self.stdin.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
-        stdin.write_all(message.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        self.stdin = None;
-        Ok(())
+impl Outgoing for Sender {
+    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async move {
+            self.stdin.write_all(message.as_bytes()).await?;
+            self.stdin.write_all(b"\n").await?;
+            self.stdin.flush().await
+        })
     }
 }
 
@@ -72,19 +63,18 @@ pub(super) struct Receiver {
     lines: Lines<BufReader<ChildStdout>>,
 }
 
-impl TransportReceiverT for Receiver {
-    type Error = io::Error;
-
-    /// The next line that is a message. Anything else on stdout is skipped: jsonrpsee would
-    /// end the session over a line it cannot parse.
-    async fn receive(&mut self) -> io::Result<ReceivedMessage> {
-        loop {
-            match self.lines.next_line().await? {
-                Some(line) if line.starts_with('{') => return Ok(ReceivedMessage::Text(line)),
-                Some(_) => continue,
-                None => return Err(io::ErrorKind::UnexpectedEof.into()),
+impl Incoming for Receiver {
+    /// The next line that is a message: anything else on stdout is skipped.
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {
+        Box::pin(async move {
+            loop {
+                match self.lines.next_line().await? {
+                    Some(line) if line.starts_with('{') => return Ok(line),
+                    Some(_) => continue,
+                    None => return Err(io::ErrorKind::UnexpectedEof.into()),
+                }
             }
-        }
+        })
     }
 }
 
@@ -121,13 +111,8 @@ where
         calls.spawn(async move {
             let mut extensions = Extensions::new();
             extensions.insert(Notifier::new(outbox.clone()));
-            match dispatcher.call(Bytes::from(line), extensions).await {
-                Answer::Response(response) | Answer::Refused(_, response)
-                    if !response.is_empty() =>
-                {
-                    let _ = outbox.send(String::from_utf8_lossy(&response).into_owned());
-                }
-                _ => {}
+            if let Some(response) = dispatcher.call(line.as_bytes(), extensions).await {
+                let _ = outbox.send(response);
             }
         });
     }
@@ -138,30 +123,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use jsonrpsee::RpcModule;
-
-    use crate::transport::{Transport, TransportClient};
+    use crate::transport::{Transport, TransportClient, testing::methods};
     use tokio::runtime::Runtime;
 
     use super::*;
 
     /// The methods every test server answers.
     fn dispatcher() -> Dispatcher {
-        let mut module = RpcModule::new(());
-        module
-            .register_method("echo", |params, _, _| params.one::<String>())
-            .unwrap();
-        module
-            .register_method("count", |params, _, extensions| {
-                let to: u32 = params.one()?;
-                let notifier = extensions.get::<Notifier>().expect("a notifier");
-                for i in 1..=to {
-                    notifier.notify("counted", i);
-                }
-                jsonrpsee::core::RpcResult::Ok(to)
-            })
-            .unwrap();
-        Dispatcher::new(module)
+        Dispatcher::new(methods())
     }
 
     /// Set in the environment of the test binary run as [`server`].
@@ -206,12 +175,30 @@ mod tests {
     #[tokio::test]
     async fn notifications_reach_the_client_before_the_response() {
         let session = spawn();
-        let mut counted = session.notifications::<u32>("counted").await.unwrap();
+        let mut counted = session.notifications::<u32>("counted");
         let answer: u32 = session.request("count", [3]).await.unwrap();
         assert_eq!(answer, 3);
         for i in 1..=3 {
             assert_eq!(counted.next().await.unwrap().unwrap(), i);
         }
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_each_get_their_own_response() {
+        let session = std::sync::Arc::new(spawn());
+        let mut calls = JoinSet::new();
+        for i in 0..20 {
+            let session = std::sync::Arc::clone(&session);
+            calls.spawn(async move {
+                let answer: String = session.request("echo", [i.to_string()]).await.unwrap();
+                (i, answer)
+            });
+        }
+        for (i, answer) in calls.join_all().await {
+            assert_eq!(answer, i.to_string());
+        }
+        let session = std::sync::Arc::into_inner(session).unwrap();
         session.close().await;
     }
 

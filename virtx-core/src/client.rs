@@ -3,7 +3,7 @@
 
 use std::io;
 
-use jsonrpsee::core::client::Error;
+use crate::transport::Error;
 use tokio::process::Command;
 
 use crate::{

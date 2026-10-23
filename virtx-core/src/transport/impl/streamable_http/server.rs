@@ -8,14 +8,16 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, Response, StatusCode, header};
+use http::{Extensions, HeaderValue, Method, Request, Response, StatusCode, header};
 use http_body::{Body, Frame};
-use http_body_util::{BodyExt, Empty, Full, Limited};
-use jsonrpsee::{Extensions, server::HttpBody};
+use http_body_util::{BodyExt, Empty, Full, Limited, combinators::UnsyncBoxBody};
 use tokio::sync::mpsc;
 
 use super::{EVENT_STREAM, SESSION_HEADER, sse};
-use crate::transport::{Dispatcher, Notifier, dispatch::Answer};
+use crate::transport::{Dispatcher, Notifier};
+
+/// The body of every response a [`Server`] answers.
+pub type HttpBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 
 /// The largest message a server reads.
 const MAX_MESSAGE: usize = 10 * 1024 * 1024;
@@ -130,7 +132,7 @@ impl Server {
         extensions.insert(SessionId(session.clone()));
         extensions.insert(Notifier::new(notifier));
         let dispatcher = self.inner.dispatcher.clone();
-        let mut call = tokio::spawn(async move { dispatcher.call(message, extensions).await });
+        let mut call = tokio::spawn(async move { dispatcher.call(&message, extensions).await });
 
         // JSON unless a notification comes before the response. Notifications first, so one
         // sent just before the call ended is not lost to a JSON answer.
@@ -164,8 +166,8 @@ impl Server {
                                 while let Ok(notification) = notifications.try_recv() {
                                     let _ = events.send(sse::event(&notification));
                                 }
-                                if let Ok(Answer::Response(response)) = answer {
-                                    let _ = events.send(sse::event(&String::from_utf8_lossy(&response)));
+                                if let Ok(Some(response)) = answer {
+                                    let _ = events.send(sse::event(&response));
                                 }
                                 break;
                             }
@@ -190,18 +192,16 @@ impl Server {
     }
 }
 
-/// The methods' answer as this transport's: `202` for a notification's.
-fn json(answer: Answer) -> Response<HttpBody> {
-    let (code, body, media_type) = match answer {
-        Answer::Response(body) => (StatusCode::OK, body, "application/json"),
-        Answer::Nothing => return status(StatusCode::ACCEPTED),
-        Answer::Refused(code, body) => (code, body, "text/plain; charset=utf-8"),
+/// The methods' answer as this transport's: `202` when there is none to send.
+fn json(answer: Option<String>) -> Response<HttpBody> {
+    let Some(body) = answer else {
+        return status(StatusCode::ACCEPTED);
     };
-    let mut response = Response::new(HttpBody::new(Full::new(body)));
-    *response.status_mut() = code;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
+    let mut response = Response::new(HttpBody::new(Full::new(Bytes::from(body))));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response
 }
 

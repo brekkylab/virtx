@@ -112,6 +112,11 @@ neither yet.
   user's browser. A request with no `Origin` (any non-browser client) is not refused for
   that.
 - A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface.
+- A server MAY require credentials, in headers such as `Authorization`, both to open a
+  session and on every later request in it. It answers `401 Unauthorized` to a request
+  without them and `403 Forbidden` to one whose credentials may not open the session or act
+  in it. A refused opening opens no session, and a refused request in a session, a `DELETE`
+  included, leaves the session as it was.
 
 ## Notifications
 

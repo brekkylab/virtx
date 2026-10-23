@@ -14,7 +14,7 @@ mod server;
 #[cfg(feature = "client")]
 pub use client::{Receiver, Sender, connect};
 #[cfg(feature = "server")]
-pub use server::{HttpBody, Server, SessionId};
+pub use server::{HttpBody, Server, SessionId, Sessions};
 
 /// The header a session's id travels in, both ways.
 pub const SESSION_HEADER: &str = "virtx-session-id";

@@ -1,12 +1,18 @@
 //! Both ends of Streamable HTTP, and the server against `PROTOCOL.md` by hand.
 
+use std::sync::{Arc, Mutex};
+
 use ciborium::{Value, cbor};
 use futures_util::StreamExt;
+use http::{Extensions, HeaderMap, StatusCode};
 use tokio::net::TcpListener;
 
 use super::*;
+use crate::method::Request;
 use crate::transport::{
-    Dispatcher, Event, TransportClient, r#impl::frame::Parser, testing::methods,
+    Dispatcher, Event, TransportClient,
+    r#impl::{BoxFuture, frame::Parser},
+    testing::methods,
 };
 
 /// A [`Server`] on localhost, serving `echo`, `count` (which sends progress before it
@@ -16,6 +22,82 @@ async fn serve() -> String {
         Dispatcher::new(methods()),
         vec!["https://allowed.example".into()],
     );
+    mount(server).await
+}
+
+/// The user a [`Tokens`] session was opened by.
+#[derive(Clone)]
+struct User(String);
+
+/// `user`: answers the [`User`] of the request's session.
+struct WhoAmI;
+
+impl Request for WhoAmI {
+    const NAME: &'static str = "user";
+    type Args = [(); 0];
+    type Output = String;
+}
+
+/// Sessions for a bearer token naming one of `users`, used by that token alone, and the ids
+/// of those ended, in `closed`.
+struct Tokens {
+    users: Vec<&'static str>,
+    closed: Arc<Mutex<Vec<String>>>,
+}
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+impl Sessions for Tokens {
+    fn open<'a>(&'a self, headers: &'a HeaderMap) -> BoxFuture<'a, Result<Extensions, StatusCode>> {
+        Box::pin(async move {
+            let user = bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+            if !self.users.contains(&user) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            let mut extensions = Extensions::new();
+            extensions.insert(User(user.to_owned()));
+            Ok(extensions)
+        })
+    }
+
+    fn check(&self, session: &Extensions, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let owner = &session.get::<User>().expect("opened with one").0;
+        match bearer(headers) {
+            Some(user) if user == owner => Ok(()),
+            _ => Err(StatusCode::FORBIDDEN),
+        }
+    }
+
+    fn close(&self, id: &SessionId, session: Extensions) {
+        assert!(session.get::<User>().is_some());
+        self.closed.lock().unwrap().push(id.0.clone());
+    }
+}
+
+/// A [`Server`] on localhost as [`serve`]'s, with `user` too, its sessions [`Tokens`] for
+/// `alice` and `bob`; and the ids of the sessions ended.
+async fn serve_tokens() -> (String, Arc<Mutex<Vec<String>>>) {
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let mut methods = methods();
+    methods.add::<WhoAmI, _, _>(|_, extensions| async move {
+        Ok(extensions.get::<User>().expect("a user").0.clone())
+    });
+    let sessions = Tokens {
+        users: vec!["alice", "bob"],
+        closed: closed.clone(),
+    };
+    let server = Server::with_sessions(Dispatcher::new(methods), Vec::new(), sessions);
+    (mount(server).await, closed)
+}
+
+/// `server` on localhost, at the URL answered.
+async fn mount(server: Server) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/rpc", listener.local_addr().unwrap());
     let router = axum::Router::new().route(
@@ -231,4 +313,75 @@ async fn an_origin_must_be_allowed() {
     };
     assert_eq!(from("https://evil.example").await.unwrap().status(), 403);
     assert_eq!(from("https://allowed.example").await.unwrap().status(), 200);
+}
+
+/// A `POST` of `body` to `url` as `post`'s, with `token` as its bearer token.
+async fn post_as(url: &str, body: &[u8], token: &str, session: Option<&str>) -> reqwest::Response {
+    let mut request = reqwest::Client::new()
+        .post(url)
+        .header("content-type", CBOR)
+        .header("accept", CBOR)
+        .header("authorization", format!("Bearer {token}"))
+        .body(body.to_owned());
+    if let Some(id) = session {
+        request = request.header(SESSION_HEADER, id);
+    }
+    request.send().await.unwrap()
+}
+
+fn user() -> Vec<u8> {
+    encode(cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "user", "params" => []}).unwrap())
+}
+
+#[tokio::test]
+async fn sessions_refuse_an_opening_and_open_none() {
+    let (url, _) = serve_tokens().await;
+    let anonymous = post(&url, &echo(), BOTH, None).await;
+    assert_eq!(anonymous.status(), 401);
+    assert!(!anonymous.headers().contains_key(SESSION_HEADER));
+    let stranger = post_as(&url, &echo(), "mallory", None).await;
+    assert_eq!(stranger.status(), 403);
+    assert!(!stranger.headers().contains_key(SESSION_HEADER));
+}
+
+#[tokio::test]
+async fn what_a_session_opened_with_reaches_its_every_method() {
+    let (url, _) = serve_tokens().await;
+    let opened = post_as(&url, &user(), "alice", None).await;
+    let id = opened.headers()[SESSION_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let answer = cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => "alice"}).unwrap();
+    assert_eq!(decode(&opened.bytes().await.unwrap()), answer);
+    let again = post_as(&url, &user(), "alice", Some(&id)).await;
+    assert_eq!(decode(&again.bytes().await.unwrap()), answer);
+}
+
+#[tokio::test]
+async fn sessions_refuse_a_request_in_anothers_session() {
+    let (url, closed) = serve_tokens().await;
+    let opened = post_as(&url, &echo(), "alice", None).await;
+    let id = opened.headers()[SESSION_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(post_as(&url, &echo(), "bob", Some(&id)).await.status(), 403);
+    assert_eq!(post(&url, &echo(), BOTH, Some(&id)).await.status(), 403);
+
+    let http = reqwest::Client::new();
+    let delete = |token: &str| {
+        http.delete(&url)
+            .header(SESSION_HEADER, &id)
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+    };
+    assert_eq!(delete("bob").await.unwrap().status(), 403);
+    assert!(closed.lock().unwrap().is_empty());
+    assert_eq!(
+        post_as(&url, &echo(), "alice", Some(&id)).await.status(),
+        200
+    );
+    assert_eq!(delete("alice").await.unwrap().status(), 204);
+    assert_eq!(*closed.lock().unwrap(), [id]);
 }

@@ -8,9 +8,11 @@ pub mod stdio;
 pub mod streamable_http;
 
 #[cfg(feature = "client")]
-use std::{future::Future, io, pin::Pin};
+use std::io;
+#[cfg(any(feature = "client", feature = "server"))]
+use std::{future::Future, pin::Pin};
 
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "server"))]
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[cfg(feature = "client")]

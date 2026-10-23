@@ -1,20 +1,23 @@
 //! The server's end: sessions, and choosing between one message and a stream of them.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
-use http::{Extensions, HeaderValue, Method, Request, Response, StatusCode, header};
+use http::{Extensions, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
 use http_body::{Body, Frame};
 use http_body_util::{BodyExt, Empty, Full, Limited, combinators::UnsyncBoxBody};
 use tokio::sync::mpsc;
 
 use super::{CBOR, CBOR_SEQ, SESSION_HEADER, is_media_type};
-use crate::transport::{Dispatcher, Notifier, r#impl::frame::frame};
+use crate::transport::{
+    Dispatcher, Notifier,
+    r#impl::{BoxFuture, frame::frame},
+};
 
 /// The body of every response a [`Server`] answers.
 pub type HttpBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
@@ -26,6 +29,52 @@ const MAX_MESSAGE: usize = 10 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(pub String);
 
+/// Who may open a session, who may use one, and what its methods are given: a [`Server`]
+/// asks this at each point of a session's life, and keeps no policy of its own.
+pub trait Sessions: Send + Sync + 'static {
+    /// A request without a session header, from `headers`. `Ok` opens a session whose every
+    /// request's [`Extensions`] start from those returned; `Err` answers that status, and
+    /// opens none.
+    fn open<'a>(&'a self, headers: &'a HeaderMap) -> BoxFuture<'a, Result<Extensions, StatusCode>>;
+
+    /// A request in an open session, before it is served or ends the session. `Err` answers
+    /// that status, and leaves the session as it was.
+    fn check(&self, session: &Extensions, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let _ = (session, headers);
+        Ok(())
+    }
+
+    /// The session `id` was ended by its client.
+    fn close(&self, id: &SessionId, session: Extensions) {
+        let _ = (id, session);
+    }
+}
+
+/// Shared with whatever else holds it, such as a server that closes what the sessions left as
+/// it ends.
+impl<S: Sessions> Sessions for Arc<S> {
+    fn open<'a>(&'a self, headers: &'a HeaderMap) -> BoxFuture<'a, Result<Extensions, StatusCode>> {
+        (**self).open(headers)
+    }
+
+    fn check(&self, session: &Extensions, headers: &HeaderMap) -> Result<(), StatusCode> {
+        (**self).check(session, headers)
+    }
+
+    fn close(&self, id: &SessionId, session: Extensions) {
+        (**self).close(id, session)
+    }
+}
+
+/// Every request opens a session, and every session is anyone's.
+struct Open;
+
+impl Sessions for Open {
+    fn open<'a>(&'a self, _: &'a HeaderMap) -> BoxFuture<'a, Result<Extensions, StatusCode>> {
+        Box::pin(async { Ok(Extensions::new()) })
+    }
+}
+
 /// The server's end of Streamable HTTP, for whatever HTTP server mounts it at the endpoint:
 /// [`Server::handle`] answers one HTTP request. Cheap to clone.
 #[derive(Clone)]
@@ -35,7 +84,9 @@ pub struct Server {
 
 struct Inner {
     dispatcher: Dispatcher,
-    sessions: Mutex<HashSet<String>>,
+    /// Each open session's id, with the extensions [`Sessions::open`] gave it.
+    sessions: Mutex<HashMap<String, Extensions>>,
+    policy: Box<dyn Sessions>,
     allowed_origins: Vec<String>,
 }
 
@@ -48,10 +99,20 @@ impl Server {
     /// Serve `dispatcher`'s methods, refusing a request whose `Origin` is not one of
     /// `allowed_origins` (as a browser sends it, e.g. `https://example.com`).
     pub fn with_origins(dispatcher: Dispatcher, allowed_origins: Vec<String>) -> Server {
+        Server::with_sessions(dispatcher, allowed_origins, Open)
+    }
+
+    /// As [`Server::with_origins`], opening, using and ending sessions as `sessions` allows.
+    pub fn with_sessions(
+        dispatcher: Dispatcher,
+        allowed_origins: Vec<String>,
+        sessions: impl Sessions,
+    ) -> Server {
         Server {
             inner: Arc::new(Inner {
                 dispatcher,
-                sessions: Mutex::new(HashSet::new()),
+                sessions: Mutex::new(HashMap::new()),
+                policy: Box::new(sessions),
                 allowed_origins,
             }),
         }
@@ -73,18 +134,34 @@ impl Server {
         }
         let session = match request.headers().get(SESSION_HEADER) {
             None => None,
-            Some(id) => match id.to_str() {
-                Ok(id) if self.has_session(id) => Some(id.to_owned()),
-                _ => return status(StatusCode::NOT_FOUND),
+            Some(id) => match id.to_str().ok().and_then(|id| self.session(id)) {
+                Some(session) => Some(session),
+                None => return status(StatusCode::NOT_FOUND),
             },
         };
+        if let Some((_, extensions)) = &session
+            && let Err(refused) = self.inner.policy.check(extensions, request.headers())
+        {
+            return status(refused);
+        }
         match *request.method() {
-            Method::POST => self.post(request, session).await,
+            Method::POST => match session {
+                Some((id, extensions)) => self.post(request, Some(id), extensions).await,
+                // Asked before the body is read, so a refused client sends no more than headers.
+                None => match self.inner.policy.open(request.headers()).await {
+                    Ok(extensions) => self.post(request, None, extensions).await,
+                    Err(refused) => status(refused),
+                },
+            },
             Method::DELETE => match session {
-                Some(id) => {
-                    self.inner.sessions.lock().unwrap().remove(&id);
-                    status(StatusCode::NO_CONTENT)
-                }
+                // Two `DELETE`s at once: the one that removes it ends it.
+                Some((id, _)) => match self.inner.sessions.lock().unwrap().remove(&id) {
+                    Some(extensions) => {
+                        self.inner.policy.close(&SessionId(id), extensions);
+                        status(StatusCode::NO_CONTENT)
+                    }
+                    None => status(StatusCode::NOT_FOUND),
+                },
                 None => status(StatusCode::BAD_REQUEST),
             },
             _ => {
@@ -97,12 +174,19 @@ impl Server {
         }
     }
 
-    fn has_session(&self, id: &str) -> bool {
-        self.inner.sessions.lock().unwrap().contains(id)
+    /// The open session `id`, with its extensions.
+    fn session(&self, id: &str) -> Option<(String, Extensions)> {
+        let sessions = self.inner.sessions.lock().unwrap();
+        Some((id.to_owned(), sessions.get(id)?.clone()))
     }
 
-    /// One message, in `session` or opening one.
-    async fn post<B>(&self, request: Request<B>, session: Option<String>) -> Response<HttpBody>
+    /// One message, in `session` or opening one with `extensions`, which are the session's.
+    async fn post<B>(
+        &self,
+        request: Request<B>,
+        session: Option<String>,
+        mut extensions: Extensions,
+    ) -> Response<HttpBody>
     where
         B: Body<Data = Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -119,7 +203,8 @@ impl Server {
             Some(id) => (id, false),
             None => {
                 let id = uuid::Uuid::new_v4().to_string();
-                self.inner.sessions.lock().unwrap().insert(id.clone());
+                let mut sessions = self.inner.sessions.lock().unwrap();
+                sessions.insert(id.clone(), extensions.clone());
                 (id, true)
             }
         };
@@ -128,7 +213,6 @@ impl Server {
         // Without a stream to send them on, notifications go nowhere: dropping the receiver
         // makes `Notifier::notify` say so.
         let mut notifications = streams.then_some(notifications);
-        let mut extensions = Extensions::new();
         extensions.insert(SessionId(session.clone()));
         extensions.insert(Notifier::new(notifier));
         let dispatcher = self.inner.dispatcher.clone();

@@ -1,10 +1,12 @@
 /*
- * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request returns at once: a
- * VirtxFuture if it answers once, a VirtxStream if it answers item by item. Poll a future with
- * virtx_future_poll and a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and
- * keeps the waker given until there is something to take, then wakes it. Or block with
+ * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request takes and answers
+ * CBOR, and returns at once: a VirtxFuture if it answers once, a VirtxStream if it answers
+ * item by item. What the library writes is CBOR in a VirtxBytes: the output, or with
+ * VIRTX_ERROR the error's message as a text string. Poll a future with virtx_future_poll and
+ * a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and keeps the waker given
+ * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
- * left, and ends after an error. Free every string written with virtx_string_free, every
+ * left, and ends after an error. Free every VirtxBytes written with virtx_bytes_free, every
  * future with virtx_future_free, and every stream with virtx_stream_free.
  */
 
@@ -19,10 +21,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Succeeded: the output, as JSON, is written.
+// Succeeded: the output, as CBOR, is written.
 #define VIRTX_OK 0
 
-// Failed: the error's message is written.
+// Failed: the error's message is written, as a CBOR text string.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.
@@ -39,6 +41,12 @@ typedef struct VirtxFuture VirtxFuture;
 
 // A request that answers item by item: polled for each until it ends, then freed.
 typedef struct VirtxStream VirtxStream;
+
+// Bytes this library wrote, for C to free with `virtx_bytes_free`.
+typedef struct VirtxBytes {
+  uint8_t *data;
+  size_t len;
+} VirtxBytes;
 
 // What a pending future or stream wakes once it has something to take.
 //
@@ -66,7 +74,7 @@ int virtx_client_spawn(const char *program,
                        const char *const *args,
                        size_t args_len,
                        struct VirtxClient **client,
-                       char **error);
+                       struct VirtxBytes *error);
 
 // Reach the server at `url`, an `http` or `https` URL, and write the client, held once, to
 // `client`.
@@ -74,7 +82,7 @@ int virtx_client_spawn(const char *program,
 // # Safety
 //
 // `url` is NUL-terminated UTF-8. `client` is writable. `error` is null or writable.
-int virtx_client_connect(const char *url, struct VirtxClient **client, char **error);
+int virtx_client_connect(const char *url, struct VirtxClient **client, struct VirtxBytes *error);
 
 // Hold `client` once more, for another holder to release.
 //
@@ -96,33 +104,38 @@ void virtx_client_release(struct VirtxClient *client);
 // `images.list`: answers with the references, as
 // `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
 //
+// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
+// takes them as `args`, the `args_len` bytes of one map, the method's params.
+//
 // # Safety
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
-// `images.build`: builds `recipe`, as
-// `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
-// (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
-// are its log, a line each, as `{"progress": "..."}`, then what it built, as
+// `images.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a
+// reference the server picks if there is none, given
+// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
+// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
 // `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`. `recipe` is NUL-terminated UTF-8, and
-// `reference` is null or one too; neither is read after this returns.
+// `client` is as in `virtx_client_list_image`. `args` is `args_len` readable bytes, not
+// read after this returns.
 struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
-                                             const char *recipe,
-                                             const char *reference);
+                                             const uint8_t *args,
+                                             size_t args_len);
 
-// `images.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
-// `{"type": "digest", "digest": "algorithm:hex"}`. Answers with `null`.
+// `images.remove`: forgets `image`, given
+// `{"image": {"type": "reference", "reference": "name:tag"}}` or
+// `{"image": {"type": "digest", "digest": "algorithm:hex"}}`. Answers with `null`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`. `image` is NUL-terminated UTF-8, not read
-// after this returns.
-struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client, const char *image);
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
 
 // `snapshots.list`: answers with the snapshots, as
 // `[{"name": "...", "size": n}, ...]`.
@@ -133,21 +146,31 @@ struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client, const 
 struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
 
 // `snapshots.create`: keeps a new, empty upper layer under `name`, or a name the server
-// picks if `name` is null. Answers with `{"name": "..."}`.
+// picks if there is none, given `{"name": "..."}` or `{}`. Answers with `{"name": "..."}`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`. `name` is null or NUL-terminated UTF-8, not
-// read after this returns.
-struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client, const char *name);
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client,
+                                                 const uint8_t *args,
+                                                 size_t args_len);
 
-// `snapshots.remove`: deletes the snapshot `name` and its upper layer. Answers with `null`.
+// `snapshots.remove`: deletes the snapshot `name` and its upper layer, given
+// `{"name": "..."}`. Answers with `null`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`. `name` is NUL-terminated UTF-8, not read
-// after this returns.
-struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client, const char *name);
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
+                                                 const uint8_t *args,
+                                                 size_t args_len);
+
+// Free bytes this library wrote. Null `data` does nothing.
+//
+// # Safety
+//
+// `bytes` is as this library wrote it, not yet freed.
+void virtx_bytes_free(struct VirtxBytes bytes);
 
 // Take `future`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written
 // to `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake
@@ -157,14 +180,14 @@ struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client, con
 //
 // `future` is one a request returned, not yet freed, and polled by one thread at a time.
 // `waker` is as `VirtxWaker` says. `out` is null or writable.
-int virtx_future_poll(struct VirtxFuture *future, struct VirtxWaker waker, char **out);
+int virtx_future_poll(struct VirtxFuture *future, struct VirtxWaker waker, struct VirtxBytes *out);
 
 // Block until `future` answers, and take its answer as `virtx_future_poll` does.
 //
 // # Safety
 //
 // As `virtx_future_poll`. Not called from a `wake`, which would block the runtime it runs on.
-int virtx_future_wait(struct VirtxFuture *future, char **out);
+int virtx_future_wait(struct VirtxFuture *future, struct VirtxBytes *out);
 
 // Free `future`, cancelling it if it has not answered, and release its waker without waking
 // it. A `wake` already under way may still finish after this returns. Null does nothing.
@@ -174,7 +197,7 @@ int virtx_future_wait(struct VirtxFuture *future, char **out);
 // `future` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_future_free(struct VirtxFuture *future);
 
-// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as JSON; `VIRTX_ERROR`,
+// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as CBOR; `VIRTX_ERROR`,
 // with the error written, after which the stream ends; `VIRTX_END` once it has; or
 // `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once there is
 // an item or the end.
@@ -183,7 +206,9 @@ void virtx_future_free(struct VirtxFuture *future);
 //
 // `stream` is one a request returned, not yet freed, and polled by one thread at a time.
 // `waker` is as `VirtxWaker` says. `out` is null or writable.
-int virtx_stream_poll_next(struct VirtxStream *stream, struct VirtxWaker waker, char **out);
+int virtx_stream_poll_next(struct VirtxStream *stream,
+                           struct VirtxWaker waker,
+                           struct VirtxBytes *out);
 
 // Block until `stream` has an item or has ended, and take it as `virtx_stream_poll_next`
 // does.
@@ -192,7 +217,7 @@ int virtx_stream_poll_next(struct VirtxStream *stream, struct VirtxWaker waker, 
 //
 // As `virtx_stream_poll_next`. Not called from a `wake`, which would block the runtime it
 // runs on.
-int virtx_stream_wait_next(struct VirtxStream *stream, char **out);
+int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 
 // Free `stream`, cancelling it if it has not ended, and release its waker without waking it.
 // A `wake` already under way may still finish after this returns. Null does nothing.
@@ -201,13 +226,6 @@ int virtx_stream_wait_next(struct VirtxStream *stream, char **out);
 //
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
-
-// Free a string this library wrote. Null does nothing.
-//
-// # Safety
-//
-// `string` is null, or a string this library wrote, not yet freed.
-void virtx_string_free(char *string);
 
 #ifdef __cplusplus
 }  // extern "C"

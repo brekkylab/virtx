@@ -6,7 +6,7 @@
 //! it opaque, and passes that struct to [`share`], [`retain`] and [`release`].
 
 use std::{
-    ffi::{c_char, c_int},
+    ffi::c_int,
     future::Future,
     sync::{Arc, Mutex, PoisonError},
 };
@@ -16,10 +16,10 @@ use serde::Serialize;
 use tokio::task::JoinSet;
 
 use super::{
-    VIRTX_ERROR, VIRTX_OK,
+    VIRTX_OK,
+    bytes::{VirtxBytes, failure, write},
     future::{self, VirtxFuture},
     stream::{self, VirtxStream},
-    text::write,
 };
 
 /// `T`, the runtime its requests run on (C calls in without one), and the tasks running them,
@@ -90,7 +90,8 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 }
 
-/// Write `opened`, held once, to `out`, or its error to `error`.
+/// Write `opened`, held once, to `out`, or its error's message, as a CBOR text string, to
+/// `error`.
 ///
 /// # Safety
 ///
@@ -98,7 +99,7 @@ impl<T: Send + Sync + 'static> Runtime<T> {
 pub(crate) unsafe fn share<H>(
     opened: Result<H, String>,
     out: *mut *mut H,
-    error: *mut *mut c_char,
+    error: *mut VirtxBytes,
 ) -> c_int {
     match opened {
         Ok(opened) => {
@@ -106,8 +107,9 @@ pub(crate) unsafe fn share<H>(
             VIRTX_OK
         }
         Err(message) => {
+            let (status, message) = failure(message);
             unsafe { write(error, message) };
-            VIRTX_ERROR
+            status
         }
     }
 }
@@ -143,8 +145,8 @@ mod tests {
 
     use super::{
         super::{
-            VIRTX_END, virtx_future_free, virtx_future_wait, virtx_stream_free,
-            virtx_stream_wait_next, virtx_string_free,
+            VIRTX_END, VIRTX_ERROR, virtx_bytes_free, virtx_future_free, virtx_future_wait,
+            virtx_stream_free, virtx_stream_wait_next, waker::testing::empty,
         },
         *,
     };
@@ -205,16 +207,16 @@ mod tests {
 
         assert!(close(held));
         assert_eq!(closes.load(SeqCst), 1, "each request's clone went with it");
-        let mut out = ptr::null_mut();
+        let mut out = empty();
         assert_eq!(unsafe { virtx_future_wait(future, &mut out) }, VIRTX_ERROR);
-        unsafe { virtx_string_free(out) };
-        let mut out = ptr::null_mut();
+        unsafe { virtx_bytes_free(out) };
+        let mut out = empty();
         assert_eq!(
             unsafe { virtx_stream_wait_next(stream, &mut out) },
             VIRTX_ERROR
         );
-        unsafe { virtx_string_free(out) };
-        let mut out = ptr::null_mut();
+        unsafe { virtx_bytes_free(out) };
+        let mut out = empty();
         assert_eq!(
             unsafe { virtx_stream_wait_next(stream, &mut out) },
             VIRTX_END

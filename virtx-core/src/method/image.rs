@@ -1,7 +1,6 @@
 //! Images, in the OCI image spec's terms: an image is named by its digest, and any number of
 //! references (`name:tag`) point at one.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -19,13 +18,13 @@ impl Request for ImageList {
 }
 
 /// What `images.list` takes: nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageListArgs {}
 
 /// One reference in what `images.list` answers. Two references to one image are two items with
 /// the same digest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageListOutputItem {
     /// The reference, as `name:tag`.
@@ -49,7 +48,7 @@ impl Request for ImageBuild {
 }
 
 /// What `images.build` takes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildArgs {
     /// What to build.
@@ -64,7 +63,7 @@ pub struct ImageBuildArgs {
 }
 
 /// What `images.build` answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildOutput {
     /// The reference pointing at the image: the one asked for, or the one the server picked.
@@ -84,7 +83,7 @@ impl Request for ImageRemove {
 }
 
 /// What `images.remove` takes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRemoveArgs {
     /// Which image.
@@ -92,6 +91,6 @@ pub struct ImageRemoveArgs {
 }
 
 /// What `images.remove` answers: nothing, once the image is gone.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRemoveOutput {}

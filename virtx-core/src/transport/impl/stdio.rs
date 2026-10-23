@@ -1,16 +1,19 @@
-//! The stdio transport: one message per line on the server's stdin and stdout.
+//! The stdio transport: messages as [`frame`]s on the server's stdin and stdout.
 
 use std::{io, process::Stdio, time::Duration};
 
 use http::Extensions;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::mpsc,
     task::JoinSet,
 };
 
-use super::{BoxFuture, Incoming, Outgoing};
+use super::{
+    BoxFuture, Incoming, Outgoing,
+    frame::{self, Reader, frame},
+};
 use crate::transport::{Dispatcher, Notifier};
 
 /// How long a server whose stdin is closed has to exit before it is killed.
@@ -31,7 +34,7 @@ pub fn spawn(command: impl Into<Command>) -> io::Result<(Sender, Receiver)> {
     let stdout = child.stdout.take().expect("piped");
     let sender = Sender { stdin, child };
     let receiver = Receiver {
-        lines: BufReader::new(stdout).lines(),
+        frames: Reader::new(stdout),
     };
     Ok((sender, receiver))
 }
@@ -43,10 +46,9 @@ pub struct Sender {
 }
 
 impl Outgoing for Sender {
-    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>> {
+    fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
-            self.stdin.write_all(message.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
+            self.stdin.write_all(&frame(&message)).await?;
             self.stdin.flush().await
         })
     }
@@ -67,20 +69,17 @@ impl Outgoing for Sender {
 }
 
 pub struct Receiver {
-    lines: Lines<BufReader<ChildStdout>>,
+    frames: Reader<ChildStdout>,
 }
 
 impl Incoming for Receiver {
-    /// The next line that is a message: anything else on stdout is skipped.
-    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {
+    /// The next message: anything else on stdout is skipped.
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async move {
-            loop {
-                match self.lines.next_line().await? {
-                    Some(line) if line.starts_with('{') => return Ok(line),
-                    Some(_) => continue,
-                    None => return Err(io::ErrorKind::UnexpectedEof.into()),
-                }
-            }
+            self.frames
+                .next()
+                .await?
+                .ok_or(io::ErrorKind::UnexpectedEof.into())
         })
     }
 }
@@ -95,30 +94,26 @@ where
     I: AsyncRead + Unpin,
     O: AsyncWrite + Unpin + Send + 'static,
 {
-    let (outbox, mut queued) = mpsc::unbounded_channel::<String>();
+    let (outbox, mut queued) = mpsc::unbounded_channel::<Vec<u8>>();
     // One writer, so two messages never interleave on `output`.
     let writer = tokio::spawn(async move {
         let mut output = output;
         while let Some(message) = queued.recv().await {
-            output.write_all(message.as_bytes()).await?;
-            output.write_all(b"\n").await?;
+            output.write_all(&frame::frame(&message)).await?;
             output.flush().await?;
         }
         io::Result::Ok(())
     });
 
-    let mut lines = BufReader::new(input).lines();
+    let mut input = Reader::new(input);
     let mut calls = JoinSet::new();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
+    while let Some(message) = input.next().await? {
         let dispatcher = dispatcher.clone();
         let outbox = outbox.clone();
         calls.spawn(async move {
             let mut extensions = Extensions::new();
             extensions.insert(Notifier::new(outbox.clone()));
-            if let Some(response) = dispatcher.call(line.as_bytes(), extensions).await {
+            if let Some(response) = dispatcher.call(&message, extensions).await {
                 let _ = outbox.send(response);
             }
         });
@@ -130,6 +125,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use ciborium::cbor;
     use futures_util::StreamExt;
 
     use crate::transport::{Event, TransportClient, testing::methods};
@@ -147,7 +143,7 @@ mod tests {
 
     /// Serves [`dispatcher`] over this process's stdio when run as [`spawn`]'s server, and
     /// does nothing otherwise. libtest writes its own lines to stdout too, which the client
-    /// skips.
+    /// skips, as they are outside any frame.
     #[test]
     #[ignore = "the server `spawn` runs, not a test"]
     fn server() {
@@ -259,20 +255,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serve_answers_each_line_and_ends_with_its_input() {
-        let input = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["a"]}"#,
-            "\n\n",
-            r#"{"jsonrpc":"2.0","method":"echo","params":["b"]}"#,
-            "\n",
+    async fn serve_answers_each_frame_and_ends_with_its_input() {
+        let message = |value: ciborium::Value| {
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&value, &mut bytes).unwrap();
+            frame(&bytes)
+        };
+        let mut input = message(
+            cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["a"]}).unwrap(),
         );
+        input.extend(message(
+            cbor!({"jsonrpc" => "2.0", "method" => "echo", "params" => ["b"]}).unwrap(),
+        ));
         let (output, mut read) = tokio::io::duplex(4096);
-        serve(dispatcher(), input.as_bytes(), output).await.unwrap();
-        let mut written = String::new();
-        tokio::io::AsyncReadExt::read_to_string(&mut read, &mut written)
+        serve(dispatcher(), &input[..], output).await.unwrap();
+        let mut written = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut read, &mut written)
             .await
             .unwrap();
-        assert_eq!(written, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"a\"}\n");
+        let answer = cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => "a"}).unwrap();
+        assert_eq!(written, message(answer));
     }
 
     #[cfg(unix)]

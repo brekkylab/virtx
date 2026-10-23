@@ -1,11 +1,14 @@
 //! Both ends of Streamable HTTP, and the server against `PROTOCOL.md` by hand.
 
+use ciborium::{Value, cbor};
 use tokio::net::TcpListener;
 
 use super::*;
 use futures_util::StreamExt;
 
-use crate::transport::{Dispatcher, Event, TransportClient, testing::methods};
+use crate::transport::{
+    Dispatcher, Event, TransportClient, r#impl::frame::Parser, testing::methods,
+};
 
 /// A [`Server`] on localhost, serving `echo`, `count` (which sends progress before it
 /// answers) and `session` (which answers the request's session id).
@@ -27,11 +30,31 @@ async fn serve() -> String {
     url
 }
 
+fn encode(message: Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&message, &mut bytes).unwrap();
+    bytes
+}
+
+fn decode(bytes: &[u8]) -> Value {
+    ciborium::from_reader(bytes).unwrap()
+}
+
+/// `echo`ing `hi`, as request 1.
+fn echo() -> Vec<u8> {
+    encode(cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["hi"]}).unwrap())
+}
+
+/// `count`ing to 2, as request 1.
+fn count() -> Vec<u8> {
+    encode(cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "count", "params" => [2]}).unwrap())
+}
+
 /// A `POST` of `body` to `url`, accepting what `accept` says, in `session` if one is given.
-async fn post(url: &str, body: &str, accept: &str, session: Option<&str>) -> reqwest::Response {
+async fn post(url: &str, body: &[u8], accept: &str, session: Option<&str>) -> reqwest::Response {
     let mut request = reqwest::Client::new()
         .post(url)
-        .header("content-type", "application/json")
+        .header("content-type", CBOR)
         .header("accept", accept)
         .body(body.to_owned());
     if let Some(id) = session {
@@ -46,7 +69,7 @@ fn connect(url: &str) -> TransportClient {
     TransportClient::new(outgoing, incoming)
 }
 
-const BOTH: &str = "application/json, text/event-stream";
+const BOTH: &str = "application/cbor, application/cbor-seq";
 
 #[tokio::test]
 async fn a_client_calls_and_its_session_carries_over() {
@@ -104,79 +127,88 @@ fn connect_refuses_anything_but_an_http_url() {
 }
 
 #[tokio::test]
-async fn a_first_post_opens_a_session_and_answers_json() {
+async fn a_first_post_opens_a_session_and_answers_one_message() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#;
-    let response = post(&url, request, BOTH, None).await;
+    let response = post(&url, &echo(), BOTH, None).await;
     assert_eq!(response.status(), 200);
     assert!(response.headers().contains_key(SESSION_HEADER));
-    assert_eq!(response.headers()["content-type"], "application/json");
+    assert_eq!(response.headers()["content-type"], CBOR);
     assert_eq!(
-        response.text().await.unwrap(),
-        r#"{"jsonrpc":"2.0","id":1,"result":"hi"}"#
+        decode(&response.bytes().await.unwrap()),
+        cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => "hi"}).unwrap()
     );
 }
 
 #[tokio::test]
 async fn a_request_with_notifications_answers_a_stream_ending_in_its_response() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"count","params":[2]}"#;
-    let response = post(&url, request, BOTH, None).await;
-    assert_eq!(response.headers()["content-type"], EVENT_STREAM);
-    let mut parser = sse::Parser::default();
-    let events = parser.feed(&response.bytes().await.unwrap());
+    let response = post(&url, &count(), BOTH, None).await;
+    assert_eq!(response.headers()["content-type"], CBOR_SEQ);
+    let mut parser = Parser::default();
+    parser.push(&response.bytes().await.unwrap());
+    let messages: Vec<_> = std::iter::from_fn(|| parser.next_message())
+        .map(|message| decode(&message))
+        .collect();
+    let progress = |message| {
+        cbor!({
+            "jsonrpc" => "2.0",
+            "method" => "notifications/progress",
+            "params" => {"requestId" => 1, "message" => message},
+        })
+        .unwrap()
+    };
     assert_eq!(
-        events,
-        vec![
-            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":1,"message":"1"}}"#,
-            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":1,"message":"2"}}"#,
-            r#"{"jsonrpc":"2.0","id":1,"result":2}"#,
+        messages,
+        [
+            progress("1"),
+            progress("2"),
+            cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => 2}).unwrap(),
         ]
     );
 }
 
 #[tokio::test]
-async fn a_client_that_takes_no_stream_gets_json() {
+async fn a_client_that_takes_no_stream_gets_one_message() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"count","params":[2]}"#;
-    let response = post(&url, request, "application/json", None).await;
-    assert_eq!(response.headers()["content-type"], "application/json");
+    let response = post(&url, &count(), CBOR, None).await;
+    assert_eq!(response.headers()["content-type"], CBOR);
     assert_eq!(
-        response.text().await.unwrap(),
-        r#"{"jsonrpc":"2.0","id":1,"result":2}"#
+        decode(&response.bytes().await.unwrap()),
+        cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => 2}).unwrap()
     );
 }
 
 #[tokio::test]
 async fn a_notification_is_accepted() {
     let url = serve().await;
-    let notification = r#"{"jsonrpc":"2.0","method":"echo","params":["hi"]}"#;
-    assert_eq!(post(&url, notification, BOTH, None).await.status(), 202);
+    let notification =
+        encode(cbor!({"jsonrpc" => "2.0", "method" => "echo", "params" => ["hi"]}).unwrap());
+    assert_eq!(post(&url, &notification, BOTH, None).await.status(), 202);
 }
 
 #[tokio::test]
 async fn a_session_ends_with_a_delete_and_is_unknown_after() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#;
-    let opened = post(&url, request, BOTH, None).await;
+    let request = echo();
+    let opened = post(&url, &request, BOTH, None).await;
     let id = opened.headers()[SESSION_HEADER]
         .to_str()
         .unwrap()
         .to_owned();
-    assert_eq!(post(&url, request, BOTH, Some(&id)).await.status(), 200);
+    assert_eq!(post(&url, &request, BOTH, Some(&id)).await.status(), 200);
 
     let http = reqwest::Client::new();
     let delete = || http.delete(&url).header(SESSION_HEADER, &id).send();
     assert_eq!(delete().await.unwrap().status(), 204);
     assert_eq!(delete().await.unwrap().status(), 404);
-    assert_eq!(post(&url, request, BOTH, Some(&id)).await.status(), 404);
+    assert_eq!(post(&url, &request, BOTH, Some(&id)).await.status(), 404);
 }
 
 #[tokio::test]
 async fn an_unknown_session_is_not_found() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#;
-    assert_eq!(post(&url, request, BOTH, Some("nope")).await.status(), 404);
+    let request = echo();
+    assert_eq!(post(&url, &request, BOTH, Some("nope")).await.status(), 404);
 }
 
 #[tokio::test]
@@ -189,13 +221,13 @@ async fn a_get_is_not_allowed() {
 #[tokio::test]
 async fn an_origin_must_be_allowed() {
     let url = serve().await;
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#;
+    let request = echo();
     let http = reqwest::Client::new();
     let from = |origin: &'static str| {
         http.post(&url)
-            .header("content-type", "application/json")
+            .header("content-type", CBOR)
             .header("origin", origin)
-            .body(request)
+            .body(request.clone())
             .send()
     };
     assert_eq!(from("https://evil.example").await.unwrap().status(), 403);

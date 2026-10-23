@@ -71,7 +71,8 @@ pub(super) mod testing {
     //! A waker that counts its wakes and releases, for the tests of what wakes one.
 
     use std::{
-        ffi::{CStr, c_char, c_void},
+        ffi::c_void,
+        ptr, slice,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering::SeqCst},
@@ -80,8 +81,10 @@ pub(super) mod testing {
         time::{Duration, Instant},
     };
 
+    use ciborium::Value;
+
     use super::VirtxWaker;
-    use crate::ffi::virtx_string_free;
+    use crate::ffi::{VirtxBytes, virtx_bytes_free};
 
     #[derive(Default)]
     pub struct Counts {
@@ -121,13 +124,22 @@ pub(super) mod testing {
         }
     }
 
-    /// The string the library wrote to `out`, freed.
-    pub unsafe fn taken(out: *mut c_char) -> Option<String> {
-        if out.is_null() {
+    /// Where the library writes nothing until it writes bytes.
+    pub fn empty() -> VirtxBytes {
+        VirtxBytes {
+            data: ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    /// The CBOR the library wrote to `out`, read and freed.
+    pub unsafe fn taken(out: VirtxBytes) -> Option<Value> {
+        if out.data.is_null() {
             return None;
         }
-        let text = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_owned();
-        unsafe { virtx_string_free(out) };
-        Some(text)
+        let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
+        let value = ciborium::from_reader(bytes).unwrap();
+        unsafe { virtx_bytes_free(out) };
+        Some(value)
     }
 }

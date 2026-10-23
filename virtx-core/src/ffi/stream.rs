@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    ffi::{c_char, c_int},
+    ffi::c_int,
     mem,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -16,7 +16,7 @@ use tokio::{
 
 use super::{
     VIRTX_END, VIRTX_ERROR, VIRTX_PENDING,
-    text::{encode, write},
+    bytes::{VirtxBytes, encode, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
 
@@ -29,7 +29,7 @@ pub struct VirtxStream {
 #[derive(Default)]
 struct Shared {
     /// Items not yet taken, oldest first: a status, and the item or the error.
-    items: VecDeque<(c_int, String)>,
+    items: VecDeque<(c_int, Vec<u8>)>,
     /// No item comes after those in `items`.
     ended: bool,
     /// The waker of the last poll that found nothing to take.
@@ -46,7 +46,7 @@ struct Items(Arc<Mutex<Shared>>);
 
 impl Items {
     /// Queue an item, or end the stream after it if `last`, and wake the waker kept.
-    fn push(&self, item: Option<(c_int, String)>, last: bool) {
+    fn push(&self, item: Option<(c_int, Vec<u8>)>, last: bool) {
         let waker = {
             let mut shared = lock(&self.0);
             if shared.ended {
@@ -65,8 +65,7 @@ impl Items {
 
 impl Drop for Items {
     fn drop(&mut self) {
-        let error = (VIRTX_ERROR, "the call ended before it finished".to_string());
-        self.push(Some(error), true);
+        self.push(Some(failure("the call ended before it finished")), true);
     }
 }
 
@@ -100,7 +99,7 @@ pub(super) fn start<T: Serialize>(
     Box::into_raw(Box::new(VirtxStream { shared, task }))
 }
 
-/// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as JSON; `VIRTX_ERROR`,
+/// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as CBOR; `VIRTX_ERROR`,
 /// with the error written, after which the stream ends; `VIRTX_END` once it has; or
 /// `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once there is
 /// an item or the end.
@@ -113,7 +112,7 @@ pub(super) fn start<T: Serialize>(
 pub unsafe extern "C" fn virtx_stream_poll_next(
     stream: *mut VirtxStream,
     waker: VirtxWaker,
-    out: *mut *mut c_char,
+    out: *mut VirtxBytes,
 ) -> c_int {
     let waker = Waker::new(waker);
     let mut shared = lock(&unsafe { &*stream }.shared);
@@ -144,7 +143,7 @@ pub unsafe extern "C" fn virtx_stream_poll_next(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtx_stream_wait_next(
     stream: *mut VirtxStream,
-    out: *mut *mut c_char,
+    out: *mut VirtxBytes,
 ) -> c_int {
     block_on(|waker| unsafe { virtx_stream_poll_next(stream, waker, out) })
 }
@@ -172,26 +171,28 @@ pub unsafe extern "C" fn virtx_stream_free(stream: *mut VirtxStream) {
 
 #[cfg(test)]
 mod tests {
-    use std::{ptr, thread, time::Duration};
+    use std::{thread, time::Duration};
+
+    use ciborium::Value;
 
     use tokio::{runtime::Runtime, sync::mpsc};
 
     use super::{
         super::{
             VIRTX_OK,
-            waker::testing::{Counts, taken, waker},
+            waker::testing::{Counts, empty, taken, waker},
         },
         *,
     };
 
-    fn poll(stream: *mut VirtxStream, counts: &Arc<Counts>) -> (c_int, Option<String>) {
-        let mut out = ptr::null_mut();
+    fn poll(stream: *mut VirtxStream, counts: &Arc<Counts>) -> (c_int, Option<Value>) {
+        let mut out = empty();
         let status = unsafe { virtx_stream_poll_next(stream, waker(counts), &mut out) };
         (status, unsafe { taken(out) })
     }
 
-    fn wait(stream: *mut VirtxStream) -> (c_int, Option<String>) {
-        let mut out = ptr::null_mut();
+    fn wait(stream: *mut VirtxStream) -> (c_int, Option<Value>) {
+        let mut out = empty();
         let status = unsafe { virtx_stream_wait_next(stream, &mut out) };
         (status, unsafe { taken(out) })
     }
@@ -220,13 +221,13 @@ mod tests {
         assert_eq!(poll(stream, &counts), (VIRTX_PENDING, None));
         send.send(Ok(1)).unwrap();
         counts.await_wakes(1);
-        assert_eq!(poll(stream, &counts), (VIRTX_OK, Some("1".to_string())));
+        assert_eq!(poll(stream, &counts), (VIRTX_OK, Some(Value::from(1))));
 
         assert_eq!(poll(stream, &counts), (VIRTX_PENDING, None));
         send.send(Ok(2)).unwrap();
         drop(send);
         counts.await_wakes(2);
-        assert_eq!(wait(stream), (VIRTX_OK, Some("2".to_string())));
+        assert_eq!(wait(stream), (VIRTX_OK, Some(Value::from(2))));
         assert_eq!(wait(stream), (VIRTX_END, None));
         assert_eq!(poll(stream, &counts), (VIRTX_END, None));
         assert_eq!(counts.get(), (2, 4), "every waker released once");
@@ -241,7 +242,7 @@ mod tests {
         let (stream, send) = pending(&runtime, &tasks);
 
         send.send(Err("no".to_string())).unwrap();
-        assert_eq!(wait(stream), (VIRTX_ERROR, Some("no".to_string())));
+        assert_eq!(wait(stream), (VIRTX_ERROR, Some(Value::from("no"))));
         let _ = send.send(Ok(1));
         assert_eq!(wait(stream), (VIRTX_END, None));
 
@@ -288,7 +289,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             send.send(Ok(7)).unwrap();
         });
-        assert_eq!(wait(stream), (VIRTX_OK, Some("7".to_string())));
+        assert_eq!(wait(stream), (VIRTX_OK, Some(Value::from(7))));
 
         sender.join().unwrap();
         unsafe { virtx_stream_free(stream) };

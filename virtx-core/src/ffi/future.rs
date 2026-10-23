@@ -1,7 +1,7 @@
 //! A request that answers once, polled by C as a Rust future is.
 
 use std::{
-    ffi::{c_char, c_int},
+    ffi::c_int,
     future::Future,
     mem,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -14,8 +14,8 @@ use tokio::{
 };
 
 use super::{
-    VIRTX_ERROR, VIRTX_PENDING,
-    text::{encode, write},
+    VIRTX_PENDING,
+    bytes::{VirtxBytes, encode, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
 
@@ -29,7 +29,7 @@ enum State {
     /// Running, with the waker of the last poll.
     Pending(Option<Waker>),
     /// Answered, not yet polled.
-    Ready(c_int, String),
+    Ready(c_int, Vec<u8>),
     /// Answered and polled, or freed.
     Taken,
 }
@@ -43,7 +43,7 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
 struct Completion(Arc<Mutex<State>>);
 
 impl Completion {
-    fn finish(&self, status: c_int, output: String) {
+    fn finish(&self, (status, output): (c_int, Vec<u8>)) {
         let waker = {
             let state = &mut *lock(&self.0);
             match mem::replace(state, State::Taken) {
@@ -66,7 +66,7 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        self.finish(VIRTX_ERROR, "the call ended before it answered".to_string());
+        self.finish(failure("the call ended before it answered"));
     }
 }
 
@@ -83,8 +83,7 @@ pub(super) fn start<T: Serialize>(
     while tasks.try_join_next().is_some() {}
     let task = tasks.spawn_on(
         async move {
-            let (status, output) = encode(future.await);
-            completion.finish(status, output);
+            completion.finish(encode(future.await));
         },
         runtime,
     );
@@ -103,7 +102,7 @@ pub(super) fn start<T: Serialize>(
 pub unsafe extern "C" fn virtx_future_poll(
     future: *mut VirtxFuture,
     waker: VirtxWaker,
-    out: *mut *mut c_char,
+    out: *mut VirtxBytes,
 ) -> c_int {
     let waker = Waker::new(waker);
     let mut state = lock(&unsafe { &*future }.state);
@@ -115,7 +114,7 @@ pub unsafe extern "C" fn virtx_future_poll(
             return VIRTX_PENDING;
         }
         State::Ready(status, output) => (status, output),
-        State::Taken => (VIRTX_ERROR, "the call already answered".to_string()),
+        State::Taken => failure("the call already answered"),
     };
     drop(state);
     drop(waker);
@@ -131,7 +130,7 @@ pub unsafe extern "C" fn virtx_future_poll(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn virtx_future_wait(
     future: *mut VirtxFuture,
-    out: *mut *mut c_char,
+    out: *mut VirtxBytes,
 ) -> c_int {
     block_on(|waker| unsafe { virtx_future_poll(future, waker, out) })
 }
@@ -155,17 +154,22 @@ pub unsafe extern "C" fn virtx_future_free(future: *mut VirtxFuture) {
 
 #[cfg(test)]
 mod tests {
-    use std::{ptr, thread, time::Duration};
+    use std::{thread, time::Duration};
+
+    use ciborium::Value;
 
     use tokio::{runtime::Runtime, sync::oneshot};
 
     use super::{
-        super::waker::testing::{Counts, taken, waker},
+        super::{
+            VIRTX_ERROR,
+            waker::testing::{Counts, empty, taken, waker},
+        },
         *,
     };
 
-    fn poll(future: *mut VirtxFuture, counts: &Arc<Counts>) -> (c_int, Option<String>) {
-        let mut out = ptr::null_mut();
+    fn poll(future: *mut VirtxFuture, counts: &Arc<Counts>) -> (c_int, Option<Value>) {
+        let mut out = empty();
         let status = unsafe { virtx_future_poll(future, waker(counts), &mut out) };
         (status, unsafe { taken(out) })
     }
@@ -197,7 +201,7 @@ mod tests {
         last.await_wakes(1);
         assert_eq!(last.get(), (1, 1));
 
-        assert_eq!(poll(future, &after), (0, Some("7".to_string())));
+        assert_eq!(poll(future, &after), (0, Some(Value::from(7))));
         assert_eq!(poll(future, &after).0, VIRTX_ERROR);
         assert_eq!(after.get(), (0, 2), "a ready poll keeps no waker");
 
@@ -243,9 +247,9 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             send.send(7).unwrap();
         });
-        let mut out = ptr::null_mut();
+        let mut out = empty();
         let status = unsafe { virtx_future_wait(future, &mut out) };
-        assert_eq!((status, unsafe { taken(out) }), (0, Some("7".to_string())));
+        assert_eq!((status, unsafe { taken(out) }), (0, Some(Value::from(7))));
 
         sender.join().unwrap();
         unsafe { virtx_future_free(future) };

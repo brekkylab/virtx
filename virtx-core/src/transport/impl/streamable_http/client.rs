@@ -5,10 +5,11 @@ use std::{io, sync::Arc};
 use http::{HeaderValue, StatusCode, header};
 use tokio::sync::{Mutex, mpsc};
 
-use super::{EVENT_STREAM, SESSION_HEADER, sse};
+use super::{CBOR, CBOR_SEQ, SESSION_HEADER, is_media_type};
 use crate::transport::{
     error::transport_error,
-    r#impl::{BoxFuture, Incoming, Outgoing},
+    r#impl::{BoxFuture, Incoming, Outgoing, frame::Parser},
+    message::Received,
 };
 
 /// Where every message goes, and the session they go in.
@@ -41,13 +42,13 @@ pub fn connect(url: &str) -> anyhow::Result<(Sender, Receiver)> {
 pub struct Sender {
     endpoint: Arc<Endpoint>,
     /// Where each `POST`'s answers go, for [`Receiver`] to hand to the client.
-    inbox: mpsc::UnboundedSender<String>,
+    inbox: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl Outgoing for Sender {
     /// Start the `POST` and return. Its failure is the request's error, not the transport's:
     /// an `Err` here would end the client, and every call in flight with it.
-    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>> {
+    fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         let endpoint = Arc::clone(&self.endpoint);
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -76,10 +77,10 @@ impl Outgoing for Sender {
     }
 }
 
-pub struct Receiver(mpsc::UnboundedReceiver<String>);
+pub struct Receiver(mpsc::UnboundedReceiver<Vec<u8>>);
 
 impl Incoming for Receiver {
-    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async move {
             self.0
                 .recv()
@@ -93,14 +94,14 @@ impl Incoming for Receiver {
 /// answer did not come.
 async fn post(
     endpoint: &Endpoint,
-    inbox: &mpsc::UnboundedSender<String>,
-    message: &str,
+    inbox: &mpsc::UnboundedSender<Vec<u8>>,
+    message: &[u8],
 ) -> Result<(), String> {
     let mut request = endpoint
         .http
         .post(endpoint.url.clone())
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, format!("application/json, {EVENT_STREAM}"))
+        .header(header::CONTENT_TYPE, CBOR)
+        .header(header::ACCEPT, format!("{CBOR}, {CBOR_SEQ}"))
         .body(message.to_owned());
     let mut session = Some(endpoint.session.lock().await);
     if let Some(id) = session.as_deref().cloned().flatten() {
@@ -129,17 +130,18 @@ async fn post(
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with(EVENT_STREAM));
+        .is_some_and(|value| is_media_type(value, CBOR_SEQ));
     if !streamed {
-        let body = response.text().await.map_err(|e| format!("{e:#}"))?;
-        let _ = inbox.send(body);
+        let body = response.bytes().await.map_err(|e| format!("{e:#}"))?;
+        let _ = inbox.send(body.to_vec());
         return Ok(());
     }
 
-    let mut parser = sse::Parser::default();
+    let mut parser = Parser::default();
     let mut answered = false;
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("{e:#}"))? {
-        for message in parser.feed(&chunk) {
+        parser.push(&chunk);
+        while let Some(message) = parser.next_message() {
             answered |= is_response(&message);
             let _ = inbox.send(message);
         }
@@ -151,7 +153,6 @@ async fn post(
 }
 
 /// Whether `message` is a response, not a notification.
-fn is_response(message: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(message)
-        .is_ok_and(|message| message.get("id").is_some())
+fn is_response(message: &[u8]) -> bool {
+    ciborium::from_reader::<Received, _>(message).is_ok_and(|message| message.id.is_some())
 }

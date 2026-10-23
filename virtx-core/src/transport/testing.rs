@@ -3,15 +3,18 @@
 
 use std::io;
 
-use tokio::io::{
-    AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
-};
+use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 
 use crate::{
     method::{ImageBuild, ImageBuildOutput, Request},
     transport::{
         Dispatcher, ErrorObject, Methods, Notifier, TransportClient,
-        r#impl::{BoxFuture, Incoming, Outgoing, stdio, streamable_http::SessionId},
+        r#impl::{
+            BoxFuture, Incoming, Outgoing,
+            frame::{Reader, frame},
+            stdio,
+            streamable_http::SessionId,
+        },
     },
 };
 
@@ -78,17 +81,14 @@ pub fn connect() -> TransportClient {
     let (input, output) = tokio::io::split(server);
     tokio::spawn(stdio::serve(Dispatcher::new(methods()), input, output));
     let (read, write) = tokio::io::split(client);
-    TransportClient::new(Pipe(write), PipeLines(BufReader::new(read).lines()))
+    TransportClient::new(Pipe(write), PipeFrames(Reader::new(read)))
 }
 
 struct Pipe(WriteHalf<DuplexStream>);
 
 impl Outgoing for Pipe {
-    fn send(&mut self, message: String) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            self.0.write_all(message.as_bytes()).await?;
-            self.0.write_all(b"\n").await
-        })
+    fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
+        Box::pin(async move { self.0.write_all(&frame(&message)).await })
     }
 
     fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
@@ -96,13 +96,13 @@ impl Outgoing for Pipe {
     }
 }
 
-struct PipeLines(Lines<BufReader<ReadHalf<DuplexStream>>>);
+struct PipeFrames(Reader<ReadHalf<DuplexStream>>);
 
-impl Incoming for PipeLines {
-    fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {
+impl Incoming for PipeFrames {
+    fn receive(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
         Box::pin(async move {
             self.0
-                .next_line()
+                .next()
                 .await?
                 .ok_or(io::ErrorKind::UnexpectedEof.into())
         })

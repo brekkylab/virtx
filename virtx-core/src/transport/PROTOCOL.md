@@ -11,9 +11,27 @@ hold here too, and say so where they part from it.
 
 ## Messages
 
-- A message is a JSON-RPC 2.0 request, notification or response, encoded as UTF-8 JSON.
-- A message is one JSON object. Batches (JSON arrays) are not used: a client MUST NOT send
-  one, and a server MAY refuse one.
+- A message is a JSON-RPC 2.0 request, notification or response, encoded as CBOR
+  (RFC 8949): the object JSON-RPC defines is a map with text-string keys, and its members
+  keep JSON-RPC's names and meanings, `"jsonrpc": "2.0"` included. Examples here are in CBOR
+  diagnostic notation.
+- A message is one CBOR data item, a map, with nothing after it. Batches (arrays) are not
+  used: a client MUST NOT send one, and a server MAY refuse one.
+- Bytes are a byte string, not text: CBOR carries them as they are.
+
+### Frames
+
+Where messages follow one another in a byte stream (stdio, and a streamed HTTP answer), each
+is a frame: the self-described CBOR tag (55799) over a byte string whose bytes are the
+message, with the string's length always in its four-byte form. A frame is the eight bytes
+
+```text
+d9 d9 f7 5a L L L L
+```
+
+where `L L L L` is the message's length, big-endian, followed by the message. A stream of
+frames is a CBOR sequence (RFC 8742), and a reader finds the next frame by its first four
+bytes.
 - Only the client sends requests. The server answers them, and MAY send notifications
   about a request while it runs (see [Notifications](#notifications)). The server never
   sends a request.
@@ -22,12 +40,11 @@ hold here too, and say so where they part from it.
 
 The client starts the server as a child process.
 
-- The server reads messages from its stdin and writes messages to its stdout, one message
-  per line: each is followed by `\n` and contains no newline itself.
-- The server MUST NOT write anything to stdout that is not a message. It MAY write UTF-8
+- The server reads messages from its stdin and writes messages to its stdout, each as a
+  [frame](#frames).
+- The server MUST NOT write anything to stdout that is not a frame. It MAY write UTF-8
   text to stderr for a person to read; the client MAY capture, forward or ignore it.
-- A client SHOULD skip a stdout line that does not start with `{`, rather than end the
-  session over it.
+- A client SHOULD skip stdout bytes outside a frame, rather than end the session over them.
 - The client MUST NOT write anything to the server's stdin that is not a message.
 - The client ends the session by closing the server's stdin, and the server then exits:
   see [Ending a session](#ending-a-session). A client MAY kill a server that has not exited
@@ -43,23 +60,24 @@ message is sent.
 ### Sending a message
 
 1. Every message from the client is a new `POST` to the endpoint, with
-   `Content-Type: application/json` and the message as the body.
-2. The client MUST send an `Accept` header listing `application/json`, and SHOULD also list
-   `text/event-stream`. A client that does not list `text/event-stream` receives no
+   `Content-Type: application/cbor` and the message, unframed, as the body.
+2. The client MUST send an `Accept` header listing `application/cbor`, and SHOULD also list
+   `application/cbor-seq`. A client that does not list `application/cbor-seq` receives no
    [notifications](#notifications) over HTTP.
 3. If the message is a notification, the server answers `202 Accepted` with no body, or an
    HTTP error status if it does not accept it.
 4. If the message is a request, the server answers `200` with either
-   - `Content-Type: application/json` and the response as the body, or
-   - `Content-Type: text/event-stream`, an SSE stream (only to a client that listed it).
-5. On an SSE stream, each event's `data` is one message. The server sends notifications
-   about the request first, then the response, and then closes the stream. A server MUST
-   NOT close the stream before the response unless the session has ended.
+   - `Content-Type: application/cbor` and the response, unframed, as the body, or
+   - `Content-Type: application/cbor-seq`, a stream of [frames](#frames) (only to a client
+     that listed it).
+5. On a stream, the server sends notifications about the request first, then the response,
+   and then ends the body. A server MUST NOT end the stream before the response unless the
+   session has ended.
 6. A dropped connection is not a cancellation: the server MAY run the request to its end,
    or until the session ends.
 
-The server chooses per request. It SHOULD answer with JSON when it has nothing to send
-before the response, so a request with no notifications costs one plain HTTP exchange.
+The server chooses per request. It SHOULD answer with one message when it has nothing to
+send before the response, so a request with no notifications costs one plain HTTP exchange.
 
 ### Sessions
 
@@ -100,7 +118,7 @@ neither yet.
 While a request runs, the server MAY send its progress, such as a build's output, as
 `notifications/progress` notifications:
 
-```json
+```text
 {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "message": "pulling alpine:3.20"}}
 ```
 
@@ -111,7 +129,7 @@ While a request runs, the server MAY send its progress, such as a build's output
   ignore what it does not want.
 - A notification from the client has no `id`, so the server sends no progress about it.
 - The server sends no other notification.
-- Over Streamable HTTP, progress goes on that request's SSE stream, before its response.
+- Over Streamable HTTP, progress goes on that request's stream, before its response.
 - Over stdio, it is written to stdout between responses, as any message is.
 
 ## Ending a session
@@ -141,8 +159,7 @@ How the server learns that a session has ended depends on the transport:
 
 - **Resuming a stream.** MCP lets a server put an `id` on each SSE event, and a client that
   lost the stream `GET` the endpoint with `Last-Event-ID` to have the rest of it replayed.
-  Until this protocol defines that, a server MUST NOT rely on a client resuming, and the
-  `id` field of an event carries no meaning.
+  A stream of frames has no ids, so a client that loses one loses the rest of it.
 - **Cancellation.** Ending the session cancels its requests, but a client cannot yet cancel
   one request and keep the session. MCP has a `notifications/cancelled`, which names the
   request by its `requestId` as progress does here.

@@ -158,15 +158,15 @@ mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
     //! each of which starts the request and hands C its [`VirtxFuture`] or [`VirtxStream`].
 
-    use std::ffi::{c_char, c_int};
+    use std::ffi::{CStr, c_char, c_int};
 
     use futures_util::StreamExt;
     use tokio::process::Command;
 
     use super::Client;
     use crate::{
-        ffi::{Runtime, VirtxFuture, VirtxStream, json, release, retain, share, text},
-        image::ImageName,
+        ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
+        method::{ImageBuildArgs, ImageRemoveArgs, SnapshotCreateArgs, SnapshotRemoveArgs},
     };
 
     /// A `Client`, as C holds it.
@@ -185,12 +185,17 @@ mod ffi {
         args: *const *const c_char,
         args_len: usize,
         client: *mut *mut VirtxClient,
-        error: *mut *mut c_char,
+        error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
-            let mut command = Command::new(unsafe { text(program) }?);
+            let utf8 = |ptr| {
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_str()
+                    .map_err(|e| e.to_string())
+            };
+            let mut command = Command::new(utf8(program)?);
             for i in 0..args_len {
-                command.arg(unsafe { text(*args.add(i)) }?);
+                command.arg(utf8(unsafe { *args.add(i) })?);
             }
             Runtime::open(|| {
                 Client::spawn(command).map_err(|e| format!("starting the server: {e}"))
@@ -209,9 +214,11 @@ mod ffi {
     pub unsafe extern "C" fn virtx_client_connect(
         url: *const c_char,
         client: *mut *mut VirtxClient,
-        error: *mut *mut c_char,
+        error: *mut VirtxBytes,
     ) -> c_int {
-        let opened = unsafe { text(url) }
+        let opened = unsafe { CStr::from_ptr(url) }
+            .to_str()
+            .map_err(|e| e.to_string())
             .and_then(|url| Runtime::open(|| Client::connect(url).map_err(|e| format!("{e:#}"))));
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
@@ -244,6 +251,9 @@ mod ffi {
     /// `images.list`: answers with the references, as
     /// `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
     ///
+    /// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
+    /// takes them as `args`, the `args_len` bytes of one map, the method's params.
+    ///
     /// # Safety
     ///
     /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
@@ -253,33 +263,26 @@ mod ffi {
             .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
     }
 
-    /// `images.build`: builds `recipe`, as
-    /// `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
-    /// (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
-    /// are its log, a line each, as `{"progress": "..."}`, then what it built, as
+    /// `images.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a
+    /// reference the server picks if there is none, given
+    /// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
+    /// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
     /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`. `recipe` is NUL-terminated UTF-8, and
-    /// `reference` is null or one too; neither is read after this returns.
+    /// `client` is as in `virtx_client_list_image`. `args` is `args_len` readable bytes, not
+    /// read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
         client: *mut VirtxClient,
-        recipe: *const c_char,
-        reference: *const c_char,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxStream {
-        let args = (|| {
-            let recipe = unsafe { json(recipe) }?;
-            let reference = match reference.is_null() {
-                true => None,
-                false => Some(unsafe { text(reference) }?.to_owned()),
-            };
-            Ok::<_, String>((recipe, reference))
-        })();
+        let args = unsafe { cbor::<ImageBuildArgs>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
-                let (recipe, reference) = match args {
+                let ImageBuildArgs { recipe, reference } = match args {
                     Ok(args) => args,
                     Err(error) => {
                         yield Err(error);
@@ -294,21 +297,25 @@ mod ffi {
         })
     }
 
-    /// `images.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
-    /// `{"type": "digest", "digest": "algorithm:hex"}`. Answers with `null`.
+    /// `images.remove`: forgets `image`, given
+    /// `{"image": {"type": "reference", "reference": "name:tag"}}` or
+    /// `{"image": {"type": "digest", "digest": "algorithm:hex"}}`. Answers with `null`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`. `image` is NUL-terminated UTF-8, not read
-    /// after this returns.
+    /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_remove_image(
         client: *mut VirtxClient,
-        image: *const c_char,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxFuture {
-        let image = unsafe { json::<ImageName>(image) };
+        let args = unsafe { cbor::<ImageRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client.remove_image(image?).await.map_err(|e| e.to_string())
+            client
+                .remove_image(args?.image)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -327,44 +334,42 @@ mod ffi {
     }
 
     /// `snapshots.create`: keeps a new, empty upper layer under `name`, or a name the server
-    /// picks if `name` is null. Answers with `{"name": "..."}`.
+    /// picks if there is none, given `{"name": "..."}` or `{}`. Answers with `{"name": "..."}`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`. `name` is null or NUL-terminated UTF-8, not
-    /// read after this returns.
+    /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_create_snapshot(
         client: *mut VirtxClient,
-        name: *const c_char,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxFuture {
-        let name = match name.is_null() {
-            true => Ok(None),
-            false => unsafe { text(name) }.map(|name| Some(name.to_owned())),
-        };
+        let args = unsafe { cbor::<SnapshotCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
-                .create_snapshot(name?)
+                .create_snapshot(args?.name)
                 .await
                 .map_err(|e| e.to_string())
         })
     }
 
-    /// `snapshots.remove`: deletes the snapshot `name` and its upper layer. Answers with `null`.
+    /// `snapshots.remove`: deletes the snapshot `name` and its upper layer, given
+    /// `{"name": "..."}`. Answers with `null`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`. `name` is NUL-terminated UTF-8, not read
-    /// after this returns.
+    /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_remove_snapshot(
         client: *mut VirtxClient,
-        name: *const c_char,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxFuture {
-        let name = unsafe { text(name) }.map(str::to_owned);
+        let args = unsafe { cbor::<SnapshotRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
-                .remove_snapshot(name?)
+                .remove_snapshot(args?.name)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -375,20 +380,23 @@ mod ffi {
         use std::ptr;
 
         use super::*;
-        use crate::ffi::virtx_string_free;
+        use crate::ffi::virtx_bytes_free;
 
         #[test]
         fn spawning_nothing_fails_with_a_message() {
             let mut client = ptr::null_mut();
-            let mut error = ptr::null_mut();
+            let mut error = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
             let program = c"/nonexistent/virtx-server";
             let status = unsafe {
                 virtx_client_spawn(program.as_ptr(), ptr::null(), 0, &mut client, &mut error)
             };
             assert_eq!(status, crate::ffi::VIRTX_ERROR);
             assert!(client.is_null());
-            assert!(!error.is_null());
-            unsafe { virtx_string_free(error) };
+            assert!(!error.data.is_null());
+            unsafe { virtx_bytes_free(error) };
         }
     }
 }

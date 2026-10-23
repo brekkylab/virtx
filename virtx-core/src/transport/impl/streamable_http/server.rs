@@ -1,4 +1,4 @@
-//! The server's end: sessions, and choosing between a JSON answer and an SSE stream.
+//! The server's end: sessions, and choosing between one message and a stream of them.
 
 use std::{
     collections::HashSet,
@@ -13,8 +13,8 @@ use http_body::{Body, Frame};
 use http_body_util::{BodyExt, Empty, Full, Limited, combinators::UnsyncBoxBody};
 use tokio::sync::mpsc;
 
-use super::{EVENT_STREAM, SESSION_HEADER, sse};
-use crate::transport::{Dispatcher, Notifier};
+use super::{CBOR, CBOR_SEQ, SESSION_HEADER, is_media_type};
+use crate::transport::{Dispatcher, Notifier, r#impl::frame::frame};
 
 /// The body of every response a [`Server`] answers.
 pub type HttpBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
@@ -107,7 +107,7 @@ impl Server {
         B: Body<Data = Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let streams = accepts(request.headers(), EVENT_STREAM);
+        let streams = accepts(request.headers(), CBOR_SEQ);
         let message = match Limited::new(request.into_body(), MAX_MESSAGE)
             .collect()
             .await
@@ -134,8 +134,8 @@ impl Server {
         let dispatcher = self.inner.dispatcher.clone();
         let mut call = tokio::spawn(async move { dispatcher.call(&message, extensions).await });
 
-        // JSON unless a notification comes before the response. Notifications first, so one
-        // sent just before the call ended is not lost to a JSON answer.
+        // One message unless a notification comes before the response. Notifications first, so
+        // one sent just before the call ended is not lost to a one-message answer.
         let first = match &mut notifications {
             Some(queue) => tokio::select! {
                 biased;
@@ -146,13 +146,13 @@ impl Server {
         };
         let mut response = match first {
             Err(answer) => match answer {
-                Ok(answer) => json(answer),
+                Ok(answer) => single(answer),
                 Err(_) => status(StatusCode::INTERNAL_SERVER_ERROR),
             },
             Ok(first) => {
                 let mut notifications = notifications.expect("a stream was accepted");
-                let (events, body) = mpsc::unbounded_channel();
-                let _ = events.send(sse::event(&first));
+                let (frames, body) = mpsc::unbounded_channel();
+                let _ = frames.send(Bytes::from(frame(&first)));
                 tokio::spawn(async move {
                     // The call has ended when its task has, and every notification it sent
                     // is queued by then: drain them, then send the response.
@@ -160,24 +160,24 @@ impl Server {
                         tokio::select! {
                             biased;
                             Some(notification) = notifications.recv() => {
-                                let _ = events.send(sse::event(&notification));
+                                let _ = frames.send(Bytes::from(frame(&notification)));
                             }
                             answer = &mut call => {
                                 while let Ok(notification) = notifications.try_recv() {
-                                    let _ = events.send(sse::event(&notification));
+                                    let _ = frames.send(Bytes::from(frame(&notification)));
                                 }
                                 if let Ok(Some(response)) = answer {
-                                    let _ = events.send(sse::event(&response));
+                                    let _ = frames.send(Bytes::from(frame(&response)));
                                 }
                                 break;
                             }
                         }
                     }
                 });
-                let mut response = Response::new(HttpBody::new(Events(body)));
+                let mut response = Response::new(HttpBody::new(Frames(body)));
                 response
                     .headers_mut()
-                    .insert(header::CONTENT_TYPE, HeaderValue::from_static(EVENT_STREAM));
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static(CBOR_SEQ));
                 response
                     .headers_mut()
                     .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -193,15 +193,14 @@ impl Server {
 }
 
 /// The methods' answer as this transport's: `202` when there is none to send.
-fn json(answer: Option<String>) -> Response<HttpBody> {
+fn single(answer: Option<Vec<u8>>) -> Response<HttpBody> {
     let Some(body) = answer else {
         return status(StatusCode::ACCEPTED);
     };
     let mut response = Response::new(HttpBody::new(Full::new(Bytes::from(body))));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(CBOR));
     response
 }
 
@@ -218,14 +217,13 @@ fn accepts(headers: &http::HeaderMap, media_type: &str) -> bool {
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
-        .map(|item| item.split(';').next().unwrap_or("").trim())
-        .any(|item| item.eq_ignore_ascii_case(media_type))
+        .any(|item| is_media_type(item, media_type))
 }
 
-/// An SSE body: the events sent on a channel, ending when it closes.
-struct Events(mpsc::UnboundedReceiver<Bytes>);
+/// A streamed body: the frames sent on a channel, ending when it closes.
+struct Frames(mpsc::UnboundedReceiver<Bytes>);
 
-impl Body for Events {
+impl Body for Frames {
     type Data = Bytes;
     type Error = std::convert::Infallible;
 
@@ -235,6 +233,6 @@ impl Body for Events {
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         self.0
             .poll_recv(cx)
-            .map(|event| event.map(|e| Ok(Frame::data(e))))
+            .map(|frame| frame.map(|f| Ok(Frame::data(f))))
     }
 }

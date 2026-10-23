@@ -1,6 +1,5 @@
 //! Volumes: storage the server keeps under a name, apart from any VM.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::method::Request;
@@ -15,12 +14,12 @@ impl Request for VolumeList {
 }
 
 /// What `volumes.list` takes: nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeListArgs {}
 
 /// One volume in what `volumes.list` answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeListOutputItem {
     /// The volume's name.
@@ -40,7 +39,7 @@ impl Request for VolumeCreate {
 }
 
 /// What `volumes.create` takes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeCreateArgs {
     /// The name to keep it under. Without one the server picks it, and answers it in
@@ -50,7 +49,7 @@ pub struct VolumeCreateArgs {
 }
 
 /// What `volumes.create` answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeCreateOutput {
     /// The volume's name: the one asked for, or the one the server picked.
@@ -67,7 +66,7 @@ impl Request for VolumeRemove {
 }
 
 /// What `volumes.remove` takes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeRemoveArgs {
     /// Which volume, by name.
@@ -75,6 +74,6 @@ pub struct VolumeRemoveArgs {
 }
 
 /// What `volumes.remove` answers: nothing, once the volume is gone.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeRemoveOutput {}

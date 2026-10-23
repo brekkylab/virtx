@@ -3,7 +3,6 @@
 use std::fmt;
 
 use anyhow::Context as _;
-use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Which spelling of this format a declaration is written in.
@@ -14,7 +13,7 @@ const FORMAT_VERSION: u32 = 1;
 
 /// A base and the [`Step`]s over it: a declaration only, which each console server builds its
 /// own way.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recipe {
     /// Serialized first, so a declaration from a newer virtx is refused by version rather than
     /// by whichever member it disagrees on.
@@ -255,7 +254,7 @@ fn some_base<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
 ///
 /// Serialized by name (`{"run": …}`, `{"env": {…}}`), not position, so a new variant cannot
 /// change what a stored [`Recipe`] means.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
     /// A command, run through `sh -c` with the environment accumulated so far.

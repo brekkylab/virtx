@@ -2,27 +2,27 @@
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
+use ciborium::Value;
 use http::Extensions;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, value::RawValue};
 use tokio::sync::mpsc;
 
 use super::message::{ErrorObject, Notification, PROGRESS, Progress, Received, response};
 use crate::method::Request;
 
-/// Where a method sends the progress of the request it is answering: the request's SSE stream
-/// over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every request,
+/// Where a method sends the progress of the request it is answering: the request's streamed
+/// answer over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every request,
 /// so a method gets it with `extensions.get::<Notifier>()`.
 #[derive(Clone, Debug)]
 pub struct Notifier {
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::UnboundedSender<Vec<u8>>,
     /// The `id` of the request being answered; `None` for a notification, which has no
     /// progress to send.
     request_id: Option<Value>,
 }
 
 impl Notifier {
-    pub(crate) fn new(sender: mpsc::UnboundedSender<String>) -> Notifier {
+    pub(crate) fn new(sender: mpsc::UnboundedSender<Vec<u8>>) -> Notifier {
         Notifier {
             sender,
             request_id: None,
@@ -44,14 +44,15 @@ impl Notifier {
                 message: line.into(),
             },
         };
-        let notification = serde_json::to_string(&notification).expect("a value serializes");
-        self.sender.send(notification).is_ok()
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&notification, &mut bytes).expect("a notification encodes");
+        self.sender.send(bytes).is_ok()
     }
 }
 
-type Answering = Pin<Box<dyn Future<Output = Result<Box<RawValue>, ErrorObject>> + Send>>;
+type Answering = Pin<Box<dyn Future<Output = Result<Value, ErrorObject>> + Send>>;
 
-type Handler = Arc<dyn Fn(Option<Box<RawValue>>, Extensions) -> Answering + Send + Sync>;
+type Handler = Arc<dyn Fn(Option<Value>, Extensions) -> Answering + Send + Sync>;
 
 /// The methods a server answers, by name.
 #[derive(Clone, Default)]
@@ -76,9 +77,9 @@ impl Methods {
         let handler: Handler = Arc::new(move |params, extensions| {
             let handler = Arc::clone(&handler);
             Box::pin(async move {
-                let args = read_params::<R::Args>(params.as_deref())?;
+                let args = read_params::<R::Args>(params)?;
                 let output = handler(args, extensions).await?;
-                serde_json::value::to_raw_value(&output)
+                Value::serialized(&output)
                     .map_err(|e| ErrorObject::new(ErrorObject::INTERNAL_ERROR, e.to_string()))
             })
         });
@@ -88,9 +89,10 @@ impl Methods {
 }
 
 /// `params` read as `A`; no params read as `{}`.
-fn read_params<A: DeserializeOwned>(params: Option<&RawValue>) -> Result<A, ErrorObject> {
-    let params = params.map_or("{}", RawValue::get);
-    serde_json::from_str(params)
+fn read_params<A: DeserializeOwned>(params: Option<Value>) -> Result<A, ErrorObject> {
+    params
+        .unwrap_or(Value::Map(Vec::new()))
+        .deserialized()
         .map_err(|e| ErrorObject::new(ErrorObject::INVALID_PARAMS, e.to_string()))
 }
 
@@ -110,29 +112,32 @@ impl Dispatcher {
     /// Hand `message` to its method, with `extensions` the method's to read and their
     /// [`Notifier`] bound to the request, and return the response; `None` for a message that
     /// takes none, a notification or a response.
-    pub(crate) async fn call(&self, message: &[u8], mut extensions: Extensions) -> Option<String> {
+    pub(crate) async fn call(&self, message: &[u8], mut extensions: Extensions) -> Option<Vec<u8>> {
         let failed = |id: &Value, code, message: &str| {
             Some(response(id, Err(ErrorObject::new(code, message))))
         };
-        // An object, or not a request: a batch is not taken.
-        let starts_an_object = message.trim_ascii_start().first() == Some(&b'{');
-        let received = match serde_json::from_slice::<Received>(message) {
-            Ok(received) if starts_an_object => received,
-            _ => {
-                return match serde_json::from_slice::<serde::de::IgnoredAny>(message) {
-                    Ok(_) => failed(
-                        &Value::Null,
-                        ErrorObject::INVALID_REQUEST,
-                        "Invalid request",
-                    ),
-                    Err(_) => failed(&Value::Null, ErrorObject::PARSE_ERROR, "Parse error"),
-                };
-            }
+        // One data item, and nothing after it.
+        let mut rest = message;
+        let message = match ciborium::from_reader::<Value, _>(&mut rest) {
+            Ok(message) if rest.is_empty() => message,
+            _ => return failed(&Value::Null, ErrorObject::PARSE_ERROR, "Parse error"),
+        };
+        // A map, or not a request: a batch is not taken.
+        let received = match message {
+            Value::Map(_) => message.deserialized::<Received>().ok(),
+            _ => None,
+        };
+        let Some(received) = received else {
+            return failed(
+                &Value::Null,
+                ErrorObject::INVALID_REQUEST,
+                "Invalid request",
+            );
         };
 
         let id = match received.id {
             None => None,
-            Some(id @ (Value::Null | Value::String(_) | Value::Number(_))) => Some(id),
+            Some(id @ (Value::Null | Value::Text(_) | Value::Integer(_))) => Some(id),
             Some(_) => {
                 return failed(
                     &Value::Null,
@@ -141,12 +146,10 @@ impl Dispatcher {
                 );
             }
         };
-        let params_structured = received.params.as_ref().is_none_or(|params| {
-            matches!(
-                params.get().trim_start().as_bytes().first(),
-                Some(b'{' | b'[')
-            )
-        });
+        let params_structured = received
+            .params
+            .as_ref()
+            .is_none_or(|params| matches!(params, Value::Map(_) | Value::Array(_)));
         let method = match received.method {
             Some(method) if received.jsonrpc.as_deref() == Some("2.0") && params_structured => {
                 method
@@ -175,115 +178,152 @@ impl Dispatcher {
 
 #[cfg(test)]
 mod tests {
+    use ciborium::cbor;
+
     use super::*;
     use crate::transport::testing::methods;
 
-    async fn call(message: &str) -> Option<String> {
-        Dispatcher::new(methods())
-            .call(message.as_bytes(), Extensions::new())
-            .await
+    fn encode(message: Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&message, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> T {
+        ciborium::from_reader(bytes).unwrap()
+    }
+
+    async fn call(message: Value) -> Option<Value> {
+        let answer = Dispatcher::new(methods())
+            .call(&encode(message), Extensions::new())
+            .await;
+        answer.map(|answer| decode(&answer))
     }
 
     #[tokio::test]
     async fn a_request_answers_its_response() {
-        let answer = call(r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#).await;
+        let request =
+            cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["hi"]});
         assert_eq!(
-            answer.as_deref(),
-            Some(r#"{"jsonrpc":"2.0","id":1,"result":"hi"}"#)
+            call(request.unwrap()).await,
+            Some(cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => "hi"}).unwrap())
         );
     }
 
     #[tokio::test]
     async fn a_notification_answers_nothing() {
-        let answer = call(r#"{"jsonrpc":"2.0","method":"echo","params":["hi"]}"#).await;
-        assert_eq!(answer, None);
+        let notification = cbor!({"jsonrpc" => "2.0", "method" => "echo", "params" => ["hi"]});
+        assert_eq!(call(notification.unwrap()).await, None);
     }
 
     #[tokio::test]
     async fn a_response_answers_nothing() {
-        assert_eq!(call(r#"{"jsonrpc":"2.0","id":1,"result":2}"#).await, None);
+        let response = cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => 2});
+        assert_eq!(call(response.unwrap()).await, None);
     }
 
     /// What `message` answers, given a [`Notifier`], and the notifications sent while it ran.
-    async fn call_notified(message: &str) -> (Option<String>, Vec<String>) {
+    async fn call_notified(message: Value) -> (Option<Value>, Vec<Value>) {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut extensions = Extensions::new();
         extensions.insert(Notifier::new(sender));
         let answer = Dispatcher::new(methods())
-            .call(message.as_bytes(), extensions)
+            .call(&encode(message), extensions)
             .await;
         let mut sent = Vec::new();
         while let Ok(notification) = receiver.try_recv() {
-            sent.push(notification);
+            sent.push(decode(&notification));
         }
-        (answer, sent)
+        (answer.map(|answer| decode(&answer)), sent)
     }
 
     #[tokio::test]
     async fn progress_names_the_request_by_its_id() {
-        let (answer, sent) =
-            call_notified(r#"{"jsonrpc":"2.0","id":"a","method":"count","params":[2]}"#).await;
+        let request =
+            cbor!({"jsonrpc" => "2.0", "id" => "a", "method" => "count", "params" => [2]});
+        let (answer, sent) = call_notified(request.unwrap()).await;
         assert_eq!(
-            answer.as_deref(),
-            Some(r#"{"jsonrpc":"2.0","id":"a","result":2}"#)
+            answer,
+            Some(cbor!({"jsonrpc" => "2.0", "id" => "a", "result" => 2}).unwrap())
         );
-        assert_eq!(
-            sent,
-            [
-                r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":"a","message":"1"}}"#,
-                r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":"a","message":"2"}}"#,
-            ]
-        );
+        let progress = |message| {
+            cbor!({
+                "jsonrpc" => "2.0",
+                "method" => "notifications/progress",
+                "params" => {"requestId" => "a", "message" => message},
+            })
+            .unwrap()
+        };
+        assert_eq!(sent, [progress("1"), progress("2")]);
     }
 
     #[tokio::test]
     async fn a_notification_sends_no_progress() {
-        let (answer, sent) =
-            call_notified(r#"{"jsonrpc":"2.0","method":"count","params":[2]}"#).await;
+        let notification = cbor!({"jsonrpc" => "2.0", "method" => "count", "params" => [2]});
+        let (answer, sent) = call_notified(notification.unwrap()).await;
         assert_eq!(answer, None);
         assert!(sent.is_empty());
     }
 
-    /// The `error.code` `message` is answered with.
-    async fn code(message: &str) -> i64 {
-        let answer = call(message).await.expect("a response");
-        let answer: Value = serde_json::from_str(&answer).unwrap();
-        answer["error"]["code"].as_i64().expect("an error")
+    /// The `error.code` `message`, as CBOR, is answered with.
+    async fn code(message: &[u8]) -> i64 {
+        let answer = Dispatcher::new(methods())
+            .call(message, Extensions::new())
+            .await
+            .expect("a response");
+        let answer: Received = decode(&answer);
+        answer.error.expect("an error").code
     }
 
     #[tokio::test]
     async fn what_is_not_a_request_answers_the_spec_s_errors() {
+        let request =
+            cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["hi"]});
+        let request = request.unwrap();
+        let mut trailing = encode(request.clone());
+        trailing.push(0);
         let cases = [
-            ("not json", ErrorObject::PARSE_ERROR),
-            ("[]", ErrorObject::INVALID_REQUEST),
+            (b"not cbor".to_vec(), ErrorObject::PARSE_ERROR),
+            (Vec::new(), ErrorObject::PARSE_ERROR),
+            (trailing, ErrorObject::PARSE_ERROR),
+            (encode(cbor!([]).unwrap()), ErrorObject::INVALID_REQUEST),
             (
-                r#"[{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}]"#,
+                encode(Value::Array(vec![request])),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                r#"{"jsonrpc":"1.0","id":1,"method":"echo"}"#,
-                ErrorObject::INVALID_REQUEST,
-            ),
-            (r#"{"jsonrpc":"2.0","id":1}"#, ErrorObject::INVALID_REQUEST),
-            (
-                r#"{"jsonrpc":"2.0","id":{},"method":"echo"}"#,
+                encode(cbor!({"jsonrpc" => "1.0", "id" => 1, "method" => "echo"}).unwrap()),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":"hi"}"#,
+                encode(cbor!({"jsonrpc" => "2.0", "id" => 1}).unwrap()),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#,
+                encode(cbor!({"jsonrpc" => "2.0", "id" => {}, "method" => "echo"}).unwrap()),
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                encode(
+                    cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => "hi"})
+                        .unwrap(),
+                ),
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                encode(cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "nope"}).unwrap()),
                 ErrorObject::METHOD_NOT_FOUND,
             ),
             (
-                r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":[1]}"#,
+                encode(
+                    cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => [1]})
+                        .unwrap(),
+                ),
                 ErrorObject::INVALID_PARAMS,
             ),
         ];
         for (message, expected) in cases {
-            assert_eq!(code(message).await, expected, "{message}");
+            assert_eq!(code(&message).await, expected, "{message:02x?}");
         }
     }
 }

@@ -24,11 +24,9 @@ uuid = { version = "1", features = ["v4"] }
 # `Stream`, which a call's progress is, and the macro that writes one.
 futures-util = { version = "0.3", default-features = false }
 async-stream = "0.3"
-# The schema's types: their wire form, and the JSON Schema a server advertises for them.
-schemars = "1"
+# The schema's types and their wire form: every message, and what crosses the C ABI, is CBOR.
 serde = { version = "1", features = ["derive"] }
-# What crosses the C ABI: a call's params and its output, as JSON text.
-serde_json = { version = "1", features = ["raw_value"] }
+ciborium = "0.2"
 # A session brings its own runtime, since C calls in without one. `rt-multi-thread` so the
 # session's tasks run between C calls, not only inside one.
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

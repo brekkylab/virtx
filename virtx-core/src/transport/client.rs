@@ -1,4 +1,4 @@
-//! The transport client: JSON-RPC requests over either transport, which only opening and
+//! The transport client: JSON-RPC requests, in CBOR, over either transport, which only opening and
 //! closing tell apart. It knows no method; a typed client is built on it.
 
 use std::{
@@ -10,9 +10,9 @@ use std::{
     },
 };
 
+use ciborium::Value;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::value::RawValue;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -34,7 +34,7 @@ pub enum Event<R> {
 
 /// A client of one server, over stdio or Streamable HTTP.
 ///
-/// It carries JSON-RPC 2.0 as the spec defines. One task reads what the server sends, in
+/// It carries JSON-RPC 2.0 as the spec defines, each message a CBOR map. One task reads what the server sends, in
 /// order, so a request's progress reaches its call before its response does.
 pub struct TransportClient {
     outgoing: tokio::sync::Mutex<Box<dyn Outgoing>>,
@@ -53,7 +53,7 @@ struct State {
 
 /// Where a call's response and progress go.
 struct Call {
-    answer: oneshot::Sender<Result<Box<RawValue>, Error>>,
+    answer: oneshot::Sender<Result<Value, Error>>,
     progress: mpsc::UnboundedSender<String>,
 }
 
@@ -87,7 +87,7 @@ impl TransportClient {
         }
     }
 
-    /// Call `method` with `params`, a value that serializes to a JSON object or array, and
+    /// Call `method` with `params`, a value that serializes to a map or an array, and
     /// wait for its result. Its progress is not read.
     pub async fn request<R: DeserializeOwned + Send>(
         &self,
@@ -115,15 +115,18 @@ impl TransportClient {
     where
         R: DeserializeOwned + Send + 'a,
     {
-        let params = serde_json::value::to_raw_value(&params);
+        let params = Value::serialized(&params).map_err(|e| Error::Cbor(e.to_string()));
         async_stream::try_stream! {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let message = serde_json::to_string(&Request {
+            let request = Request {
                 jsonrpc: "2.0",
                 id: Some(id),
                 method,
                 params: &params?,
-            })?;
+            };
+            let mut message = Vec::new();
+            ciborium::into_writer(&request, &mut message)
+                .map_err(|e| Error::Cbor(e.to_string()))?;
             let (answer, mut answered) = oneshot::channel();
             let (progress, mut progressed) = mpsc::unbounded_channel();
             let ended = {
@@ -156,7 +159,7 @@ impl TransportClient {
                 yield Event::Progress(line);
             }
             let result = result.map_err(|_| Error::Transport("the session ended".into()))??;
-            yield Event::Output(serde_json::from_str(result.get())?);
+            yield Event::Output(result.deserialized().map_err(|e| Error::Cbor(e.to_string()))?);
         }
     }
 
@@ -174,7 +177,7 @@ impl TransportClient {
     }
 
     /// Send `message`. Failing to means the server is gone, which ends the session.
-    async fn send(&self, message: String) -> Result<(), Error> {
+    async fn send(&self, message: Vec<u8>) -> Result<(), Error> {
         let sent = self.outgoing.lock().await.send(message).await;
         sent.map_err(|e| {
             let reason = format!("sending to the server: {e}");
@@ -204,7 +207,7 @@ async fn read(mut incoming: Box<dyn Incoming>, state: Arc<Mutex<State>>) {
             Ok(message) => message,
             Err(e) => break format!("the server is gone: {e}"),
         };
-        let Ok(received) = serde_json::from_str::<Received>(&message) else {
+        let Ok(received) = ciborium::from_reader::<Received, _>(&message[..]) else {
             continue;
         };
         let mut state = lock(&state);
@@ -215,16 +218,16 @@ async fn read(mut incoming: Box<dyn Incoming>, state: Arc<Mutex<State>>) {
                     message,
                 }) = received
                     .params
-                    .and_then(|params| serde_json::from_str::<Progress>(params.get()).ok())
+                    .and_then(|params| params.deserialized::<Progress>().ok())
                 else {
                     continue;
                 };
-                if let Some(call) = request_id.as_u64().and_then(|id| state.calls.get(&id)) {
+                if let Some(call) = as_u64(&request_id).and_then(|id| state.calls.get(&id)) {
                     let _ = call.progress.send(message);
                 }
             }
             (Some(id), None) => {
-                let Some(call) = id.as_u64().and_then(|id| state.calls.remove(&id)) else {
+                let Some(call) = as_u64(&id).and_then(|id| state.calls.remove(&id)) else {
                     continue;
                 };
                 let result = match (received.result, received.error) {
@@ -243,8 +246,15 @@ async fn read(mut incoming: Box<dyn Incoming>, state: Arc<Mutex<State>>) {
     lock(&state).end(reason);
 }
 
+/// `id` as the request id this client sent, if it is one.
+fn as_u64(id: &Value) -> Option<u64> {
+    id.as_integer().and_then(|id| u64::try_from(id).ok())
+}
+
 #[cfg(test)]
 mod tests {
+    use ciborium::cbor;
+
     use super::*;
 
     #[test]
@@ -252,13 +262,13 @@ mod tests {
         let cases = [
             (
                 Event::Progress("pulling".into()),
-                r#"{"progress":"pulling"}"#,
+                cbor!({"progress" => "pulling"}).unwrap(),
             ),
-            (Event::Output(2), r#"{"output":2}"#),
+            (Event::Output(2), cbor!({"output" => 2}).unwrap()),
         ];
-        for (event, json) in cases {
-            assert_eq!(serde_json::to_string(&event).unwrap(), json);
-            assert_eq!(serde_json::from_str::<Event<u32>>(json).unwrap(), event);
+        for (event, value) in cases {
+            assert_eq!(Value::serialized(&event).unwrap(), value);
+            assert_eq!(value.deserialized::<Event<u32>>().unwrap(), event);
         }
     }
 }

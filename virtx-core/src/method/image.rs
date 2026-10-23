@@ -38,6 +38,35 @@ pub struct ImageListOutputItem {
     pub size: u64,
 }
 
+/// `image.pull`: fetch an image from its registry, and point its reference at it.
+pub struct ImagePull;
+
+impl Request for ImagePull {
+    const NAME: &'static str = "image.pull";
+    type Args = ImagePullArgs;
+    type Output = ImagePullOutput;
+}
+
+/// What `image.pull` takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePullArgs {
+    /// The image to pull, as its registry names it (`alpine:3.20`, `ghcr.io/owner/name:tag`).
+    /// The server holds it under this reference; one already in use is moved to this image.
+    pub reference: String,
+}
+
+/// What `image.pull` answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePullOutput {
+    /// The reference pointing at the image.
+    pub reference: String,
+
+    /// The digest of the image's manifest, as `algorithm:hex`.
+    pub digest: String,
+}
+
 /// `image.build`: build a recipe, and point a reference at what it builds.
 pub struct ImageBuild;
 

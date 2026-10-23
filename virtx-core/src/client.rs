@@ -11,22 +11,22 @@ use crate::{
     image::{ImageName, Recipe},
     method::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
-        ImageListOutputItem, ImageRemove, ImageRemoveArgs, ImageRemoveOutput, Request,
-        SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
-        SandboxExecOutput, SandboxInit, SandboxInitArgs, SandboxInitOutput, SandboxList,
-        SandboxListArgs, SandboxListOutputItem, SnapshotCreate, SnapshotCreateArgs,
-        SnapshotCreateOutput, SnapshotList, SnapshotListArgs, SnapshotListOutputItem,
-        SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput, VolumeCreate, VolumeCreateArgs,
-        VolumeCreateOutput, VolumeFileCopy, VolumeFileCopyArgs, VolumeFileCopyOutput,
-        VolumeFileCreateDir, VolumeFileCreateDirArgs, VolumeFileCreateDirOutput, VolumeFileRead,
-        VolumeFileReadArgs, VolumeFileReadDir, VolumeFileReadDirArgs, VolumeFileReadOutput,
-        VolumeFileRemove, VolumeFileRemoveArgs, VolumeFileRemoveOutput, VolumeFileRename,
-        VolumeFileRenameArgs, VolumeFileRenameOutput, VolumeFileStat, VolumeFileStatArgs,
-        VolumeFileWrite, VolumeFileWriteArgs, VolumeFileWriteOutput, VolumeList, VolumeListArgs,
-        VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs, VolumeMountCreateOutput,
-        VolumeMountList, VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemove,
-        VolumeMountRemoveArgs, VolumeMountRemoveOutput, VolumeRemove, VolumeRemoveArgs,
-        VolumeRemoveOutput,
+        ImageListOutputItem, ImagePull, ImagePullArgs, ImagePullOutput, ImageRemove,
+        ImageRemoveArgs, ImageRemoveOutput, Request, SandboxClose, SandboxCloseArgs,
+        SandboxCloseOutput, SandboxExec, SandboxExecArgs, SandboxExecOutput, SandboxInit,
+        SandboxInitArgs, SandboxInitOutput, SandboxList, SandboxListArgs, SandboxListOutputItem,
+        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
+        SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
+        VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopy, VolumeFileCopyArgs,
+        VolumeFileCopyOutput, VolumeFileCreateDir, VolumeFileCreateDirArgs,
+        VolumeFileCreateDirOutput, VolumeFileRead, VolumeFileReadArgs, VolumeFileReadDir,
+        VolumeFileReadDirArgs, VolumeFileReadOutput, VolumeFileRemove, VolumeFileRemoveArgs,
+        VolumeFileRemoveOutput, VolumeFileRename, VolumeFileRenameArgs, VolumeFileRenameOutput,
+        VolumeFileStat, VolumeFileStatArgs, VolumeFileWrite, VolumeFileWriteArgs,
+        VolumeFileWriteOutput, VolumeList, VolumeListArgs, VolumeListOutputItem, VolumeMountCreate,
+        VolumeMountCreateArgs, VolumeMountCreateOutput, VolumeMountList, VolumeMountListArgs,
+        VolumeMountListOutputItem, VolumeMountRemove, VolumeMountRemoveArgs,
+        VolumeMountRemoveOutput, VolumeRemove, VolumeRemoveArgs, VolumeRemoveOutput,
     },
     transport::{
         Error, Event, TransportClient,
@@ -60,6 +60,21 @@ impl Client {
     /// Every reference the server holds, and the image each points at.
     pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
         self.inner.request(ImageList::NAME, ImageListArgs {}).await
+    }
+
+    /// Pull `reference` from its registry, and point it at what it pulls. The stream is the
+    /// pull's log, a [`Event::Progress`] a line, then what it pulled as its last item, an
+    /// [`Event::Output`] or the error it failed with. Dropping it drops the pull.
+    pub fn pull_image(
+        &self,
+        reference: impl Into<String>,
+    ) -> impl Stream<Item = Result<Event<ImagePullOutput>, Error>> + Unpin + Send + '_ {
+        Box::pin(self.inner.request_with_progress(
+            ImagePull::NAME,
+            ImagePullArgs {
+                reference: reference.into(),
+            },
+        ))
     }
 
     /// Build `recipe`, and point `reference` at it; without one the server picks it. The
@@ -448,6 +463,36 @@ mod tests {
     use crate::transport::testing::connect;
 
     #[tokio::test]
+    async fn a_pull_streams_its_log_then_its_output() {
+        let client = Client { inner: connect() };
+        let events: Vec<_> = client
+            .pull_image("alpine:3.20")
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        let output = ImagePullOutput {
+            reference: "alpine:3.20".into(),
+            digest: "sha256:0".into(),
+        };
+        assert_eq!(
+            events,
+            [
+                Event::Progress("pulling alpine:3.20".into()),
+                Event::Output(output)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_pull_ends_its_stream_with_the_error() {
+        let client = Client { inner: connect() };
+        let mut pull = client.pull_image("missing");
+        assert!(matches!(pull.next().await, Some(Ok(Event::Progress(_)))));
+        assert!(matches!(pull.next().await, Some(Err(Error::Call(_)))));
+        assert!(pull.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn a_build_streams_its_log_then_its_output() {
         let client = Client { inner: connect() };
         let mut build = client.build_image(Recipe::new("alpine:3.20"), Some("jq:latest"));
@@ -511,9 +556,9 @@ mod ffi {
     use crate::{
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
         method::{
-            ImageBuildArgs, ImageRemoveArgs, SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs,
-            SnapshotCreateArgs, SnapshotRemoveArgs, VolumeCreateArgs, VolumeFileCopyArgs,
-            VolumeFileCreateDirArgs, VolumeFileReadArgs, VolumeFileReadDirArgs,
+            ImageBuildArgs, ImagePullArgs, ImageRemoveArgs, SandboxCloseArgs, SandboxExecArgs,
+            SandboxInitArgs, SnapshotCreateArgs, SnapshotRemoveArgs, VolumeCreateArgs,
+            VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs, VolumeFileReadDirArgs,
             VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs, VolumeFileWriteArgs,
             VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs, VolumeRemoveArgs,
         },
@@ -611,6 +656,38 @@ mod ffi {
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
             .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
+    }
+
+    /// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+    /// `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
+    /// `{"progress": "..."}`, then what it pulled, as
+    /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_pull_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { cbor::<ImagePullArgs>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let reference = match args {
+                    Ok(args) => args.reference,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut pull = client.pull_image(reference);
+                while let Some(event) = pull.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
+        })
     }
 
     /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a

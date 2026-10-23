@@ -43,6 +43,11 @@ export interface ImageListItem {
   size: number
 }
 
+export interface ImagePullOutput {
+  reference: string
+  digest: string
+}
+
 export interface ImageBuildOutput {
   reference: string
   digest: string
@@ -129,6 +134,7 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   listImage(): Promise<ImageListItem[]>
+  pullImage(reference: string): AsyncGenerator<Event<ImagePullOutput>>
   buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference?: string): AsyncGenerator<Event<ImageBuildOutput>>
   removeImage(image: string | ImageName): Promise<void>
   listSnapshot(): Promise<SnapshotListItem[]>

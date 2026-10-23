@@ -8,14 +8,14 @@ use std::{
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImageName, ImageRemoveArgs,
-    Metadata, MountSource, Recipe, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput,
-    SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs,
-    SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs,
-    VolumeCreateOutput, VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs,
-    VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs,
-    VolumeFileWriteArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
-    VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImageName, ImagePullArgs,
+    ImagePullOutput, ImageRemoveArgs, Metadata, MountSource, Recipe, SandboxCloseArgs,
+    SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
+    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
+    VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopyArgs, VolumeFileCreateDirArgs,
+    VolumeFileReadArgs, VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs,
+    VolumeFileStatArgs, VolumeFileWriteArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -108,6 +108,15 @@ impl Client {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_list_image)(self.raw)
         })
+    }
+
+    /// Pull `reference` from its registry, and point it at what it pulls. Its events are the
+    /// pull's log, then what it pulled.
+    pub fn pull_image(&self, reference: impl Into<String>) -> Events<ImagePullOutput> {
+        let args = ImagePullArgs {
+            reference: reference.into(),
+        };
+        Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
     }
 
     /// Build `recipe`, and point `reference` at it; without one the server picks it. Its

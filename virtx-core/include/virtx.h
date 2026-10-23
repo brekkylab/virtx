@@ -112,6 +112,18 @@ void virtx_client_release(struct VirtxClient *client);
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
+// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+// `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
+// `{"progress": "..."}`, then what it pulled, as
+// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
 // `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a
 // reference the server picks if there is none, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.

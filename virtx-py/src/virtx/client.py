@@ -214,6 +214,11 @@ class Client:
         ``{"reference", "digest", "size"}``."""
         return await self._call("virtx_client_list_image")
 
+    def pull_image(self, reference: str) -> AsyncIterator[Event[dict[str, Any]]]:
+        """Pull ``reference`` from its registry, and point it at what it pulls. Its events are
+        the pull's log, then what it pulled, ``{"reference", "digest"}``."""
+        return self._events("virtx_client_pull_image", _args(reference=reference))
+
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str | None = None
     ) -> AsyncIterator[Event[dict[str, Any]]]:

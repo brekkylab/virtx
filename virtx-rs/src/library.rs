@@ -91,6 +91,7 @@ api! {
     virtx_client_retain: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_release: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_list_image: Plain,
+    virtx_client_pull_image: WithArgs,
     virtx_client_build_image: WithArgs,
     virtx_client_remove_image: WithArgs,
     virtx_client_list_snapshot: Plain,

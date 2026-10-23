@@ -63,6 +63,7 @@ const SIGNATURES = {
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_list_image: PLAIN,
+  virtx_client_pull_image: WITH_ARGS,
   virtx_client_build_image: WITH_ARGS,
   virtx_client_remove_image: WITH_ARGS,
   virtx_client_list_snapshot: PLAIN,
@@ -375,6 +376,10 @@ class Client {
 
   listImage() {
     return this._call('virtx_client_list_image')
+  }
+
+  pullImage(reference) {
+    return this._events('virtx_client_pull_image', { reference })
   }
 
   buildImage(recipe, reference) {

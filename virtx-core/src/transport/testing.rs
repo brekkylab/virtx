@@ -1,5 +1,6 @@
-//! The methods the tests serve, and a client of them in memory. `image.build` sends
-//! `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
+//! The methods the tests serve, and a client of them in memory. `image.pull` sends
+//! `pulling <reference>` as its progress, and fails for the reference `missing`. `image.build`
+//! sends `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
 //! the path itself, as though each file held its own path. `sandbox.exec` runs everything as
 //! `echo`, sending its line as its progress. The client of them needs the `ffi` feature too.
 
@@ -20,8 +21,8 @@ use crate::transport::{
 };
 use crate::{
     method::{
-        ImageBuild, ImageBuildOutput, Request, SandboxExec, SandboxExecOutput, VolumeFileRead,
-        VolumeFileReadOutput,
+        ImageBuild, ImageBuildOutput, ImagePull, ImagePullOutput, Request, SandboxExec,
+        SandboxExecOutput, VolumeFileRead, VolumeFileReadOutput,
     },
     transport::{ErrorObject, Methods, Notifier, r#impl::streamable_http::SessionId},
 };
@@ -64,6 +65,17 @@ pub fn methods() -> Methods {
                 tokio::task::yield_now().await;
             }
             Ok(to)
+        })
+        .add::<ImagePull, _, _>(|args, extensions| async move {
+            let notifier = extensions.get::<Notifier>().expect("a notifier");
+            notifier.progress(format!("pulling {}", args.reference));
+            if args.reference == "missing" {
+                return Err(ErrorObject::new(1, format!("no image {}", args.reference)));
+            }
+            Ok(ImagePullOutput {
+                reference: args.reference,
+                digest: "sha256:0".into(),
+            })
         })
         .add::<ImageBuild, _, _>(|args, extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");

@@ -10,7 +10,8 @@ use jsonrpsee::core::{
     },
     traits::ToRpcParams,
 };
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::value::RawValue;
 
 use super::Transport;
 
@@ -41,18 +42,20 @@ impl TransportClient {
         TransportClient { rpc, transport }
     }
 
-    /// Call `method` with `params`, and wait for its result.
+    /// Call `method` with `params`, a value that serializes to a JSON object or array, and
+    /// wait for its result.
     pub async fn request<R: DeserializeOwned>(
         &self,
         method: &str,
-        params: impl ToRpcParams + Send,
+        params: impl Serialize,
     ) -> Result<R, Error> {
-        self.rpc.request(method, params).await
+        self.rpc.request(method, Params::new(params)?).await
     }
 
-    /// Send the notification `method` with `params`: no answer comes back.
-    pub async fn notify(&self, method: &str, params: impl ToRpcParams + Send) -> Result<(), Error> {
-        self.rpc.notification(method, params).await
+    /// Send the notification `method` with `params`, as in [`request`](Self::request): no
+    /// answer comes back.
+    pub async fn notify(&self, method: &str, params: impl Serialize) -> Result<(), Error> {
+        self.rpc.notification(method, Params::new(params)?).await
     }
 
     /// The notifications named `method` the server sends from now on.
@@ -76,5 +79,20 @@ impl TransportClient {
         // Over stdio, dropping the client closes the server's stdin.
         drop(rpc);
         transport.close().await;
+    }
+}
+
+/// `params`, serialized before the call, so it need not be `Send` across the await.
+struct Params(Box<RawValue>);
+
+impl Params {
+    fn new(params: impl Serialize) -> Result<Params, Error> {
+        Ok(Params(serde_json::value::to_raw_value(&params)?))
+    }
+}
+
+impl ToRpcParams for Params {
+    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
+        Ok(Some(self.0))
     }
 }

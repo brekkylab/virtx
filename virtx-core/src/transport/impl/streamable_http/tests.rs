@@ -1,6 +1,6 @@
 //! Both ends of Streamable HTTP, and the server against `PROTOCOL.md` by hand.
 
-use jsonrpsee::{RpcModule, rpc_params};
+use jsonrpsee::RpcModule;
 use tokio::net::TcpListener;
 
 use super::*;
@@ -71,10 +71,10 @@ const BOTH: &str = "application/json, text/event-stream";
 async fn a_client_calls_and_its_session_carries_over() {
     let url = serve().await;
     let session = connect(&url);
-    let answer: String = session.request("echo", rpc_params!["hi"]).await.unwrap();
+    let answer: String = session.request("echo", ["hi"]).await.unwrap();
     assert_eq!(answer, "hi");
-    let first: String = session.request("session", rpc_params![]).await.unwrap();
-    let second: String = session.request("session", rpc_params![]).await.unwrap();
+    let first: String = session.request("session", [(); 0]).await.unwrap();
+    let second: String = session.request("session", [(); 0]).await.unwrap();
     assert_eq!(first, second);
     session.close().await;
 }
@@ -84,7 +84,7 @@ async fn a_client_receives_notifications_over_the_stream() {
     let url = serve().await;
     let session = connect(&url);
     let mut counted = session.notifications::<u32>("counted").await.unwrap();
-    let answer: u32 = session.request("count", rpc_params![3]).await.unwrap();
+    let answer: u32 = session.request("count", [3]).await.unwrap();
     assert_eq!(answer, 3);
     for i in 1..=3 {
         assert_eq!(counted.next().await.unwrap().unwrap(), i);
@@ -99,10 +99,7 @@ async fn a_failed_post_fails_its_call_and_not_the_client() {
     drop(listener);
     let session = connect(&url);
     for _ in 0..2 {
-        let error = session
-            .request::<String>("echo", rpc_params!["hi"])
-            .await
-            .unwrap_err();
+        let error = session.request::<String>("echo", ["hi"]).await.unwrap_err();
         assert!(session.is_connected(), "{error}");
     }
     session.close().await;

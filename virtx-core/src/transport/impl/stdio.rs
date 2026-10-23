@@ -138,7 +138,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use jsonrpsee::{RpcModule, rpc_params};
+    use jsonrpsee::RpcModule;
 
     use crate::transport::{Transport, TransportClient};
     use tokio::runtime::Runtime;
@@ -198,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_answers_over_the_child_process() {
         let session = spawn();
-        let answer: String = session.request("echo", rpc_params!["hi"]).await.unwrap();
+        let answer: String = session.request("echo", ["hi"]).await.unwrap();
         assert_eq!(answer, "hi");
         session.close().await;
     }
@@ -207,7 +207,7 @@ mod tests {
     async fn notifications_reach_the_client_before_the_response() {
         let session = spawn();
         let mut counted = session.notifications::<u32>("counted").await.unwrap();
-        let answer: u32 = session.request("count", rpc_params![3]).await.unwrap();
+        let answer: u32 = session.request("count", [3]).await.unwrap();
         assert_eq!(answer, 3);
         for i in 1..=3 {
             assert_eq!(counted.next().await.unwrap().unwrap(), i);
@@ -219,11 +219,11 @@ mod tests {
     async fn a_missing_method_is_an_error_not_an_end() {
         let session = spawn();
         let error = session
-            .request::<String>("nope", rpc_params![])
+            .request::<String>("nope", [(); 0])
             .await
             .unwrap_err();
         assert!(error.to_string().contains("Method not found"), "{error}");
-        let answer: String = session.request("echo", rpc_params!["hi"]).await.unwrap();
+        let answer: String = session.request("echo", ["hi"]).await.unwrap();
         assert_eq!(answer, "hi");
         session.close().await;
     }
@@ -250,10 +250,7 @@ mod tests {
     async fn a_server_that_exits_ends_the_client() {
         let (sender, receiver, transport) = Transport::spawn(Command::new("true")).unwrap();
         let session = TransportClient::new(sender, receiver, transport);
-        let error = session
-            .request::<String>("echo", rpc_params!["hi"])
-            .await
-            .unwrap_err();
+        let error = session.request::<String>("echo", ["hi"]).await.unwrap_err();
         assert!(!session.is_connected(), "{error}");
         session.close().await;
     }

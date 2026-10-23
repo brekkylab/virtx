@@ -1,4 +1,4 @@
-//! The methods the tests serve, and a client of them in memory. `image.build` sends
+//! The methods the tests serve, and a client of them in memory. `images.build` sends
 //! `pulling <base>` as its progress, and fails for the base `missing`.
 
 use std::io;

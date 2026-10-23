@@ -9,21 +9,21 @@ use crate::{
     method::Request,
 };
 
-/// `image.list`: every reference the server holds, and the image each points at.
+/// `images.list`: every reference the server holds, and the image each points at.
 pub struct ImageList;
 
 impl Request for ImageList {
-    const NAME: &'static str = "image.list";
+    const NAME: &'static str = "images.list";
     type Args = ImageListArgs;
     type Output = Vec<ImageListOutputItem>;
 }
 
-/// What `image.list` takes: nothing.
+/// What `images.list` takes: nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageListArgs {}
 
-/// One reference in what `image.list` answers. Two references to one image are two items with
+/// One reference in what `images.list` answers. Two references to one image are two items with
 /// the same digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -39,16 +39,16 @@ pub struct ImageListOutputItem {
     pub size: u64,
 }
 
-/// `image.build`: build a recipe, and point a reference at what it builds.
+/// `images.build`: build a recipe, and point a reference at what it builds.
 pub struct ImageBuild;
 
 impl Request for ImageBuild {
-    const NAME: &'static str = "image.build";
+    const NAME: &'static str = "images.build";
     type Args = ImageBuildArgs;
     type Output = ImageBuildOutput;
 }
 
-/// What `image.build` takes.
+/// What `images.build` takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildArgs {
@@ -63,7 +63,7 @@ pub struct ImageBuildArgs {
     pub reference: Option<String>,
 }
 
-/// What `image.build` answers.
+/// What `images.build` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildOutput {
@@ -74,16 +74,16 @@ pub struct ImageBuildOutput {
     pub digest: String,
 }
 
-/// `image.remove`: forget an image, named by a reference or by its digest.
+/// `images.remove`: forget an image, named by a reference or by its digest.
 pub struct ImageRemove;
 
 impl Request for ImageRemove {
-    const NAME: &'static str = "image.remove";
+    const NAME: &'static str = "images.remove";
     type Args = ImageRemoveArgs;
     type Output = ImageRemoveOutput;
 }
 
-/// What `image.remove` takes.
+/// What `images.remove` takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRemoveArgs {
@@ -91,7 +91,7 @@ pub struct ImageRemoveArgs {
     pub image: ImageName,
 }
 
-/// What `image.remove` answers: nothing, once the image is gone.
+/// What `images.remove` answers: nothing, once the image is gone.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRemoveOutput {}

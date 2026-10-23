@@ -1,6 +1,10 @@
 mod image;
+mod snapshot;
+mod volume;
 
 pub use image::*;
+pub use snapshot::*;
+pub use volume::*;
 
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};

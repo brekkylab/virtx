@@ -93,7 +93,7 @@ void virtx_client_retain(struct VirtxClient *client);
 // `wake`, which runs on the runtime this may stop.
 void virtx_client_release(struct VirtxClient *client);
 
-// `image.list`: answers with the references, as
+// `images.list`: answers with the references, as
 // `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
 //
 // # Safety
@@ -101,7 +101,7 @@ void virtx_client_release(struct VirtxClient *client);
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
-// `image.build`: builds `recipe`, as
+// `images.build`: builds `recipe`, as
 // `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
 // (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
 // are its log, a line each, as `{"progress": "..."}`, then what it built, as
@@ -115,7 +115,7 @@ struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
                                              const char *recipe,
                                              const char *reference);
 
-// `image.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
+// `images.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}`. Answers with `null`.
 //
 // # Safety
@@ -123,6 +123,31 @@ struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
 // `client` is as in `virtx_client_list_image`. `image` is NUL-terminated UTF-8, not read
 // after this returns.
 struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client, const char *image);
+
+// `snapshots.list`: answers with the snapshots, as
+// `[{"name": "...", "size": n}, ...]`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_image`.
+struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
+
+// `snapshots.create`: keeps a new, empty upper layer under `name`, or a name the server
+// picks if `name` is null. Answers with `{"name": "..."}`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_image`. `name` is null or NUL-terminated UTF-8, not
+// read after this returns.
+struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client, const char *name);
+
+// `snapshots.remove`: deletes the snapshot `name` and its upper layer. Answers with `null`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_image`. `name` is NUL-terminated UTF-8, not read
+// after this returns.
+struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client, const char *name);
 
 // Take `future`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written
 // to `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake

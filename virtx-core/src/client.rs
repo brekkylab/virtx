@@ -14,6 +14,8 @@ use crate::{
     method::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
         ImageListOutputItem, ImageRemove, ImageRemoveArgs, ImageRemoveOutput, Request,
+        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
+        SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
     },
     transport::{
         Event, TransportClient,
@@ -74,6 +76,40 @@ impl Client {
                 ImageRemoveArgs {
                     image: image.into(),
                 },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Every snapshot the server holds.
+    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
+        self.inner
+            .request(SnapshotList::NAME, SnapshotListArgs {})
+            .await
+    }
+
+    /// Keep a new, empty upper layer under `name`; without one the server picks it.
+    pub async fn create_snapshot(
+        &self,
+        name: Option<impl Into<String>>,
+    ) -> Result<SnapshotCreateOutput, Error> {
+        self.inner
+            .request(
+                SnapshotCreate::NAME,
+                SnapshotCreateArgs {
+                    name: name.map(Into::into),
+                },
+            )
+            .await
+    }
+
+    /// Delete the snapshot `name` and its upper layer.
+    pub async fn remove_snapshot(&self, name: impl Into<String>) -> Result<(), Error> {
+        let _: SnapshotRemoveOutput = self
+            .inner
+            .request(
+                SnapshotRemove::NAME,
+                SnapshotRemoveArgs { name: name.into() },
             )
             .await?;
         Ok(())
@@ -205,7 +241,7 @@ mod ffi {
         }
     }
 
-    /// `image.list`: answers with the references, as
+    /// `images.list`: answers with the references, as
     /// `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
     ///
     /// # Safety
@@ -217,7 +253,7 @@ mod ffi {
             .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
     }
 
-    /// `image.build`: builds `recipe`, as
+    /// `images.build`: builds `recipe`, as
     /// `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
     /// (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
     /// are its log, a line each, as `{"progress": "..."}`, then what it built, as
@@ -258,7 +294,7 @@ mod ffi {
         })
     }
 
-    /// `image.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
+    /// `images.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}`. Answers with `null`.
     ///
     /// # Safety
@@ -273,6 +309,64 @@ mod ffi {
         let image = unsafe { json::<ImageName>(image) };
         unsafe { &(*client).0 }.future(|client| async move {
             client.remove_image(image?).await.map_err(|e| e.to_string())
+        })
+    }
+
+    /// `snapshots.list`: answers with the snapshots, as
+    /// `[{"name": "...", "size": n}, ...]`.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_snapshot(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_snapshot().await.map_err(|e| e.to_string()) })
+    }
+
+    /// `snapshots.create`: keeps a new, empty upper layer under `name`, or a name the server
+    /// picks if `name` is null. Answers with `{"name": "..."}`.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_image`. `name` is null or NUL-terminated UTF-8, not
+    /// read after this returns.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_snapshot(
+        client: *mut VirtxClient,
+        name: *const c_char,
+    ) -> *mut VirtxFuture {
+        let name = match name.is_null() {
+            true => Ok(None),
+            false => unsafe { text(name) }.map(|name| Some(name.to_owned())),
+        };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .create_snapshot(name?)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// `snapshots.remove`: deletes the snapshot `name` and its upper layer. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_image`. `name` is NUL-terminated UTF-8, not read
+    /// after this returns.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_snapshot(
+        client: *mut VirtxClient,
+        name: *const c_char,
+    ) -> *mut VirtxFuture {
+        let name = unsafe { text(name) }.map(str::to_owned);
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .remove_snapshot(name?)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 

@@ -1,4 +1,4 @@
-//! Writes `include/virtx.h`, the C declarations of `src/ffi.rs`, as `cbindgen.toml` sets.
+//! Writes `include/virtx.h`, the C declarations under `src/`, as `cbindgen.toml` sets.
 
 use std::{env, path::PathBuf};
 
@@ -11,5 +11,5 @@ fn main() {
         .write_to_file(crate_dir.join("include/virtx.h"));
 
     println!("cargo::rerun-if-changed=cbindgen.toml");
-    println!("cargo::rerun-if-changed=src/ffi.rs");
+    println!("cargo::rerun-if-changed=src");
 }

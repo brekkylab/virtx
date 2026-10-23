@@ -97,11 +97,22 @@ neither yet.
 
 ## Notifications
 
-While a request runs, the server MAY send JSON-RPC notifications about it, such as
-progress or output.
+While a request runs, the server MAY send its progress, such as a build's output, as
+`notifications/progress` notifications:
 
-- Over Streamable HTTP, they go on that request's SSE stream, before its response.
-- Over stdio, they are written to stdout between responses, as any message is.
+```json
+{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "message": "pulling alpine:3.20"}}
+```
+
+- `requestId` is the `id` of the request the progress is about, exactly as the client sent
+  it: a client tells concurrent requests' progress apart by it, as it does their responses.
+- `message` is a string: one line of the request's log, for a person to read.
+- A request's progress comes before its response. A client MUST be ready for none, and MAY
+  ignore what it does not want.
+- A notification from the client has no `id`, so the server sends no progress about it.
+- The server sends no other notification.
+- Over Streamable HTTP, progress goes on that request's SSE stream, before its response.
+- Over stdio, it is written to stdout between responses, as any message is.
 
 ## Ending a session
 
@@ -128,15 +139,15 @@ How the server learns that a session has ended depends on the transport:
 
 ## Open questions
 
-- **Which request a notification is about.** Over HTTP its stream says so; over stdio
-  nothing does. MCP puts a `progressToken`, chosen by the client in the request, into the
-  notification's params. This protocol needs a rule like that before a method sends one.
 - **Resuming a stream.** MCP lets a server put an `id` on each SSE event, and a client that
   lost the stream `GET` the endpoint with `Last-Event-ID` to have the rest of it replayed.
   Until this protocol defines that, a server MUST NOT rely on a client resuming, and the
   `id` field of an event carries no meaning.
 - **Cancellation.** Ending the session cancels its requests, but a client cannot yet cancel
-  one request and keep the session. MCP has a `notifications/cancelled`.
+  one request and keep the session. MCP has a `notifications/cancelled`, which names the
+  request by its `requestId` as progress does here.
+- **Asking for no progress.** A server sends a request's progress whether or not the client
+  wants it. MCP sends it only to a request carrying a `progressToken`.
 - **Version.** Nothing yet tells a server which version of this protocol a client speaks.
   MCP sends `MCP-Protocol-Version` on every HTTP request.
 - **What a session holds**, and so what ending one releases.

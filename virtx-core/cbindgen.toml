@@ -9,8 +9,10 @@ header = """
 /*
  * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request returns a VirtxCall at
  * once: poll it with virtx_call_poll, which answers VIRTX_PENDING and keeps the waker given
- * until the call has an answer, then wakes it; or block on it with virtx_call_wait. Free every
- * string written with virtx_string_free, and every call with virtx_call_free.
+ * until the call has an answer, then wakes it; or block on it with virtx_call_wait. A call
+ * that sends progress wakes the waker for each too: take it with virtx_call_progress until
+ * VIRTX_PENDING, then poll again. Free every string written with virtx_string_free, and every
+ * call with virtx_call_free.
  */"""
 
 [parse]

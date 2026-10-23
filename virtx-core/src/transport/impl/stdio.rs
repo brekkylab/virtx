@@ -13,40 +13,33 @@ use tokio::{
 use super::{BoxFuture, Incoming, Outgoing};
 use crate::transport::{Dispatcher, Notifier};
 
-/// How long [`TransportClient::close`](crate::transport::TransportClient::close) waits for the
-/// server to exit once its stdin is closed.
+/// How long a server whose stdin is closed has to exit before it is killed.
 pub const EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// Start `command` with its stdin and stdout piped, and the transport over them.
-pub(super) fn spawn(mut command: Command) -> io::Result<(Sender, Receiver, Child)> {
+/// Start `command`, a [`std::process::Command`] or a tokio one, as the server, and the
+/// transport over its stdin and stdout: whatever `command` set for those two is replaced. The
+/// rest of it (arguments, environment, directory, stderr) is the caller's. Must be called
+/// inside a tokio runtime.
+pub fn spawn(command: impl Into<Command>) -> io::Result<(Sender, Receiver)> {
     let mut child = command
+        .into()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
     let stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
-    let sender = Sender { stdin };
+    let sender = Sender { stdin, child };
     let receiver = Receiver {
         lines: BufReader::new(stdout).lines(),
     };
-    Ok((sender, receiver, child))
+    Ok((sender, receiver))
 }
 
-/// Wait for `child`, whose stdin is closed, to exit, and kill it if it has not within
-/// [`EXIT_GRACE`].
-pub(super) async fn close(mut child: Child) {
-    if tokio::time::timeout(EXIT_GRACE, child.wait())
-        .await
-        .is_err()
-    {
-        let _ = child.kill().await;
-    }
-}
-
-/// The server's stdin, which dropping closes.
-pub(super) struct Sender {
+/// The server's stdin, and the server, which dropping kills.
+pub struct Sender {
     stdin: ChildStdin,
+    child: Child,
 }
 
 impl Outgoing for Sender {
@@ -57,9 +50,23 @@ impl Outgoing for Sender {
             self.stdin.flush().await
         })
     }
+
+    /// Close the server's stdin, and kill it if it has not exited within [`EXIT_GRACE`].
+    fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
+        let Sender { stdin, mut child } = *self;
+        drop(stdin);
+        Box::pin(async move {
+            if tokio::time::timeout(EXIT_GRACE, child.wait())
+                .await
+                .is_err()
+            {
+                let _ = child.kill().await;
+            }
+        })
+    }
 }
 
-pub(super) struct Receiver {
+pub struct Receiver {
     lines: Lines<BufReader<ChildStdout>>,
 }
 
@@ -123,7 +130,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::transport::{Transport, TransportClient, testing::methods};
+    use futures_util::StreamExt;
+
+    use crate::transport::{Event, TransportClient, testing::methods};
     use tokio::runtime::Runtime;
 
     use super::*;
@@ -160,8 +169,8 @@ mod tests {
             "--nocapture",
             "transport::r#impl::stdio::tests::server",
         ]);
-        let (sender, receiver, transport) = Transport::spawn(command).unwrap();
-        TransportClient::new(sender, receiver, transport)
+        let (outgoing, incoming) = super::spawn(command).unwrap();
+        TransportClient::new(outgoing, incoming)
     }
 
     #[tokio::test]
@@ -173,14 +182,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notifications_reach_the_client_before_the_response() {
+    async fn progress_reaches_the_call_before_its_response() {
         let session = spawn();
-        let mut counted = session.notifications::<u32>("counted");
-        let answer: u32 = session.request("count", [3]).await.unwrap();
-        assert_eq!(answer, 3);
-        for i in 1..=3 {
-            assert_eq!(counted.next().await.unwrap().unwrap(), i);
+        let events: Vec<_> = session
+            .request_with_progress::<u32>("count", [3])
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            [
+                Event::Progress("1".into()),
+                Event::Progress("2".into()),
+                Event::Progress("3".into()),
+                Event::Output(3)
+            ]
+        );
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_each_get_their_own_progress() {
+        let session = std::sync::Arc::new(spawn());
+        let mut calls = JoinSet::new();
+        for to in 1..=10u32 {
+            let session = std::sync::Arc::clone(&session);
+            calls.spawn(async move {
+                let events: Vec<_> = session
+                    .request_with_progress::<u32>("count", [to])
+                    .map(Result::unwrap)
+                    .collect()
+                    .await;
+                (to, events)
+            });
         }
+        for (to, events) in calls.join_all().await {
+            let expected: Vec<_> = (1..=to)
+                .map(|i| Event::Progress(i.to_string()))
+                .chain([Event::Output(to)])
+                .collect();
+            assert_eq!(events, expected);
+        }
+        let session = std::sync::Arc::into_inner(session).unwrap();
         session.close().await;
     }
 
@@ -235,8 +278,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_server_that_exits_ends_the_client() {
-        let (sender, receiver, transport) = Transport::spawn(Command::new("true")).unwrap();
-        let session = TransportClient::new(sender, receiver, transport);
+        let (outgoing, incoming) = super::spawn(Command::new("true")).unwrap();
+        let session = TransportClient::new(outgoing, incoming);
         let error = session.request::<String>("echo", ["hi"]).await.unwrap_err();
         assert!(!session.is_connected(), "{error}");
         session.close().await;

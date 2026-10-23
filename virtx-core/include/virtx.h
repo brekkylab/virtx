@@ -1,8 +1,10 @@
 /*
  * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request returns a VirtxCall at
  * once: poll it with virtx_call_poll, which answers VIRTX_PENDING and keeps the waker given
- * until the call has an answer, then wakes it; or block on it with virtx_call_wait. Free every
- * string written with virtx_string_free, and every call with virtx_call_free.
+ * until the call has an answer, then wakes it; or block on it with virtx_call_wait. A call
+ * that sends progress wakes the waker for each too: take it with virtx_call_progress until
+ * VIRTX_PENDING, then poll again. Free every string written with virtx_string_free, and every
+ * call with virtx_call_free.
  */
 
 #ifndef VIRTX_H
@@ -25,7 +27,8 @@
 // Not answered yet: the waker given is kept, and woken once it is.
 #define VIRTX_PENDING 1
 
-// A request in flight: polled until it answers, then freed.
+// A request in flight: polled until it answers, then freed. Its progress, if it sends any,
+// is taken with `virtx_call_progress`.
 typedef struct VirtxCall VirtxCall;
 
 // A `Client`, as C holds it.
@@ -95,7 +98,8 @@ struct VirtxCall *virtx_client_list_image(struct VirtxClient *client);
 // `image.build`: builds `recipe`, as
 // `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
 // (`name:tag`) at it, or a reference the server picks if `reference` is null. Answers with
-// `{"reference": "name:tag", "digest": "algorithm:hex"}`.
+// `{"reference": "name:tag", "digest": "algorithm:hex"}`. Its progress, taken with
+// `virtx_call_progress`, is its log, a line at a time, as a JSON string.
 //
 // # Safety
 //
@@ -116,7 +120,7 @@ struct VirtxCall *virtx_client_remove_image(struct VirtxClient *client, const ch
 
 // Take `call`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written to
 // `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once
-// there is one. A call answers once; polled again, it fails.
+// there is one, or progress to take. A call answers once; polled again, it fails.
 //
 // # Safety
 //
@@ -124,7 +128,17 @@ struct VirtxCall *virtx_client_remove_image(struct VirtxClient *client, const ch
 // `waker` is as `VirtxWaker` says. `out` is null or writable.
 int virtx_call_poll(struct VirtxCall *call, struct VirtxWaker waker, char **out);
 
-// Block until `call` answers, and take its answer as `virtx_call_poll` does.
+// Take `call`'s oldest progress not yet taken: `VIRTX_OK`, with it written to `out` as JSON,
+// or `VIRTX_PENDING` if there is none now. Every progress a call sends is queued before it
+// answers, so what is left once it has is taken here too.
+//
+// # Safety
+//
+// As `virtx_call_poll`.
+int virtx_call_progress(struct VirtxCall *call, char **out);
+
+// Block until `call` answers, and take its answer as `virtx_call_poll` does. Its progress
+// stays queued, for `virtx_call_progress`.
 //
 // # Safety
 //

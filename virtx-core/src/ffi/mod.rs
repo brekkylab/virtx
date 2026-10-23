@@ -10,7 +10,9 @@
 //! [`VIRTX_PENDING`] and keeps the [`VirtxWaker`] it was given, which the call wakes once it
 //! has an answer, and the next poll takes it. So the caller's event loop, whatever it is, never
 //! blocks on one: only a waker's `wake` runs on another thread. [`virtx_call_wait`] blocks
-//! instead, for a caller without a loop.
+//! instead, for a caller without a loop. A call that sends progress, as `image.build` does,
+//! queues each and wakes the waker for it: [`virtx_call_progress`] takes them, until none is
+//! left, before the next poll.
 //!
 //! A client is shared by reference count: `virtx_client_retain` for each holder, and
 //! `virtx_client_release` by each, the last of which ends the session.

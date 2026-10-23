@@ -3,8 +3,11 @@
 
 use std::io;
 
-use crate::transport::Error;
+use futures_util::Stream;
+
 use tokio::process::Command;
+
+use crate::transport::Error;
 
 use crate::{
     image::{ImageName, Recipe},
@@ -12,7 +15,10 @@ use crate::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
         ImageListOutputItem, ImageRemove, ImageRemoveArgs, ImageRemoveOutput, Request,
     },
-    transport::{Transport, TransportClient},
+    transport::{
+        Event, TransportClient,
+        r#impl::{stdio, streamable_http},
+    },
 };
 
 /// A client of one server, over stdio or Streamable HTTP.
@@ -24,16 +30,16 @@ impl Client {
     /// Start `command` as the server, and talk to it over its stdin and stdout. Must be called
     /// inside a tokio runtime.
     pub fn spawn(command: impl Into<Command>) -> io::Result<Client> {
-        let (sender, receiver, transport) = Transport::spawn(command)?;
-        let inner = TransportClient::new(sender, receiver, transport);
+        let (outgoing, incoming) = stdio::spawn(command)?;
+        let inner = TransportClient::new(outgoing, incoming);
         Ok(Client { inner })
     }
 
     /// Reach the server at `url`, an `http` or `https` URL. Must be called inside a tokio
     /// runtime.
     pub fn connect(url: &str) -> anyhow::Result<Client> {
-        let (sender, receiver, transport) = Transport::connect(url)?;
-        let inner = TransportClient::new(sender, receiver, transport);
+        let (outgoing, incoming) = streamable_http::connect(url)?;
+        let inner = TransportClient::new(outgoing, incoming);
         Ok(Client { inner })
     }
 
@@ -42,21 +48,21 @@ impl Client {
         self.inner.request(ImageList::NAME, ImageListArgs {}).await
     }
 
-    /// Build `recipe`, and point `reference` at it; without one the server picks it.
-    pub async fn build_image(
+    /// Build `recipe`, and point `reference` at it; without one the server picks it. The
+    /// stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
+    /// item, an [`Event::Output`] or the error it failed with. Dropping it drops the build.
+    pub fn build_image(
         &self,
         recipe: Recipe,
-        reference: Option<&str>,
-    ) -> Result<ImageBuildOutput, Error> {
-        self.inner
-            .request(
-                ImageBuild::NAME,
-                ImageBuildArgs {
-                    recipe,
-                    reference: reference.map(str::to_string),
-                },
-            )
-            .await
+        reference: Option<impl Into<String>>,
+    ) -> impl Stream<Item = Result<Event<ImageBuildOutput>, Error>> + Unpin + Send + '_ {
+        Box::pin(self.inner.request_with_progress(
+            ImageBuild::NAME,
+            ImageBuildArgs {
+                recipe,
+                reference: reference.map(Into::into),
+            },
+        ))
     }
 
     /// Forget `image`, given as an [`ImageName`] or a string read by [`ImageName::parse`].
@@ -79,15 +85,50 @@ impl Client {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+
+    use super::*;
+    use crate::transport::testing::connect;
+
+    #[tokio::test]
+    async fn a_build_streams_its_log_then_its_output() {
+        let client = Client { inner: connect() };
+        let mut build = client.build_image(Recipe::new("alpine:3.20"), Some("jq:latest"));
+        let mut events = Vec::new();
+        while let Some(event) = build.next().await {
+            events.push(event.unwrap());
+        }
+        let message = "pulling alpine:3.20".to_string();
+        let output = ImageBuildOutput {
+            reference: "jq:latest".into(),
+            digest: "sha256:0".into(),
+        };
+        assert_eq!(events, [Event::Progress(message), Event::Output(output)]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_build_ends_its_stream_with_the_error() {
+        let client = Client { inner: connect() };
+        let mut build = client.build_image(Recipe::new("missing"), None::<String>);
+        assert!(matches!(build.next().await, Some(Ok(Event::Progress(_)))));
+        assert!(matches!(build.next().await, Some(Err(Error::Call(_)))));
+        assert!(build.next().await.is_none());
+    }
+}
+
 mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
     //! each of which starts the call and hands C the [`VirtxCall`].
 
     use std::ffi::{c_char, c_int};
 
+    use futures_util::StreamExt;
+
     use tokio::process::Command;
 
-    use super::Client;
+    use super::{Client, Event};
     use crate::{
         ffi::{Runtime, VirtxCall, json, release, retain, share, text},
         image::ImageName,
@@ -180,7 +221,8 @@ mod ffi {
     /// `image.build`: builds `recipe`, as
     /// `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
     /// (`name:tag`) at it, or a reference the server picks if `reference` is null. Answers with
-    /// `{"reference": "name:tag", "digest": "algorithm:hex"}`.
+    /// `{"reference": "name:tag", "digest": "algorithm:hex"}`. Its progress, taken with
+    /// `virtx_call_progress`, is its log, a line at a time, as a JSON string.
     ///
     /// # Safety
     ///
@@ -200,12 +242,16 @@ mod ffi {
             };
             Ok::<_, String>((recipe, reference))
         })();
-        unsafe { &(*client).0 }.call(|client| async move {
+        unsafe { &(*client).0 }.call_with_progress(|client, progress| async move {
             let (recipe, reference) = args?;
-            client
-                .build_image(recipe, reference.as_deref())
-                .await
-                .map_err(|e| e.to_string())
+            let mut build = client.build_image(recipe, reference);
+            while let Some(event) = build.next().await {
+                match event.map_err(|e| e.to_string())? {
+                    Event::Progress(value) => progress.push(&value),
+                    Event::Output(output) => return Ok(output),
+                }
+            }
+            Err("the build ended without its output".to_string())
         })
     }
 

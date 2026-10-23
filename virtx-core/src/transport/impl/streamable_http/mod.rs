@@ -2,15 +2,14 @@
 //! or with an SSE stream when the server has notifications to send first.
 //!
 //! [`Server`] is the server's end; the client's is
-//! [`Transport::connect`](crate::transport::Transport::connect).
+//! [`connect`].
 //! Both keep to the "Streamable HTTP" section of `PROTOCOL.md`, including its session header.
 
 mod client;
 mod server;
 mod sse;
 
-pub use client::Endpoint;
-pub(crate) use client::{close, connect};
+pub use client::{Receiver, Sender, connect};
 pub use server::{HttpBody, Server, SessionId};
 
 /// The header a session's id travels in, both ways.

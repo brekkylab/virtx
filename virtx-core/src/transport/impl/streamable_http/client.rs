@@ -12,7 +12,7 @@ use crate::transport::{
 };
 
 /// Where every message goes, and the session they go in.
-pub struct Endpoint {
+struct Endpoint {
     http: reqwest::Client,
     url: reqwest::Url,
     /// `None` until the first answer names the session. Held across the first `POST`, so no
@@ -20,8 +20,9 @@ pub struct Endpoint {
     session: Mutex<Option<HeaderValue>>,
 }
 
-/// The transport to the endpoint at `url`, an `http` or `https` URL, and the endpoint.
-pub(crate) fn connect(url: &str) -> anyhow::Result<(Sender, Receiver, Arc<Endpoint>)> {
+/// The transport to the endpoint at `url`, an `http` or `https` URL. Nothing is sent until
+/// the first message, which opens the session.
+pub fn connect(url: &str) -> anyhow::Result<(Sender, Receiver)> {
     let url = reqwest::Url::parse(url)?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https"),
@@ -33,26 +34,11 @@ pub(crate) fn connect(url: &str) -> anyhow::Result<(Sender, Receiver, Arc<Endpoi
         session: Mutex::new(None),
     });
     let (inbox, received) = mpsc::unbounded_channel();
-    let sender = Sender {
-        endpoint: Arc::clone(&endpoint),
-        inbox,
-    };
-    Ok((sender, Receiver(received), endpoint))
+    let sender = Sender { endpoint, inbox };
+    Ok((sender, Receiver(received)))
 }
 
-/// End `endpoint`'s session with a `DELETE`, if one was opened.
-pub(crate) async fn close(endpoint: &Endpoint) {
-    if let Some(id) = endpoint.session.lock().await.take() {
-        let _ = endpoint
-            .http
-            .delete(endpoint.url.clone())
-            .header(SESSION_HEADER, id)
-            .send()
-            .await;
-    }
-}
-
-pub(crate) struct Sender {
+pub struct Sender {
     endpoint: Arc<Endpoint>,
     /// Where each `POST`'s answers go, for [`Receiver`] to hand to the client.
     inbox: mpsc::UnboundedSender<String>,
@@ -73,9 +59,24 @@ impl Outgoing for Sender {
         });
         Box::pin(async { Ok(()) })
     }
+
+    /// End the session with a `DELETE`, if one was opened.
+    fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let endpoint = &self.endpoint;
+            if let Some(id) = endpoint.session.lock().await.take() {
+                let _ = endpoint
+                    .http
+                    .delete(endpoint.url.clone())
+                    .header(SESSION_HEADER, id)
+                    .send()
+                    .await;
+            }
+        })
+    }
 }
 
-pub(crate) struct Receiver(mpsc::UnboundedReceiver<String>);
+pub struct Receiver(mpsc::UnboundedReceiver<String>);
 
 impl Incoming for Receiver {
     fn receive(&mut self) -> BoxFuture<'_, io::Result<String>> {

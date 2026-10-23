@@ -21,6 +21,9 @@ http-body = "1"
 http-body-util = "0.1"
 # `protocol::http`'s session ids.
 uuid = { version = "1", features = ["v4"] }
+# `Stream`, which a call's progress is, and the macro that writes one.
+futures-util = { version = "0.3", default-features = false }
+async-stream = "0.3"
 # The schema's types: their wire form, and the JSON Schema a server advertises for them.
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

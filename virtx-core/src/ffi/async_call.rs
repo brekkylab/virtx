@@ -1,6 +1,7 @@
-//! A request in flight, and the poll and waker C drives it with.
+//! A request in flight, the poll and waker C drives it with, and the progress it queues.
 
 use std::{
+    collections::VecDeque,
     ffi::{c_char, c_int, c_void},
     future::Future,
     mem,
@@ -15,7 +16,7 @@ use tokio::{
 };
 
 use super::{
-    VIRTX_ERROR, VIRTX_PENDING,
+    VIRTX_ERROR, VIRTX_OK, VIRTX_PENDING,
     text::{encode, write},
 };
 
@@ -31,10 +32,20 @@ pub struct VirtxWaker {
     pub release: Option<unsafe extern "C" fn(data: *mut c_void)>,
 }
 
-/// A request in flight: polled until it answers, then freed.
+/// A request in flight: polled until it answers, then freed. Its progress, if it sends any,
+/// is taken with `virtx_call_progress`.
 pub struct VirtxCall {
-    state: Arc<Mutex<State>>,
+    shared: Arc<Mutex<Shared>>,
     task: AbortHandle,
+}
+
+/// What a call's task and C share.
+struct Shared {
+    state: State,
+    /// Progress not yet taken, as JSON, oldest first.
+    progress: VecDeque<String>,
+    /// Progress came while no waker was kept to wake: the next poll wakes at once.
+    unseen: bool,
 }
 
 enum State {
@@ -66,19 +77,46 @@ impl Drop for Waker {
     }
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
+    shared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Where a call's task queues its progress, for C to take with `virtx_call_progress`.
+#[derive(Clone)]
+pub(crate) struct ProgressQueue(Arc<Mutex<Shared>>);
+
+impl ProgressQueue {
+    /// Queue `value`, as JSON, and wake the waker kept, if any.
+    pub(crate) fn push(&self, value: &impl Serialize) {
+        let Ok(value) = serde_json::to_string(value) else {
+            return;
+        };
+        let waker = {
+            let mut shared = lock(&self.0);
+            shared.progress.push_back(value);
+            let waker = match &mut shared.state {
+                State::Pending(waker) => waker.take(),
+                _ => None,
+            };
+            shared.unseen = waker.is_none();
+            waker
+        };
+        // Outside the lock, as in `Completion::finish`.
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 /// Answers a call: by `finish`, or with an error when dropped first (its task cancelled by the
 /// client's release, or panicked).
-struct Completion(Arc<Mutex<State>>);
+struct Completion(Arc<Mutex<Shared>>);
 
 impl Completion {
     fn finish(&self, status: c_int, output: String) {
         let waker = {
-            let mut state = lock(&self.0);
-            match mem::replace(&mut *state, State::Taken) {
+            let state = &mut lock(&self.0).state;
+            match mem::replace(state, State::Taken) {
                 State::Pending(waker) => {
                     *state = State::Ready(status, output);
                     waker
@@ -102,14 +140,23 @@ impl Drop for Completion {
     }
 }
 
-/// Run `call` on `runtime`, tracked in `calls`, and hand C the call.
-pub(super) fn start<T: Serialize>(
+/// Run the call `make` makes, given where to queue its progress, on `runtime`, tracked in
+/// `calls`, and hand C the call.
+pub(super) fn start<T: Serialize, F>(
     runtime: &Handle,
     calls: &Mutex<JoinSet<()>>,
-    call: impl Future<Output = Result<T, String>> + Send + 'static,
-) -> *mut VirtxCall {
-    let state = Arc::new(Mutex::new(State::Pending(None)));
-    let completion = Completion(Arc::clone(&state));
+    make: impl FnOnce(ProgressQueue) -> F,
+) -> *mut VirtxCall
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+{
+    let shared = Arc::new(Mutex::new(Shared {
+        state: State::Pending(None),
+        progress: VecDeque::new(),
+        unseen: false,
+    }));
+    let call = make(ProgressQueue(Arc::clone(&shared)));
+    let completion = Completion(Arc::clone(&shared));
     let mut calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
     // Answered calls stay in the set until reaped.
     while calls.try_join_next().is_some() {}
@@ -120,12 +167,12 @@ pub(super) fn start<T: Serialize>(
         },
         runtime,
     );
-    Box::into_raw(Box::new(VirtxCall { state, task }))
+    Box::into_raw(Box::new(VirtxCall { shared, task }))
 }
 
 /// Take `call`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written to
 /// `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once
-/// there is one. A call answers once; polled again, it fails.
+/// there is one, or progress to take. A call answers once; polled again, it fails.
 ///
 /// # Safety
 ///
@@ -138,24 +185,52 @@ pub unsafe extern "C" fn virtx_call_poll(
     out: *mut *mut c_char,
 ) -> c_int {
     let waker = Waker(waker);
-    let mut state = lock(&unsafe { &*call }.state);
-    let (status, output) = match mem::replace(&mut *state, State::Taken) {
+    let mut shared = lock(&unsafe { &*call }.shared);
+    let (status, output) = match mem::replace(&mut shared.state, State::Taken) {
+        // Progress came since the last poll, with no waker to tell: tell this one.
+        State::Pending(kept) if mem::take(&mut shared.unseen) => {
+            shared.state = State::Pending(None);
+            drop(shared);
+            drop(kept);
+            waker.wake();
+            return VIRTX_PENDING;
+        }
         State::Pending(kept) => {
-            *state = State::Pending(Some(waker));
-            drop(state);
+            shared.state = State::Pending(Some(waker));
+            drop(shared);
             drop(kept);
             return VIRTX_PENDING;
         }
         State::Ready(status, output) => (status, output),
         State::Taken => (VIRTX_ERROR, "the call already answered".to_string()),
     };
-    drop(state);
+    drop(shared);
     drop(waker);
     unsafe { write(out, output) };
     status
 }
 
-/// Block until `call` answers, and take its answer as `virtx_call_poll` does.
+/// Take `call`'s oldest progress not yet taken: `VIRTX_OK`, with it written to `out` as JSON,
+/// or `VIRTX_PENDING` if there is none now. Every progress a call sends is queued before it
+/// answers, so what is left once it has is taken here too.
+///
+/// # Safety
+///
+/// As `virtx_call_poll`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn virtx_call_progress(call: *mut VirtxCall, out: *mut *mut c_char) -> c_int {
+    let progress = lock(&unsafe { &*call }.shared).progress.pop_front();
+    match progress {
+        Some(progress) => {
+            unsafe { write(out, progress) };
+            VIRTX_OK
+        }
+        None => VIRTX_PENDING,
+    }
+}
+
+/// Block until `call` answers, and take its answer as `virtx_call_poll` does. Its progress
+/// stays queued, for `virtx_call_progress`.
 ///
 /// # Safety
 ///
@@ -194,7 +269,7 @@ pub unsafe extern "C" fn virtx_call_free(call: *mut VirtxCall) {
         return;
     }
     let call = unsafe { Box::from_raw(call) };
-    let kept = mem::replace(&mut *lock(&call.state), State::Taken);
+    let kept = mem::replace(&mut lock(&call.shared).state, State::Taken);
     drop(kept);
     call.task.abort();
 }
@@ -271,10 +346,50 @@ mod tests {
         calls: &Mutex<JoinSet<()>>,
     ) -> (*mut VirtxCall, oneshot::Sender<u32>) {
         let (send, receive) = oneshot::channel();
-        let call = start(runtime.handle(), calls, async move {
+        let call = start(runtime.handle(), calls, |_| async move {
             receive.await.map_err(|e| e.to_string())
         });
         (call, send)
+    }
+
+    fn progress(call: *mut VirtxCall) -> (c_int, Option<String>) {
+        let mut out = ptr::null_mut();
+        let status = unsafe { virtx_call_progress(call, &mut out) };
+        (status, unsafe { taken(out) })
+    }
+
+    #[test]
+    fn progress_wakes_the_call_and_is_taken_in_order_even_once_answered() {
+        let runtime = Runtime::new().unwrap();
+        let calls = Mutex::new(JoinSet::new());
+        let (send, receive) = oneshot::channel::<()>();
+        let (sent, has_sent) = oneshot::channel::<()>();
+        let call = start(runtime.handle(), &calls, |progress| async move {
+            progress.push(&1);
+            let _ = sent.send(());
+            receive.await.map_err(|e| e.to_string())?;
+            progress.push(&2);
+            Ok(3)
+        });
+        let counts: Arc<Counts> = Arc::default();
+
+        runtime.block_on(has_sent).unwrap();
+        // 1 came with no waker kept: the poll that keeps one wakes it at once.
+        assert_eq!(poll(call, &counts), (VIRTX_PENDING, None));
+        assert_eq!(counts.get(), (1, 1));
+        assert_eq!(progress(call), (VIRTX_OK, Some("1".to_string())));
+        assert_eq!(progress(call), (VIRTX_PENDING, None));
+
+        assert_eq!(poll(call, &counts), (VIRTX_PENDING, None));
+        send.send(()).unwrap();
+        counts.await_wakes(2);
+        let mut out = ptr::null_mut();
+        assert_eq!(unsafe { virtx_call_wait(call, &mut out) }, VIRTX_OK);
+        assert_eq!(unsafe { taken(out) }, Some("3".to_string()));
+        assert_eq!(progress(call), (VIRTX_OK, Some("2".to_string())));
+        assert_eq!(progress(call), (VIRTX_PENDING, None));
+
+        unsafe { virtx_call_free(call) };
     }
 
     #[test]

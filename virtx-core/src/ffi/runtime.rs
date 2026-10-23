@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 
 use super::{
     VIRTX_ERROR, VIRTX_OK,
-    async_call::{VirtxCall, start},
+    async_call::{ProgressQueue, VirtxCall, start},
     text::write,
 };
 
@@ -48,11 +48,22 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     where
         F: Future<Output = Result<R, String>> + Send + 'static,
     {
-        start(
-            self.runtime.handle(),
-            &self.calls,
-            call(Arc::clone(&self.value)),
-        )
+        self.call_with_progress(|value, _| call(value))
+    }
+
+    /// Start what `call` makes of the value and where to queue its progress, and hand C the
+    /// call.
+    pub(crate) fn call_with_progress<R: Serialize, F>(
+        &self,
+        call: impl FnOnce(Arc<T>, ProgressQueue) -> F,
+    ) -> *mut VirtxCall
+    where
+        F: Future<Output = Result<R, String>> + Send + 'static,
+    {
+        let value = Arc::clone(&self.value);
+        start(self.runtime.handle(), &self.calls, |progress| {
+            call(value, progress)
+        })
     }
 
     /// Answer every call not yet answered with `VIRTX_ERROR`, then end the value with `close`.

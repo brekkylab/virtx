@@ -3,9 +3,11 @@
 use tokio::net::TcpListener;
 
 use super::*;
-use crate::transport::{Dispatcher, Transport, TransportClient, testing::methods};
+use futures_util::StreamExt;
 
-/// A [`Server`] on localhost, serving `echo`, `count` (which notifies `counted` before it
+use crate::transport::{Dispatcher, Event, TransportClient, testing::methods};
+
+/// A [`Server`] on localhost, serving `echo`, `count` (which sends progress before it
 /// answers) and `session` (which answers the request's session id).
 async fn serve() -> String {
     let server = Server::with_origins(
@@ -40,8 +42,8 @@ async fn post(url: &str, body: &str, accept: &str, session: Option<&str>) -> req
 
 /// A client of the server at `url`.
 fn connect(url: &str) -> TransportClient {
-    let (sender, receiver, transport) = Transport::connect(url).unwrap();
-    TransportClient::new(sender, receiver, transport)
+    let (outgoing, incoming) = super::connect(url).unwrap();
+    TransportClient::new(outgoing, incoming)
 }
 
 const BOTH: &str = "application/json, text/event-stream";
@@ -59,15 +61,23 @@ async fn a_client_calls_and_its_session_carries_over() {
 }
 
 #[tokio::test]
-async fn a_client_receives_notifications_over_the_stream() {
+async fn a_client_receives_progress_over_the_stream() {
     let url = serve().await;
     let session = connect(&url);
-    let mut counted = session.notifications::<u32>("counted");
-    let answer: u32 = session.request("count", [3]).await.unwrap();
-    assert_eq!(answer, 3);
-    for i in 1..=3 {
-        assert_eq!(counted.next().await.unwrap().unwrap(), i);
-    }
+    let events: Vec<_> = session
+        .request_with_progress::<u32>("count", [3])
+        .map(Result::unwrap)
+        .collect()
+        .await;
+    assert_eq!(
+        events,
+        [
+            Event::Progress("1".into()),
+            Event::Progress("2".into()),
+            Event::Progress("3".into()),
+            Event::Output(3)
+        ]
+    );
     session.close().await;
 }
 
@@ -89,7 +99,7 @@ fn connect_refuses_anything_but_an_http_url() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let _guard = runtime.enter();
     for url in ["not a url", "file:///tmp/x"] {
-        assert!(Transport::connect(url).is_err(), "{url}");
+        assert!(super::connect(url).is_err(), "{url}");
     }
 }
 
@@ -118,8 +128,8 @@ async fn a_request_with_notifications_answers_a_stream_ending_in_its_response() 
     assert_eq!(
         events,
         vec![
-            r#"{"jsonrpc":"2.0","method":"counted","params":1}"#,
-            r#"{"jsonrpc":"2.0","method":"counted","params":2}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":1,"message":"1"}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":1,"message":"2"}}"#,
             r#"{"jsonrpc":"2.0","id":1,"result":2}"#,
         ]
     );

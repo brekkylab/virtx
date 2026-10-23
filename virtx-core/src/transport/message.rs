@@ -84,6 +84,27 @@ pub(crate) struct Request<'a> {
     pub params: &'a RawValue,
 }
 
+/// A notification from the server.
+#[derive(Serialize)]
+pub(crate) struct Notification<P> {
+    pub jsonrpc: &'static str,
+    pub method: &'static str,
+    pub params: P,
+}
+
+/// The notification a server sends a request's progress in.
+pub(crate) const PROGRESS: &str = "notifications/progress";
+
+/// The params of a [`PROGRESS`] notification.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Progress {
+    /// The `id` of the request this is about, as the client sent it.
+    #[serde(rename = "requestId")]
+    pub request_id: Value,
+    /// One line of the request's log, for a person to read.
+    pub message: String,
+}
+
 /// The response to the request `id`: its result, or why it failed.
 pub(crate) fn response(id: &Value, outcome: Result<Box<RawValue>, ErrorObject>) -> String {
     #[derive(Serialize)]

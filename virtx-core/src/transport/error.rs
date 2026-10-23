@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use super::{message::ErrorObject, transport_client::REQUEST_TIMEOUT};
+use super::message::ErrorObject;
 
 /// Why a call failed.
 #[derive(Debug)]
@@ -14,8 +14,6 @@ pub enum Error {
     Transport(String),
     /// The params did not serialize, or the result did not read as the type asked for.
     Json(serde_json::Error),
-    /// No response within [`REQUEST_TIMEOUT`].
-    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -24,7 +22,6 @@ impl fmt::Display for Error {
             Error::Call(error) => write!(f, "{error}"),
             Error::Transport(reason) => f.write_str(reason),
             Error::Json(error) => write!(f, "{error}"),
-            Error::Timeout => write!(f, "no response within {REQUEST_TIMEOUT:?}"),
         }
     }
 }

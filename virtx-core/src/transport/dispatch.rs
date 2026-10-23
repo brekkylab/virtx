@@ -3,33 +3,49 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use http::Extensions;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
 use tokio::sync::mpsc;
 
-use super::message::{ErrorObject, Received, response};
+use super::message::{ErrorObject, Notification, PROGRESS, Progress, Received, response};
 use crate::method::Request;
 
-/// Where a method sends notifications about the request it is answering: the request's SSE
-/// stream over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every
-/// request, so a method gets it with `extensions.get::<Notifier>()`.
+/// Where a method sends the progress of the request it is answering: the request's SSE stream
+/// over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every request,
+/// so a method gets it with `extensions.get::<Notifier>()`.
 #[derive(Clone, Debug)]
-pub struct Notifier(mpsc::UnboundedSender<String>);
+pub struct Notifier {
+    sender: mpsc::UnboundedSender<String>,
+    /// The `id` of the request being answered; `None` for a notification, which has no
+    /// progress to send.
+    request_id: Option<Value>,
+}
 
 impl Notifier {
     pub(crate) fn new(sender: mpsc::UnboundedSender<String>) -> Notifier {
-        Notifier(sender)
+        Notifier {
+            sender,
+            request_id: None,
+        }
     }
 
-    /// Send the notification `method` with `params`. False if nothing will read it: the
-    /// client did not ask for a stream, or is gone.
-    pub fn notify(&self, method: &str, params: impl Serialize) -> bool {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        self.0.send(notification.to_string()).is_ok()
+    /// Send `line`, one line of this request's log, as a [`PROGRESS`] notification. False if
+    /// nothing will read it: the message was a notification, or the client took no stream, or
+    /// is gone.
+    pub fn progress(&self, line: impl Into<String>) -> bool {
+        let Some(request_id) = self.request_id.clone() else {
+            return false;
+        };
+        let notification = Notification {
+            jsonrpc: "2.0",
+            method: PROGRESS,
+            params: Progress {
+                request_id,
+                message: line.into(),
+            },
+        };
+        let notification = serde_json::to_string(&notification).expect("a value serializes");
+        self.sender.send(notification).is_ok()
     }
 }
 
@@ -91,9 +107,10 @@ impl Dispatcher {
         }
     }
 
-    /// Hand `message` to its method, with `extensions` the method's to read, and return the
-    /// response; `None` for a message that takes none, a notification or a response.
-    pub(crate) async fn call(&self, message: &[u8], extensions: Extensions) -> Option<String> {
+    /// Hand `message` to its method, with `extensions` the method's to read and their
+    /// [`Notifier`] bound to the request, and return the response; `None` for a message that
+    /// takes none, a notification or a response.
+    pub(crate) async fn call(&self, message: &[u8], mut extensions: Extensions) -> Option<String> {
         let failed = |id: &Value, code, message: &str| {
             Some(response(id, Err(ErrorObject::new(code, message))))
         };
@@ -142,6 +159,9 @@ impl Dispatcher {
             }
         };
 
+        if let Some(notifier) = extensions.get_mut::<Notifier>() {
+            notifier.request_id = id.clone();
+        }
         let outcome = match self.methods.0.get(method.as_str()) {
             Some(handler) => handler(received.params, extensions).await,
             None => Err(ErrorObject::new(
@@ -156,7 +176,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::testing::{Count, methods};
+    use crate::transport::testing::methods;
 
     async fn call(message: &str) -> Option<String> {
         Dispatcher::new(methods())
@@ -184,31 +204,44 @@ mod tests {
         assert_eq!(call(r#"{"jsonrpc":"2.0","id":1,"result":2}"#).await, None);
     }
 
-    #[tokio::test]
-    async fn a_method_reaches_the_notifier_it_was_given() {
+    /// What `message` answers, given a [`Notifier`], and the notifications sent while it ran.
+    async fn call_notified(message: &str) -> (Option<String>, Vec<String>) {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut extensions = Extensions::new();
         extensions.insert(Notifier::new(sender));
-        let mut methods = Methods::new();
-        methods.add::<Count, _, _>(|(to,), extensions| async move {
-            let notifier = extensions.get::<Notifier>().expect("a notifier");
-            notifier.notify("progress", to);
-            Ok(to)
-        });
-        let answer = Dispatcher::new(methods)
-            .call(
-                br#"{"jsonrpc":"2.0","id":1,"method":"count","params":[1]}"#,
-                extensions,
-            )
+        let answer = Dispatcher::new(methods())
+            .call(message.as_bytes(), extensions)
             .await;
+        let mut sent = Vec::new();
+        while let Ok(notification) = receiver.try_recv() {
+            sent.push(notification);
+        }
+        (answer, sent)
+    }
+
+    #[tokio::test]
+    async fn progress_names_the_request_by_its_id() {
+        let (answer, sent) =
+            call_notified(r#"{"jsonrpc":"2.0","id":"a","method":"count","params":[2]}"#).await;
         assert_eq!(
             answer.as_deref(),
-            Some(r#"{"jsonrpc":"2.0","id":1,"result":1}"#)
+            Some(r#"{"jsonrpc":"2.0","id":"a","result":2}"#)
         );
         assert_eq!(
-            receiver.recv().await.as_deref(),
-            Some(r#"{"jsonrpc":"2.0","method":"progress","params":1}"#)
+            sent,
+            [
+                r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":"a","message":"1"}}"#,
+                r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"requestId":"a","message":"2"}}"#,
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_notification_sends_no_progress() {
+        let (answer, sent) =
+            call_notified(r#"{"jsonrpc":"2.0","method":"count","params":[2]}"#).await;
+        assert_eq!(answer, None);
+        assert!(sent.is_empty());
     }
 
     /// The `error.code` `message` is answered with.

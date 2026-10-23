@@ -69,6 +69,8 @@ const SIGNATURES = {
   virtx_client_list_snapshot: PLAIN,
   virtx_client_create_snapshot: WITH_ARGS,
   virtx_client_remove_snapshot: WITH_ARGS,
+  virtx_client_read_snapshot_dir: WITH_ARGS,
+  virtx_client_read_snapshot_file: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_remove_volume: WITH_ARGS,
@@ -401,6 +403,14 @@ class Client {
 
   async removeSnapshot(name) {
     await this._call('virtx_client_remove_snapshot', { name })
+  }
+
+  readSnapshotDir(snapshot, dir) {
+    return this._call('virtx_client_read_snapshot_dir', { snapshot, path: dir })
+  }
+
+  readSnapshotFile(snapshot, file, offset = 0, length) {
+    return this._call('virtx_client_read_snapshot_file', { snapshot, path: file, offset, length })
   }
 
   listVolume() {

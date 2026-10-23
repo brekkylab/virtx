@@ -178,6 +178,29 @@ struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
+// `snapshot.file.read_dir`: given `{"snapshot": "...", "path": "dir"}`, `path` in the
+// snapshot's upper layer and not the image under it, answers with
+// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
+// `virtx_client_stat_volume_file` answers it.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_snapshot_dir(struct VirtxClient *client,
+                                                   const uint8_t *args,
+                                                   size_t args_len);
+
+// `snapshot.file.read`: given
+// `{"snapshot": "...", "path": "...", "offset": n, "length": n}`, `path` in the snapshot's
+// upper layer and not the image under it, `offset` and `length` optional, answers with the bytes read, as a byte string.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_snapshot_file(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
+
 // `volume.list`: answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //
 // # Safety

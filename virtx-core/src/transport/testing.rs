@@ -1,12 +1,14 @@
 //! The methods the tests serve, and a client of them in memory. `image.pull` sends
 //! `pulling <reference>` as its progress, and fails for the reference `missing`. `image.build`
-//! sends `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
-//! the path itself, as though each file held its own path. `sandbox.exec` runs everything as
-//! `echo`, sending its line as its progress. The client of them needs the `ffi` feature too.
+//! sends `pulling <base>` as its progress, and fails for the base `missing`.
+//! `volume.file.read` and `snapshot.file.read` read the path itself, as though each file held
+//! its own path. `sandbox.exec` runs everything as `echo`, sending its line as its progress.
+//! The client of them needs the `ffi` feature too.
 
 #[cfg(feature = "ffi")]
 use std::io;
 
+use bytes::Bytes;
 #[cfg(feature = "ffi")]
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
 
@@ -22,7 +24,8 @@ use crate::transport::{
 use crate::{
     method::{
         ImageBuild, ImageBuildOutput, ImagePull, ImagePullOutput, Request, SandboxExec,
-        SandboxExecOutput, VolumeFileRead, VolumeFileReadOutput,
+        SandboxExecOutput, SnapshotFileRead, SnapshotFileReadOutput, VolumeFileRead,
+        VolumeFileReadOutput,
     },
     transport::{ErrorObject, Methods, Notifier, r#impl::streamable_http::SessionId},
 };
@@ -96,20 +99,30 @@ pub fn methods() -> Methods {
             Ok(SandboxExecOutput { code: 0 })
         })
         .add::<VolumeFileRead, _, _>(|args, _| async move {
-            let bytes = args.path.into_bytes();
-            let start = (args.offset as usize).min(bytes.len());
-            let end = match args.length {
-                Some(length) => (start + length as usize).min(bytes.len()),
-                None => bytes.len(),
-            };
             Ok(VolumeFileReadOutput {
-                data: bytes[start..end].to_vec().into(),
+                data: own_path(args.path, args.offset, args.length),
+            })
+        })
+        .add::<SnapshotFileRead, _, _>(|args, _| async move {
+            Ok(SnapshotFileReadOutput {
+                data: own_path(args.path, args.offset, args.length),
             })
         })
         .add::<Session, _, _>(|_, extensions| async move {
             Ok(extensions.get::<SessionId>().expect("a session").0.clone())
         });
     methods
+}
+
+/// The bytes of `path` from `offset`, at most `length` of them.
+fn own_path(path: String, offset: u64, length: Option<u64>) -> Bytes {
+    let bytes = path.into_bytes();
+    let start = (offset as usize).min(bytes.len());
+    let end = match length {
+        Some(length) => (start + length as usize).min(bytes.len()),
+        None => bytes.len(),
+    };
+    Bytes::from(bytes).slice(start..end)
 }
 
 #[cfg(feature = "ffi")]

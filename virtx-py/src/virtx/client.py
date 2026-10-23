@@ -248,6 +248,23 @@ class Client:
         """Delete the snapshot ``name`` and its upper layer."""
         await self._call("virtx_client_remove_snapshot", _args(name=name))
 
+    async def read_snapshot_dir(self, snapshot: str, path: str) -> list[dict[str, Any]]:
+        """The entries of the directory ``path`` in ``snapshot``'s upper layer, in no set order,
+        as ``{"name", "metadata"}``; the image under it is not looked at."""
+        return await self._call(
+            "virtx_client_read_snapshot_dir", _args(snapshot=snapshot, path=path)
+        )
+
+    async def read_snapshot_file(
+        self, snapshot: str, path: str, offset: int = 0, length: int | None = None
+    ) -> bytes:
+        """Up to ``length`` bytes of the file ``path`` in ``snapshot``'s upper layer, not the
+        image under it, from ``offset``, or to the end without a ``length``. Fewer may come back before the end; none at or past it."""
+        return await self._call(
+            "virtx_client_read_snapshot_file",
+            _args(snapshot=snapshot, path=path, offset=offset, length=length),
+        )
+
     async def list_volume(self) -> list[dict[str, Any]]:
         """Every volume the server holds, as ``{"name", "size"}``."""
         return await self._call("virtx_client_list_volume")

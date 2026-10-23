@@ -97,6 +97,8 @@ api! {
     virtx_client_list_snapshot: Plain,
     virtx_client_create_snapshot: WithArgs,
     virtx_client_remove_snapshot: WithArgs,
+    virtx_client_read_snapshot_dir: WithArgs,
+    virtx_client_read_snapshot_file: WithArgs,
     virtx_client_list_volume: Plain,
     virtx_client_create_volume: WithArgs,
     virtx_client_remove_volume: WithArgs,

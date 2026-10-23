@@ -15,10 +15,11 @@ use crate::{
         ImageRemoveArgs, ImageRemoveOutput, Request, SandboxClose, SandboxCloseArgs,
         SandboxCloseOutput, SandboxExec, SandboxExecArgs, SandboxExecOutput, SandboxInit,
         SandboxInitArgs, SandboxInitOutput, SandboxList, SandboxListArgs, SandboxListOutputItem,
-        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
-        SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
-        VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopy, VolumeFileCopyArgs,
-        VolumeFileCopyOutput, VolumeFileCreateDir, VolumeFileCreateDirArgs,
+        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileRead,
+        SnapshotFileReadArgs, SnapshotFileReadDir, SnapshotFileReadDirArgs, SnapshotFileReadOutput,
+        SnapshotList, SnapshotListArgs, SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs,
+        SnapshotRemoveOutput, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopy,
+        VolumeFileCopyArgs, VolumeFileCopyOutput, VolumeFileCreateDir, VolumeFileCreateDirArgs,
         VolumeFileCreateDirOutput, VolumeFileRead, VolumeFileReadArgs, VolumeFileReadDir,
         VolumeFileReadDirArgs, VolumeFileReadOutput, VolumeFileRemove, VolumeFileRemoveArgs,
         VolumeFileRemoveOutput, VolumeFileRename, VolumeFileRenameArgs, VolumeFileRenameOutput,
@@ -143,6 +144,48 @@ impl Client {
             )
             .await?;
         Ok(())
+    }
+
+    /// The entries of the directory `path` in `snapshot`'s upper layer, in no set order; the
+    /// image under it is not looked at.
+    pub async fn read_snapshot_dir(
+        &self,
+        snapshot: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Result<Vec<DirEntry>, Error> {
+        self.inner
+            .request(
+                SnapshotFileReadDir::NAME,
+                SnapshotFileReadDirArgs {
+                    snapshot: snapshot.into(),
+                    path: path.into(),
+                },
+            )
+            .await
+    }
+
+    /// Up to `length` bytes of the file `path` in `snapshot`'s upper layer, not the image under
+    /// it, from `offset`, or to the end without a `length`. Fewer may come back before the end; none at or past it.
+    pub async fn read_snapshot_file(
+        &self,
+        snapshot: impl Into<String>,
+        path: impl Into<String>,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<Bytes, Error> {
+        let output: SnapshotFileReadOutput = self
+            .inner
+            .request(
+                SnapshotFileRead::NAME,
+                SnapshotFileReadArgs {
+                    snapshot: snapshot.into(),
+                    path: path.into(),
+                    offset,
+                    length,
+                },
+            )
+            .await?;
+        Ok(output.data)
     }
 
     /// Every volume the server holds.
@@ -518,6 +561,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_snapshot_file_read_comes_back_as_its_bytes() {
+        let client = Client { inner: connect() };
+        let data = client
+            .read_snapshot_file("s", "hello", 1, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(data, Bytes::from_static(b"ell"));
+    }
+
+    #[tokio::test]
     async fn a_file_read_comes_back_as_its_bytes() {
         let client = Client { inner: connect() };
         let data = client
@@ -557,10 +610,11 @@ mod ffi {
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
         method::{
             ImageBuildArgs, ImagePullArgs, ImageRemoveArgs, SandboxCloseArgs, SandboxExecArgs,
-            SandboxInitArgs, SnapshotCreateArgs, SnapshotRemoveArgs, VolumeCreateArgs,
-            VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs, VolumeFileReadDirArgs,
-            VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs, VolumeFileWriteArgs,
-            VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs, VolumeRemoveArgs,
+            SandboxInitArgs, SnapshotCreateArgs, SnapshotFileReadArgs, SnapshotFileReadDirArgs,
+            SnapshotRemoveArgs, VolumeCreateArgs, VolumeFileCopyArgs, VolumeFileCreateDirArgs,
+            VolumeFileReadArgs, VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs,
+            VolumeFileStatArgs, VolumeFileWriteArgs, VolumeMountCreateArgs, VolumeMountListArgs,
+            VolumeMountRemoveArgs, VolumeRemoveArgs,
         },
     };
 
@@ -799,6 +853,58 @@ mod ffi {
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_snapshot(args?.name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// `snapshot.file.read_dir`: given `{"snapshot": "...", "path": "dir"}`, `path` in the
+    /// snapshot's upper layer and not the image under it, answers with
+    /// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
+    /// `virtx_client_stat_volume_file` answers it.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_read_snapshot_dir(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { cbor::<SnapshotFileReadDirArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let SnapshotFileReadDirArgs { snapshot, path } = args?;
+            client
+                .read_snapshot_dir(snapshot, path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// `snapshot.file.read`: given
+    /// `{"snapshot": "...", "path": "...", "offset": n, "length": n}`, `path` in the snapshot's
+    /// upper layer and not the image under it, `offset` and `length` optional, answers with the bytes read, as a byte string.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_read_snapshot_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { cbor::<SnapshotFileReadArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let SnapshotFileReadArgs {
+                snapshot,
+                path,
+                offset,
+                length,
+            } = args?;
+            client
+                .read_snapshot_file(snapshot, path, offset, length)
                 .await
                 .map_err(|e| e.to_string())
         })

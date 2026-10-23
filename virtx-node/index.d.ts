@@ -140,6 +140,8 @@ export class Client {
   listSnapshot(): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>
+  readSnapshotDir(snapshot: string, path: string): Promise<DirEntry[]>
+  readSnapshotFile(snapshot: string, path: string, offset?: number, length?: number): Promise<Uint8Array>
   listVolume(): Promise<VolumeListItem[]>
   createVolume(name?: string): Promise<{ name: string }>
   removeVolume(name: string): Promise<void>

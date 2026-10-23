@@ -11,11 +11,12 @@ use virtx_core::{
     DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImageName, ImagePullArgs,
     ImagePullOutput, ImageRemoveArgs, Metadata, MountSource, Recipe, SandboxCloseArgs,
     SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
-    VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopyArgs, VolumeFileCreateDirArgs,
-    VolumeFileReadArgs, VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs,
-    VolumeFileStatArgs, VolumeFileWriteArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileReadArgs, SnapshotFileReadDirArgs,
+    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
+    VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs, VolumeFileReadDirArgs,
+    VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs, VolumeFileWriteArgs,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountListOutputItem,
+    VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -169,6 +170,38 @@ impl Client {
     pub fn remove_snapshot(&self, name: impl Into<String>) -> Call<()> {
         let args = SnapshotRemoveArgs { name: name.into() };
         self.call(self.api.virtx_client_remove_snapshot, args)
+    }
+
+    /// The entries of the directory `path` in `snapshot`'s upper layer, in no set order; the
+    /// image under it is not looked at.
+    pub fn read_snapshot_dir(
+        &self,
+        snapshot: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Call<Vec<DirEntry>> {
+        let args = SnapshotFileReadDirArgs {
+            snapshot: snapshot.into(),
+            path: path.into(),
+        };
+        self.call(self.api.virtx_client_read_snapshot_dir, args)
+    }
+
+    /// Up to `length` bytes of the file `path` in `snapshot`'s upper layer, not the image under
+    /// it, from `offset`, or to the end without a `length`. Fewer may come back before the end; none at or past it.
+    pub fn read_snapshot_file(
+        &self,
+        snapshot: impl Into<String>,
+        path: impl Into<String>,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Call<Bytes> {
+        let args = SnapshotFileReadArgs {
+            snapshot: snapshot.into(),
+            path: path.into(),
+            offset,
+            length,
+        };
+        self.call(self.api.virtx_client_read_snapshot_file, args)
     }
 
     /// Every volume the server holds.

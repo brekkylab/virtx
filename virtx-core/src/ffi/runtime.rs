@@ -1,5 +1,5 @@
 //! A Rust value behind the C ABI, on a tokio runtime of its own: C calls in without one, so
-//! the value brings the runtime its calls run on, and cancels them when it ends. Shared by
+//! the value brings the runtime its requests run on, and cancels them when it ends. Shared by
 //! reference count, since more than one holder (two native modules, say) may hold it.
 //!
 //! A type C holds wraps a [`Runtime`] in a struct of its own, so the header names it and keeps
@@ -11,21 +11,23 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use futures_util::Stream;
 use serde::Serialize;
 use tokio::task::JoinSet;
 
 use super::{
     VIRTX_ERROR, VIRTX_OK,
-    async_call::{ProgressQueue, VirtxCall, start},
+    future::{self, VirtxFuture},
+    stream::{self, VirtxStream},
     text::write,
 };
 
-/// `T`, the runtime its calls run on (C calls in without one), and those calls, which
-/// [`Runtime::close`] cancels.
+/// `T`, the runtime its requests run on (C calls in without one), and the tasks running them,
+/// which [`Runtime::close`] cancels.
 pub(crate) struct Runtime<T> {
     runtime: tokio::runtime::Runtime,
     value: Arc<T>,
-    calls: Mutex<JoinSet<()>>,
+    tasks: Mutex<JoinSet<()>>,
 }
 
 impl<T: Send + Sync + 'static> Runtime<T> {
@@ -39,46 +41,48 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         Ok(Runtime {
             runtime,
             value: Arc::new(value),
-            calls: Mutex::new(JoinSet::new()),
+            tasks: Mutex::new(JoinSet::new()),
         })
     }
 
-    /// Start what `call` makes of the value, and hand C the call.
-    pub(crate) fn call<R: Serialize, F>(&self, call: impl FnOnce(Arc<T>) -> F) -> *mut VirtxCall
+    /// Start what `make` makes of the value, and hand C the future.
+    pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
     where
         F: Future<Output = Result<R, String>> + Send + 'static,
     {
-        self.call_with_progress(|value, _| call(value))
+        future::start(
+            self.runtime.handle(),
+            &self.tasks,
+            make(Arc::clone(&self.value)),
+        )
     }
 
-    /// Start what `call` makes of the value and where to queue its progress, and hand C the
-    /// call.
-    pub(crate) fn call_with_progress<R: Serialize, F>(
-        &self,
-        call: impl FnOnce(Arc<T>, ProgressQueue) -> F,
-    ) -> *mut VirtxCall
+    /// Start what `make` makes of the value, and hand C the stream.
+    pub(crate) fn stream<R: Serialize, S>(&self, make: impl FnOnce(Arc<T>) -> S) -> *mut VirtxStream
     where
-        F: Future<Output = Result<R, String>> + Send + 'static,
+        S: Stream<Item = Result<R, String>> + Send + 'static,
     {
-        let value = Arc::clone(&self.value);
-        start(self.runtime.handle(), &self.calls, |progress| {
-            call(value, progress)
-        })
+        stream::start(
+            self.runtime.handle(),
+            &self.tasks,
+            make(Arc::clone(&self.value)),
+        )
     }
 
-    /// Answer every call not yet answered with `VIRTX_ERROR`, then end the value with `close`.
+    /// Answer every request not yet answered with `VIRTX_ERROR`, then end the value with
+    /// `close`.
     ///
     /// Not called on the runtime's own threads, which this stops.
     pub(crate) fn close<F: Future<Output = ()>>(self, close: impl FnOnce(T) -> F) {
         let Runtime {
             runtime,
             value,
-            calls,
+            tasks,
         } = self;
-        let mut calls = calls.into_inner().unwrap_or_else(PoisonError::into_inner);
+        let mut tasks = tasks.into_inner().unwrap_or_else(PoisonError::into_inner);
         runtime.block_on(async move {
-            calls.shutdown().await;
-            // Every call's clone went with its task.
+            tasks.shutdown().await;
+            // Every request's clone went with its task.
             if let Ok(value) = Arc::try_unwrap(value) {
                 close(value).await;
             }
@@ -138,7 +142,10 @@ mod tests {
     };
 
     use super::{
-        super::{async_call::virtx_call_free, virtx_call_wait, virtx_string_free},
+        super::{
+            VIRTX_END, virtx_future_free, virtx_future_wait, virtx_stream_free,
+            virtx_stream_wait_next, virtx_string_free,
+        },
         *,
     };
 
@@ -180,17 +187,40 @@ mod tests {
     }
 
     #[test]
-    fn closing_answers_the_calls_in_flight() {
+    fn closing_answers_the_requests_in_flight() {
         let closes = Arc::default();
         let held = shared(&closes);
-        let call = unsafe { &(*held).0 }.call(|_| std::future::pending::<Result<(), String>>());
+        let runtime = unsafe { &(*held).0 };
+        let future = runtime.future(|value| async move {
+            let _held = value;
+            std::future::pending::<Result<(), String>>().await
+        });
+        let stream = runtime.stream(|value| {
+            async_stream::stream! {
+                let _held = value;
+                std::future::pending::<()>().await;
+                yield Ok::<(), String>(());
+            }
+        });
 
         assert!(close(held));
-        assert_eq!(closes.load(SeqCst), 1, "the call's clone went with it");
+        assert_eq!(closes.load(SeqCst), 1, "each request's clone went with it");
         let mut out = ptr::null_mut();
-        assert_eq!(unsafe { virtx_call_wait(call, &mut out) }, VIRTX_ERROR);
-
+        assert_eq!(unsafe { virtx_future_wait(future, &mut out) }, VIRTX_ERROR);
         unsafe { virtx_string_free(out) };
-        unsafe { virtx_call_free(call) };
+        let mut out = ptr::null_mut();
+        assert_eq!(
+            unsafe { virtx_stream_wait_next(stream, &mut out) },
+            VIRTX_ERROR
+        );
+        unsafe { virtx_string_free(out) };
+        let mut out = ptr::null_mut();
+        assert_eq!(
+            unsafe { virtx_stream_wait_next(stream, &mut out) },
+            VIRTX_END
+        );
+
+        unsafe { virtx_future_free(future) };
+        unsafe { virtx_stream_free(stream) };
     }
 }

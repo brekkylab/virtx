@@ -120,17 +120,16 @@ mod tests {
 
 mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
-    //! each of which starts the call and hands C the [`VirtxCall`].
+    //! each of which starts the request and hands C its [`VirtxFuture`] or [`VirtxStream`].
 
     use std::ffi::{c_char, c_int};
 
     use futures_util::StreamExt;
-
     use tokio::process::Command;
 
-    use super::{Client, Event};
+    use super::Client;
     use crate::{
-        ffi::{Runtime, VirtxCall, json, release, retain, share, text},
+        ffi::{Runtime, VirtxFuture, VirtxStream, json, release, retain, share, text},
         image::ImageName,
     };
 
@@ -191,9 +190,9 @@ mod ffi {
         unsafe { retain(client) };
     }
 
-    /// Let go of `client`. The last holder's release answers every call not yet answered with
-    /// `VIRTX_ERROR`, ends the session, and frees it; its calls stay to be polled and freed. Null
-    /// does nothing.
+    /// Let go of `client`. The last holder's release answers every request not yet answered
+    /// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
+    /// polled and freed. Null does nothing.
     ///
     /// # Safety
     ///
@@ -213,16 +212,16 @@ mod ffi {
     ///
     /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxCall {
+    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .call(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
     }
 
     /// `image.build`: builds `recipe`, as
     /// `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
-    /// (`name:tag`) at it, or a reference the server picks if `reference` is null. Answers with
-    /// `{"reference": "name:tag", "digest": "algorithm:hex"}`. Its progress, taken with
-    /// `virtx_call_progress`, is its log, a line at a time, as a JSON string.
+    /// (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
+    /// are its log, a line each, as `{"progress": "..."}`, then what it built, as
+    /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
     ///
     /// # Safety
     ///
@@ -233,7 +232,7 @@ mod ffi {
         client: *mut VirtxClient,
         recipe: *const c_char,
         reference: *const c_char,
-    ) -> *mut VirtxCall {
+    ) -> *mut VirtxStream {
         let args = (|| {
             let recipe = unsafe { json(recipe) }?;
             let reference = match reference.is_null() {
@@ -242,16 +241,20 @@ mod ffi {
             };
             Ok::<_, String>((recipe, reference))
         })();
-        unsafe { &(*client).0 }.call_with_progress(|client, progress| async move {
-            let (recipe, reference) = args?;
-            let mut build = client.build_image(recipe, reference);
-            while let Some(event) = build.next().await {
-                match event.map_err(|e| e.to_string())? {
-                    Event::Progress(value) => progress.push(&value),
-                    Event::Output(output) => return Ok(output),
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let (recipe, reference) = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut build = client.build_image(recipe, reference);
+                while let Some(event) = build.next().await {
+                    yield event.map_err(|e| e.to_string());
                 }
             }
-            Err("the build ended without its output".to_string())
         })
     }
 
@@ -266,9 +269,9 @@ mod ffi {
     pub unsafe extern "C" fn virtx_client_remove_image(
         client: *mut VirtxClient,
         image: *const c_char,
-    ) -> *mut VirtxCall {
+    ) -> *mut VirtxFuture {
         let image = unsafe { json::<ImageName>(image) };
-        unsafe { &(*client).0 }.call(|client| async move {
+        unsafe { &(*client).0 }.future(|client| async move {
             client.remove_image(image?).await.map_err(|e| e.to_string())
         })
     }

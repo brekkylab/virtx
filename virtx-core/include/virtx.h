@@ -1,10 +1,11 @@
 /*
- * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request returns a VirtxCall at
- * once: poll it with virtx_call_poll, which answers VIRTX_PENDING and keeps the waker given
- * until the call has an answer, then wakes it; or block on it with virtx_call_wait. A call
- * that sends progress wakes the waker for each too: take it with virtx_call_progress until
- * VIRTX_PENDING, then poll again. Free every string written with virtx_string_free, and every
- * call with virtx_call_free.
+ * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request returns at once: a
+ * VirtxFuture if it answers once, a VirtxStream if it answers item by item. Poll a future with
+ * virtx_future_poll and a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and
+ * keeps the waker given until there is something to take, then wakes it. Or block with
+ * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
+ * left, and ends after an error. Free every string written with virtx_string_free, every
+ * future with virtx_future_free, and every stream with virtx_stream_free.
  */
 
 #ifndef VIRTX_H
@@ -27,18 +28,23 @@
 // Not answered yet: the waker given is kept, and woken once it is.
 #define VIRTX_PENDING 1
 
-// A request in flight: polled until it answers, then freed. Its progress, if it sends any,
-// is taken with `virtx_call_progress`.
-typedef struct VirtxCall VirtxCall;
+// A stream has ended: it has no item left.
+#define VIRTX_END 2
 
 // A `Client`, as C holds it.
 typedef struct VirtxClient VirtxClient;
 
-// What a pending call wakes once it has an answer.
+// A request that answers once: polled until it answers, then freed.
+typedef struct VirtxFuture VirtxFuture;
+
+// A request that answers item by item: polled for each until it ends, then freed.
+typedef struct VirtxStream VirtxStream;
+
+// What a pending future or stream wakes once it has something to take.
 //
-// Every waker handed to `virtx_call_poll` is the library's from then on: it calls `wake` at
-// most once, from any thread, and then `release`, unless null, exactly once. `data` stays
-// valid until `release`. `wake` only schedules a poll: it must not call into this library.
+// Every waker handed to a poll is the library's from then on: it calls `wake` at most once,
+// from any thread, and then `release`, unless null, exactly once. `data` stays valid until
+// `release`. `wake` only schedules a poll: it must not call into this library.
 typedef struct VirtxWaker {
   void *data;
   void (*wake)(void *data);
@@ -77,9 +83,9 @@ int virtx_client_connect(const char *url, struct VirtxClient **client, char **er
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 void virtx_client_retain(struct VirtxClient *client);
 
-// Let go of `client`. The last holder's release answers every call not yet answered with
-// `VIRTX_ERROR`, ends the session, and frees it; its calls stay to be polled and freed. Null
-// does nothing.
+// Let go of `client`. The last holder's release answers every request not yet answered
+// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
+// polled and freed. Null does nothing.
 //
 // # Safety
 //
@@ -93,21 +99,21 @@ void virtx_client_release(struct VirtxClient *client);
 // # Safety
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-struct VirtxCall *virtx_client_list_image(struct VirtxClient *client);
+struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
 // `image.build`: builds `recipe`, as
 // `{"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}`, and points `reference`
-// (`name:tag`) at it, or a reference the server picks if `reference` is null. Answers with
-// `{"reference": "name:tag", "digest": "algorithm:hex"}`. Its progress, taken with
-// `virtx_call_progress`, is its log, a line at a time, as a JSON string.
+// (`name:tag`) at it, or a reference the server picks if `reference` is null. Its items
+// are its log, a line each, as `{"progress": "..."}`, then what it built, as
+// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
 //
 // # Safety
 //
 // `client` is as in `virtx_client_list_image`. `recipe` is NUL-terminated UTF-8, and
 // `reference` is null or one too; neither is read after this returns.
-struct VirtxCall *virtx_client_build_image(struct VirtxClient *client,
-                                           const char *recipe,
-                                           const char *reference);
+struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
+                                             const char *recipe,
+                                             const char *reference);
 
 // `image.remove`: forgets `image`, as `{"type": "reference", "reference": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}`. Answers with `null`.
@@ -116,42 +122,60 @@ struct VirtxCall *virtx_client_build_image(struct VirtxClient *client,
 //
 // `client` is as in `virtx_client_list_image`. `image` is NUL-terminated UTF-8, not read
 // after this returns.
-struct VirtxCall *virtx_client_remove_image(struct VirtxClient *client, const char *image);
+struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client, const char *image);
 
-// Take `call`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written to
-// `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once
-// there is one, or progress to take. A call answers once; polled again, it fails.
+// Take `future`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written
+// to `out`, or `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake
+// once there is one. A future answers once; polled again, it fails.
 //
 // # Safety
 //
-// `call` is one a request returned, not yet freed, and polled by one thread at a time.
+// `future` is one a request returned, not yet freed, and polled by one thread at a time.
 // `waker` is as `VirtxWaker` says. `out` is null or writable.
-int virtx_call_poll(struct VirtxCall *call, struct VirtxWaker waker, char **out);
+int virtx_future_poll(struct VirtxFuture *future, struct VirtxWaker waker, char **out);
 
-// Take `call`'s oldest progress not yet taken: `VIRTX_OK`, with it written to `out` as JSON,
-// or `VIRTX_PENDING` if there is none now. Every progress a call sends is queued before it
-// answers, so what is left once it has is taken here too.
+// Block until `future` answers, and take its answer as `virtx_future_poll` does.
 //
 // # Safety
 //
-// As `virtx_call_poll`.
-int virtx_call_progress(struct VirtxCall *call, char **out);
+// As `virtx_future_poll`. Not called from a `wake`, which would block the runtime it runs on.
+int virtx_future_wait(struct VirtxFuture *future, char **out);
 
-// Block until `call` answers, and take its answer as `virtx_call_poll` does. Its progress
-// stays queued, for `virtx_call_progress`.
+// Free `future`, cancelling it if it has not answered, and release its waker without waking
+// it. A `wake` already under way may still finish after this returns. Null does nothing.
 //
 // # Safety
 //
-// As `virtx_call_poll`. Not called from a `wake`, which would block the runtime it runs on.
-int virtx_call_wait(struct VirtxCall *call, char **out);
+// `future` is null, or one a request returned, not yet freed; it is not used again.
+void virtx_future_free(struct VirtxFuture *future);
 
-// Free `call`, cancelling it if it has not answered, and release its waker without waking it.
+// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as JSON; `VIRTX_ERROR`,
+// with the error written, after which the stream ends; `VIRTX_END` once it has; or
+// `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once there is
+// an item or the end.
+//
+// # Safety
+//
+// `stream` is one a request returned, not yet freed, and polled by one thread at a time.
+// `waker` is as `VirtxWaker` says. `out` is null or writable.
+int virtx_stream_poll_next(struct VirtxStream *stream, struct VirtxWaker waker, char **out);
+
+// Block until `stream` has an item or has ended, and take it as `virtx_stream_poll_next`
+// does.
+//
+// # Safety
+//
+// As `virtx_stream_poll_next`. Not called from a `wake`, which would block the runtime it
+// runs on.
+int virtx_stream_wait_next(struct VirtxStream *stream, char **out);
+
+// Free `stream`, cancelling it if it has not ended, and release its waker without waking it.
 // A `wake` already under way may still finish after this returns. Null does nothing.
 //
 // # Safety
 //
-// `call` is null, or one a request returned, not yet freed; it is not used again.
-void virtx_call_free(struct VirtxCall *call);
+// `stream` is null, or one a request returned, not yet freed; it is not used again.
+void virtx_stream_free(struct VirtxStream *stream);
 
 // Free a string this library wrote. Null does nothing.
 //

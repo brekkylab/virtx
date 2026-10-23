@@ -13,4 +13,5 @@ mod transport;
 mod volume;
 
 pub use image::*;
+pub use transport::*;
 pub use volume::*;

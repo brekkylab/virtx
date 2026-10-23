@@ -5,6 +5,9 @@
 //! handshake is the same over every transport, so only `init` names one. `include/virtx.h`
 //! declares these functions, and changes with them.
 
+mod client;
 pub mod image;
 pub mod method;
 pub mod transport;
+
+pub use client::Client;

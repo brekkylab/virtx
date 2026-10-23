@@ -38,7 +38,7 @@ impl Recipe {
     /// not what it resolved to, so a moved tag keeps serving the image built before it moved.
     ///
     /// ```
-    /// # use virtx_core::image::{Recipe, Step};
+    /// # use virtx_core::{Recipe, Step};
     /// let declared = Recipe::new("alpine:3.20")
     ///     .step("apk add --no-cache jq")
     ///     .step(Step::env("TZ", "UTC"));
@@ -64,7 +64,7 @@ impl Recipe {
     /// channel to report what was skipped.
     ///
     /// ```
-    /// # use virtx_core::image::{Recipe, Step};
+    /// # use virtx_core::{Recipe, Step};
     /// let declared = Recipe::from_dockerfile("FROM alpine:3.20\nRUN apk add jq\n")?;
     ///
     /// assert_eq!(declared.base, "alpine:3.20");

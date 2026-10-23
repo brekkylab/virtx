@@ -12,25 +12,17 @@ use std::{
 
 use ciborium::Value;
 use futures_util::{Stream, StreamExt};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 
 use super::{
-    Error,
+    Error, Event,
     r#impl::{Incoming, Outgoing},
     message::{PROGRESS, Progress, Received, Request},
 };
-
-/// What a call's stream gives: its progress, a line of its log each, then its output last.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Event<R> {
-    Progress(String),
-    Output(R),
-}
 
 /// A client of one server, over stdio or Streamable HTTP.
 ///

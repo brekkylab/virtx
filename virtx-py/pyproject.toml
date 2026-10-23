@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "virtx"
+version = "0.1.2"
+description = "A virtx client for Python, over libvirtx_core's C ABI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+# What crosses the C ABI is CBOR. The C ABI itself is reached with ctypes, so the package has
+# no extension module of its own: a wheel is the Python files and `libvirtx_core` for its
+# platform, which the release copies into `src/virtx/` beside them.
+dependencies = ["cbor2>=5.6"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/virtx"]
+artifacts = ["src/virtx/libvirtx_core.*", "src/virtx/virtx_core.dll"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

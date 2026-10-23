@@ -400,23 +400,24 @@ impl Client {
         self.inner.request(SandboxInit::NAME, args).await
     }
 
-    /// Run `cmd` in `sandbox` to its end, killed after `timeout_ms` if one is given.
-    pub async fn exec_sandbox(
+    /// Run `cmd` in `sandbox` to its end, killed after `timeout_ms` if one is given. The stream
+    /// is its output, an [`Event::Progress`] a line as it is written, then how it ended as its
+    /// last item, an [`Event::Output`] or the error it failed with. Dropping it drops the
+    /// command.
+    pub fn exec_sandbox(
         &self,
         sandbox: impl Into<String>,
         cmd: impl IntoIterator<Item = impl Into<String>>,
         timeout_ms: Option<u64>,
-    ) -> Result<SandboxExecOutput, Error> {
-        self.inner
-            .request(
-                SandboxExec::NAME,
-                SandboxExecArgs {
-                    sandbox: sandbox.into(),
-                    cmd: cmd.into_iter().map(Into::into).collect(),
-                    timeout_ms,
-                },
-            )
-            .await
+    ) -> impl Stream<Item = Result<Event<SandboxExecOutput>, Error>> + Unpin + Send + '_ {
+        Box::pin(self.inner.request_with_progress(
+            SandboxExec::NAME,
+            SandboxExecArgs {
+                sandbox: sandbox.into(),
+                cmd: cmd.into_iter().map(Into::into).collect(),
+                timeout_ms,
+            },
+        ))
     }
 
     /// Stop `sandbox` and forget its id, keeping its snapshot and volumes.
@@ -482,14 +483,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_exec_comes_back_with_its_output() {
+    async fn an_exec_streams_its_output_then_how_it_ended() {
         let client = Client { inner: connect() };
-        let output = client
-            .exec_sandbox("s", ["echo", "hi"], None)
-            .await
-            .unwrap();
-        assert_eq!(output.code, 0);
-        assert_eq!(output.stdout, Bytes::from_static(b"hi\n"));
+        let mut exec = client.exec_sandbox("s", ["echo", "hi"], None);
+        let mut events = Vec::new();
+        while let Some(event) = exec.next().await {
+            events.push(event.unwrap());
+        }
+        let output = SandboxExecOutput { code: 0 };
+        assert_eq!(
+            events,
+            [Event::Progress("hi".into()), Event::Output(output)]
+        );
     }
 }
 
@@ -1093,8 +1098,9 @@ mod ffi {
     }
 
     /// `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
-    /// `timeout_ms` optional, runs `cmd` to its end. Answers with
-    /// `{"code": n, "stdout": h'...', "stderr": h'...', "truncated": bool}`.
+    /// `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
+    /// it is written, as `{"progress": "..."}`, then how it ended, as
+    /// `{"output": {"code": n}}`.
     ///
     /// # Safety
     ///
@@ -1104,18 +1110,22 @@ mod ffi {
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
-    ) -> *mut VirtxFuture {
+    ) -> *mut VirtxStream {
         let args = unsafe { cbor::<SandboxExecArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let SandboxExecArgs {
-                sandbox,
-                cmd,
-                timeout_ms,
-            } = args?;
-            client
-                .exec_sandbox(sandbox, cmd, timeout_ms)
-                .await
-                .map_err(|e| e.to_string())
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let SandboxExecArgs { sandbox, cmd, timeout_ms } = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut exec = client.exec_sandbox(sandbox, cmd, timeout_ms);
+                while let Some(event) = exec.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
         })
     }
 

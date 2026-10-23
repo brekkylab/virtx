@@ -1,7 +1,6 @@
 //! Sandboxes: a VM booted from an image, standing on a snapshot, with volumes mounted into it,
 //! and the commands run in one. Its files are read and written through the volumes it mounts.
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{image::ImageName, method::Request};
@@ -155,7 +154,8 @@ pub struct SandboxInitOutput {
     pub cwd: Option<String>,
 }
 
-/// `sandbox.exec`: run a command in a sandbox to its end.
+/// `sandbox.exec`: run a command in a sandbox to its end. Its output is its progress, a line
+/// at a time as it is written, stdout and stderr alike, and nowhere else.
 pub struct SandboxExec;
 
 impl Request for SandboxExec {
@@ -179,22 +179,13 @@ pub struct SandboxExecArgs {
     pub timeout_ms: Option<u64>,
 }
 
-/// What `sandbox.exec` answers: everything the command wrote, and how it ended. A command
-/// killed at its timeout is an error instead.
+/// What `sandbox.exec` answers: how the command ended. A command killed at its timeout is an
+/// error instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxExecOutput {
     /// Its exit code; `128 + signal` for one killed by a signal.
     pub code: i32,
-
-    pub stdout: Bytes,
-
-    /// Apart from `stdout`, with no order kept between them; `2>&1` keeps it.
-    pub stderr: Bytes,
-
-    /// The output outgrew one answer, and what is here is its beginning.
-    #[serde(default)]
-    pub truncated: bool,
 }
 
 /// `sandbox.close`: stop a sandbox and forget its id. Its snapshot and volumes are kept.
@@ -246,23 +237,5 @@ mod tests {
         let decoded: SandboxInitArgs = ciborium::from_reader(&encoded[..]).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
-    }
-
-    #[test]
-    fn exec_output_is_a_cbor_byte_string() {
-        let output = SandboxExecOutput {
-            code: 0,
-            stdout: Bytes::from_static(b"hi"),
-            stderr: Bytes::new(),
-            truncated: false,
-        };
-        let value = encode(&output);
-        let stdout = value
-            .as_map()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| k.as_text() == Some("stdout"))
-            .map(|(_, v)| v);
-        assert_eq!(stdout, Some(&ciborium::Value::Bytes(b"hi".to_vec())));
     }
 }

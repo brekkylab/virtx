@@ -332,13 +332,14 @@ struct VirtxFuture *virtx_client_init_sandbox(struct VirtxClient *client,
                                               size_t args_len);
 
 // `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
-// `timeout_ms` optional, runs `cmd` to its end. Answers with
-// `{"code": n, "stdout": h'...', "stderr": h'...', "truncated": bool}`.
+// `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
+// it is written, as `{"progress": "..."}`, then how it ended, as
+// `{"output": {"code": n}}`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_exec_sandbox(struct VirtxClient *client,
+struct VirtxStream *virtx_client_exec_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 

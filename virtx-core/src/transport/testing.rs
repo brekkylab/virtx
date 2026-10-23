@@ -1,7 +1,7 @@
 //! The methods the tests serve, and a client of them in memory. `image.build` sends
 //! `pulling <base>` as its progress, and fails for the base `missing`. `volume.file.read` reads
 //! the path itself, as though each file held its own path. `sandbox.exec` runs everything as
-//! `echo`.
+//! `echo`, sending its line as its progress.
 
 use std::io;
 
@@ -74,14 +74,11 @@ pub fn methods() -> Methods {
                 digest: "sha256:0".into(),
             })
         })
-        .add::<SandboxExec, _, _>(|args, _| async move {
-            let stdout = format!("{}\n", args.cmd[1..].join(" "));
-            Ok(SandboxExecOutput {
-                code: 0,
-                stdout: stdout.into(),
-                stderr: Default::default(),
-                truncated: false,
-            })
+        .add::<SandboxExec, _, _>(|args, extensions| async move {
+            let notifier = extensions.get::<Notifier>().expect("a notifier");
+            let line = args.cmd[1..].join(" ");
+            notifier.progress(line);
+            Ok(SandboxExecOutput { code: 0 })
         })
         .add::<VolumeFileRead, _, _>(|args, _| async move {
             let bytes = args.path.into_bytes();

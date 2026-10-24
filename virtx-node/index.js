@@ -389,8 +389,8 @@ class Client {
     return this._events('virtx_client_build_image', { recipe: declared, reference })
   }
 
-  async removeImage(image) {
-    await this._call('virtx_client_remove_image', { image: imageName(image) })
+  async removeImage(digest) {
+    await this._call('virtx_client_remove_image', { digest })
   }
 
   listSnapshot() {

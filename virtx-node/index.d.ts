@@ -135,8 +135,8 @@ export class Client {
 
   listImage(): Promise<ImageListItem[]>
   pullImage(reference: string): AsyncGenerator<Event<ImagePullOutput>>
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference?: string): AsyncGenerator<Event<ImageBuildOutput>>
-  removeImage(image: string | ImageName): Promise<void>
+  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput>>
+  removeImage(digest: string): Promise<void>
   listSnapshot(): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>

@@ -8,7 +8,7 @@ use futures_util::Stream;
 use tokio::process::Command;
 
 use crate::{
-    image::{ImageName, Recipe},
+    image::Recipe,
     method::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
         ImageListOutputItem, ImagePull, ImagePullArgs, ImagePullOutput, ImageRemove,
@@ -78,31 +78,30 @@ impl Client {
         ))
     }
 
-    /// Build `recipe`, and point `reference` at it; without one the server picks it. The
-    /// stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
+    /// Build `recipe`, and point `reference` at it. The stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
     /// item, an [`Event::Output`] or the error it failed with. Dropping it drops the build.
     pub fn build_image(
         &self,
         recipe: Recipe,
-        reference: Option<impl Into<String>>,
+        reference: impl Into<String>,
     ) -> impl Stream<Item = Result<Event<ImageBuildOutput>, Error>> + Unpin + Send + '_ {
         Box::pin(self.inner.request_with_progress(
             ImageBuild::NAME,
             ImageBuildArgs {
                 recipe,
-                reference: reference.map(Into::into),
+                reference: reference.into(),
             },
         ))
     }
 
-    /// Forget `image`, given as an [`ImageName`] or a string read by [`ImageName::parse`].
-    pub async fn remove_image(&self, image: impl Into<ImageName>) -> Result<(), Error> {
+    /// Forget the image `digest` names, as `algorithm:hex`, and every reference pointing at it.
+    pub async fn remove_image(&self, digest: impl Into<String>) -> Result<(), Error> {
         let _: ImageRemoveOutput = self
             .inner
             .request(
                 ImageRemove::NAME,
                 ImageRemoveArgs {
-                    image: image.into(),
+                    digest: digest.into(),
                 },
             )
             .await?;
@@ -538,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn a_build_streams_its_log_then_its_output() {
         let client = Client { inner: connect() };
-        let mut build = client.build_image(Recipe::new("alpine:3.20"), Some("jq:latest"));
+        let mut build = client.build_image(Recipe::new("alpine:3.20"), "jq:latest");
         let mut events = Vec::new();
         while let Some(event) = build.next().await {
             events.push(event.unwrap());
@@ -554,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_build_ends_its_stream_with_the_error() {
         let client = Client { inner: connect() };
-        let mut build = client.build_image(Recipe::new("missing"), None::<String>);
+        let mut build = client.build_image(Recipe::new("missing"), "missing:latest");
         assert!(matches!(build.next().await, Some(Ok(Event::Progress(_)))));
         assert!(matches!(build.next().await, Some(Err(Error::Call(_)))));
         assert!(build.next().await.is_none());
@@ -744,8 +743,7 @@ mod ffi {
         })
     }
 
-    /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a
-    /// reference the server picks if there is none, given
+    /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
     /// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
     /// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
     /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
@@ -778,9 +776,8 @@ mod ffi {
         })
     }
 
-    /// `image.remove`: forgets `image`, given
-    /// `{"image": {"type": "reference", "reference": "name:tag"}}` or
-    /// `{"image": {"type": "digest", "digest": "algorithm:hex"}}`. Answers with `null`.
+    /// `image.remove`: forgets an image and every reference pointing at it, given
+    /// `{"digest": "algorithm:hex"}`. Answers with `null`.
     ///
     /// # Safety
     ///
@@ -794,7 +791,7 @@ mod ffi {
         let args = unsafe { cbor::<ImageRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
-                .remove_image(args?.image)
+                .remove_image(args?.digest)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -1262,7 +1259,8 @@ mod ffi {
     /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [{"host": n, "guest": n}],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-    /// `virtx_client_remove_image` takes it and all but it optional. Answers with
+    /// `{"type": "reference", "reference": "name:tag"}` or
+    /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
     /// `{"id": "...", "cwd": "..."}`, `cwd` only if the server says.
     ///
     /// # Safety

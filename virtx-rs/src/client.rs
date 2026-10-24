@@ -8,7 +8,7 @@ use std::{
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImageName, ImagePullArgs,
+    DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImagePullArgs,
     ImagePullOutput, ImageRemoveArgs, Metadata, MountSource, Recipe, SandboxCloseArgs,
     SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
     SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileReadArgs, SnapshotFileReadDirArgs,
@@ -120,16 +120,16 @@ impl Client {
         Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
     }
 
-    /// Build `recipe`, and point `reference` at it; without one the server picks it. Its
-    /// events are the build's log, then what it built.
+    /// Build `recipe`, and point `reference` at it. Its events are the build's log, then what
+    /// it built.
     pub fn build_image(
         &self,
         recipe: Recipe,
-        reference: Option<impl Into<String>>,
+        reference: impl Into<String>,
     ) -> Events<ImageBuildOutput> {
         let args = ImageBuildArgs {
             recipe,
-            reference: reference.map(Into::into),
+            reference: reference.into(),
         };
         Events::new(
             self.api,
@@ -137,10 +137,10 @@ impl Client {
         )
     }
 
-    /// Forget `image`, given as an [`ImageName`] or a string read by [`ImageName::parse`].
-    pub fn remove_image(&self, image: impl Into<ImageName>) -> Call<()> {
+    /// Forget the image `digest` names, as `algorithm:hex`, and every reference pointing at it.
+    pub fn remove_image(&self, digest: impl Into<String>) -> Call<()> {
         let args = ImageRemoveArgs {
-            image: image.into(),
+            digest: digest.into(),
         };
         self.call(self.api.virtx_client_remove_image, args)
     }

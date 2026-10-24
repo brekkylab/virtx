@@ -124,8 +124,7 @@ struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
-// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, or a
-// reference the server picks if there is none, given
+// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
 // Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
 // `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
@@ -138,9 +137,8 @@ struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
 
-// `image.remove`: forgets `image`, given
-// `{"image": {"type": "reference", "reference": "name:tag"}}` or
-// `{"image": {"type": "digest", "digest": "algorithm:hex"}}`. Answers with `null`.
+// `image.remove`: forgets an image and every reference pointing at it, given
+// `{"digest": "algorithm:hex"}`. Answers with `null`.
 //
 // # Safety
 //
@@ -356,7 +354,8 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // `{"image": {...}, "snapshot": "...", "network": bool, "ports": [{"host": n, "guest": n}],
 // "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-// `virtx_client_remove_image` takes it and all but it optional. Answers with
+// `{"type": "reference", "reference": "name:tag"}` or
+// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
 // `{"id": "...", "cwd": "..."}`, `cwd` only if the server says.
 //
 // # Safety

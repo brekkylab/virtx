@@ -220,16 +220,17 @@ class Client:
         return self._events("virtx_client_pull_image", _args(reference=reference))
 
     def build_image(
-        self, recipe: Recipe | Mapping[str, Any], reference: str | None = None
+        self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> AsyncIterator[Event[dict[str, Any]]]:
-        """Build ``recipe``, and point ``reference`` at it; without one the server picks it. Its
-        events are the build's log, then what it built, ``{"reference", "digest"}``."""
+        """Build ``recipe``, and point ``reference`` at it. Its events are the build's log, then
+        what it built, ``{"reference", "digest"}``."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._events("virtx_client_build_image", _args(recipe=recipe, reference=reference))
 
-    async def remove_image(self, image: str | Mapping[str, Any]) -> None:
-        """Forget ``image``, a reference or a digest."""
-        await self._call("virtx_client_remove_image", _args(image=image_name(image)))
+    async def remove_image(self, digest: str) -> None:
+        """Forget the image ``digest`` names, as ``algorithm:hex``, and every reference pointing
+        at it."""
+        await self._call("virtx_client_remove_image", _args(digest=digest))
 
     async def list_snapshot(self) -> list[dict[str, Any]]:
         """Every snapshot the server holds, as ``{"name", "size"}``."""

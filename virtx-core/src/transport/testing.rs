@@ -79,7 +79,7 @@ pub fn methods() -> Methods {
                 return Err(ErrorObject::new(1, format!("no image {base}")));
             }
             Ok(ImageBuildOutput {
-                reference: args.reference.unwrap_or_else(|| "built:latest".into()),
+                reference: args.reference,
                 digest: "sha256:0".into(),
             })
         })

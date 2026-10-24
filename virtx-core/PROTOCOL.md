@@ -4,7 +4,7 @@ VirtX is a protocol for running virtual machines, either locally or remotely.
 
 It is inspired by [MCP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports) (2026-07-28), with some changes.
 
-## Messages
+## Message
 
 A message is a JSON-RPC 2.0 request, notification or response, encoded as CBOR (RFC 8949) instead of JSON.
 It is a CBOR map with text keys, and its members keep the names and meanings JSON-RPC gives them, including `"jsonrpc": "2.0"`.
@@ -16,10 +16,10 @@ Batches (arrays of messages) are not used: a client MUST NOT send one, and a ser
 Binary data is sent as a CBOR byte string, not encoded as text.
 
 Only the client sends requests.
-The server answers them, and MAY send notifications about a request while it runs (see [Notifications](#notifications)).
+The server answers them, and MAY send notifications about a request while it runs (see [Stream output](#stream-output)).
 The server never sends a request.
 
-### Frames
+### Frame
 
 On a byte stream (stdio, or a streamed HTTP response), messages are sent one after another, each as a frame.
 A frame is an eight-byte header followed by the message:
@@ -34,43 +34,81 @@ The length always takes the four-byte form, even for a short message, so every h
 A reader finds the next frame by them.
 A stream of frames is a CBOR sequence (RFC 8742).
 
-### Requests and responses
+### Request and response
 
-The server answers each request with zero or more [notifications](#notifications) about it, then its response, which is always last.
-Notifications are for long-running methods, such as `image.build` and `sandbox.exec`, to report their progress.
-See [Methods](#methods) for details.
+A request and its response follow JSON-RPC, as [Message](#message) says.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
-    C->>S: request {"id": 7, "method": "task.run"}
-    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "message": "step 1/2"}}
-    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "message": "step 2/2"}}
-    S->>C: response {"id": 7, "result": ...}
-    C->>S: request {"id": 8, "method": "task.list"}
-    S->>C: response {"id": 8, "result": ...}
+    C->>S: request {"id": 1, "method": "task.run", "params": {...}}
+    S->>C: response {"id": 1, "result": {...}}
 ```
 
 A client MAY have many requests in flight at once.
 Responses are matched to requests by `id`, not by order.
 
-### Notifications
+A request too large for one message, or too long to wait on, follows one of the patterns below, and a method that does says which.
 
-While a request runs, the server MAY send its progress, such as a build's output, as `notifications/progress` notifications:
+#### Multi round-trip requests (MRTR)
 
-```text
-{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "message": "pulling alpine:3.20"}}
+A method that takes more than one message can carry SHOULD take it over several requests, rather than holding a session or a stream open for it (reference: [MCP](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr)).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: request {"id": 1, "method": "bigfile.upload", "params": {...}}
+    S->>C: response {"id": 1, "result": {"resultType": "input_required", "state": "Qx7kV2..."}}
+    C->>S: request {"id": 2, "method": "bigfile.upload", "params": {..., "state": "Qx7kV2..."}}
+    S->>C: response {"id": 2, "result": {"resultType": "input_required", "state": "m9fZrT..."}}
+    C->>S: request {"id": 3, "method": "bigfile.upload", "params": {..., "state": "m9fZrT..."}}
+    S->>C: response {"id": 3, "result": {"resultType": "complete", ...}}
 ```
 
-- `requestId` is the `id` of the request the progress is about, exactly as the client sent it. A client tells concurrent requests' progress apart by it, as it does their responses.
-- `message` is a string: one line of the request's log, for a person to read.
-- A client MUST be ready for a request to have no progress, and MAY ignore what it does not want.
+- When the server needs more before it can finish, it answers `resultType: "input_required"`, with a `state`. The client sends the same method again, as a new request with a new `id`, with what the method asks for next and that `state`, exactly as it was given.
+- Each request stands alone: what ties them together is `state`, so the server holds no session for them.
+- `state` is a string only the server reads. A client MUST NOT inspect or change it.
+- A server MUST treat `state` as the client's input, which an attacker may have forged: it MUST protect it from being forged or altered, such as with an HMAC or AEAD, and SHOULD bind into it the credentials it was given to, an expiry, and the request it continues.
+- A `state` that fails the server's check, or has expired, is answered with an error, and the client starts over.
+- What else an `input_required` result carries, and what the client sends next, is the method's.
+
+#### Stream output
+
+While a request runs, the server MAY send notifications about it before its response, such as a build's output.
+They are a live view of the request, for as long as the client holds it open: a client that needs what a request did reads it from its result or its task, not from them.
+The exception is a method whose output is too large for one message, such as `image.export`: it sends that output in its notifications' `data`, and says so.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: request {"id": 7, "method": "bigfile.download"}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 1, "total": 3, "message": "1 of 3 GiB"}}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 2, "total": 3, "message": "2 of 3 GiB"}}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 3, "message": "3 of 3 GiB"}}
+    S->>C: response {"id": 7, "result": ...}
+```
+
+A notification about a request is `notifications/progress`:
+
+```text
+{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 5, "message": "pulling alpine:3.20"}}
+```
+
+- `requestId` is the `id` of the request it is about, exactly as the client sent it. A client tells concurrent requests' notifications apart by it, as it does their responses.
+- `progress` is an unsigned integer, and MUST increase with each notification about one request. What it counts, such as steps or bytes, is the method's.
+- `total` is optional: what `progress` will reach, when that is known.
+- `message` is an optional string: one line of the request's log, for a person to read.
+- `data` is an optional byte string: the next piece of the request's output, for a method that sends its output this way. `progress` then counts bytes, those sent so far including this piece, so a client that sees it differ from what it has received takes the request as failed. Over Streamable HTTP, a client that does not accept `application/cbor-seq` cannot receive it, and the server answers such a method with an error.
+- A request's notifications arrive in the order the server sent them, before its response. A client that sees `progress` fail to increase MAY take the request as failed.
+- A client MUST be ready for a request to have no notifications, and MAY ignore what it does not want.
 - A notification from the client has no `id`, so the server sends no progress about it.
 - The server sends no other notification.
 - Over stdio, progress is written to stdout like any other message. Over Streamable HTTP, it goes in that request's `application/cbor-seq` body.
 
-## stdio
+## Standard IO(stdio) protocol
 
 The client starts the server as a child process.
 
@@ -79,7 +117,7 @@ The client starts the server as a child process.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
 - The client ends the session by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then cancel what is in flight and exit, without waiting for those requests to finish. A client MAY kill a server that has not exited within a time it chooses.
 
-## Streamable HTTP
+## Streamable HTTP protocol
 
 The server offers one HTTP endpoint (for example `https://host/rpc`), and every message is sent to it.
 The endpoint accepts only `POST`.
@@ -88,7 +126,7 @@ Each `POST` stands alone: there are no sessions, so the server keeps nothing bet
 ### Sending a message
 
 1. Every message from the client is a new `POST` to the endpoint, with `Content-Type: application/cbor` and the message, unframed, as the body.
-2. The client MUST send an `Accept` header listing `application/cbor`, and SHOULD also list `application/cbor-seq`. A client that does not list `application/cbor-seq` receives no [notifications](#notifications) over HTTP.
+2. The client MUST send an `Accept` header listing `application/cbor`, and SHOULD also list `application/cbor-seq`. A client that does not list `application/cbor-seq` receives no [notifications](#stream-output) over HTTP.
 3. If the message is a notification, the server answers `202 Accepted` with no body, or an HTTP error status if it does not accept it.
 4. If the message is a request, the server answers `200` with either
    - `Content-Type: application/cbor` and the response, unframed, as the body, or
@@ -96,7 +134,7 @@ Each `POST` stands alone: there are no sessions, so the server keeps nothing bet
 
    It SHOULD use `application/cbor` when it has no notification to send.
 5. An `application/cbor-seq` body ends after the response. A server MUST NOT end it before the response, unless the request was [cancelled](#cancellation).
-6. A dropped connection alone is not a cancellation: the server MAY run the request to its end. To cancel, the client sends `notifications/cancelled`.
+6. A connection closed before the response is a [cancellation](#cancellation) of its request, and the server MUST treat it as one.
 
 ### Authentication
 
@@ -106,21 +144,24 @@ The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bea
 How the client obtains the token is outside this protocol.
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
+### Origin
+
+A web page could reach a server through DNS rebinding, so the server MUST check the `Origin` header of every request.
+It MUST answer `403 Forbidden` to a request whose `Origin` names an origin it does not allow.
+A request with no `Origin`, from any non-browser client, is not refused for that.
+
 ### Local servers
 
 A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface.
-If it takes no credentials, a web page could still reach it through DNS rebinding.
-Such a server SHOULD answer `403 Forbidden` to a request whose `Origin` header names an origin it does not allow.
-A request with no `Origin`, from any non-browser client, is not refused for that.
 
 ## Methods
 
 A method's `params` is a map, and so is its `result` unless the table says otherwise.
 A member marked `?` may be left out.
-Methods marked with ✓ send [notifications](#notifications) while they run.
+The last column names the pattern a method follows, if any: [Stream](#stream-output) sends notifications while it runs, and [MRTR](#multi-round-trip-requests-mrtr) takes several requests.
 Full definitions are in [`src/method/`](src/method/).
 
-### Images
+### Image
 
 An image is named by the digest of its manifest (`algorithm:hex`), and any number of references (`name:tag`) point at one.
 Where a method takes an image, it is `{"type": "reference", "reference": "..."}` or `{"type": "digest", "digest": "..."}`.
@@ -128,11 +169,17 @@ Where a method takes an image, it is `{"type": "reference", "reference": "..."}`
 | Method | Params | Result | |
 | --- | --- | --- | --- |
 | `image.list` | | array of `{reference, digest, size}` | |
-| `image.pull` | `reference` | `{reference, digest}` | ✓ |
-| `image.build` | `recipe`, `reference?` | `{reference, digest}` | ✓ |
-| `image.remove` | `image` | `{}` | |
+| `image.pull` | `reference` | `{digest}` | Stream |
+| `image.build` | `recipe`, `reference` | `{digest}` | Stream |
+| `image.tag` | `image`, `reference` | `{digest}` | |
+| `image.untag` | `reference` | `{}` | |
+| `image.remove` | `digest` | `{}` | |
+| `image.export` | `reference` | `{digest, size}` | Stream |
+| `image.import` | `size`, `reference`, `data`, `state?` | `{resultType: "input_required", state, received, due_time}` or `{resultType: "complete", digest}` | MRTR |
 
-### Snapshots
+An image no reference points at any more is forgotten, whichever method took its last reference.
+
+### Snapshot
 
 A snapshot is the upper layer of a sandbox's root filesystem, kept under a name.
 A sandbox started on one begins with the changes in it, and writes into it.
@@ -142,10 +189,11 @@ A sandbox started on one begins with the changes in it, and writes into it.
 | `snapshot.list` | | array of `{name, size}` | |
 | `snapshot.create` | `name?`, `disk_gib?` | `{name}` | |
 | `snapshot.remove` | `name` | `{}` | |
+| `snapshot.file.stat` | `snapshot`, `path` | metadata | |
 | `snapshot.file.read_dir` | `snapshot`, `path` | array of directory entries | |
 | `snapshot.file.read` | `snapshot`, `path`, `offset`, `length?` | `{data}` | |
 
-### Volumes
+### Volume
 
 A volume is storage kept under a name, apart from any sandbox, and mounted into sandboxes.
 Remote sources, such as S3 or Google Drive, can be mounted at a path inside one.
@@ -167,7 +215,7 @@ Remote sources, such as S3 or Google Drive, can be mounted at a path inside one.
 | `volume.mount.create` | `volume`, `path`, `source` | `{}` | |
 | `volume.mount.remove` | `volume`, `path` | `{}` | |
 
-### Sandboxes
+### Sandbox
 
 A sandbox is a VM booted from an image, optionally on a snapshot, with volumes mounted into it.
 
@@ -175,7 +223,7 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 | --- | --- | --- | --- |
 | `sandbox.list` | | array of `{id, image, snapshot?}` | |
 | `sandbox.init` | `image`, `snapshot?`, `network?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, cwd?}` | |
-| `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | ✓ |
+| `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | Stream |
 | `sandbox.close` | `sandbox` | `{}` | |
 
 `sandbox.exec` sends the command's stdout and stderr as its notifications, a line each, and they are sent nowhere else.
@@ -214,31 +262,26 @@ The server answers with an HTTP error status, and no message, only when it canno
 
 | Status | When |
 | --- | --- |
-| `401 Unauthorized`, `403 Forbidden` | See [Authentication](#authentication) and [Local servers](#local-servers). |
+| `401 Unauthorized`, `403 Forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `405 Method Not Allowed` | The HTTP method is not `POST`. |
 | `413 Content Too Large` | The body is over the server's limit (10 MiB in this implementation). |
 | `500 Internal Server Error` | The server failed before it could answer. |
 
 ## Cancellation
 
-A client MAY cancel a request it sent and has no response to yet, by sending a `notifications/cancelled` notification:
+A client MAY cancel a request it sent and has no response to yet, in the way its [transport](#over-each-transport) gives.
+Only the client cancels. The server never cancels a request this way.
 
-```text
-{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7, "reason": "user interrupted"}}
-```
-
-- `requestId` is the `id` of the request to cancel, exactly as the client sent it.
-- `reason` is an optional string, for a person to read. The server MAY log it.
-- Only the client sends it. The server never cancels a request this way.
-
-Cancellation is for long-running methods, those marked ✓ in [Methods](#methods), such as `image.build` and `sandbox.exec`.
-On receiving it, the server SHOULD stop the request and free what it holds, and SHOULD NOT send its response.
+Cancellation is for long-running methods, those marked Stream in [Methods](#methods), such as `image.build` and `sandbox.exec`.
+On a cancellation, the server SHOULD stop the request and free what it holds, and SHOULD NOT send its response.
 What stopping means for each method:
 
 - `image.pull` and `image.build` leave no reference changed. Layers already fetched or built MAY be kept for reuse.
+- `image.export` changes nothing, and what the client received of the archive is incomplete.
+- `image.import` is long-running only in the request that completes it. Cancelling that one leaves no reference changed; a client stops an import before it by sending no more.
 - `sandbox.exec` kills the command, as its `timeout_ms` does. The sandbox stays.
 
-Once it has sent the notification, the client forgets the request.
+Once it has cancelled the request, the client forgets it.
 It SHOULD ignore any progress or response that still arrives for it.
 
 The server MAY ignore a cancellation:
@@ -252,9 +295,18 @@ A cancelled request MAY therefore still have taken effect: a client that needs t
 
 ### Over each transport
 
-Over stdio, the notification is written to stdin like any other message.
+Over stdio, the client writes a `notifications/cancelled` notification to stdin like any other message:
 
-Over Streamable HTTP, it is a new `POST`, answered `202 Accepted`.
-There is no session to say whose request `requestId` names, so the server matches it only against requests sent with the same credentials, or against all its requests if it takes none.
-A client of a server that takes no credentials SHOULD therefore use ids that other clients will not, such as UUIDs.
-The client SHOULD also close the connection of the request it cancels, and the server then sends nothing more on it.
+```text
+{"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7, "reason": "user interrupted"}}
+```
+
+- `requestId` is the `id` of the request to cancel, exactly as the client sent it.
+- `reason` is an optional string, for a person to read. The server MAY log it.
+
+Over Streamable HTTP, either cancels a request:
+
+- The client closes the request's connection (over HTTP/2 or HTTP/3, only its stream). The server MUST treat the close as a cancellation, and MUST NOT send anything more for that request.
+- The client sends `notifications/cancelled`, as a new `POST` answered `202 Accepted`. MCP defines no notification from the client over Streamable HTTP; this protocol adds it, so a client can cancel a request without closing its connection.
+  There is no session to say whose request `requestId` names, so the server matches it only against requests sent with the same credentials, or against all its requests if it takes none.
+  A client of a server that takes no credentials SHOULD therefore use ids that other clients will not, such as UUIDs.

@@ -7,8 +7,6 @@ pub(crate) mod frame;
 pub mod stdio;
 pub mod streamable_http;
 
-#[cfg(feature = "client")]
-use std::io;
 #[cfg(any(feature = "client", feature = "server"))]
 use std::{future::Future, pin::Pin};
 
@@ -19,7 +17,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Where a client's messages go, and how its session ends.
 pub trait Outgoing: Send {
     /// Send `message`, one JSON-RPC message as CBOR. An `Err` means the server is gone.
-    fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, io::Result<()>>;
+    fn send(&mut self, message: Vec<u8>) -> BoxFuture<'_, std::io::Result<()>>;
 
     /// End the session: nothing is sent after this.
     fn close(self: Box<Self>) -> BoxFuture<'static, ()>;
@@ -29,5 +27,5 @@ pub trait Outgoing: Send {
 /// Where the server's messages to a client come from.
 pub trait Incoming: Send {
     /// The next message. An `Err` ends the session.
-    fn receive(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>>;
+    fn receive(&mut self) -> BoxFuture<'_, std::io::Result<Vec<u8>>>;
 }

@@ -25,8 +25,6 @@ http = { version = "1", optional = true }
 # The Streamable HTTP server: the bodies of the requests and responses it handles.
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-# The Streamable HTTP server's session ids.
-uuid = { version = "1", features = ["v4"], optional = true }
 # `Stream`, which a call's progress is, and the macro that writes one.
 futures-util = { version = "0.3", default-features = false, optional = true }
 async-stream = { version = "0.3", optional = true }
@@ -65,7 +63,6 @@ server = [
     "dep:http",
     "dep:http-body",
     "dep:http-body-util",
-    "dep:uuid",
     "dep:ciborium",
     "dep:tokio",
 ]

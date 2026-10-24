@@ -2,27 +2,24 @@
 
 use std::{io, sync::Arc};
 
-use http::{HeaderValue, StatusCode, header};
-use tokio::sync::{Mutex, mpsc};
+use http::{StatusCode, header};
+use tokio::sync::mpsc;
 
-use super::{CBOR, CBOR_SEQ, SESSION_HEADER, is_media_type};
+use super::{CBOR, CBOR_SEQ, is_media_type};
 use crate::transport::{
     error::transport_error,
     r#impl::{BoxFuture, Incoming, Outgoing, frame::Parser},
     message::Received,
 };
 
-/// Where every message goes, and the session they go in.
+/// Where every message goes.
 struct Endpoint {
     http: reqwest::Client,
     url: reqwest::Url,
-    /// `None` until the first answer names the session. Held across the first `POST`, so no
-    /// second message goes out before there is a session to put it in.
-    session: Mutex<Option<HeaderValue>>,
 }
 
 /// The transport to the endpoint at `url`, an `http` or `https` URL. Nothing is sent until
-/// the first message, which opens the session.
+/// the first message.
 pub fn connect(url: &str) -> anyhow::Result<(Sender, Receiver)> {
     let url = reqwest::Url::parse(url)?;
     anyhow::ensure!(
@@ -32,7 +29,6 @@ pub fn connect(url: &str) -> anyhow::Result<(Sender, Receiver)> {
     let endpoint = Arc::new(Endpoint {
         http: reqwest::Client::new(),
         url,
-        session: Mutex::new(None),
     });
     let (inbox, received) = mpsc::unbounded_channel();
     let sender = Sender { endpoint, inbox };
@@ -61,19 +57,9 @@ impl Outgoing for Sender {
         Box::pin(async { Ok(()) })
     }
 
-    /// End the session with a `DELETE`, if one was opened.
+    /// Nothing to end: the server keeps nothing between `POST`s.
     fn close(self: Box<Self>) -> BoxFuture<'static, ()> {
-        Box::pin(async move {
-            let endpoint = &self.endpoint;
-            if let Some(id) = endpoint.session.lock().await.take() {
-                let _ = endpoint
-                    .http
-                    .delete(endpoint.url.clone())
-                    .header(SESSION_HEADER, id)
-                    .send()
-                    .await;
-            }
-        })
+        Box::pin(async {})
     }
 }
 
@@ -97,24 +83,15 @@ async fn post(
     inbox: &mpsc::UnboundedSender<Vec<u8>>,
     message: &[u8],
 ) -> Result<(), String> {
-    let mut request = endpoint
+    let mut response = endpoint
         .http
         .post(endpoint.url.clone())
         .header(header::CONTENT_TYPE, CBOR)
         .header(header::ACCEPT, format!("{CBOR}, {CBOR_SEQ}"))
-        .body(message.to_owned());
-    let mut session = Some(endpoint.session.lock().await);
-    if let Some(id) = session.as_deref().cloned().flatten() {
-        request = request.header(SESSION_HEADER, id);
-        session = None;
-    }
-
-    let mut response = request.send().await.map_err(|e| format!("{e:#}"))?;
-    if let Some(mut session) = session
-        && let Some(id) = response.headers().get(SESSION_HEADER)
-    {
-        *session = Some(id.clone());
-    }
+        .body(message.to_owned())
+        .send()
+        .await
+        .map_err(|e| format!("{e:#}"))?;
 
     let status = response.status();
     if status == StatusCode::ACCEPTED {

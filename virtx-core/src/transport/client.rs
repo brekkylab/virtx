@@ -161,8 +161,7 @@ impl TransportClient {
     }
 
     /// End the session. Over stdio, close the server's stdin and kill it if it has not exited
-    /// within [`EXIT_GRACE`](stdio::EXIT_GRACE); over Streamable HTTP, `DELETE` the session
-    /// if one was opened.
+    /// within [`EXIT_GRACE`](stdio::EXIT_GRACE); over Streamable HTTP there is nothing to end.
     pub async fn close(self) {
         self.outgoing.into_inner().close().await;
         self.reader.abort();

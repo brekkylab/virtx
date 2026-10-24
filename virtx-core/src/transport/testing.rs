@@ -27,7 +27,7 @@ use crate::{
         SandboxExecOutput, SnapshotFileRead, SnapshotFileReadOutput, VolumeFileRead,
         VolumeFileReadOutput,
     },
-    transport::{ErrorObject, Methods, Notifier, r#impl::streamable_http::SessionId},
+    transport::{ErrorObject, Methods, Notifier},
 };
 
 /// `echo`: answers the text it is given.
@@ -46,15 +46,6 @@ impl Request for Count {
     const NAME: &'static str = "count";
     type Args = (u32,);
     type Output = u32;
-}
-
-/// `session`: answers the id of the Streamable HTTP session the request came in.
-pub struct Session;
-
-impl Request for Session {
-    const NAME: &'static str = "session";
-    type Args = [(); 0];
-    type Output = String;
 }
 
 pub fn methods() -> Methods {
@@ -107,9 +98,6 @@ pub fn methods() -> Methods {
             Ok(SnapshotFileReadOutput {
                 data: own_path(args.path, args.offset, args.length),
             })
-        })
-        .add::<Session, _, _>(|_, extensions| async move {
-            Ok(extensions.get::<SessionId>().expect("a session").0.clone())
         });
     methods
 }

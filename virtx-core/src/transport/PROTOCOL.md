@@ -46,16 +46,20 @@ The client starts the server as a child process.
   text to stderr for a person to read; the client MAY capture, forward or ignore it.
 - A client SHOULD skip stdout bytes outside a frame, rather than end the session over them.
 - The client MUST NOT write anything to the server's stdin that is not a message.
-- The client ends the session by closing the server's stdin, and the server then exits:
-  see [Ending a session](#ending-a-session). A client MAY kill a server that has not exited
-  within a time it chooses.
+- The client ends the session by closing the server's stdin, and the OS closes it for a
+  client whose process ends. The server SHOULD then cancel what is in flight and exit,
+  without waiting for those requests to finish. A client MAY kill a server that has not
+  exited within a time it chooses.
 - Requests may be in flight concurrently; responses are matched to requests by `id`, not by
   order.
 
 ## Streamable HTTP
 
 The server offers one HTTP endpoint (for example `https://host/rpc`), to which every
-message is sent.
+message is sent. Each `POST` stands alone: there are no sessions, so the server keeps
+nothing between them for the transport's sake, and a client MAY have any number of requests
+in flight at once. MCP, by contrast, opens a session with `initialize` and names it in an
+`Mcp-Session-Id` header.
 
 ### Sending a message
 
@@ -71,52 +75,29 @@ message is sent.
    - `Content-Type: application/cbor-seq`, a stream of [frames](#frames) (only to a client
      that listed it).
 5. On a stream, the server sends notifications about the request first, then the response,
-   and then ends the body. A server MUST NOT end the stream before the response unless the
-   session has ended.
-6. A dropped connection is not a cancellation: the server MAY run the request to its end,
-   or until the session ends.
+   and then ends the body. A server MUST NOT end the stream before the response.
+6. A dropped connection is not a cancellation: the server MAY run the request to its end.
 
 The server chooses per request. It SHOULD answer with one message when it has nothing to
 send before the response, so a request with no notifications costs one plain HTTP exchange.
 
-### Sessions
-
-1. A `POST` without a `Virtx-Session-Id` header opens a session: the server's answer carries
-   `Virtx-Session-Id` with the new session's id.
-   - An id is visible ASCII (0x21–0x7E), and SHOULD be unguessable (for example a random
-     UUID).
-2. The client MUST send that header on every later request of the session.
-   - Until the client has the id, it has no session to put a second request in: it MUST
-     NOT send another message until the first is answered.
-3. To a request naming a session it does not have (never opened, ended, or expired), the
-   server answers `404 Not Found`. The client MUST NOT reuse that id.
-4. The client ends a session with a `DELETE` to the endpoint carrying its
-   `Virtx-Session-Id`. The server answers `204 No Content`, or `404` if there was no such
-   session.
-5. A server MAY also end a session the client has left idle: see
-   [Ending a session](#ending-a-session).
-
-Unlike MCP, opening a session is not tied to an `initialize` method: any first request
-opens one, since this protocol has no handshake method.
-
 ### Other methods
 
-A `GET` to the endpoint is answered `405 Method Not Allowed`. MCP uses `GET` for a stream
-the server sends unprompted messages on, and for resuming a stream; this protocol has
-neither yet.
+Any other method to the endpoint is answered `405 Method Not Allowed`, with `Allow: POST`.
+MCP uses `GET` for a stream the server sends unprompted messages on, and for resuming a
+stream, and `DELETE` to end a session; this protocol has none of them.
 
 ### Security
 
-- A server MUST answer `403 Forbidden` to a request whose `Origin` header names an origin
-  it does not allow, so a web page cannot reach a server on the user's machine through the
-  user's browser. A request with no `Origin` (any non-browser client) is not refused for
-  that.
+- A server a browser can reach (on the user's machine or their network) and that takes no
+  credentials SHOULD answer `403 Forbidden` to a request whose `Origin` header names an
+  origin it does not allow, so a web page cannot reach it through DNS rebinding. A request
+  with no `Origin` (any non-browser client) is not refused for that. A server that requires
+  credentials needs no such check: the page has none to send.
 - A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface.
-- A server MAY require credentials, in headers such as `Authorization`, both to open a
-  session and on every later request in it. It answers `401 Unauthorized` to a request
-  without them and `403 Forbidden` to one whose credentials may not open the session or act
-  in it. A refused opening opens no session, and a refused request in a session, a `DELETE`
-  included, leaves the session as it was.
+- A server MAY require credentials on every request, in headers such as `Authorization`.
+  It answers `401 Unauthorized` to a request without them and `403 Forbidden` to one whose
+  credentials may not make it.
 
 ## Notifications
 
@@ -137,43 +118,16 @@ While a request runs, the server MAY send its progress, such as a build's output
 - Over Streamable HTTP, progress goes on that request's stream, before its response.
 - Over stdio, it is written to stdout between responses, as any message is.
 
-## Ending a session
-
-A session ends when the client ends it, or when the client is gone without ending it: it
-exited, crashed, or was killed. Either way nothing will read what the session's requests
-answer, so when a session ends the server SHOULD cancel the requests still running in it and
-release what the session holds.
-
-How the server learns that a session has ended depends on the transport:
-
-| | The client ends it | The client is gone |
-|---|---|---|
-| stdio | It closes the server's stdin. | The OS closes the server's stdin as the client's process ends. |
-| Streamable HTTP | It sends `DELETE`. | Nothing tells the server. |
-
-- **stdio.** End of input on stdin is the end of the session, whichever way it came. The
-  server SHOULD then cancel what is in flight and exit, without waiting for those requests
-  to finish.
-- **Streamable HTTP.** A dropped connection is not a sign that the client is gone (it may
-  reconnect), so a server learns of a client that left without a `DELETE` only by its
-  silence. A server SHOULD end a session that has been idle (no request in flight and none
-  received) for longer than a time it chooses, and from then on answer that session's id
-  with `404`. A client MUST be ready for a session to end that way.
-
 ## Open questions
 
 - **Resuming a stream.** MCP lets a server put an `id` on each SSE event, and a client that
   lost the stream `GET` the endpoint with `Last-Event-ID` to have the rest of it replayed.
   A stream of frames has no ids, so a client that loses one loses the rest of it.
-- **Cancellation.** Ending the session cancels its requests, but a client cannot yet cancel
-  one request and keep the session. MCP has a `notifications/cancelled`, which names the
-  request by its `requestId` as progress does here.
+- **Cancellation.** A client cannot cancel one request: over stdio it can only end the
+  session, which cancels them all, and over Streamable HTTP not even that. MCP has a
+  `notifications/cancelled`, which names the request by its `requestId` as progress does
+  here.
 - **Asking for no progress.** A server sends a request's progress whether or not the client
   wants it. MCP sends it only to a request carrying a `progressToken`.
 - **Version.** Nothing yet tells a server which version of this protocol a client speaks.
   MCP sends `MCP-Protocol-Version` on every HTTP request.
-- **What a session holds**, and so what ending one releases.
-- **How long an idle session lives.** The server chooses for now, and a client cannot ask
-  for longer or learn the time; a client that idles past it loses the session. A fixed
-  minimum, a header that states the time, or a method that keeps a session alive would
-  each settle it.

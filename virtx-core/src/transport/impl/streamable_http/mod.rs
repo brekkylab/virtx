@@ -4,7 +4,7 @@
 //!
 //! [`Server`] is the server's end; the client's is
 //! [`connect`].
-//! Both keep to the "Streamable HTTP" section of `PROTOCOL.md`, including its session header.
+//! Both keep to the "Streamable HTTP" section of `PROTOCOL.md`.
 
 #[cfg(feature = "client")]
 mod client;
@@ -14,10 +14,7 @@ mod server;
 #[cfg(feature = "client")]
 pub use client::{Receiver, Sender, connect};
 #[cfg(feature = "server")]
-pub use server::{HttpBody, Server, SessionId, Sessions};
-
-/// The header a session's id travels in, both ways.
-pub const SESSION_HEADER: &str = "virtx-session-id";
+pub use server::{HttpBody, Server};
 
 /// The media type of one message.
 const CBOR: &str = "application/cbor";

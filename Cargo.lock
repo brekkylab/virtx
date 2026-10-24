@@ -2624,7 +2624,6 @@ dependencies = [
  "reqwest",
  "serde",
  "tokio",
- "uuid",
 ]
 
 [[package]]

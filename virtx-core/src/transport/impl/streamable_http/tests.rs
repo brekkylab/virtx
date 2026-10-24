@@ -18,9 +18,10 @@ use crate::transport::{
 /// A [`Server`] on localhost, serving `echo`, `count` (which sends progress before it
 /// answers) and `session` (which answers the request's session id).
 async fn serve() -> String {
-    let server = Server::with_origins(
+    let server = Server::new(
         Dispatcher::new(methods()),
         vec!["https://allowed.example".into()],
+        (),
     );
     mount(server).await
 }
@@ -92,12 +93,13 @@ async fn serve_tokens() -> (String, Arc<Mutex<Vec<String>>>) {
         users: vec!["alice", "bob"],
         closed: closed.clone(),
     };
-    let server = Server::with_sessions(Dispatcher::new(methods), Vec::new(), sessions);
+    let server = Server::new(Dispatcher::new(methods), Vec::new(), sessions);
     (mount(server).await, closed)
 }
 
 /// `server` on localhost, at the URL answered.
 async fn mount(server: Server) -> String {
+    let server = Arc::new(server);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/rpc", listener.local_addr().unwrap());
     let router = axum::Router::new().route(

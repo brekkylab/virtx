@@ -12,11 +12,39 @@ export function load(file: string): void
 /** The path the open library was opened by; `null` before the first client or `load`. */
 export function libraryPath(): string | null
 
-/** An image, as the wire names one. */
-export type ImageName = { type: 'reference'; reference: string } | { type: 'digest'; digest: string }
+/** An image by a reference to it, as `name:tag`. */
+export interface ImageReference {
+  type: 'reference'
+  reference: string
+}
+
+/** An image by the digest of its manifest, as `algorithm:hex`. */
+export interface ImageDigest {
+  type: 'digest'
+  digest: string
+}
+
+/** An image, by a reference to it or by its digest. */
+export type ImageName = ImageReference | ImageDigest
 
 /** A full `sha256:` or `sha512:` digest is a digest, any other string a reference. */
 export function imageName(image: string | ImageName): ImageName
+
+/** A username, and a password or an access token the registry takes in its place. */
+export interface BasicAuth {
+  type: 'basic'
+  username: string
+  password: string
+}
+
+/** A token the registry takes as is. */
+export interface BearerAuth {
+  type: 'bearer'
+  token: string
+}
+
+/** Credentials for a remote image registry. */
+export type RegistryAuth = BasicAuth | BearerAuth
 
 export type Step = { run: string } | { env: { key: string; value: string } } | { workdir: string }
 
@@ -34,20 +62,33 @@ export class Recipe {
   toJSON(): { v: 1; base: string; steps: Step[] }
 }
 
-/** A line of a request's log, then what it answered. */
-export type Event<T> = { progress: string } | { output: T }
+/** A notification about a request: how far it has got, what that will reach when known, and its `content`, if it sent one, such as a line of its log. */
+export interface Progress<C> {
+  progress: number
+  total?: number
+  content?: C
+}
 
-export interface ImageListItem {
+/** Each of a request's notifications, then what it answered. */
+export type Event<T, C> = { progress: Progress<C> } | { output: T }
+
+/** One reference the server holds. Two references to one image are two items with the same digest. */
+export interface ImageListOutputItem {
+  /** As `name:tag`. */
   reference: string
+  /** The digest of the image's manifest, as `algorithm:hex`. */
   digest: string
+  /** The bytes the image's layers take on the server, counting a layer shared with another image in both. */
   size: number
 }
 
 export interface ImagePullOutput {
+  /** The digest of the image's manifest, as `algorithm:hex`. */
   digest: string
 }
 
 export interface ImageBuildOutput {
+  /** The digest of the image's manifest, as `algorithm:hex`. */
   digest: string
 }
 
@@ -56,33 +97,68 @@ export interface SnapshotListItem {
   size: number
 }
 
-export interface VolumeListItem {
+export interface VolumeListOutputItem {
   name: string
+  /** The bytes the volume's files take on the server. */
   size: number
 }
 
+export interface VolumeCreateOutput {
+  /** The one asked for, or the one the server picked. */
+  name: string
+}
+
+/** What a path in a volume is. */
+export type FileType = 'file' | 'dir'
+
+/** A path's type, size and modification time. */
 export interface Metadata {
-  type: 'file' | 'dir'
+  type: FileType
+  /** The file's length in bytes; for a directory, what the server's filesystem reports. */
   size: number
-  /** Nanoseconds since the Unix epoch. */
+  /** When the contents last changed, in nanoseconds since the Unix epoch. */
   modified: number
 }
 
+/** One entry of a directory: its name within the directory, and its metadata. */
 export interface DirEntry {
   name: string
   metadata: Metadata
 }
 
+/** A mount source's type, without its credentials. */
 export type MountType = 'notion' | 'gdrive' | 'onedrive'
 
-export type MountSource =
-  | { type: 'notion'; apiKey: string }
-  | { type: 'gdrive'; clientId: string; clientSecret: string; refreshToken: string }
-  | { type: 'onedrive'; clientId: string; clientSecret?: string; refreshToken: string }
+/** The pages a Notion integration can reach. */
+export interface NotionSource {
+  type: 'notion'
+  apiKey: string
+}
 
-export interface VolumeMountListItem {
+/** A Google Drive. */
+export interface GdriveSource {
+  type: 'gdrive'
+  clientId: string
+  clientSecret: string
+  refreshToken: string
+}
+
+/** A OneDrive. `clientSecret` is for a confidential app; a public one, as a personal account's usually is, has none. */
+export interface OnedriveSource {
+  type: 'onedrive'
+  clientId: string
+  clientSecret?: string
+  refreshToken: string
+}
+
+/** What a mount shows, and the credentials to reach it. */
+export type MountSource = NotionSource | GdriveSource | OnedriveSource
+
+/** One mount in a volume. Its credentials are not answered. */
+export interface VolumeMountListOutputItem {
+  /** Where it is mounted. */
   path: string
-  mount_type: MountType
+  mountType: MountType
 }
 
 export interface SandboxListItem {
@@ -145,17 +221,17 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  listImage(): Promise<ImageListItem[]>
-  pullImage(reference: string): AsyncGenerator<Event<ImagePullOutput>>
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput>>
+  listImage(): Promise<ImageListOutputItem[]>
+  pullImage(reference: string): AsyncGenerator<Event<ImagePullOutput, string>>
+  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput, string>>
   removeImage(digest: string): Promise<void>
   listSnapshot(): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>
   readSnapshotDir(snapshot: string, path: string): Promise<DirEntry[]>
   readSnapshotFile(snapshot: string, path: string, offset?: number, length?: number): Promise<Uint8Array>
-  listVolume(): Promise<VolumeListItem[]>
-  createVolume(name?: string): Promise<{ name: string }>
+  listVolume(): Promise<VolumeListOutputItem[]>
+  createVolume(name?: string): Promise<VolumeCreateOutput>
   removeVolume(name: string): Promise<void>
   statVolumeFile(volume: string, path: string): Promise<Metadata>
   readVolumeDir(volume: string, path: string): Promise<DirEntry[]>
@@ -167,12 +243,12 @@ export class Client {
   removeVolumeFile(volume: string, path: string, recursive?: boolean): Promise<void>
   renameVolumeFile(volume: string, from: string, to: string, overwrite?: boolean): Promise<void>
   copyVolumeFile(volume: string, from: string, to: string, overwrite?: boolean): Promise<void>
-  listVolumeMount(volume: string): Promise<VolumeMountListItem[]>
+  listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
   createVolumeMount(volume: string, path: string, source: MountSource): Promise<void>
   removeVolumeMount(volume: string, path: string): Promise<void>
   listSandbox(): Promise<SandboxListItem[]>
   initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
   /** Killed after `timeoutMs` if one is given. */
-  execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }>>
+  execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }, string>>
   closeSandbox(sandbox: string): Promise<void>
 }

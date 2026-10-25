@@ -23,7 +23,7 @@ use crate::transport::{
 };
 use crate::{
     image::{ImageBuild, ImageBuildOutput, ImagePull, ImagePullOutput},
-    method::Request,
+    method::{Progress, Request, StreamingRequest},
     sandbox::{SandboxExec, SandboxExecOutput},
     snapshot::{SnapshotFileRead, SnapshotFileReadOutput},
     transport::{ErrorObject, Methods, Notifier},
@@ -39,13 +39,27 @@ impl Request for Echo {
     type Output = String;
 }
 
-/// `count`: sends 1 up to the number it is given as its progress, then answers it.
+/// `count`: sends 1 up to the number it is given as its progress, that number its total and
+/// no content, then answers it.
 pub struct Count;
 
 impl Request for Count {
     const NAME: &'static str = "count";
     type Args = (u32,);
     type Output = u32;
+}
+
+impl StreamingRequest for Count {
+    type Content = String;
+}
+
+/// The `n`th line of a log.
+fn line(n: u64, line: String) -> Progress<String> {
+    Progress {
+        progress: n,
+        total: None,
+        content: Some(line),
+    }
 }
 
 pub fn methods() -> Methods {
@@ -55,14 +69,18 @@ pub fn methods() -> Methods {
         .add::<Count, _, _>(|(to,), extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");
             for i in 1..=to {
-                notifier.progress(i.to_string());
+                notifier.notify::<Count>(Progress {
+                    progress: i.into(),
+                    total: Some(to.into()),
+                    content: None,
+                });
                 tokio::task::yield_now().await;
             }
             Ok(to)
         })
         .add::<ImagePull, _, _>(|args, extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");
-            notifier.progress(format!("pulling {}", args.reference));
+            notifier.notify::<ImagePull>(line(1, format!("pulling {}", args.reference)));
             if args.reference == "missing" {
                 return Err(ErrorObject::new(1, format!("no image {}", args.reference)));
             }
@@ -73,7 +91,7 @@ pub fn methods() -> Methods {
         .add::<ImageBuild, _, _>(|args, extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");
             let base = &args.recipe.base;
-            notifier.progress(format!("pulling {base}"));
+            notifier.notify::<ImageBuild>(line(1, format!("pulling {base}")));
             if base == "missing" {
                 return Err(ErrorObject::new(1, format!("no image {base}")));
             }
@@ -83,8 +101,7 @@ pub fn methods() -> Methods {
         })
         .add::<SandboxExec, _, _>(|args, extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");
-            let line = args.cmd[1..].join(" ");
-            notifier.progress(line);
+            notifier.notify::<SandboxExec>(line(1, args.cmd[1..].join(" ")));
             Ok(SandboxExecOutput { code: 0 })
         })
         .add::<VolumeFileRead, _, _>(|args, _| async move {

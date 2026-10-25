@@ -7,7 +7,7 @@ const { Client, Recipe } = require('@brekkylab/virtx')
 
 const client = Client.spawn('virtx-server')
 for await (const event of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
-  if ('progress' in event) console.log(event.progress)
+  if ('progress' in event) console.log(event.progress.content)
   else console.log('built', event.output.digest)
 }
 await client.close()

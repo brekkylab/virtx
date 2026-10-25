@@ -98,14 +98,18 @@ pub(crate) struct Notification<P> {
 /// The notification a server sends a request's progress in.
 pub(crate) const PROGRESS: &str = "notifications/progress";
 
-/// The params of a [`PROGRESS`] notification.
+/// The params of a [`PROGRESS`] notification: a [`method::Progress`](crate::method::Progress)
+/// and the request it is about.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Progress {
+pub(crate) struct ProgressParams<C> {
     /// The `id` of the request this is about, as the client sent it.
     #[serde(rename = "requestId")]
     pub request_id: Value,
-    /// One line of the request's log, for a person to read.
-    pub message: String,
+    pub progress: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<C>,
 }
 
 /// The response to the request `id`: its result, or why it failed.

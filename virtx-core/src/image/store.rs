@@ -12,7 +12,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::{ImageName, Recipe, RegistryAuth};
-use crate::method::{Request, RoundTrip};
+use crate::method::{Request, RoundTrip, StreamingRequest};
 
 /// `image.list`: every reference the server holds, and the image each points at.
 pub struct ImageList;
@@ -53,6 +53,11 @@ impl Request for ImagePull {
     type Output = ImagePullOutput;
 }
 
+impl StreamingRequest for ImagePull {
+    /// A line of the pull's log.
+    type Content = String;
+}
+
 /// What `image.pull` takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +86,11 @@ impl Request for ImageBuild {
     const NAME: &'static str = "image.build";
     type Args = ImageBuildArgs;
     type Output = ImageBuildOutput;
+}
+
+impl StreamingRequest for ImageBuild {
+    /// A line of the build's log.
+    type Content = String;
 }
 
 /// What `image.build` takes.
@@ -186,6 +196,12 @@ impl Request for ImageExport {
     const NAME: &'static str = "image.export";
     type Args = ImageExportArgs;
     type Output = ImageExportOutput;
+}
+
+impl StreamingRequest for ImageExport {
+    /// The next piece of the archive; `progress` counts the bytes sent so far, `total` the
+    /// archive's length.
+    type Content = Bytes;
 }
 
 /// What `image.export` takes.

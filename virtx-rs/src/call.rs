@@ -72,23 +72,24 @@ impl<T> Drop for Call<T> {
     }
 }
 
-/// A request that answers item by item: its progress, a line each, then its output, a `T`,
-/// or the error it failed with. It runs from when it is made; dropping it cancels it.
+/// A request that answers item by item: its progress, each with a `C` as its content, then
+/// its output, a `T`, or the error it failed with. It runs from when it is made; dropping it
+/// cancels it.
 #[must_use = "a call dropped is cancelled"]
-pub struct Events<T> {
+pub struct Events<T, C> {
     api: &'static Api,
     stream: *mut Opaque,
-    output: PhantomData<fn() -> T>,
+    output: PhantomData<fn() -> (T, C)>,
 }
 
 // As `Call`.
-unsafe impl<T> Send for Events<T> {}
-unsafe impl<T> Sync for Events<T> {}
+unsafe impl<T, C> Send for Events<T, C> {}
+unsafe impl<T, C> Sync for Events<T, C> {}
 
-impl<T> Unpin for Events<T> {}
+impl<T, C> Unpin for Events<T, C> {}
 
-impl<T: DeserializeOwned> Events<T> {
-    pub(crate) fn new(api: &'static Api, stream: *mut Opaque) -> Events<T> {
+impl<T: DeserializeOwned, C: DeserializeOwned> Events<T, C> {
+    pub(crate) fn new(api: &'static Api, stream: *mut Opaque) -> Events<T, C> {
         Events {
             api,
             stream,
@@ -98,7 +99,7 @@ impl<T: DeserializeOwned> Events<T> {
 
     /// Block this thread until the next item, or `None` once there is none, for a caller
     /// without an async runtime.
-    pub fn wait_next(&mut self) -> Option<Result<Event<T>, Error>> {
+    pub fn wait_next(&mut self) -> Option<Result<Event<T, C>, Error>> {
         let mut out = VirtxBytes::empty();
         let status = unsafe { (self.api.virtx_stream_wait_next)(self.stream, &mut out) };
         match status {
@@ -108,8 +109,8 @@ impl<T: DeserializeOwned> Events<T> {
     }
 }
 
-impl<T: DeserializeOwned> Stream for Events<T> {
-    type Item = Result<Event<T>, Error>;
+impl<T: DeserializeOwned, C: DeserializeOwned> Stream for Events<T, C> {
+    type Item = Result<Event<T, C>, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut out = VirtxBytes::empty();
@@ -122,7 +123,7 @@ impl<T: DeserializeOwned> Stream for Events<T> {
     }
 }
 
-impl<T> Drop for Events<T> {
+impl<T, C> Drop for Events<T, C> {
     fn drop(&mut self) {
         unsafe { (self.api.virtx_stream_free)(self.stream) };
     }

@@ -3,7 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{image::ImageName, method::Request};
+use crate::{
+    image::ImageName,
+    method::{Request, StreamingRequest},
+};
 
 /// `sandbox.list`: every sandbox the server holds, up to its `sandbox.close`.
 pub struct SandboxList;
@@ -191,6 +194,11 @@ impl Request for SandboxExec {
     const NAME: &'static str = "sandbox.exec";
     type Args = SandboxExecArgs;
     type Output = SandboxExecOutput;
+}
+
+impl StreamingRequest for SandboxExec {
+    /// A line of the command's output.
+    type Content = String;
 }
 
 /// What `sandbox.exec` takes. It runs in the sandbox's current directory, with no stdin.

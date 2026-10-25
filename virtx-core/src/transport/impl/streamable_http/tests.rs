@@ -9,7 +9,7 @@ use http::{HeaderMap, StatusCode};
 use tokio::{net::TcpListener, task::JoinSet};
 
 use super::*;
-use crate::method::Request;
+use crate::method::{Progress, Request};
 use crate::transport::{
     Dispatcher, Event, TransportClient, r#impl::frame::Parser, testing::methods,
 };
@@ -127,16 +127,16 @@ async fn a_client_receives_progress_over_the_stream() {
     tokio::spawn(async move { axum::serve(listener, router).await });
     let client = connect(&url);
     let events: Vec<_> = client
-        .request_with_progress::<u32>("count", [3])
+        .request_with_progress::<u32, String>("count", [3])
         .map(Result::unwrap)
         .collect()
         .await;
     assert_eq!(
         events,
         [
-            Event::Progress("1".into()),
-            Event::Progress("2".into()),
-            Event::Progress("3".into()),
+            Event::Progress(count(1, 3)),
+            Event::Progress(count(2, 3)),
+            Event::Progress(count(3, 3)),
             Event::Output(3)
         ]
     );
@@ -234,19 +234,19 @@ async fn a_request_with_notifications_answers_a_stream_ending_in_its_response() 
     let messages: Vec<Value> = std::iter::from_fn(|| parser.next_message())
         .map(|message| ciborium::from_reader(&message[..]).unwrap())
         .collect();
-    let progress = |message| {
+    let progress = |progress| {
         cbor!({
             "jsonrpc" => "2.0",
             "method" => "notifications/progress",
-            "params" => {"requestId" => 1, "message" => message},
+            "params" => {"requestId" => 1, "progress" => progress, "total" => 2},
         })
         .unwrap()
     };
     assert_eq!(
         messages,
         [
-            progress("1"),
-            progress("2"),
+            progress(1),
+            progress(2),
             cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => 2}).unwrap(),
         ]
     );
@@ -430,5 +430,14 @@ async fn what_middleware_puts_in_a_request_reaches_its_method() {
             answer,
             cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => name}).unwrap()
         );
+    }
+}
+
+/// What `count` sends as its `n`th progress, counting to `to`.
+fn count(n: u32, to: u32) -> Progress<String> {
+    Progress {
+        progress: n.into(),
+        total: Some(to.into()),
+        content: None,
     }
 }

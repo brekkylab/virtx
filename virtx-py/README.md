@@ -10,10 +10,10 @@ async def main():
     with Client.spawn("virtx-server") as client:
         async for event in client.build_image(Recipe("alpine:3.20").run("apk add jq"), "jq:latest"):
             match event:
-                case Progress(line):
+                case Progress(content=line):
                     print(line)
                 case Output(built):
-                    print("built", built["digest"])
+                    print("built", built.digest)
 
 asyncio.run(main())
 ```

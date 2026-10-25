@@ -7,8 +7,8 @@ use http::Extensions;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
-use super::message::{ErrorObject, Notification, PROGRESS, Progress, Received, response};
-use crate::method::Request;
+use super::message::{ErrorObject, Notification, PROGRESS, ProgressParams, Received, response};
+use crate::method::{Progress, Request, StreamingRequest};
 
 /// Where a method sends the progress of the request it is answering: the request's streamed
 /// answer over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every request,
@@ -29,19 +29,21 @@ impl Notifier {
         }
     }
 
-    /// Send `line`, one line of this request's log, as a [`PROGRESS`] notification. False if
+    /// Send `progress` about this request, an `R`, as a [`PROGRESS`] notification. False if
     /// nothing will read it: the message was a notification, or the client took no stream, or
     /// is gone.
-    pub fn progress(&self, line: impl Into<String>) -> bool {
+    pub fn notify<R: StreamingRequest>(&self, progress: Progress<R::Content>) -> bool {
         let Some(request_id) = self.request_id.clone() else {
             return false;
         };
         let notification = Notification {
             jsonrpc: "2.0",
             method: PROGRESS,
-            params: Progress {
+            params: ProgressParams {
                 request_id,
-                message: line.into(),
+                progress: progress.progress,
+                total: progress.total,
+                content: progress.content,
             },
         };
         let mut bytes = Vec::new();
@@ -246,15 +248,15 @@ mod tests {
             answer,
             Some(cbor!({"jsonrpc" => "2.0", "id" => "a", "result" => 2}).unwrap())
         );
-        let progress = |message| {
+        let progress = |progress| {
             cbor!({
                 "jsonrpc" => "2.0",
                 "method" => "notifications/progress",
-                "params" => {"requestId" => "a", "message" => message},
+                "params" => {"requestId" => "a", "progress" => progress, "total" => 2},
             })
             .unwrap()
         };
-        assert_eq!(sent, [progress("1"), progress("2")]);
+        assert_eq!(sent, [progress(1), progress(2)]);
     }
 
     #[tokio::test]

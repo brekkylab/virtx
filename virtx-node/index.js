@@ -372,7 +372,9 @@ class Client {
     const bytes = encode(args)
     const handle = this._lib[name](this._held(), bytes, bytes.length)
     for await (const item of this._lib.items(handle)) {
-      yield 'progress' in item ? { progress: item.progress } : { output: rekey(item.output, camel) }
+      yield 'progress' in item
+        ? { progress: rekey(item.progress, camel) }
+        : { output: rekey(item.output, camel) }
     }
   }
 

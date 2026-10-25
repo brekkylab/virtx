@@ -113,7 +113,7 @@ impl Client {
 
     /// Pull `reference` from its registry, and point it at what it pulls. Its events are the
     /// pull's log, then what it pulled.
-    pub fn pull_image(&self, reference: impl Into<String>) -> Events<ImagePullOutput> {
+    pub fn pull_image(&self, reference: impl Into<String>) -> Events<ImagePullOutput, String> {
         let args = ImagePullArgs {
             reference: reference.into(),
             auth: None,
@@ -127,7 +127,7 @@ impl Client {
         &self,
         recipe: Recipe,
         reference: impl Into<String>,
-    ) -> Events<ImageBuildOutput> {
+    ) -> Events<ImageBuildOutput, String> {
         let args = ImageBuildArgs {
             recipe,
             reference: reference.into(),
@@ -412,7 +412,7 @@ impl Client {
         sandbox: impl Into<String>,
         cmd: impl IntoIterator<Item = impl Into<String>>,
         timeout_ms: Option<u64>,
-    ) -> Events<SandboxExecOutput> {
+    ) -> Events<SandboxExecOutput, String> {
         let args = SandboxExecArgs {
             sandbox: sandbox.into(),
             cmd: cmd.into_iter().map(Into::into).collect(),

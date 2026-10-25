@@ -5,24 +5,46 @@ from __future__ import annotations
 import asyncio
 import atexit
 import ctypes
-import re
 import weakref
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import cbor2
 
 from ._library import OK, Library, VirtxError, _Bytes, library
+from .image import (
+    ImageBuildOutput,
+    ImageListOutputItem,
+    ImageName,
+    ImagePullOutput,
+    Recipe,
+    image_name,
+)
+from .volume import (
+    DirEntry,
+    Metadata,
+    MountSource,
+    VolumeCreateOutput,
+    VolumeListOutputItem,
+    VolumeMountListOutputItem,
+)
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 T = TypeVar("T")
+C = TypeVar("C")
 
 
 @dataclass(frozen=True)
-class Progress:
-    """A line of a request's log: a build's, or a command's output."""
+class Progress(Generic[C]):
+    """A notification about a request: how far it has got, what that will reach when known, and
+    its ``content``, if it sent one, such as a line of its log."""
 
-    message: str
+    progress: int
+    total: int | None = None
+    content: C | None = None
 
 
 @dataclass(frozen=True)
@@ -32,48 +54,7 @@ class Output(Generic[T]):
     value: T
 
 
-Event = Progress | Output[T]
-
-
-class Recipe:
-    """A base and the steps over it, which the server builds: ``Recipe("alpine:3.20").run("apk
-    add jq")``. Each step returns the recipe, so they chain."""
-
-    def __init__(self, base: str, steps: Iterable[Mapping[str, Any]] = ()) -> None:
-        self.base = base
-        self.steps: list[Mapping[str, Any]] = list(steps)
-
-    def run(self, command: str) -> Recipe:
-        """A command, run through ``sh -c`` with every earlier ``env``."""
-        self.steps.append({"run": command})
-        return self
-
-    def env(self, key: str, value: str) -> Recipe:
-        """A variable for every later ``run`` and the built image's config."""
-        self.steps.append({"env": {"key": key, "value": value}})
-        return self
-
-    def workdir(self, directory: str) -> Recipe:
-        """Where later steps run, and the built image's working directory."""
-        self.steps.append({"workdir": directory})
-        return self
-
-    def to_dict(self) -> dict[str, Any]:
-        """As the wire has it."""
-        return {"v": 1, "base": self.base, "steps": list(self.steps)}
-
-
-_DIGEST = re.compile(r"(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})")
-
-
-def image_name(image: str | Mapping[str, Any]) -> Mapping[str, Any]:
-    """``image`` as the wire names one: a full ``sha256:`` or ``sha512:`` digest is a digest, any
-    other string a reference. A mapping is taken as already named."""
-    if not isinstance(image, str):
-        return image
-    if _DIGEST.fullmatch(image):
-        return {"type": "digest", "digest": image}
-    return {"type": "reference", "reference": image}
+Event = Output[T] | Progress[C]
 
 
 def _args(**args: Any) -> bytes:
@@ -81,10 +62,11 @@ def _args(**args: Any) -> bytes:
     return cbor2.dumps({key: value for key, value in args.items() if value is not None})
 
 
-def _event(item: Mapping[str, Any]) -> Event[Any]:
+def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]:
     if "progress" in item:
-        return Progress(item["progress"])
-    return Output(item["output"])
+        progress = item["progress"]
+        return Progress(progress["progress"], progress.get("total"), progress.get("content"))
+    return Output(output(item["output"]))
 
 
 # Every client not yet closed, closed at exit: a hold left to the interpreter's teardown would
@@ -177,13 +159,13 @@ class Client:
         """``close``, off the event loop's thread."""
         await asyncio.to_thread(self.close)
 
-    def __enter__(self) -> Client:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    async def __aenter__(self) -> Client:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -204,28 +186,36 @@ class Client:
         handle = start(raw) if args is None else start(raw, args, len(args))
         return await self._lib.answer(handle)
 
-    async def _events(self, name: str, args: bytes) -> AsyncIterator[Event[Any]]:
+    async def _events(
+        self, name: str, args: bytes, output: Callable[[Any], T]
+    ) -> AsyncIterator[Event[T, Any]]:
         handle = getattr(self._lib, name)(self._held(), args, len(args))
         async for item in self._lib.items(handle):
-            yield _event(item)
+            yield _event(item, output)
 
-    async def list_image(self) -> list[dict[str, Any]]:
-        """Every reference the server holds, and the image each points at, as
-        ``{"reference", "digest", "size"}``."""
-        return await self._call("virtx_client_list_image")
+    async def list_image(self) -> list[ImageListOutputItem]:
+        """Every reference the server holds, and the image each points at."""
+        items = await self._call("virtx_client_list_image")
+        return [ImageListOutputItem.from_dict(item) for item in items]
 
-    def pull_image(self, reference: str) -> AsyncIterator[Event[dict[str, Any]]]:
+    def pull_image(self, reference: str) -> AsyncIterator[Event[ImagePullOutput, str]]:
         """Pull ``reference`` from its registry, and point it at what it pulls. Its events are
-        the pull's log, then what it pulled, ``{"digest"}``."""
-        return self._events("virtx_client_pull_image", _args(reference=reference))
+        the pull's log, then what it pulled."""
+        return self._events(
+            "virtx_client_pull_image", _args(reference=reference), ImagePullOutput.from_dict
+        )
 
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str
-    ) -> AsyncIterator[Event[dict[str, Any]]]:
+    ) -> AsyncIterator[Event[ImageBuildOutput, str]]:
         """Build ``recipe``, and point ``reference`` at it. Its events are the build's log, then
-        what it built, ``{"digest"}``."""
+        what it built."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
-        return self._events("virtx_client_build_image", _args(recipe=recipe, reference=reference))
+        return self._events(
+            "virtx_client_build_image",
+            _args(recipe=recipe, reference=reference),
+            ImageBuildOutput.from_dict,
+        )
 
     async def remove_image(self, digest: str) -> None:
         """Forget the image ``digest`` names, as ``algorithm:hex``, and every reference pointing
@@ -241,20 +231,19 @@ class Client:
     ) -> dict[str, Any]:
         """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
         without either the server picks it. Answers ``{"name"}``."""
-        return await self._call(
-            "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
-        )
+        return await self._call("virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib))
 
     async def remove_snapshot(self, name: str) -> None:
         """Delete the snapshot ``name`` and its upper layer."""
         await self._call("virtx_client_remove_snapshot", _args(name=name))
 
-    async def read_snapshot_dir(self, snapshot: str, path: str) -> list[dict[str, Any]]:
-        """The entries of the directory ``path`` in ``snapshot``'s upper layer, in no set order,
-        as ``{"name", "metadata"}``; the image under it is not looked at."""
-        return await self._call(
+    async def read_snapshot_dir(self, snapshot: str, path: str) -> list[DirEntry]:
+        """The entries of the directory ``path`` in ``snapshot``'s upper layer, in no set order;
+        the image under it is not looked at."""
+        entries = await self._call(
             "virtx_client_read_snapshot_dir", _args(snapshot=snapshot, path=path)
         )
+        return [DirEntry.from_dict(entry) for entry in entries]
 
     async def read_snapshot_file(
         self, snapshot: str, path: str, offset: int = 0, length: int | None = None
@@ -266,28 +255,31 @@ class Client:
             _args(snapshot=snapshot, path=path, offset=offset, length=length),
         )
 
-    async def list_volume(self) -> list[dict[str, Any]]:
-        """Every volume the server holds, as ``{"name", "size"}``."""
-        return await self._call("virtx_client_list_volume")
+    async def list_volume(self) -> list[VolumeListOutputItem]:
+        """Every volume the server holds."""
+        items = await self._call("virtx_client_list_volume")
+        return [VolumeListOutputItem.from_dict(item) for item in items]
 
-    async def create_volume(self, name: str | None = None) -> dict[str, Any]:
-        """Keep a new, empty volume under ``name``; without one the server picks it. Answers
-        ``{"name"}``."""
-        return await self._call("virtx_client_create_volume", _args(name=name))
+    async def create_volume(self, name: str | None = None) -> VolumeCreateOutput:
+        """Keep a new, empty volume under ``name``; without one the server picks it."""
+        output = await self._call("virtx_client_create_volume", _args(name=name))
+        return VolumeCreateOutput.from_dict(output)
 
     async def remove_volume(self, name: str) -> None:
         """Delete the volume ``name`` and everything in it."""
         await self._call("virtx_client_remove_volume", _args(name=name))
 
-    async def stat_volume_file(self, volume: str, path: str) -> dict[str, Any]:
-        """The metadata of ``path`` in ``volume``: ``{"type": "file" or "dir", "size",
-        "modified"}``, ``modified`` in nanoseconds since the Unix epoch."""
-        return await self._call("virtx_client_stat_volume_file", _args(volume=volume, path=path))
+    async def stat_volume_file(self, volume: str, path: str) -> Metadata:
+        """The metadata of ``path`` in ``volume``."""
+        metadata = await self._call(
+            "virtx_client_stat_volume_file", _args(volume=volume, path=path)
+        )
+        return Metadata.from_dict(metadata)
 
-    async def read_volume_dir(self, volume: str, path: str) -> list[dict[str, Any]]:
-        """The entries of the directory ``path`` in ``volume``, in no set order, as
-        ``{"name", "metadata"}``."""
-        return await self._call("virtx_client_read_volume_dir", _args(volume=volume, path=path))
+    async def read_volume_dir(self, volume: str, path: str) -> list[DirEntry]:
+        """The entries of the directory ``path`` in ``volume``, in no set order."""
+        entries = await self._call("virtx_client_read_volume_dir", _args(volume=volume, path=path))
+        return [DirEntry.from_dict(entry) for entry in entries]
 
     async def read_volume_file(
         self, volume: str, path: str, offset: int = 0, length: int | None = None
@@ -344,19 +336,16 @@ class Client:
             cbor2.dumps({"volume": volume, "from": from_, "to": to, "overwrite": overwrite}),
         )
 
-    async def list_volume_mount(self, volume: str) -> list[dict[str, Any]]:
-        """The mounts in ``volume``, without their credentials, as ``{"path", "mount_type"}``."""
-        return await self._call("virtx_client_list_volume_mount", _args(volume=volume))
+    async def list_volume_mount(self, volume: str) -> list[VolumeMountListOutputItem]:
+        """The mounts in ``volume``, without their credentials."""
+        items = await self._call("virtx_client_list_volume_mount", _args(volume=volume))
+        return [VolumeMountListOutputItem.from_dict(item) for item in items]
 
-    async def create_volume_mount(
-        self, volume: str, path: str, source: Mapping[str, Any]
-    ) -> None:
-        """Mount ``source`` at ``path`` in ``volume``, a directory the mount creates. ``source``
-        is ``{"type": "notion", "api_key"}``, ``{"type": "gdrive", "client_id",
-        "client_secret", "refresh_token"}`` or ``{"type": "onedrive", "client_id",
-        "refresh_token"}`` (and ``"client_secret"`` if it has one)."""
+    async def create_volume_mount(self, volume: str, path: str, source: MountSource) -> None:
+        """Mount ``source`` at ``path`` in ``volume``, a directory the mount creates."""
         await self._call(
-            "virtx_client_create_volume_mount", _args(volume=volume, path=path, source=source)
+            "virtx_client_create_volume_mount",
+            _args(volume=volume, path=path, source=source.to_dict()),
         )
 
     async def remove_volume_mount(self, volume: str, path: str) -> None:
@@ -371,7 +360,7 @@ class Client:
 
     async def init_sandbox(
         self,
-        image: str | Mapping[str, Any],
+        image: str | ImageName,
         *,
         snapshot: str | None = None,
         network: bool = True,
@@ -390,7 +379,7 @@ class Client:
         return await self._call(
             "virtx_client_init_sandbox",
             _args(
-                image=image_name(image),
+                image=image_name(image).to_dict(),
                 snapshot=snapshot,
                 network=network,
                 daemon=daemon,
@@ -405,12 +394,13 @@ class Client:
 
     def exec_sandbox(
         self, sandbox: str, cmd: Iterable[str], timeout_ms: int | None = None
-    ) -> AsyncIterator[Event[dict[str, Any]]]:
+    ) -> AsyncIterator[Event[dict[str, Any], str]]:
         """Run ``cmd`` in ``sandbox`` to its end, killed after ``timeout_ms`` if one is given. Its
         events are its output, a line as it is written, then how it ended, ``{"code"}``."""
         return self._events(
             "virtx_client_exec_sandbox",
             _args(sandbox=sandbox, cmd=list(cmd), timeout_ms=timeout_ms),
+            dict,
         )
 
     async def close_sandbox(self, sandbox: str) -> None:

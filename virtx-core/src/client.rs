@@ -77,7 +77,7 @@ impl Client {
     pub fn pull_image(
         &self,
         reference: impl Into<String>,
-    ) -> impl Stream<Item = Result<Event<ImagePullOutput>, Error>> + Unpin + Send + '_ {
+    ) -> impl Stream<Item = Result<Event<ImagePullOutput, String>, Error>> + Unpin + Send + '_ {
         Box::pin(self.inner.request_with_progress(
             ImagePull::NAME,
             ImagePullArgs {
@@ -93,7 +93,8 @@ impl Client {
         &self,
         recipe: Recipe,
         reference: impl Into<String>,
-    ) -> impl Stream<Item = Result<Event<ImageBuildOutput>, Error>> + Unpin + Send + '_ {
+    ) -> impl Stream<Item = Result<Event<ImageBuildOutput, String>, Error>> + Unpin + Send + '_
+    {
         Box::pin(self.inner.request_with_progress(
             ImageBuild::NAME,
             ImageBuildArgs {
@@ -475,7 +476,8 @@ impl Client {
         sandbox: impl Into<String>,
         cmd: impl IntoIterator<Item = impl Into<String>>,
         timeout_ms: Option<u64>,
-    ) -> impl Stream<Item = Result<Event<SandboxExecOutput>, Error>> + Unpin + Send + '_ {
+    ) -> impl Stream<Item = Result<Event<SandboxExecOutput, String>, Error>> + Unpin + Send + '_
+    {
         Box::pin(self.inner.request_with_progress(
             SandboxExec::NAME,
             SandboxExecArgs {
@@ -511,7 +513,16 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::transport::testing::connect;
+    use crate::{method::Progress, transport::testing::connect};
+
+    /// The first line of a log, as the test methods send it.
+    fn line(line: &str) -> Progress<String> {
+        Progress {
+            progress: 1,
+            total: None,
+            content: Some(line.into()),
+        }
+    }
 
     #[tokio::test]
     async fn a_pull_streams_its_log_then_its_output() {
@@ -527,7 +538,7 @@ mod tests {
         assert_eq!(
             events,
             [
-                Event::Progress("pulling alpine:3.20".into()),
+                Event::Progress(line("pulling alpine:3.20")),
                 Event::Output(output)
             ]
         );
@@ -550,11 +561,16 @@ mod tests {
         while let Some(event) = build.next().await {
             events.push(event.unwrap());
         }
-        let message = "pulling alpine:3.20".to_string();
         let output = ImageBuildOutput {
             digest: "sha256:0".into(),
         };
-        assert_eq!(events, [Event::Progress(message), Event::Output(output)]);
+        assert_eq!(
+            events,
+            [
+                Event::Progress(line("pulling alpine:3.20")),
+                Event::Output(output)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -595,10 +611,7 @@ mod tests {
             events.push(event.unwrap());
         }
         let output = SandboxExecOutput { code: 0 };
-        assert_eq!(
-            events,
-            [Event::Progress("hi".into()), Event::Output(output)]
-        );
+        assert_eq!(events, [Event::Progress(line("hi")), Event::Output(output)]);
     }
 }
 

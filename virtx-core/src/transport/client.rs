@@ -21,8 +21,9 @@ use tokio::{
 use super::{
     Error, Event,
     r#impl::{Incoming, Outgoing},
-    message::{PROGRESS, Progress, Received, Request},
+    message::{PROGRESS, ProgressParams, Received, Request},
 };
+use crate::method::Progress;
 
 /// A client of one server, over stdio or Streamable HTTP.
 ///
@@ -46,7 +47,7 @@ struct State {
 /// Where a call's response and progress go.
 struct Call {
     answer: oneshot::Sender<Result<Value, Error>>,
-    progress: mpsc::UnboundedSender<String>,
+    progress: mpsc::UnboundedSender<Progress<Value>>,
 }
 
 impl State {
@@ -86,7 +87,7 @@ impl TransportClient {
         method: &str,
         params: impl Serialize,
     ) -> Result<R, Error> {
-        let events = self.request_with_progress::<R>(method, params);
+        let events = self.request_with_progress::<R, Value>(method, params);
         let mut events = pin!(events);
         while let Some(event) = events.next().await {
             if let Event::Output(output) = event? {
@@ -97,15 +98,16 @@ impl TransportClient {
     }
 
     /// Call `method` with `params`, as in [`request`](Self::request): the progress the server
-    /// sends about it, then its result last, or the error it failed with. Dropping the stream
-    /// drops the call.
-    pub fn request_with_progress<'a, R>(
+    /// sends about it, its `content` read as `C`, then its result last, or the error it failed
+    /// with. Dropping the stream drops the call.
+    pub fn request_with_progress<'a, R, C>(
         &'a self,
         method: &'a str,
         params: impl Serialize,
-    ) -> impl Stream<Item = Result<Event<R>, Error>> + Send + 'a
+    ) -> impl Stream<Item = Result<Event<R, C>, Error>> + Send + 'a
     where
         R: DeserializeOwned + Send + 'a,
+        C: DeserializeOwned + Send + 'a,
     {
         let params = Value::serialized(&params).map_err(|e| Error::Cbor(e.to_string()));
         async_stream::try_stream! {
@@ -142,13 +144,13 @@ impl TransportClient {
             let result = loop {
                 tokio::select! {
                     biased;
-                    Some(line) = progressed.recv() => yield Event::Progress(line),
+                    Some(progress) = progressed.recv() => yield Event::Progress(content(progress)?),
                     result = &mut answered => break result,
                 }
             };
             // Progress is handed over before the response it precedes: what is left is queued.
-            while let Ok(line) = progressed.try_recv() {
-                yield Event::Progress(line);
+            while let Ok(progress) = progressed.try_recv() {
+                yield Event::Progress(content(progress)?);
             }
             let result = result.map_err(|_| Error::Transport("the session ended".into()))??;
             yield Event::Output(result.deserialized().map_err(|e| Error::Cbor(e.to_string()))?);
@@ -178,6 +180,20 @@ impl TransportClient {
     }
 }
 
+/// `progress` with its `content` read as `C`.
+fn content<C: DeserializeOwned>(progress: Progress<Value>) -> Result<Progress<C>, Error> {
+    let content = progress
+        .content
+        .map(|content| content.deserialized())
+        .transpose()
+        .map_err(|e| Error::Cbor(e.to_string()))?;
+    Ok(Progress {
+        progress: progress.progress,
+        total: progress.total,
+        content,
+    })
+}
+
 /// A call waiting on its response; dropping it forgets the call.
 struct Waiting<'a> {
     id: u64,
@@ -204,17 +220,23 @@ async fn read(mut incoming: Box<dyn Incoming>, state: Arc<Mutex<State>>) {
         let mut state = lock(&state);
         match (received.id, received.method) {
             (None, Some(method)) if method == PROGRESS => {
-                let Some(Progress {
+                let Some(ProgressParams {
                     request_id,
-                    message,
+                    progress,
+                    total,
+                    content,
                 }) = received
                     .params
-                    .and_then(|params| params.deserialized::<Progress>().ok())
+                    .and_then(|params| params.deserialized::<ProgressParams<Value>>().ok())
                 else {
                     continue;
                 };
                 if let Some(call) = as_u64(&request_id).and_then(|id| state.calls.get(&id)) {
-                    let _ = call.progress.send(message);
+                    let _ = call.progress.send(Progress {
+                        progress,
+                        total,
+                        content,
+                    });
                 }
             }
             (Some(id), None) => {
@@ -252,14 +274,26 @@ mod tests {
     fn an_event_is_tagged_by_what_it_is() {
         let cases = [
             (
-                Event::Progress("pulling".into()),
-                cbor!({"progress" => "pulling"}).unwrap(),
+                Event::Progress(Progress {
+                    progress: 1,
+                    total: None,
+                    content: Some("pulling".into()),
+                }),
+                cbor!({"progress" => {"progress" => 1, "content" => "pulling"}}).unwrap(),
+            ),
+            (
+                Event::Progress(Progress {
+                    progress: 1,
+                    total: Some(3),
+                    content: None,
+                }),
+                cbor!({"progress" => {"progress" => 1, "total" => 3}}).unwrap(),
             ),
             (Event::Output(2), cbor!({"output" => 2}).unwrap()),
         ];
         for (event, value) in cases {
             assert_eq!(Value::serialized(&event).unwrap(), value);
-            assert_eq!(value.deserialized::<Event<u32>>().unwrap(), event);
+            assert_eq!(value.deserialized::<Event<u32, String>>().unwrap(), event);
         }
     }
 }

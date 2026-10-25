@@ -23,7 +23,7 @@ pub use error::Error;
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use virtx_core::{
     DirEntry, Event, FileType, ImageBuildOutput, ImageListOutputItem, ImageName, ImagePullOutput,
-    Metadata, MountSource, MountType, Recipe, SandboxExecOutput, SandboxInitArgs,
+    Metadata, MountSource, MountType, Progress, Recipe, SandboxExecOutput, SandboxInitArgs,
     SandboxInitOutput, SandboxListOutputItem, SandboxPort, SandboxVolume, SnapshotCreateOutput,
     SnapshotListOutputItem, Step, VolumeCreateOutput, VolumeListOutputItem,
     VolumeMountListOutputItem,

@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use tokio::{process::Command, runtime::Runtime, task::JoinSet};
 
 use super::*;
+use crate::method::Progress;
 use crate::transport::{
     Dispatcher, Event, TransportClient, r#impl::frame::frame, testing::methods,
 };
@@ -57,16 +58,16 @@ async fn a_call_answers_over_the_child_process() {
 async fn progress_reaches_the_call_before_its_response() {
     let session = spawn();
     let events: Vec<_> = session
-        .request_with_progress::<u32>("count", [3])
+        .request_with_progress::<u32, String>("count", [3])
         .map(Result::unwrap)
         .collect()
         .await;
     assert_eq!(
         events,
         [
-            Event::Progress("1".into()),
-            Event::Progress("2".into()),
-            Event::Progress("3".into()),
+            Event::Progress(count(1, 3)),
+            Event::Progress(count(2, 3)),
+            Event::Progress(count(3, 3)),
             Event::Output(3)
         ]
     );
@@ -81,7 +82,7 @@ async fn concurrent_calls_each_get_their_own_progress() {
         let session = std::sync::Arc::clone(&session);
         calls.spawn(async move {
             let events: Vec<_> = session
-                .request_with_progress::<u32>("count", [to])
+                .request_with_progress::<u32, String>("count", [to])
                 .map(Result::unwrap)
                 .collect()
                 .await;
@@ -90,7 +91,7 @@ async fn concurrent_calls_each_get_their_own_progress() {
     }
     for (to, events) in calls.join_all().await {
         let expected: Vec<_> = (1..=to)
-            .map(|i| Event::Progress(i.to_string()))
+            .map(|i| Event::Progress(count(i, to)))
             .chain([Event::Output(to)])
             .collect();
         assert_eq!(events, expected);
@@ -161,4 +162,13 @@ async fn a_server_that_exits_ends_the_client() {
     let error = session.request::<String>("echo", ["hi"]).await.unwrap_err();
     assert!(!session.is_connected(), "{error}");
     session.close().await;
+}
+
+/// What `count` sends as its `n`th progress, counting to `to`.
+fn count(n: u32, to: u32) -> Progress<String> {
+    Progress {
+        progress: n.into(),
+        total: Some(to.into()),
+        content: None,
+    }
 }

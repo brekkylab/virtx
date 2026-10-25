@@ -16,12 +16,16 @@ mod client;
 mod ffi;
 mod image;
 mod method;
+mod sandbox;
+mod snapshot;
 #[cfg(any(feature = "client", feature = "server"))]
 mod transport;
 mod volume;
 
 pub use image::*;
 pub use method::*;
+pub use sandbox::*;
+pub use snapshot::*;
 #[cfg(any(feature = "client", feature = "server"))]
 pub use transport::*;
 pub use volume::*;

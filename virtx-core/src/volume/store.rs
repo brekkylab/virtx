@@ -1,13 +1,11 @@
 //! Volumes: storage the server keeps under a name, apart from any VM, and the files in one.
-//! Paths in a volume are as [`volume`](crate::volume) says.
+//! Paths in a volume are as [`volume`](super) says.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    method::Request,
-    volume::{DirEntry, Metadata, MountSource, MountType},
-};
+use super::{DirEntry, Metadata, MountSource, MountType};
+use crate::method::Request;
 
 /// `volume.list`: every volume the server holds.
 pub struct VolumeList;

@@ -9,6 +9,8 @@
 
 mod metadata;
 mod mount;
+mod store;
 
-pub use metadata::*;
-pub use mount::*;
+pub use metadata::{DirEntry, FileType, Metadata};
+pub use mount::{MountSource, MountType};
+pub use store::*;

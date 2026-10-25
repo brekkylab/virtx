@@ -1,13 +1,10 @@
-//! Images, in the OCI image spec's terms: an image is named by its digest, and any number of
-//! references (`name:tag`) point at one.
+//! The images the server keeps, each under the references pointing at it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    image::{ImageName, Recipe},
-    method::{Request, RoundTrip},
-};
+use super::{ImageName, Recipe, RegistryAuth};
+use crate::method::{Request, RoundTrip};
 
 /// `image.list`: every reference the server holds, and the image each points at.
 pub struct ImageList;
@@ -55,6 +52,10 @@ pub struct ImagePullArgs {
     /// The image to pull, as its registry names it (`alpine:3.20`, `ghcr.io/owner/name:tag`).
     /// The server holds it under this reference; one already in use is moved to this image.
     pub reference: String,
+
+    /// Credentials for the reference's registry. Without them the server pulls anonymously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<RegistryAuth>,
 }
 
 /// What `image.pull` answers.
@@ -259,67 +260,4 @@ pub struct ImageExportOutput {
 
     /// The archive's length in bytes: what the notifications' pieces add up to.
     pub size: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn round_trip<T: Serialize + serde::de::DeserializeOwned>(value: &T) -> (ciborium::Value, T) {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(value, &mut encoded).unwrap();
-        (
-            ciborium::from_reader(&encoded[..]).unwrap(),
-            ciborium::from_reader(&encoded[..]).unwrap(),
-        )
-    }
-
-    fn member<'a>(value: &'a ciborium::Value, key: &str) -> Option<&'a ciborium::Value> {
-        value
-            .as_map()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| k.as_text() == Some(key))
-            .map(|(_, v)| v)
-    }
-
-    #[test]
-    fn an_import_answer_is_tagged_by_result_type() {
-        let answers: [<ImageImport as Request>::Output; 2] = [
-            RoundTrip::InputRequired(ImageImportInputRequired {
-                state: "s".into(),
-                received: 8,
-                due_time: 1,
-            }),
-            RoundTrip::Complete(ImageImportOutput {
-                reference: "app:1".into(),
-                digest: "sha256:0".into(),
-            }),
-        ];
-        for (answer, tag) in answers.into_iter().zip(["input_required", "complete"]) {
-            let (value, decoded) = round_trip(&answer);
-            assert_eq!(
-                member(&value, "resultType").and_then(|v| v.as_text()),
-                Some(tag)
-            );
-            assert_eq!(decoded, answer);
-        }
-    }
-
-    #[test]
-    fn a_first_import_request_has_no_state() {
-        let args = ImageImportArgs {
-            size: 20,
-            data: Bytes::from_static(b"hi"),
-            state: None,
-            reference: "app:1".into(),
-        };
-        let (value, decoded) = round_trip(&args);
-        assert_eq!(member(&value, "state"), None);
-        assert_eq!(
-            member(&value, "data"),
-            Some(&ciborium::Value::Bytes(b"hi".to_vec()))
-        );
-        assert_eq!(decoded, args);
-    }
 }

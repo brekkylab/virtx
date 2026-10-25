@@ -8,32 +8,40 @@ use futures_util::Stream;
 use tokio::process::Command;
 
 use crate::{
-    image::Recipe,
-    method::{
+    image::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
         ImageListOutputItem, ImagePull, ImagePullArgs, ImagePullOutput, ImageRemove,
-        ImageRemoveArgs, ImageRemoveOutput, Request, SandboxClose, SandboxCloseArgs,
-        SandboxCloseOutput, SandboxExec, SandboxExecArgs, SandboxExecOutput, SandboxInit,
-        SandboxInitArgs, SandboxInitOutput, SandboxList, SandboxListArgs, SandboxListOutputItem,
+        ImageRemoveArgs, ImageRemoveOutput, Recipe,
+    },
+    method::Request,
+    sandbox::{
+        SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
+        SandboxExecOutput, SandboxInit, SandboxInitArgs, SandboxInitOutput, SandboxList,
+        SandboxListArgs, SandboxListOutputItem,
+    },
+    snapshot::{
         SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileRead,
         SnapshotFileReadArgs, SnapshotFileReadDir, SnapshotFileReadDirArgs, SnapshotFileReadOutput,
         SnapshotList, SnapshotListArgs, SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs,
-        SnapshotRemoveOutput, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeFileCopy,
-        VolumeFileCopyArgs, VolumeFileCopyOutput, VolumeFileCreateDir, VolumeFileCreateDirArgs,
-        VolumeFileCreateDirOutput, VolumeFileRead, VolumeFileReadArgs, VolumeFileReadDir,
-        VolumeFileReadDirArgs, VolumeFileReadOutput, VolumeFileRemove, VolumeFileRemoveArgs,
-        VolumeFileRemoveOutput, VolumeFileRename, VolumeFileRenameArgs, VolumeFileRenameOutput,
-        VolumeFileStat, VolumeFileStatArgs, VolumeFileWrite, VolumeFileWriteArgs,
-        VolumeFileWriteOutput, VolumeList, VolumeListArgs, VolumeListOutputItem, VolumeMountCreate,
-        VolumeMountCreateArgs, VolumeMountCreateOutput, VolumeMountList, VolumeMountListArgs,
-        VolumeMountListOutputItem, VolumeMountRemove, VolumeMountRemoveArgs,
-        VolumeMountRemoveOutput, VolumeRemove, VolumeRemoveArgs, VolumeRemoveOutput,
+        SnapshotRemoveOutput,
     },
     transport::{
         Error, Event, TransportClient,
         r#impl::{stdio, streamable_http},
     },
-    volume::{DirEntry, Metadata, MountSource},
+    volume::{
+        DirEntry, Metadata, MountSource, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput,
+        VolumeFileCopy, VolumeFileCopyArgs, VolumeFileCopyOutput, VolumeFileCreateDir,
+        VolumeFileCreateDirArgs, VolumeFileCreateDirOutput, VolumeFileRead, VolumeFileReadArgs,
+        VolumeFileReadDir, VolumeFileReadDirArgs, VolumeFileReadOutput, VolumeFileRemove,
+        VolumeFileRemoveArgs, VolumeFileRemoveOutput, VolumeFileRename, VolumeFileRenameArgs,
+        VolumeFileRenameOutput, VolumeFileStat, VolumeFileStatArgs, VolumeFileWrite,
+        VolumeFileWriteArgs, VolumeFileWriteOutput, VolumeList, VolumeListArgs,
+        VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs, VolumeMountCreateOutput,
+        VolumeMountList, VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemove,
+        VolumeMountRemoveArgs, VolumeMountRemoveOutput, VolumeRemove, VolumeRemoveArgs,
+        VolumeRemoveOutput,
+    },
 };
 
 /// A client of one server, over stdio or Streamable HTTP.
@@ -74,6 +82,7 @@ impl Client {
             ImagePull::NAME,
             ImagePullArgs {
                 reference: reference.into(),
+                auth: None,
             },
         ))
     }
@@ -607,13 +616,16 @@ mod ffi {
     use super::Client;
     use crate::{
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
-        method::{
-            ImageBuildArgs, ImagePullArgs, ImageRemoveArgs, SandboxCloseArgs, SandboxExecArgs,
-            SandboxInitArgs, SnapshotCreateArgs, SnapshotFileReadArgs, SnapshotFileReadDirArgs,
-            SnapshotRemoveArgs, VolumeCreateArgs, VolumeFileCopyArgs, VolumeFileCreateDirArgs,
-            VolumeFileReadArgs, VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs,
-            VolumeFileStatArgs, VolumeFileWriteArgs, VolumeMountCreateArgs, VolumeMountListArgs,
-            VolumeMountRemoveArgs, VolumeRemoveArgs,
+        image::{ImageBuildArgs, ImagePullArgs, ImageRemoveArgs},
+        sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs},
+        snapshot::{
+            SnapshotCreateArgs, SnapshotFileReadArgs, SnapshotFileReadDirArgs, SnapshotRemoveArgs,
+        },
+        volume::{
+            VolumeCreateArgs, VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs,
+            VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs,
+            VolumeFileWriteArgs, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs,
+            VolumeRemoveArgs,
         },
     };
 

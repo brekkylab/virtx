@@ -22,12 +22,12 @@ use crate::transport::{
     },
 };
 use crate::{
-    method::{
-        ImageBuild, ImageBuildOutput, ImagePull, ImagePullOutput, Request, SandboxExec,
-        SandboxExecOutput, SnapshotFileRead, SnapshotFileReadOutput, VolumeFileRead,
-        VolumeFileReadOutput,
-    },
+    image::{ImageBuild, ImageBuildOutput, ImagePull, ImagePullOutput},
+    method::Request,
+    sandbox::{SandboxExec, SandboxExecOutput},
+    snapshot::{SnapshotFileRead, SnapshotFileReadOutput},
     transport::{ErrorObject, Methods, Notifier},
+    volume::{VolumeFileRead, VolumeFileReadOutput},
 };
 
 /// `echo`: answers the text it is given.

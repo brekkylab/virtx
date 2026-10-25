@@ -116,6 +116,7 @@ impl Client {
     pub fn pull_image(&self, reference: impl Into<String>) -> Events<ImagePullOutput> {
         let args = ImagePullArgs {
             reference: reference.into(),
+            auth: None,
         };
         Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
     }

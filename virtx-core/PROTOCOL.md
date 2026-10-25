@@ -78,30 +78,30 @@ sequenceDiagram
 
 While a request runs, the server MAY send notifications about it before its response, such as a build's output.
 They are a live view of the request, for as long as the client holds it open: a client that needs what a request did reads it from its result or its task, not from them.
-The exception is a method whose output is too large for one message, such as `image.export`: it sends that output in its notifications' `data`, and says so.
+The exception is a method whose output is too large for one message, such as `image.export`: it sends that output in its notifications' `content`, and says so.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
     C->>S: request {"id": 7, "method": "bigfile.download"}
-    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 1, "total": 3, "message": "1 of 3 GiB"}}
-    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 2, "total": 3, "message": "2 of 3 GiB"}}
-    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 3, "message": "3 of 3 GiB"}}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 1, "total": 3, "content": "1 of 3 GiB"}}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 2, "total": 3, "content": "2 of 3 GiB"}}
+    S-->>C: notification {"method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 3, "content": "3 of 3 GiB"}}
     S->>C: response {"id": 7, "result": ...}
 ```
 
 A notification about a request is `notifications/progress`:
 
 ```text
-{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 5, "message": "pulling alpine:3.20"}}
+{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "progress": 3, "total": 5, "content": "pulling alpine:3.20"}}
 ```
 
 - `requestId` is the `id` of the request it is about, exactly as the client sent it. A client tells concurrent requests' notifications apart by it, as it does their responses.
 - `progress` is an unsigned integer, and MUST increase with each notification about one request. What it counts, such as steps or bytes, is the method's.
 - `total` is optional: what `progress` will reach, when that is known.
-- `message` is an optional string: one line of the request's log, for a person to read.
-- `data` is an optional byte string: the next piece of the request's output, for a method that sends its output this way. `progress` then counts bytes, those sent so far including this piece, so a client that sees it differ from what it has received takes the request as failed. Over Streamable HTTP, a client that does not accept `application/cbor-seq` cannot receive it, and the server answers such a method with an error.
+- `content` is optional, and may be any value: what it holds, such as a line of the request's log or the next piece of its output, is the method's.
+- A method that sends its output in `content` sends it as byte strings, each the next piece of it. `progress` then counts bytes, those sent so far including this piece, so a client that sees it differ from what it has received takes the request as failed. Over Streamable HTTP, a client that does not accept `application/cbor-seq` cannot receive it, and the server answers such a method with an error.
 - A request's notifications arrive in the order the server sent them, before its response. A client that sees `progress` fail to increase MAY take the request as failed.
 - A client MUST be ready for a request to have no notifications, and MAY ignore what it does not want.
 - A notification from the client has no `id`, so the server sends no progress about it.
@@ -156,28 +156,34 @@ A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface
 
 ## Methods
 
-A method's `params` is a map, and so is its `result` unless the table says otherwise.
-A member marked `?` may be left out.
-The last column names the pattern a method follows, if any: [Stream](#stream-output) sends notifications while it runs, and [MRTR](#multi-round-trip-requests-mrtr) takes several requests.
-Full definitions are in [`src/method/`](src/method/).
-
 ### Image
 
-An image is named by the digest of its manifest (`algorithm:hex`), and any number of references (`name:tag`) point at one.
-Where a method takes an image, it is `{"type": "reference", "reference": "..."}` or `{"type": "digest", "digest": "..."}`.
+- Digest: the name of an image, the hash of its manifest, as `algorithm:hex` (such as `sha256:0123abcd...`). It identifies one image's content and never changes.
+- Reference: a name a person gives an image, as `name:tag` (such as `alpine:3.20`). It points at one image, and can be moved to another. Any number of references may point at one image.
+
+An image no reference points at any more is forgotten, whichever method took its last reference.
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
 | `image.list` | | array of `{reference, digest, size}` | |
-| `image.pull` | `reference` | `{digest}` | Stream |
-| `image.build` | `recipe`, `reference` | `{digest}` | Stream |
+| `image.pull` | `reference`, `auth?` | `{reference, digest}` | Stream |
+| `image.build` | `recipe`, `reference` | `{reference, digest}` | Stream |
 | `image.tag` | `image`, `reference` | `{digest}` | |
 | `image.untag` | `reference` | `{}` | |
 | `image.remove` | `digest` | `{}` | |
 | `image.export` | `reference` | `{digest, size}` | Stream |
-| `image.import` | `size`, `reference`, `data`, `state?` | `{resultType: "input_required", state, received, due_time}` or `{resultType: "complete", digest}` | MRTR |
+| `image.import` | `size`, `data`, `state?`, `reference` | `{reference, digest}` | MRTR |
 
-An image no reference points at any more is forgotten, whichever method took its last reference.
+A reference already in use is moved to the image `image.pull`, `image.build`, `image.tag` or `image.import` points it at.
+Cancelled, none of them leaves a reference changed.
+
+`auth` in `image.pull` is the registry's credentials, tagged by `type`: `{type: "basic", username, password}` or `{type: "bearer", token}`. Without it the server pulls anonymously.
+
+`image` in `image.tag` is tagged by `type`, `{type: "reference", reference}` or `{type: "digest", digest}`, since `sha256:0123abcd` reads as both a digest and the reference `sha256` at tag `0123abcd`.
+
+`image.export` sends the image as an OCI image layout in a tar, in its notifications: each `content` a byte string, the next piece of the archive, with `progress` the bytes sent so far and `total` the archive's length.
+
+`image.import` takes the same archive a piece per request. Until it holds the whole archive it answers `{resultType: "input_required", state, received, due_time}`, and the client sends the next piece, from byte `received`, with that `state`, before `due_time`.
 
 ### Snapshot
 
@@ -221,10 +227,31 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
-| `sandbox.list` | | array of `{id, image, snapshot?}` | |
-| `sandbox.init` | `image`, `snapshot?`, `network?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, cwd?}` | |
+| `sandbox.list` | | array of `{id, image, snapshot?, running, daemon?, ports?}` | |
+| `sandbox.init` | `image`, `snapshot?`, `network?`, `daemon?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, cwd?, ports?}` | |
 | `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | Stream |
 | `sandbox.close` | `sandbox` | `{}` | |
+
+`running` in `sandbox.list` is whether the sandbox's VM is up now. One that is not, such as one whose VM has exited, is still held until `sandbox.close`.
+
+#### Daemon
+
+A sandbox belongs to the client that made it, and ends when that client goes: over stdio, with the session; over Streamable HTTP, which has no session, once no request has named it for a time the server chooses.
+With `daemon: true` it is kept until `sandbox.close` instead, whatever becomes of that client, and any client of the server can reach it by its id.
+A server that cannot keep one, such as a stdio server that exits with its session, refuses `daemon: true`.
+
+#### Ports
+
+`ports` are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
+They are only for a daemon: `ports` without `daemon: true` is refused, and so are `0` and a port given twice.
+
+`sandbox.init` answers each with where it is reached from, as `{port, url}`, in the order given; `sandbox.list` answers them again for a daemon.
+
+- A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
+- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
+- The URL is the server's to form: a client MUST NOT build one or take it apart.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, HTTP is proxied to it as it is, and any other TCP is carried in a WebSocket to the same URL, opened with the subprotocol `virtx.tcp`.
+- Ports are the way in, and do not need `network`, which is the way out.
 
 `sandbox.exec` sends the command's stdout and stderr as its notifications, a line each, and they are sent nowhere else.
 

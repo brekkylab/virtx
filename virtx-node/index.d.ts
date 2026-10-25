@@ -84,7 +84,7 @@ export type MountSource =
 
 export interface VolumeMountListItem {
   path: string
-  type: MountType
+  mount_type: MountType
 }
 
 export interface SandboxListItem {
@@ -92,13 +92,26 @@ export interface SandboxListItem {
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
+  /** Whether its VM is up now. */
+  running: boolean
+  daemon?: boolean
+  ports?: SandboxPort[]
+}
+
+/** A TCP port opened in a sandbox, and where it is reached from. */
+export interface SandboxPort {
+  port: number
+  url: string
 }
 
 /** Whatever is left out the server picks. */
 export interface SandboxInitOptions {
   snapshot?: string
   network?: boolean
-  ports?: { host: number; guest: number }[]
+  /** Keep it until `closeSandbox`, apart from this client. */
+  daemon?: boolean
+  /** TCP ports in it to open; only for a daemon. */
+  ports?: number[]
   vcpus?: number
   memoryMib?: number
   gpu?: boolean
@@ -109,6 +122,7 @@ export interface SandboxInitOptions {
 export interface SandboxInitOutput {
   id: string
   cwd?: string
+  ports?: SandboxPort[]
 }
 
 /**

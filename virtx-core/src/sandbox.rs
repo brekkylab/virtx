@@ -32,6 +32,18 @@ pub struct SandboxListOutputItem {
     /// The snapshot it stands on, by name, if it was given one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+
+    /// Whether its VM is up now. One that is not, such as one whose VM has exited, is still held
+    /// until `sandbox.close`.
+    pub running: bool,
+
+    /// Whether it is kept until `sandbox.close`, apart from the client that made it.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub daemon: bool,
+
+    /// Where each port it opened is reached from, in the order asked for; only for a daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<SandboxPort>,
 }
 
 /// `sandbox.init`: make a sandbox, and answer the id later calls name it by.
@@ -59,14 +71,20 @@ pub struct SandboxInitArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
 
-    /// Whether its commands reach a network at all.
+    /// Whether its commands reach a network at all: the way out, which `ports` do not need.
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
 
-    /// Ports on the server's loopback that lead into it, TCP only. Refused with the network
-    /// off.
+    /// Keep it until `sandbox.close`, whatever becomes of the client that made it, and let any
+    /// client of the server reach it by its id. Without it, it ends when that client goes. A
+    /// server that cannot keep one refuses it.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub daemon: bool,
+
+    /// TCP ports in it to open, each answered with where it is reached from. Only for a daemon;
+    /// `0` and a port given twice are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<SandboxPort>,
+    pub ports: Vec<u16>,
 
     /// How many vCPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +115,7 @@ impl SandboxInitArgs {
             image: image.into(),
             snapshot: None,
             network: true,
+            daemon: false,
             ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
@@ -111,20 +130,26 @@ fn on() -> bool {
     true
 }
 
-fn is_on(network: &bool) -> bool {
-    *network
+fn is_on(flag: &bool) -> bool {
+    *flag
 }
 
-/// A port on the server's loopback that leads into a sandbox. Port `0` on either side is
-/// refused, and so is a host port already taken.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn is_off(flag: &bool) -> bool {
+    !*flag
+}
+
+/// A TCP port opened in a sandbox, and where it is reached from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPort {
-    /// The port on the server's loopback a connection is made to.
-    pub host: u16,
+    /// The port in the sandbox.
+    pub port: u16,
 
-    /// The port in the sandbox it reaches.
-    pub guest: u16,
+    /// Where it is reached from: a loopback address from a server on the client's machine, or
+    /// a URL carrying the credentials it needs from one reachable from other machines. As secret
+    /// as those credentials, and the server's to form: a client does not build one or take it
+    /// apart.
+    pub url: String,
 }
 
 /// A volume mounted into a sandbox.
@@ -152,6 +177,10 @@ pub struct SandboxInitOutput {
     /// Its starting working directory: the image's, or the server's default without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+
+    /// Where each port it opened is reached from, in the order asked for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<SandboxPort>,
 }
 
 /// `sandbox.exec`: run a command in a sandbox to its end. Its output is its progress, a line
@@ -237,5 +266,6 @@ mod tests {
         let decoded: SandboxInitArgs = ciborium::from_reader(&encoded[..]).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
+        assert!(!decoded.daemon);
     }
 }

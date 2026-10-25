@@ -1181,7 +1181,7 @@ mod ffi {
     }
 
     /// `volume.mount.list`: given `{"volume": "..."}`, answers with the volume's mounts, as
-    /// `[{"path": "...", "type": "notion" or "gdrive" or "onedrive"}, ...]`.
+    /// `[{"path": "...", "mount_type": "notion" or "gdrive" or "onedrive"}, ...]`.
     ///
     /// # Safety
     ///
@@ -1253,8 +1253,9 @@ mod ffi {
     }
 
     /// `sandbox.list`: answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "..."}, ...]`, `snapshot` only for
-    /// one that has one.
+    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool, "daemon": bool,
+    /// "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and
+    /// `daemon` and `ports` only for a daemon.
     ///
     /// # Safety
     ///
@@ -1268,12 +1269,13 @@ mod ffi {
     }
 
     /// `sandbox.init`: makes a sandbox, given
-    /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [{"host": n, "guest": n}],
+    /// `{"image": {...}, "snapshot": "...", "network": bool, "daemon": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
     /// `{"type": "reference", "reference": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
-    /// `{"id": "...", "cwd": "..."}`, `cwd` only if the server says.
+    /// `{"id": "...", "cwd": "...", "ports": [{"port": n, "url": "..."}]}`, `cwd` only if the server
+    /// says and `ports` only if it was given some.
     ///
     /// # Safety
     ///

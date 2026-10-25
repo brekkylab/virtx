@@ -1,4 +1,12 @@
-//! The images the server keeps, each under the references pointing at it.
+//! The images the server keeps, and the names it keeps them under.
+//!
+//! - Digest: the name of an image, the hash of its manifest, as `algorithm:hex` (such as
+//!   `sha256:0123abcd...`). It identifies one image's content and never changes.
+//! - Reference: a name a person gives an image, as `name:tag` (such as `alpine:3.20`). It points
+//!   at one image, and can be moved to another. Any number of references may point at one image.
+//!
+//! An image no reference points at any more is forgotten, whichever method took its last
+//! reference.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -175,6 +183,36 @@ pub struct ImageRemoveArgs {
 #[serde(deny_unknown_fields)]
 pub struct ImageRemoveOutput {}
 
+/// `image.export`: send the image a reference points at as an OCI image layout in a tar, the
+/// archive in the request's notifications, a piece each in their `content`, with `progress` the
+/// bytes sent so far and `total` the archive's length.
+pub struct ImageExport;
+
+impl Request for ImageExport {
+    const NAME: &'static str = "image.export";
+    type Args = ImageExportArgs;
+    type Output = ImageExportOutput;
+}
+
+/// What `image.export` takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageExportArgs {
+    /// The reference, as `name:tag`.
+    pub reference: String,
+}
+
+/// What `image.export` answers, once the whole archive is sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageExportOutput {
+    /// The digest of the image's manifest, as `algorithm:hex`.
+    pub digest: String,
+
+    /// The archive's length in bytes: what the notifications' pieces add up to.
+    pub size: u64,
+}
+
 /// `image.import`: take an image as an OCI image layout in a tar, a piece per request, and point
 /// a reference at it.
 pub struct ImageImport;
@@ -230,34 +268,4 @@ pub struct ImageImportOutput {
 
     /// The digest of the image's manifest, as `algorithm:hex`.
     pub digest: String,
-}
-
-/// `image.export`: send the image a reference points at as an OCI image layout in a tar, the archive in the request's
-/// notifications, a piece each in their `data`, with `progress` the bytes sent so far and `total`
-/// the archive's length.
-pub struct ImageExport;
-
-impl Request for ImageExport {
-    const NAME: &'static str = "image.export";
-    type Args = ImageExportArgs;
-    type Output = ImageExportOutput;
-}
-
-/// What `image.export` takes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageExportArgs {
-    /// The reference, as `name:tag`.
-    pub reference: String,
-}
-
-/// What `image.export` answers, once the whole archive is sent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageExportOutput {
-    /// The digest of the image's manifest, as `algorithm:hex`.
-    pub digest: String,
-
-    /// The archive's length in bytes: what the notifications' pieces add up to.
-    pub size: u64,
 }

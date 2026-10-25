@@ -336,7 +336,7 @@ pub struct VolumeMountListOutputItem {
     /// Where it is mounted.
     pub path: String,
 
-    #[serde(rename = "type")]
+    /// What kind of source it is.
     pub mount_type: MountType,
 }
 

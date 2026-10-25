@@ -4,7 +4,10 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::{method::Request, volume::DirEntry};
+use crate::{
+    method::Request,
+    volume::{DirEntry, Metadata},
+};
 
 /// `snapshot.list`: every snapshot the server holds.
 pub struct SnapshotList;
@@ -84,6 +87,27 @@ pub struct SnapshotRemoveArgs {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotRemoveOutput {}
+
+/// `snapshot.file.stat`: the metadata of a file or directory in a snapshot's upper layer. Only
+/// what the upper layer holds: a path only the image under it has is not there.
+pub struct SnapshotFileStat;
+
+impl Request for SnapshotFileStat {
+    const NAME: &'static str = "snapshot.file.stat";
+    type Args = SnapshotFileStatArgs;
+    type Output = Metadata;
+}
+
+/// What `snapshot.file.stat` takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotFileStatArgs {
+    /// Which snapshot, by name.
+    pub snapshot: String,
+
+    /// The file or directory, as a path in the upper layer.
+    pub path: String,
+}
 
 /// `snapshot.file.read_dir`: the entries of a directory in a snapshot's upper layer, in no set
 /// order. Only what the upper layer holds: the image under it is not looked at.

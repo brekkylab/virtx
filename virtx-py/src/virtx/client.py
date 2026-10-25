@@ -345,7 +345,7 @@ class Client:
         )
 
     async def list_volume_mount(self, volume: str) -> list[dict[str, Any]]:
-        """The mounts in ``volume``, without their credentials, as ``{"path", "type"}``."""
+        """The mounts in ``volume``, without their credentials, as ``{"path", "mount_type"}``."""
         return await self._call("virtx_client_list_volume_mount", _args(volume=volume))
 
     async def create_volume_mount(
@@ -364,8 +364,9 @@ class Client:
         await self._call("virtx_client_remove_volume_mount", _args(volume=volume, path=path))
 
     async def list_sandbox(self) -> list[dict[str, Any]]:
-        """Every sandbox the server holds, as ``{"id", "image", "snapshot"}``, ``snapshot`` only
-        for one that has one."""
+        """Every sandbox the server holds, as ``{"id", "image", "snapshot", "running", "daemon",
+        "ports"}``, ``snapshot`` only for one that has one and ``daemon`` and ``ports`` only for a
+        daemon."""
         return await self._call("virtx_client_list_sandbox")
 
     async def init_sandbox(
@@ -374,27 +375,26 @@ class Client:
         *,
         snapshot: str | None = None,
         network: bool = True,
-        ports: Iterable[tuple[int, int] | Mapping[str, int]] = (),
+        daemon: bool = False,
+        ports: Iterable[int] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
-        """Make a sandbox of ``image``. ``ports`` are ``(host, guest)``; ``volumes`` are
-        ``{"volume", "path", "readonly"}``. Whatever is left out the server picks. Answers
-        ``{"id", "cwd"}``, ``cwd`` only if the server says."""
-        ports = [
-            port if isinstance(port, Mapping) else {"host": port[0], "guest": port[1]}
-            for port in ports
-        ]
+        """Make a sandbox of ``image``. ``ports`` are TCP ports in it to open, only for a
+        ``daemon``; ``volumes`` are ``{"volume", "path", "readonly"}``. Whatever is left out the
+        server picks. Answers ``{"id", "cwd", "ports"}``, ``cwd`` only if the server says and
+        ``ports``, each ``{"port", "url"}``, only if it was given some."""
         return await self._call(
             "virtx_client_init_sandbox",
             _args(
                 image=image_name(image),
                 snapshot=snapshot,
                 network=network,
-                ports=ports,
+                daemon=daemon,
+                ports=list(ports),
                 vcpus=vcpus,
                 memory_mib=memory_mib,
                 gpu=gpu,

@@ -70,9 +70,6 @@ pub struct ImagePullArgs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagePullOutput {
-    /// The reference pointing at the image.
-    pub reference: String,
-
     /// The digest of the image's manifest, as `algorithm:hex`.
     pub digest: String,
 }
@@ -103,9 +100,6 @@ pub struct ImageBuildArgs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildOutput {
-    /// The reference pointing at the image.
-    pub reference: String,
-
     /// The digest of the image's manifest, as `algorithm:hex`.
     pub digest: String,
 }
@@ -263,9 +257,6 @@ pub struct ImageImportInputRequired {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageImportOutput {
-    /// The reference pointing at the image.
-    pub reference: String,
-
     /// The digest of the image's manifest, as `algorithm:hex`.
     pub digest: String,
 }

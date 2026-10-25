@@ -216,14 +216,14 @@ class Client:
 
     def pull_image(self, reference: str) -> AsyncIterator[Event[dict[str, Any]]]:
         """Pull ``reference`` from its registry, and point it at what it pulls. Its events are
-        the pull's log, then what it pulled, ``{"reference", "digest"}``."""
+        the pull's log, then what it pulled, ``{"digest"}``."""
         return self._events("virtx_client_pull_image", _args(reference=reference))
 
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> AsyncIterator[Event[dict[str, Any]]]:
         """Build ``recipe``, and point ``reference`` at it. Its events are the build's log, then
-        what it built, ``{"reference", "digest"}``."""
+        what it built, ``{"digest"}``."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._events("virtx_client_build_image", _args(recipe=recipe, reference=reference))
 

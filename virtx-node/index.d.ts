@@ -44,12 +44,10 @@ export interface ImageListItem {
 }
 
 export interface ImagePullOutput {
-  reference: string
   digest: string
 }
 
 export interface ImageBuildOutput {
-  reference: string
   digest: string
 }
 

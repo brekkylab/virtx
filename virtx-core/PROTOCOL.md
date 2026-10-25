@@ -166,13 +166,13 @@ An image no reference points at any more is forgotten, whichever method took its
 | Method | Params | Result | |
 | --- | --- | --- | --- |
 | `image.list` | | array of `{reference, digest, size}` | |
-| `image.pull` | `reference`, `auth?` | `{reference, digest}` | Stream |
-| `image.build` | `recipe`, `reference` | `{reference, digest}` | Stream |
+| `image.pull` | `reference`, `auth?` | `{digest}` | Stream |
+| `image.build` | `recipe`, `reference` | `{digest}` | Stream |
 | `image.tag` | `image`, `reference` | `{digest}` | |
 | `image.untag` | `reference` | `{}` | |
 | `image.remove` | `digest` | `{}` | |
 | `image.export` | `reference` | `{digest, size}` | Stream |
-| `image.import` | `size`, `data`, `state?`, `reference` | `{reference, digest}` | MRTR |
+| `image.import` | `size`, `data`, `state?`, `reference` | `{digest}` | MRTR |
 
 A reference already in use is moved to the image `image.pull`, `image.build`, `image.tag` or `image.import` points it at.
 Cancelled, none of them leaves a reference changed.

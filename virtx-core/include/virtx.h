@@ -115,7 +115,7 @@ struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 // `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
 // `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
 // `{"progress": "..."}`, then what it pulled, as
-// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+// `{"output": {"digest": "algorithm:hex"}}`.
 //
 // # Safety
 //
@@ -127,7 +127,7 @@ struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
 // `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
 // Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
-// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+// `{"output": {"digest": "algorithm:hex"}}`.
 //
 // # Safety
 //

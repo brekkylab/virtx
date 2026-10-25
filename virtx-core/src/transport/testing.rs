@@ -67,7 +67,6 @@ pub fn methods() -> Methods {
                 return Err(ErrorObject::new(1, format!("no image {}", args.reference)));
             }
             Ok(ImagePullOutput {
-                reference: args.reference,
                 digest: "sha256:0".into(),
             })
         })
@@ -79,7 +78,6 @@ pub fn methods() -> Methods {
                 return Err(ErrorObject::new(1, format!("no image {base}")));
             }
             Ok(ImageBuildOutput {
-                reference: args.reference,
                 digest: "sha256:0".into(),
             })
         })

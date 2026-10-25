@@ -522,7 +522,6 @@ mod tests {
             .collect()
             .await;
         let output = ImagePullOutput {
-            reference: "alpine:3.20".into(),
             digest: "sha256:0".into(),
         };
         assert_eq!(
@@ -553,7 +552,6 @@ mod tests {
         }
         let message = "pulling alpine:3.20".to_string();
         let output = ImageBuildOutput {
-            reference: "jq:latest".into(),
             digest: "sha256:0".into(),
         };
         assert_eq!(events, [Event::Progress(message), Event::Output(output)]);
@@ -726,7 +724,7 @@ mod ffi {
     /// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
     /// `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
     /// `{"progress": "..."}`, then what it pulled, as
-    /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+    /// `{"output": {"digest": "algorithm:hex"}}`.
     ///
     /// # Safety
     ///
@@ -758,7 +756,7 @@ mod ffi {
     /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
     /// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
     /// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
-    /// `{"output": {"reference": "name:tag", "digest": "algorithm:hex"}}`.
+    /// `{"output": {"digest": "algorithm:hex"}}`.
     ///
     /// # Safety
     ///

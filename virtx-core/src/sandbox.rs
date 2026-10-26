@@ -177,10 +177,6 @@ pub struct SandboxInitOutput {
     /// The sandbox's id, which `sandbox.exec` names it by.
     pub id: String,
 
-    /// Its starting working directory: the image's, or the server's default without one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-
     /// Where each port it opened is reached from, in the order asked for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,

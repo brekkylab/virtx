@@ -264,8 +264,8 @@ class Client:
     ) -> dict[str, Any]:
         """Make a sandbox of ``image``. ``ports`` are TCP ports in it to open, only for a
         ``daemon``; ``volumes`` are ``{"volume", "path", "readonly"}``. Whatever is left out the
-        server picks. Answers ``{"id", "cwd", "ports"}``, ``cwd`` only if the server says and
-        ``ports``, each ``{"port", "url"}``, only if it was given some."""
+        server picks. Answers ``{"id", "ports"}``, ``ports``, each ``{"port", "url"}``,
+        only if it was given some."""
         return await self._call(
             "virtx_client_init_sandbox",
             _args(

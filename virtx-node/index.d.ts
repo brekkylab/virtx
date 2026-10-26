@@ -148,7 +148,6 @@ export interface SandboxInitOptions {
 
 export interface SandboxInitOutput {
   id: string
-  cwd?: string
   ports?: SandboxPort[]
 }
 

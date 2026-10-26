@@ -223,8 +223,7 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
 // `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
-// `{"id": "...", "cwd": "...", "ports": [{"port": n, "url": "..."}]}`, `cwd` only if the server
-// says and `ports` only if it was given some.
+// `{"id": "...", "ports": [{"port": n, "url": "..."}]}`, `ports` only if it was given some.
 //
 // # Safety
 //

@@ -259,7 +259,7 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 | Method | Params | Result | |
 | --- | --- | --- | --- |
 | `sandbox.list` | | array of `{id, image, snapshot?, running, daemon?, ports?}` | |
-| `sandbox.init` | `image`, `snapshot?`, `network?`, `daemon?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, cwd?, ports?}` | |
+| `sandbox.init` | `image`, `snapshot?`, `network?`, `daemon?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, ports?}` | |
 | `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | Stream |
 | `sandbox.close` | `sandbox` | `{}` | |
 

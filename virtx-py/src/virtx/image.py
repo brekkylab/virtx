@@ -15,14 +15,14 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class ImageReference:
-    """An image by a reference to it, as ``name:tag``."""
+class ImageTag:
+    """An image by a tag on it, as ``name:tag``."""
 
-    reference: str
+    tag: str
 
     def to_dict(self) -> dict[str, Any]:
         """As the wire has it."""
-        return {"type": "reference", "reference": self.reference}
+        return {"type": "tag", "tag": self.tag}
 
 
 @dataclass(frozen=True)
@@ -36,20 +36,20 @@ class ImageDigest:
         return {"type": "digest", "digest": self.digest}
 
 
-ImageName = ImageReference | ImageDigest
-"""An image, by a reference to it or by its digest."""
+ImageName = ImageTag | ImageDigest
+"""An image, by a tag on it or by its digest."""
 
 _DIGEST = re.compile(r"(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})")
 
 
 def image_name(image: str | ImageName) -> ImageName:
     """``image`` as the wire names one: a full ``sha256:`` or ``sha512:`` digest is a digest, any
-    other string a reference. An ``ImageName`` is taken as it is."""
+    other string a tag. An ``ImageName`` is taken as it is."""
     if not isinstance(image, str):
         return image
     if _DIGEST.fullmatch(image):
         return ImageDigest(image)
-    return ImageReference(image)
+    return ImageTag(image)
 
 
 @dataclass(frozen=True)

@@ -1283,7 +1283,7 @@ mod ffi {
     /// `{"image": {...}, "snapshot": "...", "network": bool, "daemon": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-    /// `{"type": "reference", "reference": "name:tag"}` or
+    /// `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
     /// `{"id": "...", "cwd": "...", "ports": [{"port": n, "url": "..."}]}`, `cwd` only if the server
     /// says and `ports` only if it was given some.

@@ -179,7 +179,7 @@ Cancelled, none of them leaves a reference changed.
 
 `auth` in `image.pull` is the registry's credentials, tagged by `type`: `{type: "basic", username, password}` or `{type: "bearer", token}`. Without it the server pulls anonymously.
 
-`image` in `image.tag` is tagged by `type`, `{type: "reference", reference}` or `{type: "digest", digest}`, since `sha256:0123abcd` reads as both a digest and the reference `sha256` at tag `0123abcd`.
+`image` in `image.tag` is tagged by `type`, `{type: "tag", tag}` or `{type: "digest", digest}`, since `sha256:0123abcd` reads as both a digest and a tag.
 
 `image.export` sends the image as an OCI image layout in a tar, in its notifications: each `content` a byte string, the next piece of the archive, with `progress` the bytes sent so far and `total` the archive's length.
 

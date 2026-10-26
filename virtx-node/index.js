@@ -230,12 +230,12 @@ function encode(args) {
 const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/
 
 // `image` as the wire names one: a full `sha256:` or `sha512:` digest is a digest, any other
-// string a reference. An object is taken as already named.
+// string a tag. An object is taken as already named.
 function imageName(image) {
   if (typeof image !== 'string') return image
   return DIGEST.test(image)
     ? { type: 'digest', digest: image }
-    : { type: 'reference', reference: image }
+    : { type: 'tag', tag: image }
 }
 
 // A base and the steps over it, which the server builds: `new Recipe('alpine:3.20').run('apk add

@@ -9,7 +9,7 @@
 //! runtime: a [`VirtxFuture`] if it answers once, a [`VirtxStream`] if it answers item by item.
 //! What the library writes is CBOR in a [`VirtxBytes`]: an output, or an error's message as a
 //! text string. C drives futures and streams as Rust does: [`virtx_future_poll`] and
-//! [`virtx_stream_poll_next`] answer [`VIRTX_PENDING`] and keep the [`VirtxWaker`] they were
+//! [`virtx_stream_poll_next`] answer [`VIRTX_PENDING`] and keep the [`VirtxWaker`](waker::VirtxWaker) they were
 //! given, which is woken once there is something to take, and the next poll takes it. So the
 //! caller's event loop, whatever it is, never blocks on one: only a waker's `wake` runs on
 //! another thread. [`virtx_future_wait`] and [`virtx_stream_wait_next`] block instead, for a
@@ -27,11 +27,12 @@ mod waker;
 use std::ffi::c_int;
 
 pub(crate) use bytes::cbor;
-pub use bytes::{VirtxBytes, virtx_bytes_free};
+pub use bytes::VirtxBytes;
+#[cfg(test)]
+pub(crate) use bytes::virtx_bytes_free;
 pub use future::*;
 pub(crate) use runtime::{Runtime, release, retain, share};
 pub use stream::*;
-pub use waker::VirtxWaker;
 
 /// Succeeded: the output, as CBOR, is written.
 pub const VIRTX_OK: c_int = 0;

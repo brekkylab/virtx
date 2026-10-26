@@ -12,10 +12,10 @@ export function load(file: string): void
 /** The path the open library was opened by; `null` before the first client or `load`. */
 export function libraryPath(): string | null
 
-/** An image by a reference to it, as `name:tag`. */
-export interface ImageReference {
-  type: 'reference'
-  reference: string
+/** An image by a tag on it, as `name:tag`. */
+export interface ImageTag {
+  type: 'tag'
+  tag: string
 }
 
 /** An image by the digest of its manifest, as `algorithm:hex`. */
@@ -24,10 +24,10 @@ export interface ImageDigest {
   digest: string
 }
 
-/** An image, by a reference to it or by its digest. */
-export type ImageName = ImageReference | ImageDigest
+/** An image, by a tag on it or by its digest. */
+export type ImageName = ImageTag | ImageDigest
 
-/** A full `sha256:` or `sha512:` digest is a digest, any other string a reference. */
+/** A full `sha256:` or `sha512:` digest is a digest, any other string a tag. */
 export function imageName(image: string | ImageName): ImageName
 
 /** A username, and a password or an access token the registry takes in its place. */

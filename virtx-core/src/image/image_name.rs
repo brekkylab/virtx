@@ -1,21 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-/// An image, by a reference to it or by its digest.
+/// An image, by a tag on it or by its digest.
 ///
 /// Tagged rather than told apart by spelling, since `sha256:0123abcd` reads as both a digest
-/// and the reference `sha256` at tag `0123abcd`.
+/// and the tag `sha256:0123abcd`.
 ///
 /// In CBOR diagnostic notation:
 ///
 /// ```text
-/// {"type": "reference", "reference": "myimg:latest"}
+/// {"type": "tag", "tag": "myimg:latest"}
 /// {"type": "digest", "digest": "sha256:0123abcd"}
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageName {
-    /// A reference, as `name:tag`.
-    Reference { reference: String },
+    /// A tag, as `name:tag`.
+    Tag { tag: String },
 
     /// The digest of the image's manifest, as `algorithm:hex`.
     Digest { digest: String },
@@ -23,9 +23,9 @@ pub enum ImageName {
 
 impl ImageName {
     /// Reads `s` as a digest when it is `sha256:` or `sha512:` followed by exactly as many hex
-    /// digits as that algorithm's digest has, and as a reference otherwise.
+    /// digits as that algorithm's digest has, and as a tag otherwise.
     ///
-    /// A reference spelled that way is read as a digest; build [`ImageName::Reference`] directly
+    /// A tag spelled that way is read as a digest; build [`ImageName::Tag`] directly
     /// to name one.
     pub fn parse(s: &str) -> Self {
         if is_digest(s) {
@@ -33,8 +33,8 @@ impl ImageName {
                 digest: s.to_owned(),
             }
         } else {
-            Self::Reference {
-                reference: s.to_owned(),
+            Self::Tag {
+                tag: s.to_owned(),
             }
         }
     }
@@ -89,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn anything_else_is_a_reference() {
+    fn anything_else_is_a_tag() {
         for s in [
             "myimg:latest",
             "myimg",
@@ -100,8 +100,8 @@ mod tests {
         ] {
             assert_eq!(
                 ImageName::from(s),
-                ImageName::Reference {
-                    reference: s.to_owned()
+                ImageName::Tag {
+                    tag: s.to_owned()
                 },
                 "{s}"
             );

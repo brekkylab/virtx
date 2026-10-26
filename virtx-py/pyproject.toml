@@ -9,10 +9,10 @@ description = "A virtx client for Python, over libvirtx_core's C ABI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-# What crosses the C ABI is CBOR. The C ABI itself is reached with ctypes, so the package has
-# no extension module of its own: a wheel is the Python files and `libvirtx_core` for its
-# platform, which the release copies into `src/virtx/` beside them.
-dependencies = ["cbor2>=5.6"]
+# What crosses the C ABI is JSON, and the C ABI itself is reached with ctypes, so the package
+# depends on nothing and has no extension module of its own: a wheel is the Python files and
+# `libvirtx_core` for its platform, which the release copies into `src/virtx/` beside them.
+dependencies = []
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1"]

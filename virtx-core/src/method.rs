@@ -15,7 +15,7 @@ pub trait StreamingRequest: Request {
     type Content: Serialize + DeserializeOwned;
 }
 
-/// What a call's stream gives: each of its notifications, then its output last. As CBOR,
+/// What a call's stream gives: each of its notifications, then its output last. As JSON,
 /// `{"progress": {"progress": 1, "total": 3, "content": ...}}` or `{"output": ...}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

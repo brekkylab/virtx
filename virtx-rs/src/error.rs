@@ -8,7 +8,7 @@ pub enum Error {
     /// The library answered with an error: the server's, the transport's, or its own.
     Call(String),
     /// What crosses the C ABI did not encode or read back.
-    Cbor(String),
+    Json(String),
     /// An argument cannot cross the C ABI: a string with a NUL in it.
     Argument(String),
 }
@@ -18,7 +18,7 @@ impl fmt::Display for Error {
         match self {
             Error::Library(message)
             | Error::Call(message)
-            | Error::Cbor(message)
+            | Error::Json(message)
             | Error::Argument(message) => f.write_str(message),
         }
     }

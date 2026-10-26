@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Tagged rather than told apart by spelling, since `sha256:0123abcd` reads as both a digest
 /// and the tag `sha256:0123abcd`.
 ///
-/// In CBOR diagnostic notation:
+/// As JSON:
 ///
 /// ```text
 /// {"type": "tag", "tag": "myimg:latest"}

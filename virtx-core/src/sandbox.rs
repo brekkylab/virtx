@@ -251,27 +251,14 @@ pub struct SandboxCloseOutput {}
 mod tests {
     use super::*;
 
-    fn encode(value: &impl Serialize) -> ciborium::Value {
-        let mut encoded = Vec::new();
-        ciborium::into_writer(value, &mut encoded).unwrap();
-        ciborium::from_reader(&encoded[..]).unwrap()
-    }
-
     #[test]
     fn an_init_says_only_what_it_asked_for() {
         let args = SandboxInitArgs::new("img:latest");
-        let value = encode(&args);
-        let keys: Vec<_> = value
-            .as_map()
-            .unwrap()
-            .iter()
-            .map(|(k, _)| k.as_text().unwrap())
-            .collect();
+        let value = serde_json::to_value(&args).unwrap();
+        let keys: Vec<_> = value.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["image"]);
 
-        let mut encoded = Vec::new();
-        ciborium::into_writer(&args, &mut encoded).unwrap();
-        let decoded: SandboxInitArgs = ciborium::from_reader(&encoded[..]).unwrap();
+        let decoded: SandboxInitArgs = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
         assert!(!decoded.daemon);

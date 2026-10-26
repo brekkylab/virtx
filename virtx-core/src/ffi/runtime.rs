@@ -90,7 +90,7 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 }
 
-/// Write `opened`, held once, to `out`, or its error's message, as a CBOR text string, to
+/// Write `opened`, held once, to `out`, or its error's message, as a JSON string, to
 /// `error`.
 ///
 /// # Safety

@@ -1,14 +1,14 @@
 //! [`Client`](crate::client::Client) behind a C ABI, as `include/virtx.h` declares it.
 //!
 //! What every type behind the ABI shares: the runtime it runs on and C holds it by, the futures
-//! and streams its requests return and the waker they wake, and the CBOR across the ABI. Each
+//! and streams its requests return and the waker they wake, and the JSON across the ABI. Each
 //! type's own functions are next to it, as the client's are in `client`.
 //!
 //! Opening a client blocks, returns [`VIRTX_OK`] or [`VIRTX_ERROR`], and writes the client or
-//! the error's message. A request takes CBOR and returns at once, running on the client's own
+//! the error's message. A request takes JSON and returns at once, running on the client's own
 //! runtime: a [`VirtxFuture`] if it answers once, a [`VirtxStream`] if it answers item by item.
-//! What the library writes is CBOR in a [`VirtxBytes`]: an output, or an error's message as a
-//! text string. C drives futures and streams as Rust does: [`virtx_future_poll`] and
+//! What the library writes is JSON in a [`VirtxBytes`]: an output, or an error's message as a
+//! string. C drives futures and streams as Rust does: [`virtx_future_poll`] and
 //! [`virtx_stream_poll_next`] answer [`VIRTX_PENDING`] and keep the [`VirtxWaker`](waker::VirtxWaker) they were
 //! given, which is woken once there is something to take, and the next poll takes it. So the
 //! caller's event loop, whatever it is, never blocks on one: only a waker's `wake` runs on
@@ -26,7 +26,7 @@ mod waker;
 
 use std::ffi::c_int;
 
-pub(crate) use bytes::cbor;
+pub(crate) use bytes::json;
 pub use bytes::VirtxBytes;
 #[cfg(test)]
 pub(crate) use bytes::virtx_bytes_free;
@@ -34,10 +34,10 @@ pub use future::*;
 pub(crate) use runtime::{Runtime, release, retain, share};
 pub use stream::*;
 
-/// Succeeded: the output, as CBOR, is written.
+/// Succeeded: the output, as JSON, is written.
 pub const VIRTX_OK: c_int = 0;
 
-/// Failed: the error's message is written, as a CBOR text string.
+/// Failed: the error's message is written, as a JSON string.
 pub const VIRTX_ERROR: c_int = -1;
 
 /// Not answered yet: the waker given is kept, and woken once it is.

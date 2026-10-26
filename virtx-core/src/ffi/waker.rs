@@ -81,7 +81,7 @@ pub(super) mod testing {
         time::{Duration, Instant},
     };
 
-    use ciborium::Value;
+    use serde_json::Value;
 
     use super::VirtxWaker;
     use crate::ffi::{VirtxBytes, virtx_bytes_free};
@@ -132,13 +132,13 @@ pub(super) mod testing {
         }
     }
 
-    /// The CBOR the library wrote to `out`, read and freed.
+    /// The JSON the library wrote to `out`, read and freed.
     pub unsafe fn taken(out: VirtxBytes) -> Option<Value> {
         if out.data.is_null() {
             return None;
         }
         let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
-        let value = ciborium::from_reader(bytes).unwrap();
+        let value = serde_json::from_slice(bytes).unwrap();
         unsafe { virtx_bytes_free(out) };
         Some(value)
     }

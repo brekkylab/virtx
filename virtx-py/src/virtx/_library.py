@@ -14,14 +14,13 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import itertools
+import json
 import os
 import sys
 import threading
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
-
-import cbor2
 
 OK, ERROR, PENDING, END = 0, -1, 1, 2
 
@@ -143,9 +142,9 @@ class Library:
         if out.data:
             self.virtx_bytes_free(out)
         if status == OK:
-            return cbor2.loads(data)
+            return json.loads(data)
         if status == ERROR:
-            raise VirtxError(cbor2.loads(data) if data else "the call failed")
+            raise VirtxError(json.loads(data) if data else "the call failed")
         raise VirtxError(f"unknown status {status}")
 
     def _poll(

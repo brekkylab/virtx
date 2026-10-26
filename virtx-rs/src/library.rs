@@ -46,7 +46,7 @@ pub(crate) const VIRTX_ERROR: c_int = -1;
 pub(crate) const VIRTX_PENDING: c_int = 1;
 pub(crate) const VIRTX_END: c_int = 2;
 
-/// A request with no arguments, and one taking `args_len` bytes of CBOR.
+/// A request with no arguments, and one taking `args_len` bytes of JSON.
 type Plain = unsafe extern "C" fn(client: *mut Opaque) -> *mut Opaque;
 type WithArgs =
     unsafe extern "C" fn(client: *mut Opaque, args: *const u8, len: usize) -> *mut Opaque;

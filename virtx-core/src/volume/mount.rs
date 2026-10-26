@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// mount up. Where each service is reached is the server's own setting, never a request's,
 /// since a token endpoint is sent the client secret.
 ///
-/// In CBOR diagnostic notation:
+/// As JSON:
 ///
 /// ```text
 /// {"type": "notion", "api_key": "..."}

@@ -309,7 +309,7 @@ mod ffi {
 
     use super::Client;
     use crate::{
-        ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
+        ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, json, release, retain, share},
         image::ImageBuildArgs,
         sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs},
         snapshot::{SnapshotCreateArgs, SnapshotRemoveArgs},
@@ -414,7 +414,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxStream {
-        let args = unsafe { cbor::<ImageBuildArgs>(args, args_len) };
+        let args = unsafe { json::<ImageBuildArgs>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
                 let ImageBuildArgs { recipe, reference } = match args {
@@ -435,8 +435,8 @@ mod ffi {
     /// `snapshot.list`: answers with the snapshots, as
     /// `[{"name": "...", "size": n, "in_use": false}, ...]`.
     ///
-    /// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
-    /// takes them as `args`, the `args_len` bytes of one map, the method's params.
+    /// Every value here is JSON. A request that takes arguments takes them as `args`, the
+    /// `args_len` bytes of one object, the method's params.
     ///
     /// # Safety
     ///
@@ -462,7 +462,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SnapshotCreateArgs>(args, args_len) };
+        let args = unsafe { json::<SnapshotCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let args = args?;
             client
@@ -484,7 +484,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SnapshotRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<SnapshotRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_snapshot(args?.name)
@@ -518,7 +518,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeCreateArgs>(args, args_len) };
+        let args = unsafe { json::<VolumeCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .create_volume(args?.name)
@@ -539,7 +539,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<VolumeRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_volume(args?.name)
@@ -560,7 +560,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeMountListArgs>(args, args_len) };
+        let args = unsafe { json::<VolumeMountListArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .list_volume_mount(args?.volume)
@@ -584,7 +584,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeMountCreateArgs>(args, args_len) };
+        let args = unsafe { json::<VolumeMountCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let VolumeMountCreateArgs {
                 volume,
@@ -610,7 +610,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeMountRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<VolumeMountRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let VolumeMountRemoveArgs { volume, path } = args?;
             client
@@ -654,7 +654,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SandboxInitArgs>(args, args_len) };
+        let args = unsafe { json::<SandboxInitArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client.init_sandbox(args?).await.map_err(|e| e.to_string())
         })
@@ -674,7 +674,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxStream {
-        let args = unsafe { cbor::<SandboxExecArgs>(args, args_len) };
+        let args = unsafe { json::<SandboxExecArgs>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
                 let SandboxExecArgs { sandbox, cmd, timeout_ms } = match args {
@@ -703,7 +703,7 @@ mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SandboxCloseArgs>(args, args_len) };
+        let args = unsafe { json::<SandboxCloseArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .close_sandbox(args?.sandbox)

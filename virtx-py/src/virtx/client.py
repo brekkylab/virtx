@@ -5,12 +5,11 @@ from __future__ import annotations
 import asyncio
 import atexit
 import ctypes
+import json
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
-
-import cbor2
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from .image import ImageBuildOutput, ImageName, Recipe, image_name
@@ -49,8 +48,8 @@ Event = Output[T] | Progress[C]
 
 
 def _args(**args: Any) -> bytes:
-    """``args`` without the ones left out, as CBOR."""
-    return cbor2.dumps({key: value for key, value in args.items() if value is not None})
+    """``args`` without the ones left out, as JSON."""
+    return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
 
 
 def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]:

@@ -166,6 +166,8 @@ pub struct VolumeMountRemoveOutput {}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -175,31 +177,17 @@ mod tests {
             client_secret: "secret".into(),
             refresh_token: "token".into(),
         };
-        let mut encoded = Vec::new();
-        ciborium::into_writer(&source, &mut encoded).unwrap();
-        let value: ciborium::Value = ciborium::from_reader(&encoded[..]).unwrap();
-        let tag = value
-            .as_map()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| k.as_text() == Some("type"))
-            .map(|(_, v)| v.as_text());
-        assert_eq!(tag, Some(Some("gdrive")));
-        let decoded: MountSource = ciborium::from_reader(&encoded[..]).unwrap();
+        let value = serde_json::to_value(&source).unwrap();
+        assert_eq!(value["type"], "gdrive");
+        let decoded: MountSource = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, source);
         assert!(!format!("{source:?}").contains("secret"));
     }
 
     #[test]
     fn a_onedrive_source_needs_no_client_secret() {
-        let value = ciborium::Value::Map(vec![
-            ("type".into(), "onedrive".into()),
-            ("client_id".into(), "id".into()),
-            ("refresh_token".into(), "token".into()),
-        ]);
-        let mut encoded = Vec::new();
-        ciborium::into_writer(&value, &mut encoded).unwrap();
-        let decoded: MountSource = ciborium::from_reader(&encoded[..]).unwrap();
+        let value = json!({"type": "onedrive", "client_id": "id", "refresh_token": "token"});
+        let decoded: MountSource = serde_json::from_value(value).unwrap();
         assert_eq!(
             decoded,
             MountSource::Onedrive {

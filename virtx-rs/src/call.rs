@@ -155,14 +155,14 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
     out: VirtxBytes,
 ) -> Result<T, Error> {
     let read = if out.data.is_null() {
-        Err(Error::Cbor("the library wrote nothing".into()))
+        Err(Error::Json("the library wrote nothing".into()))
     } else {
         let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
         match status {
-            VIRTX_OK => ciborium::from_reader(bytes).map_err(|e| Error::Cbor(e.to_string())),
-            VIRTX_ERROR => Err(match ciborium::from_reader::<String, _>(bytes) {
+            VIRTX_OK => serde_json::from_slice(bytes).map_err(|e| Error::Json(e.to_string())),
+            VIRTX_ERROR => Err(match serde_json::from_slice::<String>(bytes) {
                 Ok(message) => Error::Call(message),
-                Err(e) => Error::Cbor(e.to_string()),
+                Err(e) => Error::Json(e.to_string()),
             }),
             other => Err(Error::Library(format!("unknown status {other}"))),
         }

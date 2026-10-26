@@ -14,8 +14,8 @@ virtx-core = { path = "../virtx-core", default-features = false }
 libloading = "0.8"
 # `Stream`, which a request answering item by item is.
 futures-core = "0.3"
-# What crosses the C ABI is CBOR.
-ciborium = "0.2"
+# What crosses the C ABI is JSON.
+serde_json = "1"
 serde = "1"
 
 [[test]]

@@ -1,8 +1,8 @@
 /*
  * Opening a client blocks and returns VIRTX_OK or VIRTX_ERROR. A request takes and answers
- * CBOR, and returns at once: a VirtxFuture if it answers once, a VirtxStream if it answers
- * item by item. What the library writes is CBOR in a VirtxBytes: the output, or with
- * VIRTX_ERROR the error's message as a text string. Poll a future with virtx_future_poll and
+ * JSON, and returns at once: a VirtxFuture if it answers once, a VirtxStream if it answers
+ * item by item. What the library writes is JSON in a VirtxBytes: the output, or with
+ * VIRTX_ERROR the error's message as a string. Poll a future with virtx_future_poll and
  * a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and keeps the waker given
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
@@ -21,10 +21,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-// Succeeded: the output, as CBOR, is written.
+// Succeeded: the output, as JSON, is written.
 #define VIRTX_OK 0
 
-// Failed: the error's message is written, as a CBOR text string.
+// Failed: the error's message is written, as a JSON string.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.
@@ -118,8 +118,8 @@ struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
 // `snapshot.list`: answers with the snapshots, as
 // `[{"name": "...", "size": n, "in_use": false}, ...]`.
 //
-// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
-// takes them as `args`, the `args_len` bytes of one map, the method's params.
+// Every value here is JSON. A request that takes arguments takes them as `args`, the
+// `args_len` bytes of one object, the method's params.
 //
 // # Safety
 //
@@ -286,7 +286,7 @@ int virtx_future_wait(struct VirtxFuture *future, struct VirtxBytes *out);
 // `future` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_future_free(struct VirtxFuture *future);
 
-// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as CBOR; `VIRTX_ERROR`,
+// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as JSON; `VIRTX_ERROR`,
 // with the error written, after which the stream ends; `VIRTX_END` once it has; or
 // `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once there is
 // an item or the end.

@@ -99,7 +99,7 @@ pub(super) fn start<T: Serialize>(
     Box::into_raw(Box::new(VirtxStream { shared, task }))
 }
 
-/// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as CBOR; `VIRTX_ERROR`,
+/// Take `stream`'s next item: `VIRTX_OK`, with it written to `out` as JSON; `VIRTX_ERROR`,
 /// with the error written, after which the stream ends; `VIRTX_END` once it has; or
 /// `VIRTX_PENDING`, keeping `waker` (and releasing the one kept before) to wake once there is
 /// an item or the end.
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn virtx_stream_free(stream: *mut VirtxStream) {
 mod tests {
     use std::{thread, time::Duration};
 
-    use ciborium::Value;
+    use serde_json::Value;
     use tokio::{runtime::Runtime, sync::mpsc};
 
     use super::{

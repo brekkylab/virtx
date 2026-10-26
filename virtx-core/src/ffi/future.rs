@@ -156,7 +156,7 @@ pub unsafe extern "C" fn virtx_future_free(future: *mut VirtxFuture) {
 mod tests {
     use std::{thread, time::Duration};
 
-    use ciborium::Value;
+    use serde_json::Value;
     use tokio::{runtime::Runtime, sync::oneshot};
 
     use super::{

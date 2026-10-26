@@ -19,7 +19,6 @@
     "test": "node --test '__test__/**/*.spec.mjs'"
   },
   "dependencies": {
-    "cbor-x": "^1.6.8",
     "koffi": "^3.3.3"
   }
 }

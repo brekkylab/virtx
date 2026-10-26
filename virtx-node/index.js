@@ -15,7 +15,6 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const koffi = require('koffi')
-const { Encoder } = require('cbor-x')
 
 const OK = 0
 const ERROR = -1
@@ -31,9 +30,6 @@ const FILE_NAME =
     : process.platform === 'darwin'
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
-
-// Maps read as objects, as the wire's are all keyed by text.
-const cbor = new Encoder({ useRecords: false, mapsAsObjects: true })
 
 class VirtxError extends Error {
   constructor(message) {
@@ -121,8 +117,10 @@ class Library {
       data = Buffer.from(new Uint8Array(koffi.view(out.data, out.len)))
       this.virtx_bytes_free(out)
     }
-    if (status === OK) return cbor.decode(data)
-    if (status === ERROR) throw new VirtxError(data.length ? cbor.decode(data) : 'the call failed')
+    if (status === OK) return JSON.parse(data.toString('utf8'))
+    if (status === ERROR) {
+      throw new VirtxError(data.length ? JSON.parse(data.toString('utf8')) : 'the call failed')
+    }
     throw new VirtxError(`unknown status ${status}`)
   }
 
@@ -211,7 +209,7 @@ const snake = (name) => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
 const camel = (name) => name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
 
 function encode(args) {
-  return cbor.encode(rekey(args, snake))
+  return Buffer.from(JSON.stringify(rekey(args, snake)))
 }
 
 const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/

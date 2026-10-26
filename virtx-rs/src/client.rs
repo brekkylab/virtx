@@ -243,14 +243,13 @@ impl Client {
         self.call(self.api.virtx_client_close_sandbox, args)
     }
 
-    /// Start `request` with `args` as CBOR, which the library has read by the time it returns.
+    /// Start `request` with `args` as JSON, which the library has read by the time it returns.
     fn start(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,
     ) -> *mut Opaque {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&args, &mut bytes).expect("a request's args encode");
+        let bytes = serde_json::to_vec(&args).expect("a request's args encode");
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 

@@ -1,18 +1,20 @@
-//! The server's side of every transport: the methods, and what one message to them answers.
+//! The server's methods, and what one message to them answers.
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use ciborium::Value;
 use http::Extensions;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::message::{ErrorObject, Notification, PROGRESS, ProgressParams, Received, response};
 use crate::method::{Progress, Request, StreamingRequest};
+use crate::transport::message::{
+    ErrorObject, Notification, PROGRESS, ProgressParams, Received, response,
+};
 
-/// Where a method sends the progress of the request it is answering: the request's streamed
-/// answer over HTTP, the server's stdout over stdio. In a method's [`Extensions`] for every request,
-/// so a method gets it with `extensions.get::<Notifier>()`.
+/// Where a method sends the progress of the request it is answering: the request's event
+/// stream. In a method's [`Extensions`] for every request, so a method gets it with
+/// `extensions.get::<Notifier>()`.
 #[derive(Clone, Debug)]
 pub struct Notifier {
     sender: mpsc::UnboundedSender<Vec<u8>>,
@@ -46,8 +48,7 @@ impl Notifier {
                 content: progress.content,
             },
         };
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&notification, &mut bytes).expect("a notification encodes");
+        let bytes = serde_json::to_vec(&notification).expect("a notification encodes");
         self.sender.send(bytes).is_ok()
     }
 }
@@ -81,7 +82,7 @@ impl Methods {
             Box::pin(async move {
                 let args = read_params::<R::Args>(params)?;
                 let output = handler(args, extensions).await?;
-                Value::serialized(&output)
+                serde_json::to_value(&output)
                     .map_err(|e| ErrorObject::new(ErrorObject::INTERNAL_ERROR, e.to_string()))
             })
         });
@@ -92,9 +93,7 @@ impl Methods {
 
 /// `params` read as `A`; no params read as `{}`.
 fn read_params<A: DeserializeOwned>(params: Option<Value>) -> Result<A, ErrorObject> {
-    params
-        .unwrap_or(Value::Map(Vec::new()))
-        .deserialized()
+    serde_json::from_value(params.unwrap_or_else(|| Value::Object(Default::default())))
         .map_err(|e| ErrorObject::new(ErrorObject::INVALID_PARAMS, e.to_string()))
 }
 
@@ -118,15 +117,14 @@ impl Dispatcher {
         let failed = |id: &Value, code, message: &str| {
             Some(response(id, Err(ErrorObject::new(code, message))))
         };
-        // One data item, and nothing after it.
-        let mut rest = message;
-        let message = match ciborium::from_reader::<Value, _>(&mut rest) {
-            Ok(message) if rest.is_empty() => message,
-            _ => return failed(&Value::Null, ErrorObject::PARSE_ERROR, "Parse error"),
+        // One value, and nothing after it.
+        let message = match serde_json::from_slice::<Value>(message) {
+            Ok(message) => message,
+            Err(_) => return failed(&Value::Null, ErrorObject::PARSE_ERROR, "Parse error"),
         };
-        // A map, or not a request: a batch is not taken.
+        // An object, or not a request: a batch is not taken.
         let received = match message {
-            Value::Map(_) => message.deserialized::<Received>().ok(),
+            Value::Object(_) => serde_json::from_value::<Received>(message).ok(),
             _ => None,
         };
         let Some(received) = received else {
@@ -139,7 +137,8 @@ impl Dispatcher {
 
         let id = match received.id {
             None => None,
-            Some(id @ (Value::Null | Value::Text(_) | Value::Integer(_))) => Some(id),
+            Some(id @ (Value::Null | Value::String(_))) => Some(id),
+            Some(Value::Number(id)) if id.is_i64() || id.is_u64() => Some(Value::Number(id)),
             Some(_) => {
                 return failed(
                     &Value::Null,
@@ -151,7 +150,7 @@ impl Dispatcher {
         let params_structured = received
             .params
             .as_ref()
-            .is_none_or(|params| matches!(params, Value::Map(_) | Value::Array(_)));
+            .is_none_or(|params| matches!(params, Value::Object(_) | Value::Array(_)));
         let method = match received.method {
             Some(method) if received.jsonrpc.as_deref() == Some("2.0") && params_structured => {
                 method
@@ -178,50 +177,43 @@ impl Dispatcher {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "client"))]
 mod tests {
-    use ciborium::cbor;
+    use serde_json::json;
 
     use super::*;
-    use crate::transport::testing::methods;
+    use crate::transport::tests::methods;
 
-    fn encode(message: Value) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&message, &mut bytes).unwrap();
-        bytes
-    }
-
-    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> T {
-        ciborium::from_reader(bytes).unwrap()
+    fn decode(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap()
     }
 
     async fn call(message: Value) -> Option<Value> {
         let answer = Dispatcher::new(methods())
-            .call(&encode(message), Extensions::new())
+            .call(message.to_string().as_bytes(), Extensions::new())
             .await;
         answer.map(|answer| decode(&answer))
     }
 
     #[tokio::test]
     async fn a_request_answers_its_response() {
-        let request =
-            cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["hi"]});
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "echo", "params": ["hi"]});
         assert_eq!(
-            call(request.unwrap()).await,
-            Some(cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => "hi"}).unwrap())
+            call(request).await,
+            Some(json!({"jsonrpc": "2.0", "id": 1, "result": "hi"}))
         );
     }
 
     #[tokio::test]
     async fn a_notification_answers_nothing() {
-        let notification = cbor!({"jsonrpc" => "2.0", "method" => "echo", "params" => ["hi"]});
-        assert_eq!(call(notification.unwrap()).await, None);
+        let notification = json!({"jsonrpc": "2.0", "method": "echo", "params": ["hi"]});
+        assert_eq!(call(notification).await, None);
     }
 
     #[tokio::test]
     async fn a_response_answers_nothing() {
-        let response = cbor!({"jsonrpc" => "2.0", "id" => 1, "result" => 2});
-        assert_eq!(call(response.unwrap()).await, None);
+        let response = json!({"jsonrpc": "2.0", "id": 1, "result": 2});
+        assert_eq!(call(response).await, None);
     }
 
     /// What `message` answers, given a [`Notifier`], and the notifications sent while it ran.
@@ -230,7 +222,7 @@ mod tests {
         let mut extensions = Extensions::new();
         extensions.insert(Notifier::new(sender));
         let answer = Dispatcher::new(methods())
-            .call(&encode(message), extensions)
+            .call(message.to_string().as_bytes(), extensions)
             .await;
         let mut sent = Vec::new();
         while let Ok(notification) = receiver.try_recv() {
@@ -241,91 +233,90 @@ mod tests {
 
     #[tokio::test]
     async fn progress_names_the_request_by_its_id() {
-        let request =
-            cbor!({"jsonrpc" => "2.0", "id" => "a", "method" => "count", "params" => [2]});
-        let (answer, sent) = call_notified(request.unwrap()).await;
+        let request = json!({"jsonrpc": "2.0", "id": "a", "method": "count", "params": [2]});
+        let (answer, sent) = call_notified(request).await;
         assert_eq!(
             answer,
-            Some(cbor!({"jsonrpc" => "2.0", "id" => "a", "result" => 2}).unwrap())
+            Some(json!({"jsonrpc": "2.0", "id": "a", "result": 2}))
         );
-        let progress = |progress| {
-            cbor!({
-                "jsonrpc" => "2.0",
-                "method" => "notifications/progress",
-                "params" => {"requestId" => "a", "progress" => progress, "total" => 2},
+        let progress = |progress: u32| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {"requestId": "a", "progress": progress, "total": 2},
             })
-            .unwrap()
         };
         assert_eq!(sent, [progress(1), progress(2)]);
     }
 
     #[tokio::test]
     async fn a_notification_sends_no_progress() {
-        let notification = cbor!({"jsonrpc" => "2.0", "method" => "count", "params" => [2]});
-        let (answer, sent) = call_notified(notification.unwrap()).await;
+        let notification = json!({"jsonrpc": "2.0", "method": "count", "params": [2]});
+        let (answer, sent) = call_notified(notification).await;
         assert_eq!(answer, None);
         assert!(sent.is_empty());
     }
 
-    /// The `error.code` `message`, as CBOR, is answered with.
+    /// The `error.code` `message` is answered with.
     async fn code(message: &[u8]) -> i64 {
         let answer = Dispatcher::new(methods())
             .call(message, Extensions::new())
             .await
             .expect("a response");
-        let answer: Received = decode(&answer);
+        let answer: Received = serde_json::from_slice(&answer).unwrap();
         answer.error.expect("an error").code
     }
 
     #[tokio::test]
     async fn what_is_not_a_request_answers_the_spec_s_errors() {
-        let request =
-            cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => ["hi"]});
-        let request = request.unwrap();
-        let mut trailing = encode(request.clone());
-        trailing.push(0);
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "echo", "params": ["hi"]});
+        let encode = |value: Value| value.to_string().into_bytes();
         let cases = [
-            (b"not cbor".to_vec(), ErrorObject::PARSE_ERROR),
+            (b"not json".to_vec(), ErrorObject::PARSE_ERROR),
             (Vec::new(), ErrorObject::PARSE_ERROR),
-            (trailing, ErrorObject::PARSE_ERROR),
-            (encode(cbor!([]).unwrap()), ErrorObject::INVALID_REQUEST),
             (
-                encode(Value::Array(vec![request])),
+                format!("{request} 0").into_bytes(),
+                ErrorObject::PARSE_ERROR,
+            ),
+            (b"\xff".to_vec(), ErrorObject::PARSE_ERROR),
+            (encode(json!([])), ErrorObject::INVALID_REQUEST),
+            (encode(json!([request])), ErrorObject::INVALID_REQUEST),
+            (
+                encode(json!({"jsonrpc": "1.0", "id": 1, "method": "echo"})),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                encode(cbor!({"jsonrpc" => "1.0", "id" => 1, "method" => "echo"}).unwrap()),
+                encode(json!({"jsonrpc": "2.0", "id": 1})),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                encode(cbor!({"jsonrpc" => "2.0", "id" => 1}).unwrap()),
+                encode(json!({"jsonrpc": "2.0", "id": {}, "method": "echo"})),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                encode(cbor!({"jsonrpc" => "2.0", "id" => {}, "method" => "echo"}).unwrap()),
+                encode(json!({"jsonrpc": "2.0", "id": 1.5, "method": "echo"})),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                encode(
-                    cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => "hi"})
-                        .unwrap(),
-                ),
+                encode(json!({"jsonrpc": "2.0", "id": 1, "method": "echo", "params": "hi"})),
                 ErrorObject::INVALID_REQUEST,
             ),
             (
-                encode(cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "nope"}).unwrap()),
+                encode(json!({"jsonrpc": "2.0", "id": 1, "method": "echo", "params": null})),
+                ErrorObject::INVALID_REQUEST,
+            ),
+            (
+                encode(json!({"jsonrpc": "2.0", "id": 1, "method": "nope"})),
                 ErrorObject::METHOD_NOT_FOUND,
             ),
             (
-                encode(
-                    cbor!({"jsonrpc" => "2.0", "id" => 1, "method" => "echo", "params" => [1]})
-                        .unwrap(),
-                ),
+                encode(json!({"jsonrpc": "2.0", "id": 1, "method": "echo", "params": [1]})),
                 ErrorObject::INVALID_PARAMS,
             ),
         ];
         for (message, expected) in cases {
-            assert_eq!(code(&message).await, expected, "{message:02x?}");
+            let shown = String::from_utf8_lossy(&message).into_owned();
+            assert_eq!(code(&message).await, expected, "{shown}");
         }
     }
 }

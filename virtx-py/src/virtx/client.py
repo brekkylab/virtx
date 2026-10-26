@@ -13,17 +13,8 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 import cbor2
 
 from ._library import OK, Library, VirtxError, _Bytes, library
-from .image import (
-    ImageBuildOutput,
-    ImageListOutputItem,
-    ImageName,
-    ImagePullOutput,
-    Recipe,
-    image_name,
-)
+from .image import ImageBuildOutput, ImageName, Recipe, image_name
 from .volume import (
-    DirEntry,
-    Metadata,
     MountSource,
     VolumeCreateOutput,
     VolumeListOutputItem,
@@ -109,7 +100,8 @@ class Client:
 
     @classmethod
     def connect(cls, url: str) -> Client:
-        """Reach the server at ``url``, an ``http`` or ``https`` URL."""
+        """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
+        it)."""
         lib = library()
         raw = ctypes.c_void_p()
         error = _Bytes()
@@ -193,18 +185,6 @@ class Client:
         async for item in self._lib.items(handle):
             yield _event(item, output)
 
-    async def list_image(self) -> list[ImageListOutputItem]:
-        """Every reference the server holds, and the image each points at."""
-        items = await self._call("virtx_client_list_image")
-        return [ImageListOutputItem.from_dict(item) for item in items]
-
-    def pull_image(self, reference: str) -> AsyncIterator[Event[ImagePullOutput, str]]:
-        """Pull ``reference`` from its registry, and point it at what it pulls. Its events are
-        the pull's log, then what it pulled."""
-        return self._events(
-            "virtx_client_pull_image", _args(reference=reference), ImagePullOutput.from_dict
-        )
-
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> AsyncIterator[Event[ImageBuildOutput, str]]:
@@ -217,13 +197,9 @@ class Client:
             ImageBuildOutput.from_dict,
         )
 
-    async def remove_image(self, digest: str) -> None:
-        """Forget the image ``digest`` names, as ``algorithm:hex``, and every reference pointing
-        at it."""
-        await self._call("virtx_client_remove_image", _args(digest=digest))
-
     async def list_snapshot(self) -> list[dict[str, Any]]:
-        """Every snapshot the server holds, as ``{"name", "size"}``."""
+        """Every snapshot the server holds, as ``{"name", "size", "in_use"}``, ``in_use`` whether
+        a sandbox holds it now."""
         return await self._call("virtx_client_list_snapshot")
 
     async def create_snapshot(
@@ -236,24 +212,6 @@ class Client:
     async def remove_snapshot(self, name: str) -> None:
         """Delete the snapshot ``name`` and its upper layer."""
         await self._call("virtx_client_remove_snapshot", _args(name=name))
-
-    async def read_snapshot_dir(self, snapshot: str, path: str) -> list[DirEntry]:
-        """The entries of the directory ``path`` in ``snapshot``'s upper layer, in no set order;
-        the image under it is not looked at."""
-        entries = await self._call(
-            "virtx_client_read_snapshot_dir", _args(snapshot=snapshot, path=path)
-        )
-        return [DirEntry.from_dict(entry) for entry in entries]
-
-    async def read_snapshot_file(
-        self, snapshot: str, path: str, offset: int = 0, length: int | None = None
-    ) -> bytes:
-        """Up to ``length`` bytes of the file ``path`` in ``snapshot``'s upper layer, not the
-        image under it, from ``offset``, or to the end without a ``length``. Fewer may come back before the end; none at or past it."""
-        return await self._call(
-            "virtx_client_read_snapshot_file",
-            _args(snapshot=snapshot, path=path, offset=offset, length=length),
-        )
 
     async def list_volume(self) -> list[VolumeListOutputItem]:
         """Every volume the server holds."""
@@ -268,73 +226,6 @@ class Client:
     async def remove_volume(self, name: str) -> None:
         """Delete the volume ``name`` and everything in it."""
         await self._call("virtx_client_remove_volume", _args(name=name))
-
-    async def stat_volume_file(self, volume: str, path: str) -> Metadata:
-        """The metadata of ``path`` in ``volume``."""
-        metadata = await self._call(
-            "virtx_client_stat_volume_file", _args(volume=volume, path=path)
-        )
-        return Metadata.from_dict(metadata)
-
-    async def read_volume_dir(self, volume: str, path: str) -> list[DirEntry]:
-        """The entries of the directory ``path`` in ``volume``, in no set order."""
-        entries = await self._call("virtx_client_read_volume_dir", _args(volume=volume, path=path))
-        return [DirEntry.from_dict(entry) for entry in entries]
-
-    async def read_volume_file(
-        self, volume: str, path: str, offset: int = 0, length: int | None = None
-    ) -> bytes:
-        """Up to ``length`` bytes of the file ``path`` in ``volume`` from ``offset``, or to the
-        end without a ``length``. Fewer may come back before the end; none at or past it."""
-        return await self._call(
-            "virtx_client_read_volume_file",
-            _args(volume=volume, path=path, offset=offset, length=length),
-        )
-
-    async def write_volume_file(
-        self, volume: str, path: str, data: bytes, offset: int | None = None
-    ) -> None:
-        """Write ``data`` to the file ``path`` in ``volume`` at ``offset``, or make the file
-        ``data`` and nothing else without one. The file is created if there is none."""
-        await self._call(
-            "virtx_client_write_volume_file",
-            _args(volume=volume, path=path, offset=offset, data=bytes(data)),
-        )
-
-    async def create_volume_dir(self, volume: str, path: str, parents: bool = False) -> None:
-        """Create the directory ``path`` in ``volume``, and with ``parents`` the ones above it
-        too."""
-        await self._call(
-            "virtx_client_create_volume_dir", _args(volume=volume, path=path, parents=parents)
-        )
-
-    async def remove_volume_file(self, volume: str, path: str, recursive: bool = False) -> None:
-        """Delete the file or directory ``path`` in ``volume``; a directory with anything in it
-        only when ``recursive``."""
-        await self._call(
-            "virtx_client_remove_volume_file",
-            _args(volume=volume, path=path, recursive=recursive),
-        )
-
-    async def rename_volume_file(
-        self, volume: str, from_: str, to: str, overwrite: bool = False
-    ) -> None:
-        """Move ``from_`` to ``to`` in ``volume``, replacing what is at ``to`` only when
-        ``overwrite``."""
-        await self._call(
-            "virtx_client_rename_volume_file",
-            cbor2.dumps({"volume": volume, "from": from_, "to": to, "overwrite": overwrite}),
-        )
-
-    async def copy_volume_file(
-        self, volume: str, from_: str, to: str, overwrite: bool = False
-    ) -> None:
-        """Copy ``from_``, a file or a whole directory, to ``to`` in ``volume``, deleting what is
-        at ``to`` first only when ``overwrite``."""
-        await self._call(
-            "virtx_client_copy_volume_file",
-            cbor2.dumps({"volume": volume, "from": from_, "to": to, "overwrite": overwrite}),
-        )
 
     async def list_volume_mount(self, volume: str) -> list[VolumeMountListOutputItem]:
         """The mounts in ``volume``, without their credentials."""

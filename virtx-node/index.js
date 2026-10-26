@@ -62,26 +62,13 @@ const SIGNATURES = {
   virtx_client_connect: ['int', ['const char *', koffi.out(koffi.pointer('uintptr_t')), Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
-  virtx_client_list_image: PLAIN,
-  virtx_client_pull_image: WITH_ARGS,
   virtx_client_build_image: WITH_ARGS,
-  virtx_client_remove_image: WITH_ARGS,
   virtx_client_list_snapshot: PLAIN,
   virtx_client_create_snapshot: WITH_ARGS,
   virtx_client_remove_snapshot: WITH_ARGS,
-  virtx_client_read_snapshot_dir: WITH_ARGS,
-  virtx_client_read_snapshot_file: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_remove_volume: WITH_ARGS,
-  virtx_client_stat_volume_file: WITH_ARGS,
-  virtx_client_read_volume_dir: WITH_ARGS,
-  virtx_client_read_volume_file: WITH_ARGS,
-  virtx_client_write_volume_file: WITH_ARGS,
-  virtx_client_create_volume_dir: WITH_ARGS,
-  virtx_client_remove_volume_file: WITH_ARGS,
-  virtx_client_rename_volume_file: WITH_ARGS,
-  virtx_client_copy_volume_file: WITH_ARGS,
   virtx_client_list_volume_mount: WITH_ARGS,
   virtx_client_create_volume_mount: WITH_ARGS,
   virtx_client_remove_volume_mount: WITH_ARGS,
@@ -299,7 +286,7 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, an `http` or `https` URL.
+  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it).
   static connect(url) {
     const lib = library()
     const raw = [0]
@@ -378,21 +365,9 @@ class Client {
     }
   }
 
-  listImage() {
-    return this._call('virtx_client_list_image')
-  }
-
-  pullImage(reference) {
-    return this._events('virtx_client_pull_image', { reference })
-  }
-
   buildImage(recipe, reference) {
     const declared = recipe instanceof Recipe ? recipe.toJSON() : recipe
     return this._events('virtx_client_build_image', { recipe: declared, reference })
-  }
-
-  async removeImage(digest) {
-    await this._call('virtx_client_remove_image', { digest })
   }
 
   listSnapshot() {
@@ -407,14 +382,6 @@ class Client {
     await this._call('virtx_client_remove_snapshot', { name })
   }
 
-  readSnapshotDir(snapshot, dir) {
-    return this._call('virtx_client_read_snapshot_dir', { snapshot, path: dir })
-  }
-
-  readSnapshotFile(snapshot, file, offset = 0, length) {
-    return this._call('virtx_client_read_snapshot_file', { snapshot, path: file, offset, length })
-  }
-
   listVolume() {
     return this._call('virtx_client_list_volume')
   }
@@ -425,43 +392,6 @@ class Client {
 
   async removeVolume(name) {
     await this._call('virtx_client_remove_volume', { name })
-  }
-
-  statVolumeFile(volume, file) {
-    return this._call('virtx_client_stat_volume_file', { volume, path: file })
-  }
-
-  readVolumeDir(volume, dir) {
-    return this._call('virtx_client_read_volume_dir', { volume, path: dir })
-  }
-
-  readVolumeFile(volume, file, offset = 0, length) {
-    return this._call('virtx_client_read_volume_file', { volume, path: file, offset, length })
-  }
-
-  async writeVolumeFile(volume, file, data, offset) {
-    await this._call('virtx_client_write_volume_file', {
-      volume,
-      path: file,
-      offset,
-      data: Buffer.from(data),
-    })
-  }
-
-  async createVolumeDir(volume, dir, parents = false) {
-    await this._call('virtx_client_create_volume_dir', { volume, path: dir, parents })
-  }
-
-  async removeVolumeFile(volume, file, recursive = false) {
-    await this._call('virtx_client_remove_volume_file', { volume, path: file, recursive })
-  }
-
-  async renameVolumeFile(volume, from, to, overwrite = false) {
-    await this._call('virtx_client_rename_volume_file', { volume, from, to, overwrite })
-  }
-
-  async copyVolumeFile(volume, from, to, overwrite = false) {
-    await this._call('virtx_client_copy_volume_file', { volume, from, to, overwrite })
   }
 
   listVolumeMount(volume) {

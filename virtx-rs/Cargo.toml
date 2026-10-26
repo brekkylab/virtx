@@ -17,8 +17,6 @@ futures-core = "0.3"
 # What crosses the C ABI is CBOR.
 ciborium = "0.2"
 serde = "1"
-# A file's contents, as `virtx-core` reads them.
-bytes = "1"
 
 [[test]]
 # Its own `main`, which opens the library once before every test.

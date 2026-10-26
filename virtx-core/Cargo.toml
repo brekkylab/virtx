@@ -14,21 +14,28 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # What the types need, and all they need: a crate that only names requests and their answers
 # (`virtx-rs`, which reaches the library through the C ABI) takes `default-features = false`.
 anyhow = "1"
-# `serde` so a volume's file contents are a CBOR byte string, not an array of integers.
-bytes = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 
-# HTTP for the Streamable HTTP client. The same reqwest 0.13 and rustls the `virtx` crate uses.
+# HTTP over TCP for the client. The same reqwest 0.13 and rustls the `virtx` crate uses.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
-# The headers and statuses of Streamable HTTP, and a method's `Extensions`.
+# HTTP/2 over stdio for both ends, and the server's end of either transport.
+hyper = { version = "1", optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+# The requests and responses both transports carry, and a method's `Extensions`.
+bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
-# The Streamable HTTP server: the bodies of the requests and responses it handles.
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
+# Every message is JSON; an `text/event-stream` answer is read and written as SSE.
+serde_json = { version = "1", optional = true }
+sse-stream = { version = "0.2", optional = true }
+# A request's id: unique across clients, since a server without credentials matches a
+# cancellation's against every client's requests.
+uuid = { version = "1", features = ["v4"], optional = true }
 # `Stream`, which a call's progress is, and the macro that writes one.
-futures-util = { version = "0.3", default-features = false, optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 async-stream = { version = "0.3", optional = true }
-# Every message, and what crosses the C ABI, is CBOR.
+# What crosses the C ABI is CBOR.
 ciborium = { version = "0.2", optional = true }
 # A session brings its own runtime, since C calls in without one. `rt-multi-thread` so the
 # session's tasks run between C calls, not only inside one.
@@ -41,8 +48,9 @@ cbindgen = { version = "0.29", default-features = false }
 [dev-dependencies]
 # The types' tests read their wire form back.
 ciborium = "0.2"
-# What serves the Streamable HTTP tests' server.
+# What serves the HTTP tests' server, and the tests' own requests to it.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 # The stdio tests' server reads its own stdin and writes its own stdout.
 tokio = { version = "1", features = ["io-std"] }
 
@@ -53,17 +61,39 @@ tokio = { version = "1", features = ["io-std"] }
 default = ["ffi"]
 client = [
     "dep:reqwest",
+    "dep:hyper",
+    "hyper/client",
+    "hyper/http2",
+    "dep:hyper-util",
+    "dep:bytes",
     "dep:http",
+    "dep:http-body-util",
+    "dep:serde_json",
+    "dep:sse-stream",
+    "dep:uuid",
     "dep:futures-util",
     "dep:async-stream",
-    "dep:ciborium",
     "dep:tokio",
 ]
 server = [
+    "dep:hyper",
+    "hyper/server",
+    "hyper/http2",
+    "dep:hyper-util",
+    "dep:bytes",
     "dep:http",
     "dep:http-body",
     "dep:http-body-util",
-    "dep:ciborium",
+    "dep:serde_json",
+    "dep:sse-stream",
+    "dep:futures-util",
+    "dep:async-stream",
     "dep:tokio",
 ]
-ffi = ["client"]
+ffi = ["client", "dep:ciborium"]
+
+# Runs a child process of itself as the server, so libtest's output stays off its stdout.
+[[test]]
+name = "stdio"
+harness = false
+required-features = ["client", "server"]

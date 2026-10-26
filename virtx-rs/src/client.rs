@@ -5,18 +5,13 @@ use std::{
     ptr,
 };
 
-use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    DirEntry, ImageBuildArgs, ImageBuildOutput, ImageListOutputItem, ImagePullArgs,
-    ImagePullOutput, ImageRemoveArgs, Metadata, MountSource, Recipe, SandboxCloseArgs,
-    SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileReadArgs, SnapshotFileReadDirArgs,
-    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
-    VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs, VolumeFileReadDirArgs,
-    VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs, VolumeFileWriteArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountListOutputItem,
-    VolumeMountRemoveArgs, VolumeRemoveArgs,
+    ImageBuildArgs, ImageBuildOutput, MountSource, Recipe, SandboxCloseArgs, SandboxExecArgs,
+    SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
+    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
+    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -67,7 +62,8 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, an `http` or `https` URL. Blocks until the client is made.
+    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). Blocks
+    /// until the client is made.
     pub fn connect(url: impl AsRef<str>) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
@@ -104,23 +100,6 @@ impl Client {
         })
     }
 
-    /// Every reference the server holds, and the image each points at.
-    pub fn list_image(&self) -> Call<Vec<ImageListOutputItem>> {
-        Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_image)(self.raw)
-        })
-    }
-
-    /// Pull `reference` from its registry, and point it at what it pulls. Its events are the
-    /// pull's log, then what it pulled.
-    pub fn pull_image(&self, reference: impl Into<String>) -> Events<ImagePullOutput, String> {
-        let args = ImagePullArgs {
-            reference: reference.into(),
-            auth: None,
-        };
-        Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
-    }
-
     /// Build `recipe`, and point `reference` at it. Its events are the build's log, then what
     /// it built.
     pub fn build_image(
@@ -136,14 +115,6 @@ impl Client {
             self.api,
             self.start(self.api.virtx_client_build_image, args),
         )
-    }
-
-    /// Forget the image `digest` names, as `algorithm:hex`, and every reference pointing at it.
-    pub fn remove_image(&self, digest: impl Into<String>) -> Call<()> {
-        let args = ImageRemoveArgs {
-            digest: digest.into(),
-        };
-        self.call(self.api.virtx_client_remove_image, args)
     }
 
     /// Every snapshot the server holds.
@@ -173,38 +144,6 @@ impl Client {
         self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
-    /// The entries of the directory `path` in `snapshot`'s upper layer, in no set order; the
-    /// image under it is not looked at.
-    pub fn read_snapshot_dir(
-        &self,
-        snapshot: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Call<Vec<DirEntry>> {
-        let args = SnapshotFileReadDirArgs {
-            snapshot: snapshot.into(),
-            path: path.into(),
-        };
-        self.call(self.api.virtx_client_read_snapshot_dir, args)
-    }
-
-    /// Up to `length` bytes of the file `path` in `snapshot`'s upper layer, not the image under
-    /// it, from `offset`, or to the end without a `length`. Fewer may come back before the end; none at or past it.
-    pub fn read_snapshot_file(
-        &self,
-        snapshot: impl Into<String>,
-        path: impl Into<String>,
-        offset: u64,
-        length: Option<u64>,
-    ) -> Call<Bytes> {
-        let args = SnapshotFileReadArgs {
-            snapshot: snapshot.into(),
-            path: path.into(),
-            offset,
-            length,
-        };
-        self.call(self.api.virtx_client_read_snapshot_file, args)
-    }
-
     /// Every volume the server holds.
     pub fn list_volume(&self) -> Call<Vec<VolumeListOutputItem>> {
         Call::new(self.api, unsafe {
@@ -224,134 +163,6 @@ impl Client {
     pub fn remove_volume(&self, name: impl Into<String>) -> Call<()> {
         let args = VolumeRemoveArgs { name: name.into() };
         self.call(self.api.virtx_client_remove_volume, args)
-    }
-
-    /// The metadata of `path` in `volume`.
-    pub fn stat_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Call<Metadata> {
-        let args = VolumeFileStatArgs {
-            volume: volume.into(),
-            path: path.into(),
-        };
-        self.call(self.api.virtx_client_stat_volume_file, args)
-    }
-
-    /// The entries of the directory `path` in `volume`, in no set order.
-    pub fn read_volume_dir(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Call<Vec<DirEntry>> {
-        let args = VolumeFileReadDirArgs {
-            volume: volume.into(),
-            path: path.into(),
-        };
-        self.call(self.api.virtx_client_read_volume_dir, args)
-    }
-
-    /// Up to `length` bytes of the file `path` in `volume` from `offset`, or to the end without
-    /// a `length`. Fewer may come back before the end; none at or past it.
-    pub fn read_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        offset: u64,
-        length: Option<u64>,
-    ) -> Call<Bytes> {
-        let args = VolumeFileReadArgs {
-            volume: volume.into(),
-            path: path.into(),
-            offset,
-            length,
-        };
-        self.call(self.api.virtx_client_read_volume_file, args)
-    }
-
-    /// Write `data` to the file `path` in `volume` at `offset`, or make the file `data` and
-    /// nothing else without one. The file is created if there is none.
-    pub fn write_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        offset: Option<u64>,
-        data: impl Into<Bytes>,
-    ) -> Call<()> {
-        let args = VolumeFileWriteArgs {
-            volume: volume.into(),
-            path: path.into(),
-            offset,
-            data: data.into(),
-        };
-        self.call(self.api.virtx_client_write_volume_file, args)
-    }
-
-    /// Create the directory `path` in `volume`, and with `parents` the ones above it too.
-    pub fn create_volume_dir(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        parents: bool,
-    ) -> Call<()> {
-        let args = VolumeFileCreateDirArgs {
-            volume: volume.into(),
-            path: path.into(),
-            parents,
-        };
-        self.call(self.api.virtx_client_create_volume_dir, args)
-    }
-
-    /// Delete the file or directory `path` in `volume`; a directory with anything in it only
-    /// when `recursive`.
-    pub fn remove_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        recursive: bool,
-    ) -> Call<()> {
-        let args = VolumeFileRemoveArgs {
-            volume: volume.into(),
-            path: path.into(),
-            recursive,
-        };
-        self.call(self.api.virtx_client_remove_volume_file, args)
-    }
-
-    /// Move `from` to `to` in `volume`, replacing what is at `to` only when `overwrite`.
-    pub fn rename_volume_file(
-        &self,
-        volume: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        overwrite: bool,
-    ) -> Call<()> {
-        let args = VolumeFileRenameArgs {
-            volume: volume.into(),
-            from: from.into(),
-            to: to.into(),
-            overwrite,
-        };
-        self.call(self.api.virtx_client_rename_volume_file, args)
-    }
-
-    /// Copy `from`, a file or a whole directory, to `to` in `volume`, deleting what is at `to`
-    /// first only when `overwrite`.
-    pub fn copy_volume_file(
-        &self,
-        volume: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        overwrite: bool,
-    ) -> Call<()> {
-        let args = VolumeFileCopyArgs {
-            volume: volume.into(),
-            from: from.into(),
-            to: to.into(),
-            overwrite,
-        };
-        self.call(self.api.virtx_client_copy_volume_file, args)
     }
 
     /// The mounts in `volume`, without their credentials.

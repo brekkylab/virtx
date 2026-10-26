@@ -33,17 +33,10 @@ def test_a_mount_source_keeps_its_credentials_out_of_its_repr() -> None:
     assert "client_secret" not in virtx.OnedriveSource("id", "token").to_dict()
 
 
-def test_a_read_dir_answer_reads_back() -> None:
-    entry = virtx.DirEntry.from_dict(
-        {"name": "a", "metadata": {"type": "dir", "size": 0, "modified": 1}}
-    )
-    assert entry == virtx.DirEntry("a", virtx.Metadata(virtx.FileType.DIR, 0, 1))
-
-
 def test_a_streamed_event_reads_back() -> None:
     from virtx.client import _event
 
-    progress = {"progress": {"progress": 1, "content": "pulling alpine:3.20"}}
-    assert _event(progress, dict) == virtx.Progress(1, None, "pulling alpine:3.20")
+    progress = {"progress": {"progress": 1, "content": "fetch alpine:3.20"}}
+    assert _event(progress, dict) == virtx.Progress(1, None, "fetch alpine:3.20")
     assert _event({"progress": {"progress": 2, "total": 3}}, dict) == virtx.Progress(2, 3)
     assert _event({"output": {"code": 0}}, dict) == virtx.Output({"code": 0})

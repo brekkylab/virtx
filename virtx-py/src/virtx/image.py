@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -52,33 +52,6 @@ def image_name(image: str | ImageName) -> ImageName:
     return ImageTag(image)
 
 
-@dataclass(frozen=True)
-class BasicAuth:
-    """A username, and a password or an access token the registry takes in its place."""
-
-    username: str
-    password: str = field(repr=False)
-
-    def to_dict(self) -> dict[str, Any]:
-        """As the wire has it."""
-        return {"type": "basic", "username": self.username, "password": self.password}
-
-
-@dataclass(frozen=True)
-class BearerAuth:
-    """A token the registry takes as is."""
-
-    token: str = field(repr=False)
-
-    def to_dict(self) -> dict[str, Any]:
-        """As the wire has it."""
-        return {"type": "bearer", "token": self.token}
-
-
-RegistryAuth = BasicAuth | BearerAuth
-"""Credentials for a remote image registry."""
-
-
 class Recipe:
     """A base and the steps over it, which the server builds: ``Recipe("alpine:3.20").run("apk
     add jq")``. Each step returns the recipe, so they chain."""
@@ -105,38 +78,6 @@ class Recipe:
     def to_dict(self) -> dict[str, Any]:
         """As the wire has it."""
         return {"v": 1, "base": self.base, "steps": list(self.steps)}
-
-
-@dataclass(frozen=True)
-class ImageListOutputItem:
-    """One reference the server holds. Two references to one image are two items with the same
-    digest."""
-
-    reference: str
-    """The reference, as ``name:tag``."""
-
-    digest: str
-    """The digest of the image's manifest, as ``algorithm:hex``."""
-
-    size: int
-    """The bytes the image's layers take on the server, counting a layer shared with another
-    image in both."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImageListOutputItem:
-        return cls(value["reference"], value["digest"], value["size"])
-
-
-@dataclass(frozen=True)
-class ImagePullOutput:
-    """What ``pull_image`` pulled."""
-
-    digest: str
-    """The digest of the image's manifest, as ``algorithm:hex``."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImagePullOutput:
-        return cls(value["digest"])
 
 
 @dataclass(frozen=True)

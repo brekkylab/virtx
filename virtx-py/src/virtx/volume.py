@@ -1,4 +1,4 @@
-"""Volumes: storage the server keeps under a name, apart from any VM, and the files in one.
+"""Volumes: storage the server keeps under a name, apart from any VM, and the mounts in one.
 
 A path in a volume is relative to its root, ``/``-separated, as ``dir/file.txt``; the empty path
 is the root. The server refuses one that leads outside the volume.
@@ -10,42 +10,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, ClassVar
-
-
-class FileType(str, Enum):
-    """What a path in a volume is."""
-
-    FILE = "file"
-    DIR = "dir"
-
-
-@dataclass(frozen=True)
-class Metadata:
-    """A path's type, size and modification time."""
-
-    file_type: FileType
-
-    size: int
-    """The file's length in bytes; for a directory, what the server's filesystem reports."""
-
-    modified: int
-    """When the contents last changed, in nanoseconds since the Unix epoch."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Metadata:
-        return cls(FileType(value["type"]), value["size"], value["modified"])
-
-
-@dataclass(frozen=True)
-class DirEntry:
-    """One entry of a directory: its name within the directory, and its metadata."""
-
-    name: str
-    metadata: Metadata
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> DirEntry:
-        return cls(value["name"], Metadata.from_dict(value["metadata"]))
 
 
 class MountType(str, Enum):

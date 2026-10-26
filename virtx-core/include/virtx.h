@@ -76,8 +76,8 @@ int virtx_client_spawn(const char *program,
                        struct VirtxClient **client,
                        struct VirtxBytes *error);
 
-// Reach the server at `url`, an `http` or `https` URL, and write the client, held once, to
-// `client`.
+// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), and write
+// the client, held once, to `client`.
 //
 // # Safety
 //
@@ -101,8 +101,22 @@ void virtx_client_retain(struct VirtxClient *client);
 // `wake`, which runs on the runtime this may stop.
 void virtx_client_release(struct VirtxClient *client);
 
-// `image.list`: answers with the references, as
-// `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
+// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
+// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
+// Its items are its log, a line each, as
+// `{"progress": {"progress": n, "total": n, "content": "..."}}` (`total` and `content` each
+// optional), then what it built, as `{"output": {"digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
+// read after this returns.
+struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// `snapshot.list`: answers with the snapshots, as
+// `[{"name": "...", "size": n, "in_use": false}, ...]`.
 //
 // Every value here is CBOR, written in diagnostic notation. A request that takes arguments
 // takes them as `args`, the `args_len` bytes of one map, the method's params.
@@ -110,49 +124,6 @@ void virtx_client_release(struct VirtxClient *client);
 // # Safety
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
-
-// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
-// `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
-// `{"progress": "..."}`, then what it pulled, as
-// `{"output": {"digest": "algorithm:hex"}}`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
-
-// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
-// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
-// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
-// `{"output": {"digest": "algorithm:hex"}}`.
-//
-// # Safety
-//
-// `client` is as in `virtx_client_list_image`. `args` is `args_len` readable bytes, not
-// read after this returns.
-struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
-                                             const uint8_t *args,
-                                             size_t args_len);
-
-// `image.remove`: forgets an image and every reference pointing at it, given
-// `{"digest": "algorithm:hex"}`. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
-
-// `snapshot.list`: answers with the snapshots, as
-// `[{"name": "...", "size": n}, ...]`.
-//
-// # Safety
-//
-// `client` is as in `virtx_client_list_image`.
 struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
 
 // `snapshot.create`: keeps a new, empty upper layer under `name`, holding at most
@@ -176,34 +147,11 @@ struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
-// `snapshot.file.read_dir`: given `{"snapshot": "...", "path": "dir"}`, `path` in the
-// snapshot's upper layer and not the image under it, answers with
-// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
-// `virtx_client_stat_volume_file` answers it.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_read_snapshot_dir(struct VirtxClient *client,
-                                                   const uint8_t *args,
-                                                   size_t args_len);
-
-// `snapshot.file.read`: given
-// `{"snapshot": "...", "path": "...", "offset": n, "length": n}`, `path` in the snapshot's
-// upper layer and not the image under it, `offset` and `length` optional, answers with the bytes read, as a byte string.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_read_snapshot_file(struct VirtxClient *client,
-                                                    const uint8_t *args,
-                                                    size_t args_len);
-
 // `volume.list`: answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`.
+// `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client);
 
 // `volume.create`: keeps a new, empty volume under `name`, or a name the server picks if
@@ -225,88 +173,6 @@ struct VirtxFuture *virtx_client_create_volume(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_remove_volume(struct VirtxClient *client,
                                                const uint8_t *args,
                                                size_t args_len);
-
-// `volume.file.stat`: given `{"volume": "...", "path": "dir/file"}`, answers with
-// `{"type": "file" or "dir", "size": n, "modified": nanoseconds}`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_stat_volume_file(struct VirtxClient *client,
-                                                  const uint8_t *args,
-                                                  size_t args_len);
-
-// `volume.file.read_dir`: given `{"volume": "...", "path": "dir"}`, answers with
-// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as `virtx_client_stat_volume_file`
-// answers it.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_read_volume_dir(struct VirtxClient *client,
-                                                 const uint8_t *args,
-                                                 size_t args_len);
-
-// `volume.file.read`: given `{"volume": "...", "path": "...", "offset": n, "length": n}`,
-// `offset` and `length` optional, answers with the bytes read, as a byte string.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_read_volume_file(struct VirtxClient *client,
-                                                  const uint8_t *args,
-                                                  size_t args_len);
-
-// `volume.file.write`: given `{"volume": "...", "path": "...", "offset": n, "data": h'...'}`,
-// `offset` optional, writes `data`. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_write_volume_file(struct VirtxClient *client,
-                                                   const uint8_t *args,
-                                                   size_t args_len);
-
-// `volume.file.create_dir`: given `{"volume": "...", "path": "...", "parents": bool}`,
-// `parents` optional, creates the directory. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_create_volume_dir(struct VirtxClient *client,
-                                                   const uint8_t *args,
-                                                   size_t args_len);
-
-// `volume.file.remove`: given `{"volume": "...", "path": "...", "recursive": bool}`,
-// `recursive` optional, deletes the file or directory. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_remove_volume_file(struct VirtxClient *client,
-                                                    const uint8_t *args,
-                                                    size_t args_len);
-
-// `volume.file.rename`: given
-// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite`
-// optional, moves `from` to `to`. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_rename_volume_file(struct VirtxClient *client,
-                                                    const uint8_t *args,
-                                                    size_t args_len);
-
-// `volume.file.copy`: given `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`,
-// `overwrite` optional, copies `from` to `to`. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_copy_volume_file(struct VirtxClient *client,
-                                                  const uint8_t *args,
-                                                  size_t args_len);
 
 // `volume.mount.list`: given `{"volume": "..."}`, answers with the volume's mounts, as
 // `[{"path": "...", "mount_type": "notion" or "gdrive" or "onedrive"}, ...]`.
@@ -348,7 +214,7 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_image`.
+// `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // `sandbox.init`: makes a sandbox, given
@@ -369,8 +235,8 @@ struct VirtxFuture *virtx_client_init_sandbox(struct VirtxClient *client,
 
 // `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
 // `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
-// it is written, as `{"progress": "..."}`, then how it ended, as
-// `{"output": {"code": n}}`.
+// it is written, as `{"progress": ...}` as `virtx_client_build_image`'s are, then how it
+// ended, as `{"output": {"code": n}}`.
 //
 // # Safety
 //

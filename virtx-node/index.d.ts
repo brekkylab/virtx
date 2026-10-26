@@ -30,22 +30,6 @@ export type ImageName = ImageTag | ImageDigest
 /** A full `sha256:` or `sha512:` digest is a digest, any other string a tag. */
 export function imageName(image: string | ImageName): ImageName
 
-/** A username, and a password or an access token the registry takes in its place. */
-export interface BasicAuth {
-  type: 'basic'
-  username: string
-  password: string
-}
-
-/** A token the registry takes as is. */
-export interface BearerAuth {
-  type: 'bearer'
-  token: string
-}
-
-/** Credentials for a remote image registry. */
-export type RegistryAuth = BasicAuth | BearerAuth
-
 export type Step = { run: string } | { env: { key: string; value: string } } | { workdir: string }
 
 /** A base and the steps over it. Each step returns the recipe, so they chain. */
@@ -72,21 +56,6 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-/** One reference the server holds. Two references to one image are two items with the same digest. */
-export interface ImageListOutputItem {
-  /** As `name:tag`. */
-  reference: string
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
-  /** The bytes the image's layers take on the server, counting a layer shared with another image in both. */
-  size: number
-}
-
-export interface ImagePullOutput {
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
-}
-
 export interface ImageBuildOutput {
   /** The digest of the image's manifest, as `algorithm:hex`. */
   digest: string
@@ -95,6 +64,8 @@ export interface ImageBuildOutput {
 export interface SnapshotListItem {
   name: string
   size: number
+  /** Whether a sandbox holds it now, from its `initSandbox` until its `closeSandbox`. */
+  inUse: boolean
 }
 
 export interface VolumeListOutputItem {
@@ -106,24 +77,6 @@ export interface VolumeListOutputItem {
 export interface VolumeCreateOutput {
   /** The one asked for, or the one the server picked. */
   name: string
-}
-
-/** What a path in a volume is. */
-export type FileType = 'file' | 'dir'
-
-/** A path's type, size and modification time. */
-export interface Metadata {
-  type: FileType
-  /** The file's length in bytes; for a directory, what the server's filesystem reports. */
-  size: number
-  /** When the contents last changed, in nanoseconds since the Unix epoch. */
-  modified: number
-}
-
-/** One entry of a directory: its name within the directory, and its metadata. */
-export interface DirEntry {
-  name: string
-  metadata: Metadata
 }
 
 /** A mount source's type, without its credentials. */
@@ -207,7 +160,7 @@ export interface SandboxInitOutput {
 export class Client {
   /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
   static spawn(program: string, args?: string[]): Client
-  /** Reach the server at `url`, an `http` or `https` URL. */
+  /** Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). */
   static connect(url: string): Client
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
@@ -221,28 +174,13 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  listImage(): Promise<ImageListOutputItem[]>
-  pullImage(reference: string): AsyncGenerator<Event<ImagePullOutput, string>>
   buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput, string>>
-  removeImage(digest: string): Promise<void>
   listSnapshot(): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>
-  readSnapshotDir(snapshot: string, path: string): Promise<DirEntry[]>
-  readSnapshotFile(snapshot: string, path: string, offset?: number, length?: number): Promise<Uint8Array>
   listVolume(): Promise<VolumeListOutputItem[]>
   createVolume(name?: string): Promise<VolumeCreateOutput>
   removeVolume(name: string): Promise<void>
-  statVolumeFile(volume: string, path: string): Promise<Metadata>
-  readVolumeDir(volume: string, path: string): Promise<DirEntry[]>
-  /** Up to `length` bytes from `offset`, or to the end without a `length`. */
-  readVolumeFile(volume: string, path: string, offset?: number, length?: number): Promise<Uint8Array>
-  /** At `offset`, or the whole file without one. */
-  writeVolumeFile(volume: string, path: string, data: Uint8Array, offset?: number): Promise<void>
-  createVolumeDir(volume: string, path: string, parents?: boolean): Promise<void>
-  removeVolumeFile(volume: string, path: string, recursive?: boolean): Promise<void>
-  renameVolumeFile(volume: string, from: string, to: string, overwrite?: boolean): Promise<void>
-  copyVolumeFile(volume: string, from: string, to: string, overwrite?: boolean): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
   createVolumeMount(volume: string, path: string, source: MountSource): Promise<void>
   removeVolumeMount(volume: string, path: string): Promise<void>

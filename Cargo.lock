@@ -231,9 +231,6 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "cbindgen"
@@ -2152,6 +2149,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
+name = "sse-stream"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2621,9 +2631,14 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "serde",
+ "serde_json",
+ "sse-stream",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2654,7 +2669,6 @@ dependencies = [
 name = "virtx-rs"
 version = "0.1.2"
 dependencies = [
- "bytes",
  "ciborium",
  "futures-core",
  "libloading 0.8.9",

@@ -3,48 +3,32 @@
 
 use std::io;
 
-use bytes::Bytes;
 use futures_util::Stream;
 use tokio::process::Command;
 
 use crate::{
-    image::{
-        ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageList, ImageListArgs,
-        ImageListOutputItem, ImagePull, ImagePullArgs, ImagePullOutput, ImageRemove,
-        ImageRemoveArgs, ImageRemoveOutput, Recipe,
-    },
-    method::Request,
+    image::{ImageBuild, ImageBuildArgs, ImageBuildOutput, Recipe},
+    method::{Event, Request},
     sandbox::{
         SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
         SandboxExecOutput, SandboxInit, SandboxInitArgs, SandboxInitOutput, SandboxList,
         SandboxListArgs, SandboxListOutputItem,
     },
     snapshot::{
-        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotFileRead,
-        SnapshotFileReadArgs, SnapshotFileReadDir, SnapshotFileReadDirArgs, SnapshotFileReadOutput,
-        SnapshotList, SnapshotListArgs, SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs,
-        SnapshotRemoveOutput,
+        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
+        SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
     },
-    transport::{
-        Error, Event, TransportClient,
-        r#impl::{stdio, streamable_http},
-    },
+    transport::{Error, TransportClient},
     volume::{
-        DirEntry, Metadata, MountSource, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput,
-        VolumeFileCopy, VolumeFileCopyArgs, VolumeFileCopyOutput, VolumeFileCreateDir,
-        VolumeFileCreateDirArgs, VolumeFileCreateDirOutput, VolumeFileRead, VolumeFileReadArgs,
-        VolumeFileReadDir, VolumeFileReadDirArgs, VolumeFileReadOutput, VolumeFileRemove,
-        VolumeFileRemoveArgs, VolumeFileRemoveOutput, VolumeFileRename, VolumeFileRenameArgs,
-        VolumeFileRenameOutput, VolumeFileStat, VolumeFileStatArgs, VolumeFileWrite,
-        VolumeFileWriteArgs, VolumeFileWriteOutput, VolumeList, VolumeListArgs,
-        VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs, VolumeMountCreateOutput,
-        VolumeMountList, VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemove,
-        VolumeMountRemoveArgs, VolumeMountRemoveOutput, VolumeRemove, VolumeRemoveArgs,
-        VolumeRemoveOutput,
+        MountSource, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeList,
+        VolumeListArgs, VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs,
+        VolumeMountCreateOutput, VolumeMountList, VolumeMountListArgs, VolumeMountListOutputItem,
+        VolumeMountRemove, VolumeMountRemoveArgs, VolumeMountRemoveOutput, VolumeRemove,
+        VolumeRemoveArgs, VolumeRemoveOutput,
     },
 };
 
-/// A client of one server, over stdio or Streamable HTTP.
+/// A client of one server, over stdio or HTTP.
 pub struct Client {
     inner: TransportClient,
 }
@@ -53,38 +37,14 @@ impl Client {
     /// Start `command` as the server, and talk to it over its stdin and stdout. Must be called
     /// inside a tokio runtime.
     pub fn spawn(command: impl Into<Command>) -> io::Result<Client> {
-        let (outgoing, incoming) = stdio::spawn(command)?;
-        let inner = TransportClient::new(outgoing, incoming);
+        let inner = TransportClient::spawn(command)?;
         Ok(Client { inner })
     }
 
-    /// Reach the server at `url`, an `http` or `https` URL. Must be called inside a tokio
-    /// runtime.
+    /// Reach the server at `url`, its base `http` or `https` URL.
     pub fn connect(url: &str) -> anyhow::Result<Client> {
-        let (outgoing, incoming) = streamable_http::connect(url)?;
-        let inner = TransportClient::new(outgoing, incoming);
+        let inner = TransportClient::connect(url)?;
         Ok(Client { inner })
-    }
-
-    /// Every reference the server holds, and the image each points at.
-    pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
-        self.inner.request(ImageList::NAME, ImageListArgs {}).await
-    }
-
-    /// Pull `reference` from its registry, and point it at what it pulls. The stream is the
-    /// pull's log, a [`Event::Progress`] a line, then what it pulled as its last item, an
-    /// [`Event::Output`] or the error it failed with. Dropping it drops the pull.
-    pub fn pull_image(
-        &self,
-        reference: impl Into<String>,
-    ) -> impl Stream<Item = Result<Event<ImagePullOutput, String>, Error>> + Unpin + Send + '_ {
-        Box::pin(self.inner.request_with_progress(
-            ImagePull::NAME,
-            ImagePullArgs {
-                reference: reference.into(),
-                auth: None,
-            },
-        ))
     }
 
     /// Build `recipe`, and point `reference` at it. The stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
@@ -102,20 +62,6 @@ impl Client {
                 reference: reference.into(),
             },
         ))
-    }
-
-    /// Forget the image `digest` names, as `algorithm:hex`, and every reference pointing at it.
-    pub async fn remove_image(&self, digest: impl Into<String>) -> Result<(), Error> {
-        let _: ImageRemoveOutput = self
-            .inner
-            .request(
-                ImageRemove::NAME,
-                ImageRemoveArgs {
-                    digest: digest.into(),
-                },
-            )
-            .await?;
-        Ok(())
     }
 
     /// Every snapshot the server holds.
@@ -155,48 +101,6 @@ impl Client {
         Ok(())
     }
 
-    /// The entries of the directory `path` in `snapshot`'s upper layer, in no set order; the
-    /// image under it is not looked at.
-    pub async fn read_snapshot_dir(
-        &self,
-        snapshot: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Result<Vec<DirEntry>, Error> {
-        self.inner
-            .request(
-                SnapshotFileReadDir::NAME,
-                SnapshotFileReadDirArgs {
-                    snapshot: snapshot.into(),
-                    path: path.into(),
-                },
-            )
-            .await
-    }
-
-    /// Up to `length` bytes of the file `path` in `snapshot`'s upper layer, not the image under
-    /// it, from `offset`, or to the end without a `length`. Fewer may come back before the end; none at or past it.
-    pub async fn read_snapshot_file(
-        &self,
-        snapshot: impl Into<String>,
-        path: impl Into<String>,
-        offset: u64,
-        length: Option<u64>,
-    ) -> Result<Bytes, Error> {
-        let output: SnapshotFileReadOutput = self
-            .inner
-            .request(
-                SnapshotFileRead::NAME,
-                SnapshotFileReadArgs {
-                    snapshot: snapshot.into(),
-                    path: path.into(),
-                    offset,
-                    length,
-                },
-            )
-            .await?;
-        Ok(output.data)
-    }
-
     /// Every volume the server holds.
     pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
         self.inner
@@ -224,178 +128,6 @@ impl Client {
         let _: VolumeRemoveOutput = self
             .inner
             .request(VolumeRemove::NAME, VolumeRemoveArgs { name: name.into() })
-            .await?;
-        Ok(())
-    }
-
-    /// The metadata of `path` in `volume`.
-    pub async fn stat_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Result<Metadata, Error> {
-        self.inner
-            .request(
-                VolumeFileStat::NAME,
-                VolumeFileStatArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                },
-            )
-            .await
-    }
-
-    /// The entries of the directory `path` in `volume`, in no set order.
-    pub async fn read_volume_dir(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Result<Vec<DirEntry>, Error> {
-        self.inner
-            .request(
-                VolumeFileReadDir::NAME,
-                VolumeFileReadDirArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                },
-            )
-            .await
-    }
-
-    /// Up to `length` bytes of the file `path` in `volume` from `offset`, or to the end without
-    /// a `length`. Fewer may come back before the end; none at or past it.
-    pub async fn read_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        offset: u64,
-        length: Option<u64>,
-    ) -> Result<Bytes, Error> {
-        let output: VolumeFileReadOutput = self
-            .inner
-            .request(
-                VolumeFileRead::NAME,
-                VolumeFileReadArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                    offset,
-                    length,
-                },
-            )
-            .await?;
-        Ok(output.data)
-    }
-
-    /// Write `data` to the file `path` in `volume` at `offset`, or make the file `data` and
-    /// nothing else without one. The file is created if there is none.
-    pub async fn write_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        offset: Option<u64>,
-        data: impl Into<Bytes>,
-    ) -> Result<(), Error> {
-        let _: VolumeFileWriteOutput = self
-            .inner
-            .request(
-                VolumeFileWrite::NAME,
-                VolumeFileWriteArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                    offset,
-                    data: data.into(),
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Create the directory `path` in `volume`, and with `parents` the ones above it too.
-    pub async fn create_volume_dir(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        parents: bool,
-    ) -> Result<(), Error> {
-        let _: VolumeFileCreateDirOutput = self
-            .inner
-            .request(
-                VolumeFileCreateDir::NAME,
-                VolumeFileCreateDirArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                    parents,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Delete the file or directory `path` in `volume`; a directory with anything in it only
-    /// when `recursive`.
-    pub async fn remove_volume_file(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-        recursive: bool,
-    ) -> Result<(), Error> {
-        let _: VolumeFileRemoveOutput = self
-            .inner
-            .request(
-                VolumeFileRemove::NAME,
-                VolumeFileRemoveArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                    recursive,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Move `from` to `to` in `volume`, replacing what is at `to` only when `overwrite`.
-    pub async fn rename_volume_file(
-        &self,
-        volume: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        overwrite: bool,
-    ) -> Result<(), Error> {
-        let _: VolumeFileRenameOutput = self
-            .inner
-            .request(
-                VolumeFileRename::NAME,
-                VolumeFileRenameArgs {
-                    volume: volume.into(),
-                    from: from.into(),
-                    to: to.into(),
-                    overwrite,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Copy `from`, a file or a whole directory, to `to` in `volume`, deleting what is at `to`
-    /// first only when `overwrite`.
-    pub async fn copy_volume_file(
-        &self,
-        volume: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        overwrite: bool,
-    ) -> Result<(), Error> {
-        let _: VolumeFileCopyOutput = self
-            .inner
-            .request(
-                VolumeFileCopy::NAME,
-                VolumeFileCopyArgs {
-                    volume: volume.into(),
-                    from: from.into(),
-                    to: to.into(),
-                    overwrite,
-                },
-            )
             .await?;
         Ok(())
     }
@@ -513,7 +245,7 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::{method::Progress, transport::testing::connect};
+    use crate::{method::Progress, transport::tests::connect};
 
     /// The first line of a log, as the test methods send it.
     fn line(line: &str) -> Progress<String> {
@@ -522,35 +254,6 @@ mod tests {
             total: None,
             content: Some(line.into()),
         }
-    }
-
-    #[tokio::test]
-    async fn a_pull_streams_its_log_then_its_output() {
-        let client = Client { inner: connect() };
-        let events: Vec<_> = client
-            .pull_image("alpine:3.20")
-            .map(Result::unwrap)
-            .collect()
-            .await;
-        let output = ImagePullOutput {
-            digest: "sha256:0".into(),
-        };
-        assert_eq!(
-            events,
-            [
-                Event::Progress(line("pulling alpine:3.20")),
-                Event::Output(output)
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_pull_ends_its_stream_with_the_error() {
-        let client = Client { inner: connect() };
-        let mut pull = client.pull_image("missing");
-        assert!(matches!(pull.next().await, Some(Ok(Event::Progress(_)))));
-        assert!(matches!(pull.next().await, Some(Err(Error::Call(_)))));
-        assert!(pull.next().await.is_none());
     }
 
     #[tokio::test]
@@ -583,26 +286,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snapshot_file_read_comes_back_as_its_bytes() {
-        let client = Client { inner: connect() };
-        let data = client
-            .read_snapshot_file("s", "hello", 1, Some(3))
-            .await
-            .unwrap();
-        assert_eq!(data, Bytes::from_static(b"ell"));
-    }
-
-    #[tokio::test]
-    async fn a_file_read_comes_back_as_its_bytes() {
-        let client = Client { inner: connect() };
-        let data = client
-            .read_volume_file("v", "hello", 1, Some(3))
-            .await
-            .unwrap();
-        assert_eq!(data, Bytes::from_static(b"ell"));
-    }
-
-    #[tokio::test]
     async fn an_exec_streams_its_output_then_how_it_ended() {
         let client = Client { inner: connect() };
         let mut exec = client.exec_sandbox("s", ["echo", "hi"], None);
@@ -627,15 +310,11 @@ mod ffi {
     use super::Client;
     use crate::{
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, cbor, release, retain, share},
-        image::{ImageBuildArgs, ImagePullArgs, ImageRemoveArgs},
+        image::ImageBuildArgs,
         sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs},
-        snapshot::{
-            SnapshotCreateArgs, SnapshotFileReadArgs, SnapshotFileReadDirArgs, SnapshotRemoveArgs,
-        },
+        snapshot::{SnapshotCreateArgs, SnapshotRemoveArgs},
         volume::{
-            VolumeCreateArgs, VolumeFileCopyArgs, VolumeFileCreateDirArgs, VolumeFileReadArgs,
-            VolumeFileReadDirArgs, VolumeFileRemoveArgs, VolumeFileRenameArgs, VolumeFileStatArgs,
-            VolumeFileWriteArgs, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs,
+            VolumeCreateArgs, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs,
             VolumeRemoveArgs,
         },
     };
@@ -675,8 +354,8 @@ mod ffi {
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
-    /// Reach the server at `url`, an `http` or `https` URL, and write the client, held once, to
-    /// `client`.
+    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), and write
+    /// the client, held once, to `client`.
     ///
     /// # Safety
     ///
@@ -719,61 +398,15 @@ mod ffi {
         }
     }
 
-    /// `image.list`: answers with the references, as
-    /// `[{"reference": "name:tag", "digest": "algorithm:hex", "size": n}, ...]`.
-    ///
-    /// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
-    /// takes them as `args`, the `args_len` bytes of one map, the method's params.
-    ///
-    /// # Safety
-    ///
-    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
-    }
-
-    /// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
-    /// `{"reference": "alpine:3.20"}`. Its items are its log, a line each, as
-    /// `{"progress": "..."}`, then what it pulled, as
-    /// `{"output": {"digest": "algorithm:hex"}}`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_pull_image(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxStream {
-        let args = unsafe { cbor::<ImagePullArgs>(args, args_len) };
-        unsafe { &(*client).0 }.stream(|client| {
-            async_stream::stream! {
-                let reference = match args {
-                    Ok(args) => args.reference,
-                    Err(error) => {
-                        yield Err(error);
-                        return;
-                    }
-                };
-                let mut pull = client.pull_image(reference);
-                while let Some(event) = pull.next().await {
-                    yield event.map_err(|e| e.to_string());
-                }
-            }
-        })
-    }
-
     /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
     /// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
-    /// Its items are its log, a line each, as `{"progress": "..."}`, then what it built, as
-    /// `{"output": {"digest": "algorithm:hex"}}`.
+    /// Its items are its log, a line each, as
+    /// `{"progress": {"progress": n, "total": n, "content": "..."}}` (`total` and `content` each
+    /// optional), then what it built, as `{"output": {"digest": "algorithm:hex"}}`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`. `args` is `args_len` readable bytes, not
+    /// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
     /// read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
@@ -799,33 +432,15 @@ mod ffi {
         })
     }
 
-    /// `image.remove`: forgets an image and every reference pointing at it, given
-    /// `{"digest": "algorithm:hex"}`. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_remove_image(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<ImageRemoveArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_image(args?.digest)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
     /// `snapshot.list`: answers with the snapshots, as
-    /// `[{"name": "...", "size": n}, ...]`.
+    /// `[{"name": "...", "size": n, "in_use": false}, ...]`.
+    ///
+    /// Every value here is CBOR, written in diagnostic notation. A request that takes arguments
+    /// takes them as `args`, the `args_len` bytes of one map, the method's params.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_snapshot(
         client: *mut VirtxClient,
@@ -878,63 +493,11 @@ mod ffi {
         })
     }
 
-    /// `snapshot.file.read_dir`: given `{"snapshot": "...", "path": "dir"}`, `path` in the
-    /// snapshot's upper layer and not the image under it, answers with
-    /// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
-    /// `virtx_client_stat_volume_file` answers it.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_read_snapshot_dir(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SnapshotFileReadDirArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let SnapshotFileReadDirArgs { snapshot, path } = args?;
-            client
-                .read_snapshot_dir(snapshot, path)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `snapshot.file.read`: given
-    /// `{"snapshot": "...", "path": "...", "offset": n, "length": n}`, `path` in the snapshot's
-    /// upper layer and not the image under it, `offset` and `length` optional, answers with the bytes read, as a byte string.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_read_snapshot_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<SnapshotFileReadArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let SnapshotFileReadArgs {
-                snapshot,
-                path,
-                offset,
-                length,
-            } = args?;
-            client
-                .read_snapshot_file(snapshot, path, offset, length)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
     /// `volume.list`: answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`.
+    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
@@ -980,212 +543,6 @@ mod ffi {
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_volume(args?.name)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.stat`: given `{"volume": "...", "path": "dir/file"}`, answers with
-    /// `{"type": "file" or "dir", "size": n, "modified": nanoseconds}`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_stat_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileStatArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileStatArgs { volume, path } = args?;
-            client
-                .stat_volume_file(volume, path)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.read_dir`: given `{"volume": "...", "path": "dir"}`, answers with
-    /// `[{"name": "...", "metadata": {...}}, ...]`, each metadata as `virtx_client_stat_volume_file`
-    /// answers it.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_read_volume_dir(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileReadDirArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileReadDirArgs { volume, path } = args?;
-            client
-                .read_volume_dir(volume, path)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.read`: given `{"volume": "...", "path": "...", "offset": n, "length": n}`,
-    /// `offset` and `length` optional, answers with the bytes read, as a byte string.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_read_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileReadArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileReadArgs {
-                volume,
-                path,
-                offset,
-                length,
-            } = args?;
-            client
-                .read_volume_file(volume, path, offset, length)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.write`: given `{"volume": "...", "path": "...", "offset": n, "data": h'...'}`,
-    /// `offset` optional, writes `data`. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_write_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileWriteArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileWriteArgs {
-                volume,
-                path,
-                offset,
-                data,
-            } = args?;
-            client
-                .write_volume_file(volume, path, offset, data)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.create_dir`: given `{"volume": "...", "path": "...", "parents": bool}`,
-    /// `parents` optional, creates the directory. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_create_volume_dir(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileCreateDirArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileCreateDirArgs {
-                volume,
-                path,
-                parents,
-            } = args?;
-            client
-                .create_volume_dir(volume, path, parents)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.remove`: given `{"volume": "...", "path": "...", "recursive": bool}`,
-    /// `recursive` optional, deletes the file or directory. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_remove_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileRemoveArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileRemoveArgs {
-                volume,
-                path,
-                recursive,
-            } = args?;
-            client
-                .remove_volume_file(volume, path, recursive)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.rename`: given
-    /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite`
-    /// optional, moves `from` to `to`. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_rename_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileRenameArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileRenameArgs {
-                volume,
-                from,
-                to,
-                overwrite,
-            } = args?;
-            client
-                .rename_volume_file(volume, from, to, overwrite)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `volume.file.copy`: given `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`,
-    /// `overwrite` optional, copies `from` to `to`. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_copy_volume_file(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { cbor::<VolumeFileCopyArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeFileCopyArgs {
-                volume,
-                from,
-                to,
-                overwrite,
-            } = args?;
-            client
-                .copy_volume_file(volume, from, to, overwrite)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -1270,7 +627,7 @@ mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_image`.
+    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_sandbox(
         client: *mut VirtxClient,
@@ -1305,8 +662,8 @@ mod ffi {
 
     /// `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
     /// `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
-    /// it is written, as `{"progress": "..."}`, then how it ended, as
-    /// `{"output": {"code": n}}`.
+    /// it is written, as `{"progress": ...}` as `virtx_client_build_image`'s are, then how it
+    /// ended, as `{"output": {"code": n}}`.
     ///
     /// # Safety
     ///

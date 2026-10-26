@@ -33,9 +33,7 @@ impl ImageName {
                 digest: s.to_owned(),
             }
         } else {
-            Self::Tag {
-                tag: s.to_owned(),
-            }
+            Self::Tag { tag: s.to_owned() }
         }
     }
 }
@@ -100,9 +98,7 @@ mod tests {
         ] {
             assert_eq!(
                 ImageName::from(s),
-                ImageName::Tag {
-                    tag: s.to_owned()
-                },
+                ImageName::Tag { tag: s.to_owned() },
                 "{s}"
             );
         }

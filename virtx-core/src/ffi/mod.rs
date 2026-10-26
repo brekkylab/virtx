@@ -26,8 +26,8 @@ mod waker;
 
 use std::ffi::c_int;
 
-pub(crate) use bytes::json;
 pub use bytes::VirtxBytes;
+pub(crate) use bytes::json;
 #[cfg(test)]
 pub(crate) use bytes::virtx_bytes_free;
 pub use future::*;

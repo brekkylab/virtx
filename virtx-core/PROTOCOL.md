@@ -6,7 +6,7 @@ A server offers several endpoints, and each speaks its own protocol:
 
 | Endpoint | Protocol | For |
 | --- | --- | --- |
-| `/rpc` | [RPC](#rpc): JSON-RPC 2.0 in CBOR | Building images, and making and ending snapshots, volumes and sandboxes |
+| `/rpc` | [RPC](#rpc): JSON-RPC 2.0 | Building images, running sandboxes, and managing resources |
 | `/images/v2/` | [OCI Distribution](#images) | Image content: manifests, blobs and tags |
 | `/volumes/{name}/` | [WebDAV](#files) | The files in a volume |
 | `/snapshots/{name}/` | [WebDAV](#files) | The files in a snapshot |
@@ -22,7 +22,7 @@ Both [transports](#transport) carry HTTP, and every endpoint is reached the same
 
 The server listens on TCP and is reached at a base URL, such as `https://host/`.
 Endpoints are paths under it.
-The server MAY offer HTTP/1.1, HTTP/2 and HTTP/3. A client SHOULD use HTTP/2 or later when it sends requests concurrently.
+The server SHOULD offer HTTP/2, and MAY also offer HTTP/1.1 and HTTP/3.
 
 There are no sessions: the server keeps nothing between requests for the transport's sake.
 
@@ -61,42 +61,40 @@ It is inspired by [MCP](https://modelcontextprotocol.io/specification/2026-07-28
 
 ### Message
 
-A message is a JSON-RPC 2.0 request, notification or response, encoded as CBOR (RFC 8949) instead of JSON.
-It is a CBOR map with text keys, and its members keep the names and meanings JSON-RPC gives them, including `"jsonrpc": "2.0"`.
-Examples in this document are written in CBOR diagnostic notation.
+A message is a JSON-RPC 2.0 request, notification or response: a JSON object (RFC 8259), in UTF-8.
 
-Each message is a single CBOR map with nothing after it.
+Each message is a single JSON object with nothing after it.
 Batches (arrays of messages) are not used: a client MUST NOT send one, and the server MAY refuse one.
 
 Only the client sends requests.
 The server answers them, and MAY send notifications about a request while it runs (see [Stream output](#stream-output)).
 The server never sends a request.
 
-#### Frame
+#### Event stream
 
-In an `application/cbor-seq` body, messages are sent one after another, each as a frame.
-A frame is an eight-byte header followed by the message:
+A `text/event-stream` body is a stream of [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html), one message to each event.
+An event's `data` is the message, written on one line:
 
 ```text
-d9 d9 f7 5a L L L L
+data: {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 7, "progress": 1}}
+
+data: {"jsonrpc": "2.0", "id": 7, "result": {"code": 0}}
+
 ```
 
-`d9 d9 f7` is the self-described CBOR tag (55799), and `5a` starts a byte string with a four-byte length.
-`L L L L` is the message's length in bytes, big-endian.
-The length always takes the four-byte form, even for a short message, so every header starts with the same four bytes.
-A body of frames is a CBOR sequence (RFC 8742).
+The server sets no other field. A client ignores any other field, and any event with no `data`.
 
 ### Sending a message
 
-1. Every message from the client is a new `POST` to `/rpc`, with `Content-Type: application/cbor` and the message, unframed, as the body.
-2. The client MUST send an `Accept` header listing `application/cbor`, and SHOULD also list `application/cbor-seq`. A client that does not list `application/cbor-seq` receives no [notifications](#stream-output).
+1. Every message from the client is a new `POST` to `/rpc`, with `Content-Type: application/json` and the message as the body.
+2. The client MUST send an `Accept` header listing `application/json`, and SHOULD also list `text/event-stream`. A client that does not list `text/event-stream` receives no [notifications](#stream-output).
 3. If the message is a notification, the server answers `202 Accepted` with no body, or an HTTP error status if it does not accept it.
 4. If the message is a request, the server answers `200` with either
-   - `Content-Type: application/cbor` and the response, unframed, as the body, or
-   - `Content-Type: application/cbor-seq` and the notifications and the response, each as a [frame](#frame) (only to a client that listed it).
+   - `Content-Type: application/json` and the response as the body, or
+   - `Content-Type: text/event-stream` and the notifications and the response, each as an [event](#event-stream) (only to a client that listed it).
 
-   It SHOULD use `application/cbor` when it has no notification to send.
-5. An `application/cbor-seq` body ends after the response. A server MUST NOT end it before the response, unless the request was [cancelled](#cancellation).
+   It SHOULD use `application/json` when it has no notification to send.
+5. A `text/event-stream` body ends after the response. A server MUST NOT end it before the response, unless the request was [cancelled](#cancellation).
 
 ```mermaid
 sequenceDiagram
@@ -153,8 +151,8 @@ A request that fails is answered with a JSON-RPC error response, in place of a r
 
 | Code | Name | When |
 | --- | --- | --- |
-| -32700 | Parse error | The message is not one CBOR data item, or something follows it. |
-| -32600 | Invalid request | The message is CBOR but not a request: not a map, a batch, `jsonrpc` not `"2.0"`, no `method`, an `id` not a string, integer or null, or `params` not a map or array. |
+| -32700 | Parse error | The body is not one JSON value in UTF-8, or something follows it. |
+| -32600 | Invalid request | The message is JSON but not a request: not an object, a batch, `jsonrpc` not `"2.0"`, no `method`, an `id` not a string, integer or null, or `params` not an object or array. |
 | -32601 | Method not found | No method has the request's name. |
 | -32602 | Invalid params | The params are not what the method takes, such as a missing or unknown member. |
 | -32603 | Internal error | The method failed on the server's side, or its result could not be encoded. |
@@ -269,7 +267,10 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 
 `running` in `sandbox.list` is whether the sandbox's VM is up now. One that is not, such as one whose VM has exited, is still held until `sandbox.close`.
 
-`sandbox.exec` sends the command's stdout and stderr as its notifications, a line each, and they are sent nowhere else.
+`sandbox.exec` sends the command's output as its notifications, and it is sent nowhere else.
+Each line the command writes to stdout or stderr is one notification's `content`: a string, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD.
+stdout and stderr are not told apart, and lines from the two are in the order the server read them.
+A line longer than the server's limit is sent in parts, a notification each.
 
 ##### Daemon
 

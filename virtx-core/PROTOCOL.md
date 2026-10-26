@@ -6,7 +6,7 @@ A server offers several endpoints, and each speaks its own protocol:
 
 | Endpoint | Protocol | For |
 | --- | --- | --- |
-| `/rpc` | [RPC](#rpc): JSON-RPC 2.0 | Building images, running sandboxes, and managing resources |
+| `/rpc/` | [RPC](#rpc): JSON-RPC 2.0 | Building images, running sandboxes, and managing resources |
 | `/images/v2/` | [OCI Distribution](#images) | Image content: manifests, blobs and tags |
 | `/volumes/{name}/` | [WebDAV](#files) | The files in a volume |
 | `/snapshots/{name}/` | [WebDAV](#files) | The files in a snapshot |

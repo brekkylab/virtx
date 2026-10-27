@@ -3,13 +3,14 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import net from 'node:net'
 import path from 'node:path'
 import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import virtx from '../index.js'
 
-const { Client } = virtx
+const { Client, PortForwarder } = virtx
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const target = path.join(root, 'target', 'debug')
@@ -38,4 +39,27 @@ test('an image is named by its spelling', () => {
   const digest = 'sha256:' + '0'.repeat(64)
   assert.deepEqual(virtx.imageName(digest), { type: 'digest', digest })
   assert.deepEqual(virtx.imageName('sha256:0'), { type: 'tag', tag: 'sha256:0' })
+})
+
+// What reading a connection to `host:port` gets before it ends, or why it could not connect.
+function read(host, port) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, host)
+    let read = ''
+    socket.on('data', (data) => (read += data))
+    socket.on('end', () => resolve(read))
+    socket.on('error', reject)
+  })
+}
+
+test('a forwarder is on the loopback until it is closed', async () => {
+  // Nothing listens there: each connection to the forwarder is closed.
+  const client = Client.connect('http://127.0.0.1:9/')
+  const forwarder = PortForwarder.open(client, 'ports/abc')
+  assert.equal(forwarder.host, '127.0.0.1')
+  assert.equal(await read(forwarder.host, forwarder.port), '')
+
+  forwarder.close()
+  await client.close()
+  await assert.rejects(read(forwarder.host, forwarder.port), /ECONNREFUSED/)
 })

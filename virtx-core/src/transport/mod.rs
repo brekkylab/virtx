@@ -14,7 +14,7 @@ mod server;
 pub(crate) mod tests;
 
 #[cfg(feature = "client")]
-pub use client::{Error, TransportClient};
+pub use client::{Error, PortForwarder, TransportClient};
 pub use message::ErrorObject;
 #[cfg(feature = "server")]
 pub use server::{Dispatcher, HttpBody, Methods, Notifier, Server, serve_stdio};

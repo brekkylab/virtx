@@ -30,7 +30,7 @@ use crate::{
 
 /// A client of one server, over stdio or HTTP.
 pub struct Client {
-    inner: TransportClient,
+    pub(crate) inner: TransportClient,
 }
 
 impl Client {
@@ -298,7 +298,7 @@ mod tests {
     }
 }
 
-mod ffi {
+pub(crate) mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
     //! each of which starts the request and hands C its [`VirtxFuture`] or [`VirtxStream`].
 
@@ -320,7 +320,7 @@ mod ffi {
     };
 
     /// A `Client`, as C holds it.
-    pub struct VirtxClient(Runtime<Client>);
+    pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
     /// stdout, and write the client, held once, to `client`.

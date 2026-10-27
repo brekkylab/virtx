@@ -1,7 +1,9 @@
+import socket
+
 import pytest
 
 import virtx
-from virtx import Client, VirtxError
+from virtx import Client, PortForwarder, VirtxError
 
 
 def test_spawning_nothing_raises_a_message() -> None:
@@ -40,3 +42,16 @@ def test_a_streamed_event_reads_back() -> None:
     assert _event(progress, dict) == virtx.Progress(1, None, "fetch alpine:3.20")
     assert _event({"progress": {"progress": 2, "total": 3}}, dict) == virtx.Progress(2, 3)
     assert _event({"output": {"code": 0}}, dict) == virtx.Output({"code": 0})
+
+
+def test_a_forwarder_is_on_the_loopback_until_it_is_closed() -> None:
+    # Nothing listens there: each connection to the forwarder is closed.
+    with (
+        Client.connect("http://127.0.0.1:9/") as client,
+        PortForwarder.open(client, "ports/abc") as forwarder,
+    ):
+        assert forwarder.host == "127.0.0.1"
+        with socket.create_connection((forwarder.host, forwarder.port)) as connection:
+            assert connection.recv(1) == b""
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection((forwarder.host, forwarder.port))

@@ -45,6 +45,14 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         })
     }
 
+    /// What `make` makes of the value, run to its end on the runtime, whose tasks what it starts
+    /// stay on.
+    ///
+    /// Blocks, so not called on the runtime's own threads.
+    pub(crate) fn block_on<R, F: Future<Output = R>>(&self, make: impl FnOnce(Arc<T>) -> F) -> R {
+        self.runtime.block_on(make(Arc::clone(&self.value)))
+    }
+
     /// Start what `make` makes of the value, and hand C the future.
     pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
     where

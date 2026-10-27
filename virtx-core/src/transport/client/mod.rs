@@ -1,6 +1,7 @@
 //! The client: JSON-RPC requests over either transport, which only opening and closing tell
 //! apart. It knows no method; a typed client is built on it.
 
+mod portforward;
 mod stdio;
 mod tcp;
 
@@ -14,6 +15,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sse_stream::SseStream;
 
+pub use self::portforward::PortForwarder;
 use self::{stdio::Stdio, tcp::Tcp};
 use super::message::{
     EVENT_STREAM, ErrorObject, JSON, PROGRESS, ProgressParams, Received, Request, is_media_type,

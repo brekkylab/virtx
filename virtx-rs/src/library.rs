@@ -11,7 +11,8 @@ use std::{
 
 use crate::Error;
 
-/// `VirtxClient`, `VirtxFuture` and `VirtxStream`: opaque, held only by pointer.
+/// `VirtxClient`, `VirtxFuture`, `VirtxStream` and `VirtxPortForwarder`: opaque, held only by
+/// pointer.
 #[repr(C)]
 pub(crate) struct Opaque {
     _private: [u8; 0],
@@ -104,6 +105,14 @@ api! {
     virtx_client_init_sandbox: WithArgs,
     virtx_client_exec_sandbox: WithArgs,
     virtx_client_close_sandbox: WithArgs,
+    virtx_port_forwarder_open: unsafe extern "C" fn(
+        client: *mut Opaque,
+        args: *const u8,
+        args_len: usize,
+        forwarder: *mut *mut Opaque,
+        out: *mut VirtxBytes,
+    ) -> c_int,
+    virtx_port_forwarder_free: unsafe extern "C" fn(forwarder: *mut Opaque),
     virtx_bytes_free: unsafe extern "C" fn(bytes: VirtxBytes),
     virtx_future_poll:
         unsafe extern "C" fn(future: *mut Opaque, waker: VirtxWaker, out: *mut VirtxBytes) -> c_int,

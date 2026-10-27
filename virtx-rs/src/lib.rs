@@ -16,11 +16,13 @@ mod call;
 mod client;
 mod error;
 mod library;
+mod portforward;
 
 pub use call::{Call, Events};
 pub use client::Client;
 pub use error::Error;
 pub use library::{LIBRARY_ENV, library_path, load};
+pub use portforward::PortForwarder;
 pub use virtx_core::{
     Event, ImageBuildOutput, ImageName, MountSource, MountType, Progress, Recipe,
     SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem, SandboxPort,

@@ -14,8 +14,10 @@ header = """
  * a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and keeps the waker given
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
- * left, and ends after an error. Free every VirtxBytes written with virtx_bytes_free, every
- * future with virtx_future_free, and every stream with virtx_stream_free.
+ * left, and ends after an error. A port forwarder opens over a client, blocking as opening
+ * one does, and forwards until it is freed or the client's last release. Free every VirtxBytes
+ * written with virtx_bytes_free, every future with virtx_future_free, every stream with
+ * virtx_stream_free, and every forwarder with virtx_port_forwarder_free.
  */"""
 
 [parse]

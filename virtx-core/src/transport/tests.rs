@@ -5,7 +5,7 @@
 //! `image.build` sends `pulling <base>` as its progress, and fails for the base `missing`.
 //! `sandbox.exec` runs everything as `echo`, sending its line as its progress.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{extract::State, middleware::Next, response::IntoResponse};
 use futures_util::StreamExt;
@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use sse_stream::SseStream;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinSet};
 
-use super::{Dispatcher, ErrorObject, Methods, Notifier, Server, TransportClient, serve_stdio};
+use super::{
+    CancelScope, Dispatcher, ErrorObject, Methods, Notifier, Server, TransportClient, serve_stdio,
+};
 use crate::{
     image::{ImageBuild, ImageBuildOutput},
     method::{Event, Progress, Request, StreamingRequest},
@@ -157,8 +159,8 @@ fn hanging() -> (Methods, mpsc::UnboundedReceiver<()>) {
 #[derive(Clone)]
 struct User(String);
 
-/// Lets in a request whose bearer token names one of `users`, as that [`User`]. Middleware in
-/// front of a [`Server`], as a mounting server's would be.
+/// Lets in a request whose bearer token names one of `users`, as that [`User`] and in that
+/// user's [`CancelScope`]. Middleware in front of a [`Server`], as a mounting server's would be.
 #[derive(Clone)]
 struct Tokens {
     users: Vec<&'static str>,
@@ -183,6 +185,7 @@ async fn tokens(
     if !tokens.users.contains(&user.as_str()) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    request.extensions_mut().insert(CancelScope(user.clone()));
     request.extensions_mut().insert(User(user));
     next.run(request).await
 }
@@ -536,4 +539,121 @@ async fn what_middleware_puts_in_a_request_reaches_its_method() {
         let answer: Value = response.json().await.unwrap();
         assert_eq!(answer, json!({"jsonrpc": "2.0", "id": 1, "result": name}));
     }
+}
+
+/// `message` posted to `/rpc` at `url` as `user`, if any, accepting both media types.
+async fn post_as(url: &str, user: Option<&str>, message: Value) -> reqwest::Response {
+    let mut request = reqwest::Client::new()
+        .post(format!("{url}rpc"))
+        .header("content-type", "application/json")
+        .header("accept", BOTH);
+    if let Some(user) = user {
+        request = request.header("authorization", format!("Bearer {user}"));
+    }
+    request.body(message.to_string()).send().await.unwrap()
+}
+
+/// A `notifications/cancelled` of the request `id`.
+fn cancelled(id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": id, "reason": "test"},
+    })
+}
+
+fn hang(id: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "hang", "params": []})
+}
+
+/// Whether `dropped` says a method was dropped within a moment.
+async fn was_dropped(dropped: &mut mpsc::UnboundedReceiver<()>) -> bool {
+    tokio::time::timeout(Duration::from_millis(200), dropped.recv())
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn a_cancellation_stops_its_request_and_ends_its_stream_without_a_response() {
+    let (methods, mut dropped) = hanging();
+    let url = serve(methods, None).await;
+    let hanging = post_as(&url, None, hang("h")).await;
+    assert_eq!(hanging.headers()["content-type"], "text/event-stream");
+
+    let cancel = post_as(&url, None, cancelled("h")).await;
+    assert_eq!(cancel.status(), 202);
+    dropped.recv().await.expect("the method is dropped");
+
+    let body = hanging.text().await.unwrap();
+    assert!(body.contains("notifications/progress"), "{body}");
+    assert!(
+        !body.contains("\"result\"") && !body.contains("\"error\""),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_request_without_a_stream_is_answered_no_content() {
+    let (methods, mut dropped) = hanging();
+    let url = serve(methods, None).await;
+    let hanging = tokio::spawn({
+        let url = url.clone();
+        async move { post(&url, "application/json", hang("h")).await }
+    });
+    // Until its method runs, there is no request to cancel.
+    while post_as(&url, None, cancelled("h")).await.status() == 202 {
+        if was_dropped(&mut dropped).await {
+            break;
+        }
+    }
+    assert_eq!(hanging.await.unwrap().status(), 204);
+}
+
+#[tokio::test]
+async fn a_cancellation_stops_only_a_request_of_its_own_scope() {
+    let (methods, mut dropped) = hanging();
+    let tokens = Tokens {
+        users: vec!["alice", "bob"],
+    };
+    let url = serve(methods, Some(tokens)).await;
+    let hanging = post_as(&url, Some("alice"), hang("h")).await;
+
+    assert_eq!(
+        post_as(&url, Some("bob"), cancelled("h")).await.status(),
+        202
+    );
+    assert!(!was_dropped(&mut dropped).await);
+
+    assert_eq!(
+        post_as(&url, Some("alice"), cancelled("h")).await.status(),
+        202
+    );
+    dropped.recv().await.expect("the method is dropped");
+    drop(hanging);
+}
+
+#[tokio::test]
+async fn a_cancellation_stops_only_a_request_of_its_own_server() {
+    let (methods, mut dropped) = hanging();
+    let url = serve(methods, None).await;
+    let other = serve(super::tests::methods(), None).await;
+    let hanging = post_as(&url, None, hang("h")).await;
+
+    assert_eq!(post_as(&other, None, cancelled("h")).await.status(), 202);
+    assert!(!was_dropped(&mut dropped).await);
+    drop(hanging);
+}
+
+#[tokio::test]
+async fn a_second_request_with_an_id_in_flight_is_not_what_a_cancellation_stops() {
+    let (methods, mut dropped) = hanging();
+    let url = serve(methods, None).await;
+    let first = post_as(&url, None, hang("h")).await;
+    let second = post_as(&url, None, hang("h")).await;
+
+    assert_eq!(post_as(&url, None, cancelled("h")).await.status(), 202);
+    dropped.recv().await.expect("the first is dropped");
+    assert!(first.text().await.unwrap().contains("hanging"));
+    assert!(!was_dropped(&mut dropped).await);
+    drop(second);
 }

@@ -111,6 +111,16 @@ pub(crate) struct Notification<P> {
 /// The notification a server sends a request's progress in.
 pub(crate) const PROGRESS: &str = "notifications/progress";
 
+/// The notification a client cancels a request with.
+pub(crate) const CANCELLED: &str = "notifications/cancelled";
+
+/// The params of a [`CANCELLED`] notification. Its `reason` is for a person, and not read.
+#[derive(Deserialize)]
+pub(crate) struct CancelledParams {
+    #[serde(rename = "requestId")]
+    pub request_id: Value,
+}
+
 /// The params of a [`PROGRESS`] notification: a [`method::Progress`](crate::method::Progress)
 /// and the request it is about.
 #[derive(Debug, Serialize, Deserialize)]

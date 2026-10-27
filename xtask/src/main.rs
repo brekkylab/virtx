@@ -53,6 +53,8 @@ usage: cargo xtask init     [--force]
   --dry-run           (upload) archives, says what it would upload, and stops";
 
 const HOST_BINS: &[&str] = &["virtx-uvm"];
+/// The package `HOST_BINS` are built from.
+const HOST_PACKAGE: &str = "virtx-stdio-server";
 const GUEST_BIN: &str = "virtx-uvm-guest";
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
@@ -382,10 +384,8 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
 
     let mut cargo = cargo();
     cargo.current_dir(root_path()).arg("build");
-    for bin in HOST_BINS {
-        cargo.args(["-p", bin]);
-    }
-    cargo.args(["--features", "virtx-uvm/gpu"]);
+    cargo.args(["-p", HOST_PACKAGE]);
+    cargo.args(["--features", &format!("{HOST_PACKAGE}/gpu")]);
     if !options.debug {
         cargo.arg("--release");
     }
@@ -505,15 +505,15 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
 
 fn build_guest(options: &Options) -> anyhow::Result<()> {
     let target = guest_target()?;
-    let mut cargo = cross_cargo(&root_path().join("virtx-uvm-guest"));
+    let out = options.out();
+    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    // The crate is named for the binary it builds.
+    let mut cargo = cross_cargo(&root_path().join(GUEST_BIN));
     cargo.args(["build", "--release", "--target", target]);
     run(
         cargo,
-        &format!("guest for {target} (if the target is missing: rustup target add {target})"),
+        &format!("{GUEST_BIN} for {target} (if the target is missing: rustup target add {target})"),
     )?;
-
-    let out = options.out();
-    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
     place(
         &target_path().join(format!("{target}/release/{GUEST_BIN}")),
         &out.join(GUEST_BIN),
@@ -794,7 +794,7 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
 fn install(options: &Options) -> anyhow::Result<()> {
     let prefix = match &options.prefix {
         Some(prefix) => prefix.clone(),
-        None => virtx::cache_root(),
+        None => cache_root(),
     };
     let bin = prefix.join("bin");
     stage_bin(&options.out(), &bin, true)?;
@@ -870,4 +870,36 @@ fn place_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where virtx keeps what it keeps on this host: `$VIRTX_HOME`, or a `virtx` directory in the
+/// platform's cache directory.
+fn cache_root() -> std::path::PathBuf {
+    if let Some(named) = std::env::var_os("VIRTX_HOME") {
+        return std::path::PathBuf::from(named);
+    }
+
+    #[cfg(windows)]
+    return std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap())
+                .join("AppData")
+                .join("Local")
+        })
+        .join("virtx");
+
+    #[cfg(target_os = "macos")]
+    return std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join("Library")
+        .join("Caches")
+        .join("virtx");
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache")
+        })
+        .join("virtx");
 }

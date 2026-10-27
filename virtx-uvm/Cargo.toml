@@ -5,49 +5,71 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# What a user runs, and what becomes a micro-VM: `session` (the default) answers a console,
-# `image` manages the cache, and `boot` -- spawned by this binary itself -- enters a machine.
-# See `boot.rs` for why the machine is a process of its own, and why it is this same file.
-[[bin]]
-name = "virtx-uvm"
-path = "src/main.rs"
-
-# virtio-gpu with venus, passed through to the machine. Its own feature because what it costs is
-# a C library this tree neither ships nor builds. The Vulkan loader is not linked but opened,
-# except on macOS where MoltenVK is built in -- which is what `libc` and `windows-sys` below
-# are for.
 [features]
-gpu = ["virtx-uvm-lib/gpu", "dep:libc", "dep:windows-sys"]
+# Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus support --
+# `cargo xtask build host` builds it first.
+gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]
-anyhow = { workspace = true }
-clap = { version = "4", features = ["derive"] }
-# The image cache and the registry it pulls from.
-virtx-uvm-lib = { workspace = true }
-# A recipe, read from a Dockerfile.
-virtx = { workspace = true }
-# A built image is named by a SHA-256 of what was declared, and what it states is part of that.
+oci-spec = { version = "0.10", default-features = false, features = ["image", "distribution"] }
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+# `filesystem`: layers' archives in their two compressions, the ext4 a session writes, and
+# the erofs an image is read through.
+thiserror = "2"
 sha2 = "0.10"
-serde_json = "1"
-# A snapshot travels gzipped.
+tar = "0.4"
 flate2 = "1"
-tokio = { workspace = true, features = [
-    "io-std",
-    "io-util",
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "sync",
-    "time",
-] }
+ruzstd = "0.9"
+# A mount's source, as the protocol spells it.
+virtx-core = { workspace = true }
+# A layer's conversion is CPU that is moved off the runtime's threads, a served volume's
+# stores are waited on from libkrun's threads, and a VM is a process of its own.
+tokio = { workspace = true, features = ["io-util", "process", "rt", "rt-multi-thread", "time", "sync"] }
+# Notion's page ids.
+uuid = { version = "1", features = ["v4", "serde"] }
+# A volume's files, resolved under its root however a guest rearranges the tree under them.
+cap-std = "3"
+# The remote stores a volume mounts: HTTP for their APIs, `chrono` for their RFC 3339
+# timestamps, and `unicode-normalization` because macOS looks a name up decomposed whatever a
+# listing returned. Their failures inside are `anyhow`'s. The same reqwest oci-client uses.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form"] }
+chrono = "0.4"
+unicode-normalization = "0.1"
+anyhow = { workspace = true }
+# The errno values a served volume answers the guest in.
+libc = { workspace = true }
+# The machine: libkrun linked in, its block devices on, and the init it lays over the
+# guest's root. Vendored.
+krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }
+krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["direct"] }
+# A display backend, which libkrun's virtio-gpu device has to be handed.
+krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
-# `dlopen`, to find the Vulkan loader a `gpu` boot opens rather than links.
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true, optional = true }
+# The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
+# downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic
+# OpenSSL's soname is the distribution's.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 
-# `LoadLibraryW`, the same question on Windows.
+[target.'cfg(target_os = "linux")'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+# The host's resolvers, which Windows keeps per adapter rather than in a file.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", optional = true, features = [
+windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
-    "Win32_System_LibraryLoader",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an adapter's
+    # shape is NDIS's, and windows-sys gates the whole call on it.
+    "Win32_NetworkManagement_Ndis",
 ] }
+
+[dev-dependencies]
+# The remote stores' tests: directories to read local files from, and a runtime with threads
+# for the mock servers they answer from.
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }

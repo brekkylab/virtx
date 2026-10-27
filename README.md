@@ -52,9 +52,9 @@ this repository has. What a *session* is — the agent, the console protocol, `/
 — is the server's, and a client reaches that by spawning `virtx-uvm` rather than
 by running an example.
 
-`run` is the [`session`](virtx-uvm-lib/src/session/) module end to end: it pulls the
+`run` is the [`session`](virtx-uvm/src/session/) module end to end: it pulls the
 image into the cache, makes its layers into one disk -- the [root
-filesystem](virtx-uvm-lib/src/rootfs.rs) -- formats a writable ext4 beside it and boots
+filesystem](virtx-uvm/src/rootfs.rs) -- formats a writable ext4 beside it and boots
 the guest on an overlay of the two. The session is the ext4 file, so the
 second run of the same image sees what the first one did:
 
@@ -99,10 +99,10 @@ the build already entitled. A plain `cargo build` leaves it unsigned.
 
 ## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
 
-[`rootfs`](virtx-uvm-lib/src/rootfs.rs) makes an image's layers into a disk: one
+[`rootfs`](virtx-uvm/src/rootfs.rs) makes an image's layers into a disk: one
 read-only EROFS filesystem -- the layers merged into a metadata image that points into
 them, rather than a copy of them -- shared by every machine ever booted on those layers.
-[`session`](virtx-uvm-lib/src/session/) is what makes one of those machines writable, by
+[`session`](virtx-uvm/src/session/) is what makes one of those machines writable, by
 stacking an ext4 of its own over it:
 
 ```
@@ -125,7 +125,7 @@ need no patch at all and does not work. The guest kernel refuses a FUSE
 filesystem as an upperdir outright — `filesystem on %s not supported as
 upperdir` — and even past that, deleting a file the image shipped is recorded as
 a character device numbered `0:0`, which `mknod` on a macOS host refuses to
-anything but root. It is the same wall [`filesystem`](virtx-uvm-lib/src/filesystem/) is
+anything but root. It is the same wall [`filesystem`](virtx-uvm/src/filesystem/) is
 written around, and the reason layers become EROFS images rather than extracted
 directories.
 
@@ -219,7 +219,7 @@ the guest's listener. The patch adds `TsiPolicy`, which the vsock muxer asks bef
 | `listen` on a published port | a listener on this host's loopback, which the relay joins to the published one |
 | `listen` on any other port | `EPERM`, which the guest kernel takes as "listen on your own stack" |
 
-The policy itself is [`net/policy.rs`](virtx-uvm-lib/src/session/net/policy.rs).
+The policy itself is [`net/policy.rs`](virtx-uvm/src/session/net/policy.rs).
 In the muxer rather than in each proxy, because the muxer is the one place every
 request passes through on every host — the unix and Windows proxies below it are
 two implementations of the same thing.
@@ -349,7 +349,7 @@ of a real macOS path:
 
 Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so the
 session asks for it wherever the render server is built -- macOS and Linux, not
-Windows (see `virtx-uvm-lib/src/session/gpu.rs`). The patch carries what
+Windows (see `virtx-uvm/src/session/gpu.rs`). The patch carries what
 upstream main still gets wrong there:
 
 - **`vkr_metal_helpers.m` includes `venus-protocol/vulkan_metal.h`**, a path
@@ -513,7 +513,7 @@ clang cross-linker for the guest init.
 
 The 2.0 public Rust API was `std::os::fd` only. On Windows `ConsoleBuilder` takes
 `BorrowedHandle` where it takes `BorrowedFd` elsewhere, which is why
-[`session`](virtx-uvm-lib/src/session/) owns that call rather than leaving it to
+[`session`](virtx-uvm/src/session/) owns that call rather than leaving it to
 a caller: the two spellings differ by little more than `AsFd` → `AsHandle`, and
 holding the difference in one place is what lets everything above it be written
 once.
@@ -523,7 +523,7 @@ once.
 What a console *session* runs on is a named virtio-console port, and the host end
 of one is a descriptor the server and the boot share — a unix socket on macOS.
 Windows gets **two named pipes** instead, and
-[`session::channel`](virtx-uvm-lib/src/session/channel.rs) is where both ends of
+[`session::channel`](virtx-uvm/src/session/channel.rs) is where both ends of
 that live so that nothing above it has to know which host it is on.
 
 Two, because libkrun's Windows console reads the port's input handle with a
@@ -612,7 +612,7 @@ cargo xtask build host                  # builds libepoxy and virglrenderer firs
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
-The kernel first, because a build of `virtx-uvm-lib` stops without one -- it is
+The kernel first, because a build of `virtx-uvm` stops without one -- it is
 what copies the kernel beside the binaries, which is how they find it.
 
 `cargo xtask run` adds `build/epoxy/bin/` to `PATH`, when a `gpu` build made one.
@@ -673,7 +673,7 @@ builds again over what is already there.
 One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
 beside the binary that opens it.**
 
-`virtx-uvm-lib/build.rs` puts it there, and libkrun opens it by name at run time rather
+`virtx-uvm/build.rs` puts it there, and libkrun opens it by name at run time rather
 than linking it. On Windows a bare name is enough, because the loader searches the
 executable's own directory before anywhere else. On Linux it is enough too, because
 `dlopen` consults the *calling object's* `DT_RUNPATH` and the link sets that to `$ORIGIN`
@@ -1126,11 +1126,12 @@ reserved for the same reason `/.virtx` is: a client that asks for a tree there i
 ## Layout
 
 ```
-virtx-uvm-lib/              the machinery: images, the root filesystems made of them,
-                            machines and booting them (lib `virtx_uvm`)
-virtx-uvm/                  the one binary: the console server a user runs, and -- as
-                            `virtx-uvm boot`, spawned by itself -- the process that
-                            becomes a VM; signed on macOS
+virtx-uvm/                  the machinery: images, the root filesystems made of them,
+                            machines and booting them
+virtx-stdio-server/         the one binary, `virtx-uvm`: the console server a user runs
+                            over stdio, and -- as `virtx-uvm boot`, spawned by itself --
+                            the process that becomes a VM; signed on macOS
+virtx-http-server/          the same server over Streamable HTTP; empty for now
 virtx-uvm-guest/            the half inside the VM; its own workspace, built for musl
 virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
                             beside them and not on it -- and a SKILLS.md each, saying what one

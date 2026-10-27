@@ -107,7 +107,7 @@ fi
 # binary above and there is no loader to open. Opened at run time everywhere else: linked,
 # `virtx-uvm` needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
 # could run no session at all rather than only no GPU one. The boot asks for the loader
-# itself before it offers or attaches a GPU -- see `vulkan` in `virtx-uvm/src/boot.rs`.
+# itself before it offers or attaches a GPU -- see `vulkan` in `virtx-uvm/src/vm/mod.rs`.
 if [ "$(uname -s)" = Darwin ]; then
     vulkan_dload=false
 else

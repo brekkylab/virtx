@@ -7,7 +7,7 @@ PKG_CONFIG_PATH = { value = "build/virglrenderer/lib/pkgconfig", relative = true
 xtask = "run --package xtask --"
 
 # The guest kernel is `dlopen`ed by leaf name and lives beside the binary that opens it
-# -- see `virtx-uvm-lib/build.rs`. Windows' loader looks in the executable's own
+# -- see `virtx-uvm/build.rs`. Windows' loader looks in the executable's own
 # directory before anywhere else, and macOS is steered there by a patch to libkrun, but
 # on Linux what decides is the *calling object's* `DT_RUNPATH`, which is the binary's and
 # so is the link's to set. `$ORIGIN` is how that names the directory the binary is in,

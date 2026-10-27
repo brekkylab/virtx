@@ -1,13 +1,14 @@
 # The halves of virtx-uvm, kept apart because they are built apart.
 #
-# `virtx-uvm-lib` is the whole of the machinery -- images, disks, machines --
-# and links libkrun. `virtx-uvm` is the one binary: what a user runs, what
-# answers a console, and -- as `virtx-uvm boot`, spawned by itself -- the
-# process that becomes a micro-VM. `virtx-uvm-guest` is the init that runs
-# inside one, cross-compiled for the guest and so built apart.
+# `virtx-uvm` is the whole of the machinery -- images, disks, machines -- and
+# links libkrun. `virtx-stdio-server` is the server on `virtx-core`'s protocol over
+# stdio -- the `virtx-uvm` binary -- and, as `virtx-uvm boot`, spawned by itself, the
+# process that becomes a micro-VM; `virtx-http-server` is the same server over
+# Streamable HTTP, to the users and projects its config names. `virtx-uvm-guest` is the machines' init, cross-compiled for the
+# guest and so built apart.
 [workspace]
 resolver = "3"
-members = ["virtx-uvm", "virtx-uvm-lib", "xtask"]
+members = ["virtx-uvm", "virtx-stdio-server", "virtx-http-server", "xtask"]
 
 # `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
 # workspace. Without this, cargo would auto-adopt the path dependencies as
@@ -22,7 +23,12 @@ members = ["virtx-uvm", "virtx-uvm-lib", "xtask"]
 #
 # `virglrenderer-sys/` builds virglrenderer with meson, and is reached only through
 # rutabaga_gfx under the `gpu` feature. As a member a bare `cargo build` would run it.
-exclude = ["3rdparty/libkrun", "virtx-uvm-guest", "virtx-abins", "virglrenderer-sys"]
+exclude = [
+    "3rdparty/libkrun",
+    "virtx-uvm-guest",
+    "virtx-abins",
+    "virglrenderer-sys",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,19 +39,11 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 anyhow = "1"
-# The console protocol the server answers and the guest speaks: the frames, the calls and
-# the codes a refusal carries. A path to the sibling checkout, because the two repositories
-# are developed together -- `virtx` is what decides what a session *is*, and this one is one
-# backend for it.
-#
-# No default features: what is wanted is the console, and every binding virtx offers brings
-# a libfuse provider or an HTTP stack with it. That includes the default `ensure`, which
-# fetches a published virtx-uvm -- this server has no use for fetching itself.
-virtx = { path = "../virtx", default-features = false }
-virtx-uvm-lib = { path = "virtx-uvm-lib" }
-# The wire's codec, which `virtx` already carries in its public API: two versions of it in
-# one build would be a type error nobody could read.
-bson = { version = "3", features = ["serde"] }
+# The protocol the servers answer: the methods' args and outputs, and the server's end of
+# the stdio and Streamable HTTP transports. No default features, which are the C ABI over a
+# client; a member takes `server`.
+virtx-core = { path = "../virtx/virtx-core", default-features = false }
+virtx-uvm = { path = "virtx-uvm" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 tokio = "1"

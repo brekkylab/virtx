@@ -40,11 +40,7 @@ pub struct SandboxListOutputItem {
     /// until `sandbox.close`.
     pub running: bool,
 
-    /// Whether it is kept until `sandbox.close`, apart from the client that made it.
-    #[serde(default, skip_serializing_if = "is_off")]
-    pub daemon: bool,
-
-    /// Where each port it opened is reached from, in the order asked for; only for a daemon.
+    /// Where each port it opened is reached from, in the order asked for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
 }
@@ -78,14 +74,8 @@ pub struct SandboxInitArgs {
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
 
-    /// Keep it until `sandbox.close`, whatever becomes of the client that made it, and let any
-    /// client of the server reach it by its id. Without it, it ends when that client goes. A
-    /// server that cannot keep one refuses it.
-    #[serde(default, skip_serializing_if = "is_off")]
-    pub daemon: bool,
-
-    /// TCP ports in it to open, each answered with where it is reached from. Only for a daemon;
-    /// `0` and a port given twice are refused.
+    /// TCP ports in it to open, each answered with where it is reached from. Reserved as it is
+    /// made, and kept until `sandbox.close`; `0` and a port given twice are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
 
@@ -118,7 +108,6 @@ impl SandboxInitArgs {
             image: image.into(),
             snapshot: None,
             network: true,
-            daemon: false,
             ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
@@ -135,10 +124,6 @@ fn on() -> bool {
 
 fn is_on(flag: &bool) -> bool {
     *flag
-}
-
-fn is_off(flag: &bool) -> bool {
-    !*flag
 }
 
 /// A TCP port opened in a sandbox, and where it is reached from.
@@ -257,6 +242,5 @@ mod tests {
         let decoded: SandboxInitArgs = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
-        assert!(!decoded.daemon);
     }
 }

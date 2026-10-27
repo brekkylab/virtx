@@ -121,7 +121,6 @@ export interface SandboxListItem {
   snapshot?: string
   /** Whether its VM is up now. */
   running: boolean
-  daemon?: boolean
   ports?: SandboxPort[]
 }
 
@@ -135,9 +134,7 @@ export interface SandboxPort {
 export interface SandboxInitOptions {
   snapshot?: string
   network?: boolean
-  /** Keep it until `closeSandbox`, apart from this client. */
-  daemon?: boolean
-  /** TCP ports in it to open; only for a daemon. */
+  /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
   vcpus?: number
   memoryMib?: number

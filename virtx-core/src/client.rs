@@ -621,9 +621,9 @@ mod ffi {
     }
 
     /// `sandbox.list`: answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool, "daemon": bool,
+    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool,
     /// "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and
-    /// `daemon` and `ports` only for a daemon.
+    /// `ports` only for one that opened some.
     ///
     /// # Safety
     ///
@@ -637,7 +637,7 @@ mod ffi {
     }
 
     /// `sandbox.init`: makes a sandbox, given
-    /// `{"image": {...}, "snapshot": "...", "network": bool, "daemon": bool, "ports": [n],
+    /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
     /// `{"type": "tag", "tag": "name:tag"}` or

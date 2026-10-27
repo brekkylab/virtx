@@ -243,9 +243,8 @@ class Client:
         await self._call("virtx_client_remove_volume_mount", _args(volume=volume, path=path))
 
     async def list_sandbox(self) -> list[dict[str, Any]]:
-        """Every sandbox the server holds, as ``{"id", "image", "snapshot", "running", "daemon",
-        "ports"}``, ``snapshot`` only for one that has one and ``daemon`` and ``ports`` only for a
-        daemon."""
+        """Every sandbox the server holds, as ``{"id", "image", "snapshot", "running", "ports"}``,
+        ``snapshot`` only for one that has one and ``ports`` only for one that opened some."""
         return await self._call("virtx_client_list_sandbox")
 
     async def init_sandbox(
@@ -254,7 +253,6 @@ class Client:
         *,
         snapshot: str | None = None,
         network: bool = True,
-        daemon: bool = False,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
@@ -262,8 +260,8 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
-        """Make a sandbox of ``image``. ``ports`` are TCP ports in it to open, only for a
-        ``daemon``; ``volumes`` are ``{"volume", "path", "readonly"}``. Whatever is left out the
+        """Make a sandbox of ``image``. ``ports`` are TCP ports in it to open, reserved as it is
+        made; ``volumes`` are ``{"volume", "path", "readonly"}``. Whatever is left out the
         server picks. Answers ``{"id", "ports"}``, ``ports``, each ``{"port", "url"}``,
         only if it was given some."""
         return await self._call(
@@ -272,7 +270,6 @@ class Client:
                 image=image_name(image).to_dict(),
                 snapshot=snapshot,
                 network=network,
-                daemon=daemon,
                 ports=list(ports),
                 vcpus=vcpus,
                 memory_mib=memory_mib,

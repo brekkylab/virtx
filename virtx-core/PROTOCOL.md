@@ -258,8 +258,8 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
-| `sandbox.list` | | array of `{id, image, snapshot?, running, daemon?, ports?}` | |
-| `sandbox.init` | `image`, `snapshot?`, `network?`, `daemon?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, ports?}` | |
+| `sandbox.list` | | array of `{id, image, snapshot?, running, ports?}` | |
+| `sandbox.init` | `image`, `snapshot?`, `network?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, ports?}` | |
 | `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | Stream |
 | `sandbox.close` | `sandbox` | `{}` | |
 
@@ -272,18 +272,16 @@ Each line the command writes to stdout or stderr is one notification's `content`
 stdout and stderr are not told apart, and lines from the two are in the order the server read them.
 A line longer than the server's limit is sent in parts, a notification each.
 
-##### Daemon
+##### Lifetime
 
 A sandbox belongs to the client that made it, and ends when that client goes: over stdio, with the connection; over HTTP, which has no session, once no request has named it for a time the server chooses.
-With `daemon: true` it is kept until `sandbox.close` instead, whatever becomes of that client, and any client of the server can reach it by its id.
-A server that cannot keep one, such as a stdio server that exits with its connection, refuses `daemon: true`.
 
 ##### Ports
 
 `ports` are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
-They are only for a daemon: `ports` without `daemon: true` is refused, and so are `0` and a port given twice.
+They are reserved when `sandbox.init` makes the sandbox, and kept until it ends. `0` and a port given twice are refused.
 
-`sandbox.init` answers each with where it is reached from, as `{port, url}`, in the order given; `sandbox.list` answers them again for a daemon.
+`sandbox.init` answers each with where it is reached from, as `{port, url}`, in the order given; `sandbox.list` answers them again.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.

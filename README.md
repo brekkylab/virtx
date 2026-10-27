@@ -137,14 +137,6 @@ dropped and the host always saw 0. The init now holds a descriptor on the
 virtiofs root across the pivot and sends the ioctl to that, which is what makes
 `cargo xtask run --example run -- alpine:3.21 'exit 42'` exit 42.
 
-The ext4 is formatted on the host, by [`arcbox-ext4`][arcbox]: macOS has no
-`mke2fs`, nor does Windows, so a formatter that is a library rather than a
-program is the only form that works here. Pure Rust, so no C toolchain comes
-with it. The guest makes the overlay's `upperdir` and `workdir` on it, which is
-also what lets it pick up a disk an earlier session left.
-
-[arcbox]: https://docs.rs/arcbox-ext4
-
 ## Mounts — `3rdparty/_patches/libkrun-85bed71-session-mounts.patch`
 
 A session can see host directories, each one a virtio-fs share:
@@ -1054,22 +1046,6 @@ the mapping was always going to come from.
 numbers. Nothing here issues a DRM ioctl — the header is pulled in for the
 capset enums in `virtgpu_drm.h` — so the branch supplies the typedefs and lets
 the `DRM_IOCTL_*` definitions evaluate to zero.
-
-### arcbox-ext4 — `3rdparty/_patches/arcbox-ext4-c43590d-windows-paths.patch`
-
-One line, on the path every session takes. `FileTree::lookup` walks a path with
-`Path::components()` and skips the root by comparing the component's text
-against `"/"` — which is what `Component::RootDir` renders as on unix and never
-on Windows, where it is `"\"`. So the separator was looked up as a file name,
-every path under the root answered `None`, and formatting a session's upper layer failed
-at `Formatter::new` with `NotFound("/")` before a guest was ever started. The
-component is now matched as a component, so a root or a drive prefix is skipped
-whatever it is spelled.
-
-The submodule is pinned to `c43590d`, which is the commit 0.1.2 was published
-from — its `src/` is byte-identical to the crate on crates.io — rather than to
-`master`, which has moved on. It is reached through `[patch.crates-io]`, like
-`rutabaga_gfx`.
 
 ## `/abin`
 

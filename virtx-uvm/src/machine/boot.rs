@@ -7,13 +7,14 @@
 //!                           over -- replaced by the overlay before anything else runs
 //! virtio-blk /dev/vda       the root filesystem's disk, read-only -- the overlay's lower
 //! virtio-blk /dev/vdb       the snapshot -- the overlay's upper layer
-//! virtio-con hvc0           the guest's console, on this process's stderr
-//!            virtx-console  the wire to the guest, on this process's stdin and stdout
+//! virtio-con hvc0           the guest's console, into libkrun's log, which goes to ctlout
+//!            krun-stdin     the command's stdin, stdout and stderr: this process's own
+//!            krun-stdout
+//!            krun-stderr
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
 //!                           ports -- see [`Network`]
-//! virtio-fs  mnt0, mnt1     the guest's directory at [`GUEST_DIR`], then one per share of a
-//!                           volume, mounted by tag after the pivot
+//! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag after the pivot
 //! ```
 //!
 //! **Attach order is what fixes the two disk names**, and the guest is told which is which
@@ -35,13 +36,20 @@
 //! the overlay puts there: the init binary, its config, and the empty directories the init
 //! mounts the two disks over. It exists for the moment between the kernel handing over and
 //! the init pivoting onto the overlay.
+//!
+//! # The host
+//!
+//! Apart from the command's stdio, everything this process tells the host goes on `ctlout`, a
+//! frame at a time ([`send`]): where the ports are published, libkrun's log -- the guest's
+//! console among it -- and why the machine could not be built. `ctlin` is watched for the host
+//! telling it to stop, or going away ([`hold`]).
 
 use std::convert::Infallible;
 use std::fs::File;
-use std::io::{Stderr, Stdin, Stdout};
+use std::io::{self, Stderr, Stdin, Stdout};
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use krun::{
     BalloonDevice, BlockDevice, ConsoleDevice, DiskFormat, FsDevice, FsOverlay, MmioDeviceManager,
@@ -51,7 +59,8 @@ use oci_spec::image::Config;
 
 #[cfg(feature = "gpu")]
 use super::gpu;
-use super::{Error, GUEST_BIN, GUEST_DIR, MachineConfig, Network, Result, net, wire};
+use super::wire::{self, HostMessage, MachineMessage};
+use super::{Error, Machine, Network, Result, net};
 use crate::fstree::FsTree;
 use crate::snapshot::Snapshot;
 use crate::volume::{Remote, Served};
@@ -85,48 +94,48 @@ const DIR_MODE: u32 = 0o040_755;
 /// What a `PATH`-less image gets, which is what docker gives one.
 const DEFAULT_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Build the machine `config` describes, running the guest from `guest`, and become it: load
-/// the guest kernel, lay the init over an empty root, attach the devices, and run.
+/// The log target libkrun gives what the guest's console prints.
+const CONSOLE_TARGET: &str = "init_or_kernel";
+
+/// `ctlout`, once this process [holds](hold) it.
+static CTLOUT: OnceLock<Mutex<File>> = OnceLock::new();
+
+/// Build `machine`, running `cmd`, and become it: load the guest kernel,
+/// lay the init over an empty root, attach the devices, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> {
+pub(super) fn boot(machine: Machine, cmd: &[String]) -> Result<Infallible> {
     // Before anything is built, so a machine over a snapshot another one holds is refused
     // with nothing to undo.
-    let lock = config.snapshot.as_ref().map(Snapshot::lock).transpose()?;
+    let lock = machine.snapshot.as_ref().map(Snapshot::lock).transpose()?;
 
-    // What PID 1 does once the guest is up. The init binary and this config are
-    // injected into the root through the overlay below, and `apply` is what appends
-    // `init=/init.krun` to the kernel cmdline. The two devices go in as environment
-    // because that is how libkrun's init is told where its root is.
-    let env = env(&config.config);
+    // What PID 1 does once the guest is up: run `cmd`, and end the machine with its exit
+    // code. The init binary and this config are injected into the root through the overlay
+    // below, and `apply` is what appends `init=/init.krun` to the kernel cmdline. The two
+    // devices go in as environment because that is how libkrun's init is told where its root
+    // is.
+    let env = env(&machine.config);
     let mut init = krun_init::Config::builder()
-        .args(&[&format!("{GUEST_DIR}/{GUEST_BIN}")])
+        .args(&cmd.iter().map(String::as_str).collect::<Vec<_>>())
         .env(&env.iter().map(String::as_str).collect::<Vec<_>>())
-        .workdir(config.config.working_dir().as_deref().unwrap_or("/"))
+        .workdir(machine.config.working_dir().as_deref().unwrap_or("/"))
         .env_var(&format!("KRUN_BLOCK_LOWER_DEVICE={LOWER_DEVICE}"))
         .env_var(&format!("KRUN_BLOCK_LOWER_FSTYPE={LOWER_FSTYPE}"))
         .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
         .env_var(&format!("KRUN_BLOCK_UPPER_FSTYPE={UPPER_FSTYPE}"));
-    if config.network != Network::None {
+    if machine.network != Network::None {
         init = init.env_var(&format!("{}={}", net::NAMESERVER_ENV, net::NAMESERVER));
     }
 
     // The virtio-fs devices the guest is shown, which the init mounts by their tags in this
-    // order: the guest's directory read-only, then each volume's files and the stores under
-    // them, with each volume held. Refused where one could not be shown where it was asked.
+    // order: each volume's files and the stores under them, with each volume held. Refused
+    // where one could not be shown where it was asked.
     let mut shares = Vec::new();
-    let tag = format!("{MOUNT_TAG}0");
-    let host = utf8(&guest)?;
-    init = init.mount(GUEST_DIR, MOUNT_FSTYPE, &tag);
-    shares.push(
-        FsDevice::new_read_only(&tag, host)
-            .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
-    );
-    let mut holds = Vec::with_capacity(config.volumes.len());
-    for (i, asked) in config.volumes.iter().enumerate() {
+    let mut holds = Vec::with_capacity(machine.volumes.len());
+    for (i, asked) in machine.volumes.iter().enumerate() {
         let refused = |why| {
             Err(Error::MountPoint {
                 path: asked.path.clone(),
@@ -143,7 +152,7 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
         if at.is_empty() {
             return refused("/ is the guest's root");
         }
-        if config.volumes[..i]
+        if machine.volumes[..i]
             .iter()
             .any(|other| other.at.trim_end_matches('/') == at)
         {
@@ -183,8 +192,16 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     // of the process.
     let init: &'static krun_init::Config = Box::leak(Box::new(init.build()));
 
-    let published = published(&config.ports)?;
-    let upper = match &config.snapshot {
+    let published = published(&machine.ports)?;
+    let addresses = published
+        .iter()
+        .map(|(port, listener)| Ok((*port, listener.local_addr()?)))
+        .collect::<io::Result<_>>()
+        .map_err(|e| Error::io("reading where the published ports are", e))?;
+    send(&MachineMessage::Published(addresses))
+        .map_err(|e| Error::io("telling the host where the published ports are", e))?;
+
+    let upper = match &machine.snapshot {
         Some(snapshot) => snapshot.path.clone(),
         None => {
             let path =
@@ -215,11 +232,13 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
         FsDevice::new_null(ROOT_TAG).map_err(|e| Error::vmm("making the boot root", e))?;
     root.set_overlay(overlay);
 
-    // Leaked too, for the console. stdin and stdout are the wire's, so the console has only
-    // stderr to write to.
-    let stdin: &'static Stdin = Box::leak(Box::new(std::io::stdin()));
-    let stdout: &'static Stdout = Box::leak(Box::new(std::io::stdout()));
-    let stderr: &'static Stderr = Box::leak(Box::new(std::io::stderr()));
+    // The command's stdin, stdout and stderr are this process's, each a port of its own that
+    // the init hands the command, and the console goes to libkrun's log -- as libkrun does for
+    // streams that are not a terminal. Leaked, because the console borrows them for the rest
+    // of the process.
+    let stdin: &'static Stdin = Box::leak(Box::new(io::stdin()));
+    let stdout: &'static Stdout = Box::leak(Box::new(io::stdout()));
+    let stderr: &'static Stderr = Box::leak(Box::new(io::stderr()));
     #[cfg(unix)]
     let [stdin, stdout, stderr] = {
         use std::os::fd::AsFd;
@@ -232,15 +251,12 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     };
     let mut console = ConsoleDevice::builder();
     console
-        .add_default_console(None, Some(stderr), None)
-        .map_err(|e| Error::vmm("wiring the guest console to stderr", e))?;
-    console
-        .add_inout_port(wire::PORT_NAME, Some(stdin), Some(stdout))
-        .map_err(|e| Error::vmm("wiring the guest's channel to stdio", e))?;
+        .add_default_console(Some(stdin), Some(stdout), Some(stderr))
+        .map_err(|e| Error::vmm("wiring the command's stdio", e))?;
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind
     // it is the layer files, shared with every other root filesystem over them.
-    let rootfs = utf8(&config.rootfs)?;
+    let rootfs = utf8(&machine.rootfs)?;
     let mut lower = BlockDevice::new("vda", rootfs, DiskFormat::Vmdk)
         .map_err(|e| Error::vmm(format!("attaching {rootfs}"), e))?;
     lower.set_read_only(true);
@@ -260,13 +276,13 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     devices.add(BalloonDevice::new().map_err(|e| Error::vmm("attaching a balloon", e))?);
 
     #[cfg(feature = "gpu")]
-    if config.gpu {
-        devices.add(gpu::device(config.gpu_memory_mib)?);
+    if machine.gpu {
+        devices.add(gpu::device(machine.gpu_memory_mib)?);
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if config.network != Network::None || !published.is_empty() {
-        devices.add(net::attach(config.network, published)?);
+    if machine.network != Network::None || !published.is_empty() {
+        devices.add(net::attach(machine.network, published)?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module
@@ -279,10 +295,10 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     }
 
     let vmm = VmmBuilder::new()
-        .vcpus(config.vcpus)
-        .map_err(|e| Error::vmm(format!("{} vCPUs", config.vcpus), e))?
-        .ram_mib(config.ram_mib)
-        .map_err(|e| Error::vmm(format!("{} MiB of memory", config.ram_mib), e))?
+        .vcpus(machine.vcpus)
+        .map_err(|e| Error::vmm(format!("{} vCPUs", machine.vcpus), e))?
+        .ram_mib(machine.ram_mib)
+        .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.ram_mib), e))?
         .payload(payload)
         .devices(devices)
         .build()
@@ -291,7 +307,7 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     // The disk is open now, so a temporary one can lose its name and go with the
     // process. Windows will not remove an open file, and leaves it in the temp directory.
     #[cfg(unix)]
-    if config.snapshot.is_none() {
+    if machine.snapshot.is_none() {
         let _ = std::fs::remove_file(&upper);
     }
 
@@ -302,6 +318,71 @@ pub(super) fn boot(config: MachineConfig, guest: PathBuf) -> Result<Infallible> 
     Err(Error::EventLoop)
 }
 
+/// Take the ends the host left this process: from here on everything it says goes to
+/// `ctlout`, libkrun's log among it, and the process ends when `ctlin` says so or closes.
+///
+/// # Safety
+///
+/// `ctlin` and `ctlout` are ends the host left open for this process, which nothing else in it
+/// holds.
+pub(super) unsafe fn hold(ctlin: u64, ctlout: u64) {
+    // SAFETY: the caller's.
+    let (mut ctlin, ctlout) = unsafe { (from_raw(ctlin), from_raw(ctlout)) };
+    let _ = CTLOUT.set(Mutex::new(ctlout));
+    if log::set_logger(&Logger).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+    std::thread::spawn(move || match wire::recv(&mut ctlin) {
+        // Closed, or unreadable, is a host that is gone and will hear nothing more.
+        Ok(Some(HostMessage::Stop)) | Ok(None) | Err(_) => std::process::exit(1),
+    });
+}
+
+/// Tell the host `message`.
+pub(super) fn send(message: &MachineMessage) -> io::Result<()> {
+    let ctlout = CTLOUT
+        .get()
+        .ok_or_else(|| io::Error::other("ctlout is not held"))?;
+    wire::send(&mut *ctlout.lock().unwrap(), message)
+}
+
+#[cfg(unix)]
+unsafe fn from_raw(end: u64) -> File {
+    // SAFETY: the caller's.
+    unsafe { std::os::fd::FromRawFd::from_raw_fd(end as i32) }
+}
+
+#[cfg(windows)]
+unsafe fn from_raw(end: u64) -> File {
+    // SAFETY: the caller's.
+    unsafe { std::os::windows::io::FromRawHandle::from_raw_handle(end as usize as _) }
+}
+
+/// libkrun's log, each record a message on `ctlout` as it is made: in the thread that makes
+/// it, so what the console's last lines are is out before libkrun ends the process.
+struct Logger;
+
+impl log::Log for Logger {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let message = match record.target() {
+            // A terminal ends its lines with `\r\n`, and libkrun takes off only the `\n`.
+            CONSOLE_TARGET => {
+                MachineMessage::Console(record.args().to_string().trim_end_matches('\r').into())
+            }
+            target => MachineMessage::Log {
+                level: record.level().to_string(),
+                message: format!("{target}: {}", record.args()),
+            },
+        };
+        let _ = send(&message);
+    }
+
+    fn flush(&self) {}
+}
 /// A listener on this host's loopback for each of `ports`, which the guest's listener on that
 /// port is relayed from. Refused for `0`, which is no port, and for one given twice.
 fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {

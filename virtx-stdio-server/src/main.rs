@@ -19,9 +19,10 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .is_some_and(|arg| arg == virtx_uvm::MACHINE_SUBCOMMAND)
     {
-        return virtx_uvm::enter_machine()
-            .map(|never| match never {})
-            .map_err(Into::into);
+        // Why it could not be is the host's already, told on the control channel; stderr is
+        // the guest command's, and nothing of this process's goes there.
+        let Err(_) = virtx_uvm::enter_machine();
+        std::process::exit(1);
     }
     serve()
 }
@@ -30,8 +31,7 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let home = Arc::new(Home::new(&virtx_uvm::cache_root())?);
     let dispatcher = Dispatcher::new(rpc::methods(&home));
-    let served = serve_stdio(dispatcher, tokio::io::stdin(), tokio::io::stdout()).await;
-    // The client is gone, and every sandbox was its.
-    home.close_all().await;
-    Ok(served?)
+    // The client is gone, and every sandbox was its: a command still running ends with this
+    // process, whose machines are killed as their calls drop.
+    Ok(serve_stdio(dispatcher, tokio::io::stdin(), tokio::io::stdout()).await?)
 }

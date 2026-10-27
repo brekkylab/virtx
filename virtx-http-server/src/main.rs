@@ -23,7 +23,8 @@ use crate::access::Access;
 use crate::config::Config;
 
 /// How long a sandbox is kept with no command run in it: over HTTP no client is ever known to
-/// be gone, so one that stops naming its sandboxes is taken to be.
+/// be gone, so one that stops naming its sandboxes is taken to be, and what they hold -- their
+/// snapshots -- let go.
 const IDLE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser)]
@@ -43,9 +44,10 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .is_some_and(|arg| arg == virtx_uvm::MACHINE_SUBCOMMAND)
     {
-        return virtx_uvm::enter_machine()
-            .map(|never| match never {})
-            .map_err(Into::into);
+        // Why it could not be is the host's already, told on the control channel; stderr is
+        // the guest command's, and nothing of this process's goes there.
+        let Err(_) = virtx_uvm::enter_machine();
+        std::process::exit(1);
     }
     match Command::parse() {
         Command::Serve { config } => serve(Config::read(&config)?),
@@ -90,7 +92,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         loop {
             every.tick().await;
             for home in reaping.homes() {
-                home.close(Some(IDLE)).await;
+                home.forget_idle(IDLE);
             }
         }
     });
@@ -99,13 +101,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening at {}", config.listen))?;
     eprintln!("serving at http://{}/rpc", listener.local_addr()?);
-    let served = axum::serve(listener, router)
+    // A command still running at the end ends with this process, whose machines are killed as
+    // their calls drop.
+    axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await;
-    for home in access.homes() {
-        home.close(None).await;
-    }
-    Ok(served?)
+        .await?;
+    Ok(())
 }

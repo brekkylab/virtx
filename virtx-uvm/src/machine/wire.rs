@@ -1,118 +1,97 @@
-//! The wire between a server and the guest inside each of its machines.
+//! The control channel between a server and each of its machines' processes: `ctlin`, which
+//! the server writes [`HostMessage`]s into, and `ctlout`, which it reads [`MachineMessage`]s
+//! from. The guest's own stdin, stdout and stderr are the process's, apart from this.
 //!
-//! One file for both ends: the guest, built apart, includes it by path, so it names nothing
-//! outside itself.
-//!
-//! The guest sends [`HANDSHAKE`] as soon as it has the port open; after that the host sends
-//! calls and the guest answers them, each message one frame: its length as four big-endian
-//! bytes, then the message as JSON. Every call carries an id the host picks and every answer
-//! names it, so calls run side by side.
+//! Each message is one frame: its length as four big-endian bytes, then the message as JSON.
 
-use std::io;
+use std::io::{self, Read, Write};
+use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-
-/// What the guest sends first, before any frame: a virtio-console port discards what the host
-/// writes while nothing in the guest has it open, so the host waits for this.
-pub const HANDSHAKE: &[u8; 8] = b"VIRTXUVM";
-
-/// The name of the virtio-console port the channel runs on.
-pub const PORT_NAME: &str = "virtx-console";
 
 /// The largest frame either end reads.
 const MAX_FRAME: usize = 16 << 20;
 
-/// A call, host to guest.
+/// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ToGuest {
-    /// Run `cmd` in the guest's working directory, with no stdin, killing it and everything it
-    /// started after `timeout_ms`. Answered with its output a line at a time, then how it ended.
-    Exec {
-        id: u64,
-        cmd: Vec<String>,
-        timeout_ms: Option<u64>,
-    },
-    /// Put everything written on the disks, before the machine is killed.
-    Sync { id: u64 },
-    /// Kill the command the `Exec` named `id` runs, and everything it started. Not answered:
-    /// whatever that `Exec` still says is the host's to ignore.
-    Kill { id: u64 },
+pub enum HostMessage {
+    /// End the machine. Nothing is synced first: the process just exits.
+    Stop,
 }
 
-/// What the guest sends.
+/// What the machine's process tells the host, apart from the guest's own output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FromGuest {
-    /// One line a command wrote, to stdout or stderr, without its newline.
-    Line { id: u64, line: String },
-    /// The command ended with `code`; `128 + signal` for one a signal ended.
-    Exited { id: u64, code: i32 },
-    /// The command ran past its timeout, and was killed.
-    TimedOut { id: u64 },
-    /// The command could not be started, or not waited for.
-    Failed { id: u64, message: String },
-    /// The disks have what was written.
-    Synced { id: u64 },
+pub enum MachineMessage {
+    /// Where on this host's loopback each published guest port is reached.
+    Published(Vec<(u16, SocketAddr)>),
+    /// A line the guest's console printed: the kernel's, or the init's before it ran the
+    /// command.
+    Console(String),
+    /// What libkrun logged of its own.
+    Log { level: String, message: String },
+    /// The machine could not be built, or broke once it was, and why. The last thing it says.
+    NotBuilt(String),
 }
 
 /// Write `message` as one frame.
-pub async fn send<W: AsyncWrite + Unpin>(out: &mut W, message: &impl Serialize) -> io::Result<()> {
+pub fn send(out: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let message = serde_json::to_vec(message).map_err(io::Error::other)?;
     let length = u32::try_from(message.len()).map_err(io::Error::other)?;
-    out.write_all(&length.to_be_bytes()).await?;
-    out.write_all(&message).await?;
-    out.flush().await
+    out.write_all(&length.to_be_bytes())?;
+    out.write_all(&message)?;
+    out.flush()
 }
 
 /// The next frame's message; `None` at the end of the channel, between frames.
-pub async fn recv<R: AsyncRead + Unpin, M: DeserializeOwned>(
-    input: &mut R,
-) -> io::Result<Option<M>> {
+pub fn recv<M: DeserializeOwned>(input: &mut impl Read) -> io::Result<Option<M>> {
     let mut length = [0; 4];
-    match input.read_exact(&mut length).await {
-        Ok(_) => {}
+    match input.read_exact(&mut length) {
+        Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
+    let mut message = vec![0; frame_length(length)?];
+    input.read_exact(&mut message)?;
+    decode(&message).map(Some)
+}
+
+fn frame_length(length: [u8; 4]) -> io::Result<usize> {
     let length = u32::from_be_bytes(length) as usize;
-    if length > MAX_FRAME {
-        return Err(io::Error::new(
+    match length <= MAX_FRAME {
+        true => Ok(length),
+        false => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("a frame of {length} bytes is past the {MAX_FRAME} this reads"),
-        ));
+        )),
     }
-    let mut message = vec![0; length];
-    input.read_exact(&mut message).await?;
-    serde_json::from_slice(&message)
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn decode<M: DeserializeOwned>(message: &[u8]) -> io::Result<M> {
+    serde_json::from_slice(message).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn a_message_comes_out_as_it_went_in() {
+    #[test]
+    fn a_message_comes_out_as_it_went_in() {
         let sent = [
-            ToGuest::Exec {
-                id: 1,
-                cmd: vec!["echo".into(), "hi".into()],
-                timeout_ms: Some(5),
-            },
-            ToGuest::Sync { id: 2 },
+            MachineMessage::Published(vec![(80, "127.0.0.1:49152".parse().unwrap())]),
+            MachineMessage::Console("hello".into()),
+            MachineMessage::NotBuilt("no".into()),
         ];
         let mut wire = Vec::new();
         for message in &sent {
-            send(&mut wire, message).await.unwrap();
+            send(&mut wire, message).unwrap();
         }
         let mut input = &wire[..];
         for message in &sent {
             assert_eq!(
-                recv::<_, ToGuest>(&mut input).await.unwrap().as_ref(),
+                recv::<MachineMessage>(&mut input).unwrap().as_ref(),
                 Some(message)
             );
         }
-        assert_eq!(recv::<_, ToGuest>(&mut input).await.unwrap(), None);
+        assert_eq!(recv::<MachineMessage>(&mut input).unwrap(), None);
     }
 }

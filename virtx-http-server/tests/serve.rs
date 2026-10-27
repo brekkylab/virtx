@@ -188,13 +188,13 @@ async fn a_project_keeps_its_snapshots_and_volumes() {
         Err(ALREADY_EXISTS)
     );
 
-    // A daemon is not kept yet, and a sandbox of an image nobody filed is refused before it
+    // Ports are not opened yet, and a sandbox of an image nobody filed is refused before it
     // boots.
     assert_eq!(
         served
             .result(
                 "sandbox.init",
-                json!({"image": {"type": "tag", "tag": "a:b"}, "daemon": true})
+                json!({"image": {"type": "tag", "tag": "a:b"}, "ports": [8080]})
             )
             .await,
         Err(UNSUPPORTED)

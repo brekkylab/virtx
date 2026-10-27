@@ -23,7 +23,6 @@ const NOT_FOUND: i64 = -31001;
 const ALREADY_EXISTS: i64 = -31002;
 const IN_USE: i64 = -31003;
 const UNSUPPORTED: i64 = -31004;
-const NOT_STARTED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
 
 /// A server over an empty `VIRTX_HOME`, removed when this drops.
@@ -347,11 +346,8 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
     let here = || SandboxInitArgs::new(ImageName::parse("here:latest"));
 
     let mut args = here();
-    args.daemon = true;
-    assert_eq!(refused(args).await, UNSUPPORTED);
-    let mut args = here();
     args.ports = vec![8080];
-    assert_eq!(refused(args).await, INVALID_PARAMS);
+    assert_eq!(refused(args).await, UNSUPPORTED);
     let mut args = here();
     args.vcpus = Some(0);
     assert_eq!(refused(args).await, INVALID_PARAMS);
@@ -402,9 +398,8 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
     assert_eq!(code(answered), NOT_FOUND);
 }
 
-/// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, the guest
-/// kernel where libkrun finds it, and the guest binary beside the server or at
-/// `VIRTX_UVM_GUEST_BIN`.
+/// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
+/// guest kernel where libkrun finds it.
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
@@ -443,7 +438,8 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
-    assert!(listed[0].running);
+    // A machine is booted for each command, and none runs yet.
+    assert!(!listed[0].running);
     assert_eq!(listed[0].snapshot.as_deref(), Some("work"));
 
     let (mut lines, ended) = server
@@ -455,12 +451,13 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
         (lines, ended.unwrap()),
         (vec!["one".into(), "two".into()], 3)
     );
+    // The guest's init could not run it, as a shell answers one it cannot find.
     let (_, ended) = server.exec(&id, &["no-such-program"], None).await;
-    assert_eq!(code(ended), NOT_STARTED);
+    assert_eq!(ended.unwrap(), 127);
     let (_, ended) = server.exec(&id, &["sleep", "10"], Some(200)).await;
     assert_eq!(code(ended), TIMED_OUT);
 
-    // A call given up on takes its command with it.
+    // A call given up on takes its machine with it, and lets go of the snapshot for the next.
     {
         let args = SandboxExecArgs {
             sandbox: id.clone(),

@@ -36,8 +36,7 @@
 # containers) can run -- so the two Linux jobs build every platform's kernel and hand it on.
 # abin goes the same way: it is the guest's, so it depends on the architecture and not on
 # the host, and its C (SQLite) is cross-compiled by `xtask/scripts/musl-cc.sh`, a shell
-# script around clang that Windows cannot run. One build per architecture, then, where
-# the guest can be built by each platform, being Rust and linked by rust-lld alone.
+# script around clang that Windows cannot run. One build per architecture, then.
 #
 # # The glibc floor
 #
@@ -312,7 +311,7 @@ jobs:
           ls -la target/release/abin
 
       - name: Build
-        run: cargo xtask build host guest
+        run: cargo xtask build host
 
       - name: virglrenderer's log (Windows, on failure)
         if: failure() && runner.os == 'Windows'

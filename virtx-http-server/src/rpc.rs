@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use virtx_core::*;
 use virtx_uvm::{
-    Digest, ImageStore, ImageStoreError, Machine, MachineConfig, MachineError, Network, Reference,
+    Digest, ImageStore, ImageStoreError, Machine, MachineError, MachineReport, Network, Reference,
     Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore,
 };
 
@@ -23,21 +24,22 @@ const ALREADY_EXISTS: i64 = -31002;
 const IN_USE: i64 = -31003;
 const UNSUPPORTED: i64 = -31004;
 const BOOT_FAILED: i64 = -31005;
-const NOT_STARTED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
 
 /// A machine's size where `sandbox.init` leaves it to the server.
 const DEFAULT_VCPUS: u8 = 4;
 const DEFAULT_MEMORY_MIB: u32 = 4096;
 
-/// What one project's requests reach: the stores, and the sandboxes its members started
-/// from them, which are theirs together.
+/// What one project's requests reach: the stores, and the sandboxes its members made from
+/// them, which are theirs together.
 pub struct Home {
     images: ImageStore,
     pub snapshots: SnapshotStore,
     volumes: VolumeStore,
+    /// This binary, which each machine is spawned as.
+    exe: PathBuf,
     /// The sandboxes, by id, from `sandbox.init` to `sandbox.close` or until they idle.
-    machines: Mutex<HashMap<String, Arc<Machine>>>,
+    sandboxes: Mutex<HashMap<String, Arc<Sandbox>>>,
 }
 
 impl Home {
@@ -48,25 +50,35 @@ impl Home {
             images,
             snapshots: SnapshotStore::new(root)?,
             volumes: VolumeStore::new(root)?,
-            machines: Mutex::default(),
+            exe: std::env::current_exe()?,
+            sandboxes: Mutex::default(),
         })
     }
 
-    /// Close every sandbox that has run nothing for `idle`, or every one with no `idle`.
-    pub async fn close(&self, idle: Option<Duration>) {
-        let closing: Vec<_> = self
-            .machines
-            .lock()
-            .unwrap()
-            .extract_if(|_, machine| {
-                idle.is_none_or(|idle| machine.idle().is_some_and(|was| was >= idle))
-            })
-            .collect();
-        for (id, machine) in closing {
-            if let Err(e) = machine.stop().await {
-                eprintln!("closing sandbox {id}: {e}");
-            }
-        }
+    /// Forget every sandbox that has run nothing for `idle`.
+    pub fn forget_idle(&self, idle: Duration) {
+        self.sandboxes.lock().unwrap().retain(|_, sandbox| {
+            sandbox.running.load(Ordering::Relaxed) > 0
+                || sandbox.used.lock().unwrap().elapsed() < idle
+        });
+    }
+}
+
+/// A sandbox: the machine each of its commands boots, which ends with the command.
+struct Sandbox {
+    machine: Machine,
+    /// How many of its commands run now, and when the last one ended.
+    running: AtomicUsize,
+    used: Mutex<Instant>,
+}
+
+/// A command running in a sandbox, counted until it drops.
+struct Running<'a>(&'a Sandbox);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        *self.0.used.lock().unwrap() = Instant::now();
+        self.0.running.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -252,19 +264,18 @@ async fn sandbox_list(
     _: SandboxListArgs,
     _: Notifier,
 ) -> Result<Vec<SandboxListOutputItem>, Refused> {
-    let machines = home.machines.lock().unwrap();
-    Ok(machines
+    let sandboxes = home.sandboxes.lock().unwrap();
+    Ok(sandboxes
         .iter()
-        .map(|(id, machine)| SandboxListOutputItem {
+        .map(|(id, sandbox)| SandboxListOutputItem {
             id: id.clone(),
-            image: machine.config().image.to_string(),
-            snapshot: machine
-                .config()
+            image: sandbox.machine.image.to_string(),
+            snapshot: sandbox
+                .machine
                 .snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.name.clone()),
-            running: machine.running(),
-            daemon: false,
+            running: sandbox.running.load(Ordering::Relaxed) > 0,
             ports: Vec::new(),
         })
         .collect())
@@ -276,12 +287,9 @@ async fn sandbox_init(
     _: Notifier,
 ) -> Result<SandboxInitOutput, Refused> {
     // What can be refused without starting anything, first.
-    if args.daemon {
-        // TODO: keep a daemon apart from the client that made it.
-        return Err(refused(UNSUPPORTED, "a daemon is not kept here yet"));
-    }
     if !args.ports.is_empty() {
-        return Err(refused(INVALID_PARAMS, "ports are only for a daemon"));
+        // TODO: reserve them here, for each of the sandbox's machines to be reached at.
+        return Err(refused(UNSUPPORTED, "ports are not opened here yet"));
     }
     for (what, given) in [
         ("vcpus", args.vcpus.map(u32::from)),
@@ -350,7 +358,7 @@ async fn sandbox_init(
     let images = home.images.clone();
     let rootfs = tokio::task::spawn_blocking(move || images.insert_rootfs(&layers)).await??;
 
-    let machine = Machine::start(MachineConfig {
+    let machine = Machine {
         image: digest,
         rootfs,
         config: image.config().clone().unwrap_or_default(),
@@ -366,13 +374,31 @@ async fn sandbox_init(
             false => Network::None,
         },
         ports: Vec::new(),
-    })
-    .await
-    .map_err(|e| refused(BOOT_FAILED, e))?;
+    };
 
-    let mut machines = home.machines.lock().unwrap();
-    let id = pick(|id| machines.contains_key(id));
-    machines.insert(id.clone(), Arc::new(machine));
+    // One sandbox here to a snapshot, as one machine at a time is to it: two sandboxes' commands
+    // would otherwise take turns refusing each other.
+    let mut sandboxes = home.sandboxes.lock().unwrap();
+    if let Some(snapshot) = &machine.snapshot
+        && sandboxes.values().any(|sandbox| {
+            sandbox
+                .machine
+                .snapshot
+                .as_ref()
+                .is_some_and(|theirs| theirs.name == snapshot.name)
+        })
+    {
+        return Err(SnapshotError::InUse(snapshot.name.clone()).into());
+    }
+    let id = pick(|id| sandboxes.contains_key(id));
+    sandboxes.insert(
+        id.clone(),
+        Arc::new(Sandbox {
+            machine,
+            running: AtomicUsize::new(0),
+            used: Mutex::new(Instant::now()),
+        }),
+    );
     Ok(SandboxInitOutput {
         id,
         ports: Vec::new(),
@@ -387,16 +413,24 @@ async fn sandbox_exec(
     if args.cmd.is_empty() {
         return Err(refused(INVALID_PARAMS, "cmd: an exec names a command"));
     }
-    let machine = home.machines.lock().unwrap().get(&args.sandbox).cloned();
-    let machine = machine.ok_or_else(|| {
+    let sandbox = home.sandboxes.lock().unwrap().get(&args.sandbox).cloned();
+    let sandbox = sandbox.ok_or_else(|| {
         refused(
             NOT_FOUND,
             format!("no sandbox here has the id {}", args.sandbox),
         )
     })?;
+    sandbox.running.fetch_add(1, Ordering::Relaxed);
+    let _running = Running(&sandbox);
     let mut progress = 0;
-    let code = machine
-        .exec(args.cmd, args.timeout_ms, |line| {
+    let code = sandbox
+        .machine
+        .clone()
+        .run(&home.exe, args.cmd, args.timeout_ms, |report| {
+            // The command's output, stdout and stderr alike; the rest is the machine's own.
+            let (MachineReport::Stdout(line) | MachineReport::Stderr(line)) = report else {
+                return;
+            };
             progress += 1;
             notifier.notify::<SandboxExec>(Progress {
                 progress,
@@ -413,14 +447,16 @@ async fn sandbox_close(
     args: SandboxCloseArgs,
     _: Notifier,
 ) -> Result<SandboxCloseOutput, Refused> {
-    let machine = home.machines.lock().unwrap().remove(&args.sandbox);
-    let machine = machine.ok_or_else(|| {
-        refused(
-            NOT_FOUND,
-            format!("no sandbox here has the id {}", args.sandbox),
-        )
-    })?;
-    machine.stop().await?;
+    home.sandboxes
+        .lock()
+        .unwrap()
+        .remove(&args.sandbox)
+        .ok_or_else(|| {
+            refused(
+                NOT_FOUND,
+                format!("no sandbox here has the id {}", args.sandbox),
+            )
+        })?;
     Ok(SandboxCloseOutput {})
 }
 
@@ -493,11 +529,12 @@ impl From<ImageStoreError> for Refused {
     }
 }
 
-/// What a running machine's commands fail with.
+/// What a sandbox's commands fail with.
 impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         let code = match &e {
-            MachineError::NotStarted(_) => NOT_STARTED,
+            MachineError::NoCommand => INVALID_PARAMS,
+            MachineError::DidNotStart(_) => BOOT_FAILED,
             MachineError::TimedOut(_) => TIMED_OUT,
             _ => INTERNAL_ERROR,
         };

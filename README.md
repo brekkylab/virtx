@@ -33,7 +33,7 @@ brew install lld meson ninja krunvm
 git submodule update --init
 cargo xtask init                        # patches the submodules (--force resets them first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
-cargo xtask build host guest            # -> target/release/ (builds MoltenVK and virglrenderer
+cargo xtask build host                  # -> target/release/ (builds MoltenVK and virglrenderer
                                         #    first; add abin for /abin)
 cargo xtask install                     # -> ~/.cache/virtx/bin, or --prefix <dir>
 ```
@@ -324,7 +324,7 @@ library is first compiled with the constants' defaults (`1` in ncnn), so
 `spvCoopMatrix` has to compile for any shape and cannot `static_assert` a
 multiple of 8. And a failed conversion does not fail `vkCreateComputePipelines`
 loudly enough for ncnn: it loads the net and the guest aborts at dispatch, with
-the reason only in the boot's `console.log`.
+the reason only on the machine process's stderr, which is the server's.
 
 Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping
@@ -960,9 +960,10 @@ fs 13 · fs 14 · fs 15 · fs 16   ← the line no MP_INTSRC covers
 ```
 
 The guest's boot then stops where that fs device is mounted, which is before
-`virtx-uvm-guest` is started at all — libkrun's init mounts the shares first.
-What a server sees is the handshake never arriving: "the guest connected but
-did not say it was there within 60s", naming nothing that would lead here. The
+the command is started at all — libkrun's init mounts the shares first. What a
+server saw, back when a guest agent answered it, was that agent's handshake
+never arriving: "the guest connected but did not say it was there within 60s",
+naming nothing that would lead here. The
 `ioapic: write: ioredtbl register N` line for 16 is simply absent from a debug
 log that has 5, 13, 14 and 15.
 
@@ -1121,7 +1122,7 @@ refuses the write whatever the guest mounted it with, so a guest that is root in
 cannot remount it away. Prepended to `PATH` rather than appended, because `/abin` is what this
 backend undertakes to provide -- an image that happens to carry a program of the same name
 would make that undertaking untrue, and nothing would say which one a session got. The path is
-reserved for the same reason `/.virtx` is: a client that asks for a tree there is refused.
+reserved: a client that asks for a tree there is refused.
 
 ## Layout
 
@@ -1132,7 +1133,6 @@ virtx-stdio-server/         the one binary, `virtx-uvm`: the console server a us
                             over stdio, and -- as `virtx-uvm boot`, spawned by itself --
                             the process that becomes a VM; signed on macOS
 virtx-http-server/          the same server over Streamable HTTP; empty for now
-virtx-uvm-guest/            the half inside the VM; its own workspace, built for musl
 virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
                             beside them and not on it -- and a SKILLS.md each, saying what one
                             is; its own workspace, built for musl

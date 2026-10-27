@@ -1,7 +1,7 @@
 //! The virtio-gpu device a session gets when it asks for one.
 //!
 //! Only built for the `gpu` feature. A session that asks for a GPU without it is a
-//! session that runs without one -- see [`MachineConfig::gpu`](super::MachineConfig::gpu).
+//! session that runs without one -- see [`Machine::gpu`](super::Machine::gpu).
 //!
 //! # What reaches the guest
 //!
@@ -46,7 +46,7 @@
 //! nearly all of them -- is mapped through one window of guest-physical addresses, so the
 //! window is what the guest's GPU can hold at once: a mapping past it fails `vkMapMemory`
 //! with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. It is libkrun's 8 GiB unless the session names a
-//! size ([`MachineConfig::gpu_memory_mib`](super::MachineConfig::gpu_memory_mib)).
+//! size ([`Machine::gpu_memory_mib`](super::Machine::gpu_memory_mib)).
 //!
 //! The device the guest enumerates reports the same size: venus caps every heap, and
 //! `VK_EXT_memory_budget`'s budgets, at `VKR_HEAP_SIZE_MAX` (see

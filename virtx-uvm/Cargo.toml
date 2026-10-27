@@ -39,6 +39,8 @@ unicode-normalization = "0.1"
 anyhow = { workspace = true }
 # The errno values a served volume answers the guest in.
 libc = { workspace = true }
+# libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
+log = "0.4"
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
 # guest's root. Vendored.
 krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }

@@ -10,8 +10,8 @@ use anyhow::{Context, bail, ensure};
 
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
-       cargo xtask build    <host|guest|abin|kernel>... [--debug]
-       cargo xtask download <guest|abin|kernel>... [--debug]
+       cargo xtask build    <host|abin|kernel>... [--debug]
+       cargo xtask download <abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask upload   --bucket <name> [--profile <name>] [--region <region>]
                             [--latest] [--with-abin] [--allow-dirty] [--dry-run]
@@ -28,7 +28,6 @@ usage: cargo xtask init     [--force]
   test      cargo test, the same way
 
   host      the console server, which is also the VM process, for this machine
-  guest     the program that runs inside the VM
   abin      the executables every VM gets at /abin
   kernel    the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
 
@@ -37,7 +36,7 @@ usage: cargo xtask init     [--force]
   --prefix <dir>  where to install (default: $VIRTX_HOME, else virtx under
                   ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
                   ~/.cache otherwise)
-  --debug         builds unoptimized (the guest is always optimized)
+  --debug         builds unoptimized
 
   --bucket <name>     (upload) the bucket to publish to (default: $VIRTX_DIST_BUCKET)
   --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
@@ -55,13 +54,11 @@ usage: cargo xtask init     [--force]
 const HOST_BINS: &[&str] = &["virtx-uvm"];
 /// The package `HOST_BINS` are built from.
 const HOST_PACKAGE: &str = "virtx-stdio-server";
-const GUEST_BIN: &str = "virtx-uvm-guest";
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
     Host,
-    Guest,
     Abin,
     Kernel,
 }
@@ -155,7 +152,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
     while let Some(arg) = args.next() {
         let component = match arg.to_str() {
             Some("host") => Component::Host,
-            Some("guest") => Component::Guest,
             Some("abin") => Component::Abin,
             Some("kernel") => Component::Kernel,
             Some("--prefix") => {
@@ -351,9 +347,6 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Host) {
         build_host(options)?;
     }
-    if options.has(Component::Guest) {
-        build_guest(options)?;
-    }
     if options.has(Component::Abin) {
         build_abin(options)?;
     }
@@ -503,23 +496,6 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_guest(options: &Options) -> anyhow::Result<()> {
-    let target = guest_target()?;
-    let out = options.out();
-    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
-    // The crate is named for the binary it builds.
-    let mut cargo = cross_cargo(&root_path().join(GUEST_BIN));
-    cargo.args(["build", "--release", "--target", target]);
-    run(
-        cargo,
-        &format!("{GUEST_BIN} for {target} (if the target is missing: rustup target add {target})"),
-    )?;
-    place(
-        &target_path().join(format!("{target}/release/{GUEST_BIN}")),
-        &out.join(GUEST_BIN),
-    )
-}
-
 fn build_abin(options: &Options) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
@@ -619,9 +595,6 @@ fn build_kernel() -> anyhow::Result<()> {
     Ok(())
 }
 fn download(options: &Options) -> anyhow::Result<()> {
-    if options.has(Component::Guest) {
-        todo!("download guest");
-    }
     if options.has(Component::Abin) {
         todo!("download abin");
     }
@@ -806,7 +779,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Put the set a `bin/` holds -- the host binary, the guest, the guest kernel, and abin if
+/// Put the set a `bin/` holds -- the host binary, the guest kernel, and abin if
 /// it was built and `abin` asks for it -- from `built` into `bin`. What `install` does, and
 /// what `upload` archives.
 fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {
@@ -821,11 +794,6 @@ fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {
             built.display()
         );
     }
-    ensure!(
-        built.join(GUEST_BIN).is_file(),
-        "no {GUEST_BIN} in {} -- run `cargo xtask build guest` or `cargo xtask download guest` first",
-        built.display()
-    );
 
     // The guest kernel goes with them. libkrun resolves it by leaf name, and every
     // platform looks beside the running binary before it looks anywhere else -- so a
@@ -841,7 +809,6 @@ fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {
     for exe in &host_exes {
         place(&built.join(exe), &bin.join(exe))?;
     }
-    place(&built.join(GUEST_BIN), &bin.join(GUEST_BIN))?;
     if abin && built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;
     }

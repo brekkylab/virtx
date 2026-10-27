@@ -13,8 +13,8 @@ pub use image::{
     store::{Error as ImageStoreError, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, MachineConfig, Network, SUBCOMMAND as MACHINE_SUBCOMMAND,
-    VolumeMount, enter as enter_machine, wire,
+    Error as MachineError, Machine, Network, Report as MachineReport,
+    SUBCOMMAND as MACHINE_SUBCOMMAND, VolumeMount, enter as enter_machine, wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;

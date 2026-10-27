@@ -1,4 +1,4 @@
-# Unanchored: `virtx-uvm-guest/` is a workspace of its own and so builds into
+# Unanchored: `virtx-abins/` is a workspace of its own and so builds into
 # a target directory of its own.
 target/
 Cargo.lock

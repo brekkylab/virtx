@@ -4,8 +4,7 @@
 # links libkrun. `virtx-stdio-server` is the server on `virtx-core`'s protocol over
 # stdio -- the `virtx-uvm` binary -- and, as `virtx-uvm boot`, spawned by itself, the
 # process that becomes a micro-VM; `virtx-http-server` is the same server over
-# Streamable HTTP, to the users and projects its config names. `virtx-uvm-guest` is the machines' init, cross-compiled for the
-# guest and so built apart.
+# Streamable HTTP, to the users and projects its config names.
 [workspace]
 resolver = "3"
 members = ["virtx-uvm", "virtx-stdio-server", "virtx-http-server", "xtask"]
@@ -14,18 +13,17 @@ members = ["virtx-uvm", "virtx-stdio-server", "virtx-http-server", "xtask"]
 # workspace. Without this, cargo would auto-adopt the path dependencies as
 # members and collide with that workspace.
 #
-# `virtx-uvm-guest/` and `virtx-abins/` are workspace roots of their own: both are
-# cross-compiled to `*-unknown-linux-musl`, and a member would be built for the host
-# by a bare `cargo build` -- for a target that has no host to run on. Listed here and
-# not merely left out of `members`: a package under this directory that is neither
-# resolves against this root, and the ones in `virtx-abins/` inherit dependencies
-# this workspace has no reason to declare.
+# `virtx-abins/` is a workspace root of its own: it is cross-compiled to
+# `*-unknown-linux-musl`, and a member would be built for the host by a bare
+# `cargo build` -- for a target that has no host to run on. Listed here and not merely
+# left out of `members`: a package under this directory that is neither resolves against
+# this root, and the ones in `virtx-abins/` inherit dependencies this workspace has no
+# reason to declare.
 #
 # `virglrenderer-sys/` builds virglrenderer with meson, and is reached only through
 # rutabaga_gfx under the `gpu` feature. As a member a bare `cargo build` would run it.
 exclude = [
     "3rdparty/libkrun",
-    "virtx-uvm-guest",
     "virtx-abins",
     "virglrenderer-sys",
 ]

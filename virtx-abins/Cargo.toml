@@ -2,10 +2,9 @@
 # `storebase` is. They are written and built here, for the machine that runs them; `virtx`
 # is what decides what a delegated executable *is*.
 #
-# Its own workspace root rather than a member of the one above, for the same reason
-# `virtx-uvm-guest/` is: everything here is cross-compiled to `*-unknown-linux-musl`, and a
-# member would be built for the host by a bare `cargo build` -- for a target that has no host
-# to run on. One root over the four rather than four roots of one, because `storebase` is the
+# Its own workspace root rather than a member of the one above: everything here is
+# cross-compiled to `*-unknown-linux-musl`, and a member would be built for the host by a bare
+# `cargo build` -- for a target that has no host to run on. One root over the four rather than four roots of one, because `storebase` is the
 # substrate `mem` and `index` share: split apart, each would resolve and lock it alone.
 [workspace]
 resolver = "3"

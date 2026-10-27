@@ -1,0 +1,24 @@
+{
+  "name": "@brekkylab/virtx",
+  "version": "0.1.2",
+  "description": "A virtx client for Node, over libvirtx_core's C ABI.",
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "libvirtx_core.dylib",
+    "libvirtx_core.so",
+    "virtx_core.dll"
+  ],
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "test": "node --test '__test__/**/*.spec.mjs'"
+  },
+  "dependencies": {
+    "koffi": "^3.3.3"
+  }
+}

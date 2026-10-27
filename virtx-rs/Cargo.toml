@@ -1,0 +1,24 @@
+[package]
+name = "virtx-rs"
+version = "0.1.2"
+edition = "2024"
+description = "A virtx client for Rust, over libvirtx_core's C ABI."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# The types every request takes and answers, and nothing of the client: that is the one in
+# `libvirtx_core`, opened at run time, so a process with other modules over it shares one.
+virtx-core = { path = "../virtx-core", default-features = false }
+# Opening `libvirtx_core` and finding its functions.
+libloading = "0.8"
+# `Stream`, which a request answering item by item is.
+futures-core = "0.3"
+# What crosses the C ABI is JSON.
+serde_json = "1"
+serde = "1"
+
+[[test]]
+# Its own `main`, which opens the library once before every test.
+name = "client"
+harness = false

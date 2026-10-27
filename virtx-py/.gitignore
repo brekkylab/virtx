@@ -1,0 +1,4 @@
+/.venv/
+__pycache__/
+/src/virtx/libvirtx_core.*
+/src/virtx/virtx_core.dll

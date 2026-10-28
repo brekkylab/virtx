@@ -40,9 +40,11 @@ mod boot;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod net;
+mod ports;
 pub mod wire;
 
 pub use net::Network;
+pub use ports::{Ports, Publication};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -1,19 +1,21 @@
 //! The RPC methods `virtx-core` names, each answered from the [`Home`] of the project its
 //! request reaches, which [`access`](crate::access) puts in its extensions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::net::TcpStream;
 use virtx_core::*;
 use virtx_uvm::{
     BuildError, Digest, ImageConfiguration, ImageStore, ImageStoreError, Machine, MachineError,
-    MachineReport, MachineSpec, Network, Os, Reference, Registry, RegistryError, Snapshot,
+    MachineReport, MachineSpec, Network, Os, Ports, Reference, Registry, RegistryError, Snapshot,
     SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore, build_step,
 };
 
@@ -57,12 +59,49 @@ impl Home {
         })
     }
 
-    /// Forget every sandbox that has run nothing for `idle`.
+    /// Forget every sandbox that has run nothing, and been reached at none of its ports, for
+    /// `idle`.
     pub fn forget_idle(&self, idle: Duration) {
         self.sandboxes.lock().unwrap().retain(|_, sandbox| {
             sandbox.running.load(Ordering::Relaxed) > 0
+                || sandbox.tunnels.load(Ordering::Relaxed) > 0
                 || sandbox.used.lock().unwrap().elapsed() < idle
         });
+    }
+
+    /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
+    /// one of.
+    pub fn tunnel(&self, capability: &str) -> Option<Tunnel> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        sandboxes.values().find_map(|sandbox| {
+            let port = *sandbox.capabilities.get(capability)?;
+            sandbox.tunnels.fetch_add(1, Ordering::Relaxed);
+            Some(Tunnel {
+                sandbox: Arc::clone(sandbox),
+                port,
+            })
+        })
+    }
+}
+
+/// A connection through one of a sandbox's ports, counted until it drops: a sandbox with one
+/// is in use, whatever its commands do.
+pub struct Tunnel {
+    sandbox: Arc<Sandbox>,
+    port: u16,
+}
+
+impl Tunnel {
+    /// The port, in whichever of the sandbox's machines runs.
+    pub async fn connect(&self) -> io::Result<TcpStream> {
+        self.sandbox.ports.connect(self.port).await
+    }
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        *self.sandbox.used.lock().unwrap() = Instant::now();
+        self.sandbox.tunnels.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -74,6 +113,13 @@ struct Sandbox {
     /// How many of its commands run now, and when the last one ended.
     running: AtomicUsize,
     used: Mutex<Instant>,
+    /// Where its machines' ports are reached, where it answers each was opened, and the
+    /// capability in each answer, by the port it opens.
+    ports: Ports,
+    opened: Vec<SandboxPort>,
+    capabilities: HashMap<String, u16>,
+    /// How many connections through its ports are open now.
+    tunnels: AtomicUsize,
 }
 
 /// A command running in a sandbox, counted until it drops.
@@ -367,7 +413,7 @@ async fn sandbox_list(
                 .as_ref()
                 .map(|snapshot| snapshot.name.clone()),
             running: sandbox.running.load(Ordering::Relaxed) > 0,
-            ports: Vec::new(),
+            ports: sandbox.opened.clone(),
         })
         .collect())
 }
@@ -378,9 +424,16 @@ async fn sandbox_init(
     _: Notifier,
 ) -> Result<SandboxInitOutput, Refused> {
     // What can be refused without starting anything, first.
-    if !args.ports.is_empty() {
-        // TODO: reserve them here, for each of the sandbox's machines to be reached at.
-        return Err(refused(UNSUPPORTED, "ports are not opened here yet"));
+    let mut given = HashSet::new();
+    if let Some(port) = args
+        .ports
+        .iter()
+        .find(|port| **port == 0 || !given.insert(**port))
+    {
+        return Err(refused(
+            INVALID_PARAMS,
+            format!("ports: {port} is not a port, or is given twice"),
+        ));
     }
     for (what, given) in [
         ("vcpus", args.vcpus.map(u32::from)),
@@ -465,8 +518,26 @@ async fn sandbox_init(
             },
         },
         volumes,
-        ports: Vec::new(),
+        ports: args.ports.clone(),
     };
+
+    // Each port behind a capability of its own, which only this answer carries: who has the
+    // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
+    // what reaches this server from outside is not this server's to know.
+    let mut opened = Vec::new();
+    let mut capabilities = HashMap::new();
+    for &port in &args.ports {
+        let capability = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        opened.push(SandboxPort {
+            port,
+            url: format!("ports/{capability}"),
+        });
+        capabilities.insert(capability, port);
+    }
 
     // One sandbox here to a snapshot, as one machine at a time is to it: two sandboxes' commands
     // would otherwise take turns refusing each other.
@@ -490,12 +561,13 @@ async fn sandbox_init(
             machine,
             running: AtomicUsize::new(0),
             used: Mutex::new(Instant::now()),
+            ports: Ports::default(),
+            opened: opened.clone(),
+            capabilities,
+            tunnels: AtomicUsize::new(0),
         }),
     );
-    Ok(SandboxInitOutput {
-        id,
-        ports: Vec::new(),
-    })
+    Ok(SandboxInitOutput { id, ports: opened })
 }
 
 async fn sandbox_exec(
@@ -516,21 +588,31 @@ async fn sandbox_exec(
     sandbox.running.fetch_add(1, Ordering::Relaxed);
     let _running = Running(&sandbox);
     let mut progress = 0;
+    // Where the sandbox's ports reach, for as long as this machine runs.
+    let mut _published = None;
     let code = sandbox
         .machine
         .clone()
-        .run(&home.exe, args.cmd, args.timeout_ms, |report| {
-            // The command's output, stdout and stderr alike; the rest is the machine's own.
-            let (MachineReport::Stdout(line) | MachineReport::Stderr(line)) = report else {
-                return;
-            };
-            progress += 1;
-            notifier.notify::<SandboxExec>(Progress {
-                progress,
-                total: None,
-                content: Some(line),
-            });
-        })
+        .run(
+            &home.exe,
+            args.cmd,
+            args.timeout_ms,
+            |report| match report {
+                // The command's output, stdout and stderr alike; the rest is the machine's own.
+                MachineReport::Stdout(line) | MachineReport::Stderr(line) => {
+                    progress += 1;
+                    notifier.notify::<SandboxExec>(Progress {
+                        progress,
+                        total: None,
+                        content: Some(line),
+                    });
+                }
+                MachineReport::Published(addresses) => {
+                    _published = Some(sandbox.ports.publish(addresses));
+                }
+                MachineReport::Console(_) | MachineReport::Log { .. } => {}
+            },
+        )
         .await?;
     Ok(SandboxExecOutput { code })
 }

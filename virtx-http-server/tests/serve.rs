@@ -3,15 +3,21 @@
 
 use std::path::PathBuf;
 
-use reqwest::StatusCode;
+use futures_util::{SinkExt as _, StreamExt as _};
+use reqwest::{StatusCode, Url};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
-use virtx_uvm::{ImageStore, Registry};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::{self, Message};
+use virtx_uvm::{FsTree, ImageStore, Registry};
 
+const INVALID_PARAMS: i64 = -32602;
 const NOT_FOUND: i64 = -31001;
 const ALREADY_EXISTS: i64 = -31002;
-const UNSUPPORTED: i64 = -31004;
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// A server over an empty home, killed and removed when this drops.
 struct Served {
@@ -84,6 +90,18 @@ impl Served {
         (status, response.json().await.ok())
     }
 
+    /// File an empty image under `tag` in the store the server reads.
+    fn file_image(&self, tag: &str) {
+        let store = ImageStore::new(self.home.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_str(
+            r#"{"architecture": "arm64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}"#,
+        )
+        .unwrap();
+        let image = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
+    }
+
     /// Pull `reference` from its registry into the store the server reads.
     async fn pull_image(&self, reference: &str) {
         let store = ImageStore::new(self.home.join("images")).unwrap();
@@ -98,6 +116,30 @@ impl Served {
         }
         let image = store.insert_image(&config, &layers).unwrap();
         store.insert_tag(&reference, &image).unwrap();
+    }
+
+    /// A port's URL, as the client resolves what `sandbox.init` answered: against the URL it
+    /// called.
+    fn port_url(&self, answered: &Value) -> Url {
+        Url::parse(&self.url)
+            .unwrap()
+            .join(answered["url"].as_str().unwrap())
+            .unwrap()
+    }
+
+    /// A WebSocket to `url`, offering `protocol`: the socket, or the status it was refused with.
+    async fn open(url: &Url, protocol: Option<&str>) -> Result<Socket, u16> {
+        let mut request = url.as_str().into_client_request().unwrap();
+        if let Some(protocol) = protocol {
+            request
+                .headers_mut()
+                .insert("sec-websocket-protocol", protocol.parse().unwrap());
+        }
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((socket, _)) => Ok(socket),
+            Err(tungstenite::Error::Http(response)) => Err(response.status().as_u16()),
+            Err(e) => panic!("{e}"),
+        }
     }
 
     /// `method`'s result, as alice in `demo`.
@@ -205,16 +247,16 @@ async fn a_project_keeps_its_snapshots_and_volumes() {
         Err(ALREADY_EXISTS)
     );
 
-    // Ports are not opened yet, and a sandbox of an image nobody filed is refused before it
+    // A port that is none, and a sandbox of an image nobody filed, are refused before it
     // boots.
     assert_eq!(
         served
             .result(
                 "sandbox.init",
-                json!({"image": {"type": "tag", "tag": "a:b"}, "ports": [8080]})
+                json!({"image": {"type": "tag", "tag": "a:b"}, "ports": [0]})
             )
             .await,
-        Err(UNSUPPORTED)
+        Err(INVALID_PARAMS)
     );
     assert_eq!(
         served
@@ -225,6 +267,98 @@ async fn a_project_keeps_its_snapshots_and_volumes() {
             .await,
         Err(NOT_FOUND)
     );
+}
+
+#[tokio::test]
+async fn a_port_is_a_websocket_behind_its_capability() {
+    let served = Served::spawn("ports").await;
+    served.file_image("here:latest");
+    let init = served
+        .result(
+            "sandbox.init",
+            json!({"image": {"type": "tag", "tag": "here:latest"}, "ports": [3000]}),
+        )
+        .await
+        .unwrap();
+    let opened = &init["ports"][0];
+    assert_eq!(opened["port"], 3000);
+    let url = served.port_url(opened);
+    let capability = url.path().strip_prefix("/ports/").unwrap().to_owned();
+    assert_eq!(capability.len(), 64);
+    let listed = served.result("sandbox.list", json!({})).await.unwrap();
+    assert_eq!(listed[0]["ports"], init["ports"]);
+
+    // A WebSocket of `virtx.tcp`, and nothing else; the capability is all it needs.
+    let plain = reqwest::get(url.clone()).await.unwrap();
+    assert_eq!(plain.status(), StatusCode::UPGRADE_REQUIRED);
+    let mut ws = url.clone();
+    ws.set_scheme("ws").unwrap();
+    assert_eq!(Served::open(&ws, None).await.err(), Some(400));
+    let mut guessed = ws.clone();
+    guessed.set_path(&format!("/ports/{}", "0".repeat(64)));
+    assert_eq!(
+        Served::open(&guessed, Some("virtx.tcp")).await.err(),
+        Some(404)
+    );
+
+    // Opened, and closed at once: no machine runs to reach the port in.
+    let mut socket = Served::open(&ws, Some("virtx.tcp")).await.unwrap();
+    assert!(matches!(
+        socket.next().await,
+        Some(Ok(Message::Close(_))) | None
+    ));
+
+    served
+        .result("sandbox.close", json!({"sandbox": init["id"]}))
+        .await
+        .unwrap();
+    assert_eq!(Served::open(&ws, Some("virtx.tcp")).await.err(), Some(404));
+}
+
+/// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
+/// guest kernel where libkrun finds it.
+#[tokio::test]
+#[ignore]
+async fn a_port_s_websocket_reaches_what_listens_on_it_in_the_running_machine() {
+    let served = Served::spawn("port-reached").await;
+    served.pull_image("alpine:3.20").await;
+    let init = served
+        .result(
+            "sandbox.init",
+            json!({"image": {"type": "tag", "tag": "alpine:3.20"}, "ports": [8000]}),
+        )
+        .await
+        .unwrap();
+    let mut url = served.port_url(&init["ports"][0]);
+    url.set_scheme("ws").unwrap();
+
+    let serving = served.result(
+        "sandbox.exec",
+        json!({
+            "sandbox": init["id"],
+            "cmd": ["sh", "-c", "while true; do echo hello | nc -l -p 8000; done"],
+            "timeout_ms": 30000,
+        }),
+    );
+    let reached = async {
+        // Until the machine is up and something listens in it.
+        loop {
+            let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
+            socket.send(Message::binary(b"hi".to_vec())).await.unwrap();
+            let mut said = Vec::new();
+            while let Some(Ok(Message::Binary(bytes))) = socket.next().await {
+                said.extend_from_slice(&bytes);
+                if said.ends_with(b"hello\n") {
+                    return said;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    };
+    tokio::select! {
+        said = reached => assert_eq!(said, b"hello\n"),
+        ended = serving => panic!("nc ended before it was reached: {ended:?}"),
+    }
 }
 
 #[tokio::test]

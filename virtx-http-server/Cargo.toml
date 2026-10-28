@@ -11,13 +11,13 @@ gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
 anyhow = { workspace = true }
-axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
 http = "1"
 serde = { workspace = true }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 # A token's randomness.
 uuid = { version = "1", features = ["v4"] }
 # The server end of `/rpc`.
@@ -29,3 +29,6 @@ virtx-uvm = { workspace = true }
 # The wire, spoken by hand: virtx-core's client sends no token and names no project.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tokio = { workspace = true, features = ["io-util", "process"] }
+# A port's WebSocket, as a client would open it.
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

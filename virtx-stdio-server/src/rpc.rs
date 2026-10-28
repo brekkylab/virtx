@@ -1,18 +1,22 @@
 //! The RPC methods `virtx-core` names, answered from this host's [`Home`]: one client is on the
 //! other end of stdio, so all of it is its.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::net::TcpListener;
+use tokio::task::JoinSet;
+
 use virtx_core::*;
 use virtx_uvm::{
     BuildError, Digest, ImageConfiguration, ImageStore, ImageStoreError, Machine, MachineError,
-    MachineReport, MachineSpec, Network, Os, Reference, Registry, RegistryError, Snapshot,
+    MachineReport, MachineSpec, Network, Os, Ports, Reference, Registry, RegistryError, Snapshot,
     SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore, build_step,
 };
 
@@ -62,6 +66,11 @@ struct Sandbox {
     machine: Machine,
     /// How many of its commands run now.
     running: AtomicUsize,
+    /// Where its machines' ports are reached, and where it answers each was opened.
+    ports: Arc<Ports>,
+    opened: Vec<SandboxPort>,
+    /// What takes each port's connections, until the sandbox goes.
+    _listening: JoinSet<()>,
 }
 
 /// A command running in a sandbox, counted until it drops.
@@ -354,7 +363,7 @@ async fn sandbox_list(
                 .as_ref()
                 .map(|snapshot| snapshot.name.clone()),
             running: sandbox.running.load(Ordering::Relaxed) > 0,
-            ports: Vec::new(),
+            ports: sandbox.opened.clone(),
         })
         .collect())
 }
@@ -365,9 +374,16 @@ async fn sandbox_init(
     _: Notifier,
 ) -> Result<SandboxInitOutput, Refused> {
     // What can be refused without starting anything, first.
-    if !args.ports.is_empty() {
-        // TODO: reserve them here, for each of the sandbox's machines to be reached at.
-        return Err(refused(UNSUPPORTED, "ports are not opened here yet"));
+    let mut given = HashSet::new();
+    if let Some(port) = args
+        .ports
+        .iter()
+        .find(|port| **port == 0 || !given.insert(**port))
+    {
+        return Err(refused(
+            INVALID_PARAMS,
+            format!("ports: {port} is not a port, or is given twice"),
+        ));
     }
     for (what, given) in [
         ("vcpus", args.vcpus.map(u32::from)),
@@ -451,8 +467,38 @@ async fn sandbox_init(
             },
         },
         volumes,
-        ports: Vec::new(),
+        ports: args.ports.clone(),
     };
+
+    // Each port on this host's loopback, which only this machine reaches, taken to whichever
+    // of the sandbox's machines runs.
+    let ports = Arc::new(Ports::default());
+    let mut opened = Vec::new();
+    let mut listening = JoinSet::new();
+    for &port in &args.ports {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|e| refused(io_code(&e), format!("opening port {port}: {e}")))?;
+        let at = listener
+            .local_addr()
+            .map_err(|e| refused(INTERNAL_ERROR, format!("opening port {port}: {e}")))?;
+        opened.push(SandboxPort {
+            port,
+            url: format!("http://{at}"),
+        });
+        let ports = Arc::clone(&ports);
+        listening.spawn(async move {
+            while let Ok((mut accepted, _)) = listener.accept().await {
+                let ports = Arc::clone(&ports);
+                tokio::spawn(async move {
+                    // Closed at once when no machine runs, as a port nothing listens on is.
+                    if let Ok(mut reached) = ports.connect(port).await {
+                        let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
+                    }
+                });
+            }
+        });
+    }
 
     // One sandbox here to a snapshot, as one machine at a time is to it: two sandboxes' commands
     // would otherwise take turns refusing each other.
@@ -475,12 +521,12 @@ async fn sandbox_init(
             image: digest,
             machine,
             running: AtomicUsize::new(0),
+            ports,
+            opened: opened.clone(),
+            _listening: listening,
         }),
     );
-    Ok(SandboxInitOutput {
-        id,
-        ports: Vec::new(),
-    })
+    Ok(SandboxInitOutput { id, ports: opened })
 }
 
 async fn sandbox_exec(
@@ -501,21 +547,31 @@ async fn sandbox_exec(
     sandbox.running.fetch_add(1, Ordering::Relaxed);
     let _running = Running(&sandbox.running);
     let mut progress = 0;
+    // Where the sandbox's ports reach, for as long as this machine runs.
+    let mut _published = None;
     let code = sandbox
         .machine
         .clone()
-        .run(&home.exe, args.cmd, args.timeout_ms, |report| {
-            // The command's output, stdout and stderr alike; the rest is the machine's own.
-            let (MachineReport::Stdout(line) | MachineReport::Stderr(line)) = report else {
-                return;
-            };
-            progress += 1;
-            notifier.notify::<SandboxExec>(Progress {
-                progress,
-                total: None,
-                content: Some(line),
-            });
-        })
+        .run(
+            &home.exe,
+            args.cmd,
+            args.timeout_ms,
+            |report| match report {
+                // The command's output, stdout and stderr alike; the rest is the machine's own.
+                MachineReport::Stdout(line) | MachineReport::Stderr(line) => {
+                    progress += 1;
+                    notifier.notify::<SandboxExec>(Progress {
+                        progress,
+                        total: None,
+                        content: Some(line),
+                    });
+                }
+                MachineReport::Published(addresses) => {
+                    _published = Some(sandbox.ports.publish(addresses));
+                }
+                MachineReport::Console(_) | MachineReport::Log { .. } => {}
+            },
+        )
         .await?;
     Ok(SandboxExecOutput { code })
 }

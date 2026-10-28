@@ -18,7 +18,7 @@ gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread"] }
 # The stdio transport this binary serves the methods over.
 virtx-core = { workspace = true, features = ["server"] }
 # The methods, and the machines they start.

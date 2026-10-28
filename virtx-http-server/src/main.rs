@@ -2,6 +2,10 @@
 //! (see [`config`]): each request carries a user's token and names a project, and its methods
 //! are in that project's home.
 //!
+//! A sandbox's ports are at `/ports/<capability>` beside `/rpc`, each a WebSocket of the
+//! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
+//! `sandbox.init` answers, is all a connection needs, and gives no more than the one port.
+//!
 //! `virtx-http-server token` makes a token, and says what the config keeps of it.
 //! `virtx-http-server vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -15,12 +19,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use axum::response::IntoResponse as _;
+use axum::extract::Path;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::{IntoResponse as _, Response};
 use clap::Parser;
+use http::{HeaderMap, StatusCode, header};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use virtx_core::{CancelScope, Dispatcher, Server};
 
 use crate::access::Access;
 use crate::config::Config;
+use crate::rpc::Tunnel;
+
+/// The WebSocket subprotocol a port's TCP is carried in.
+const TCP_SUBPROTOCOL: &str = "virtx.tcp";
+
+/// How much of a port's TCP one message carries at most.
+const CHUNK: usize = 64 << 10;
 
 /// How long a sandbox is kept with no command run in it: over HTTP no client is ever known to
 /// be gone, so one that stops naming its sandboxes is taken to be, and what they hold -- their
@@ -29,7 +45,7 @@ const IDLE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser)]
 enum Command {
-    /// Serve at the endpoint `/rpc`, as `--config` says.
+    /// Serve at the endpoint `/rpc`, and sandboxes' ports beside it, as `--config` says.
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -69,24 +85,37 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let access = Arc::new(Access::new(&config)?);
     let server = Server::new(Dispatcher::new(rpc::methods()));
     let checked = Arc::clone(&access);
-    let router = axum::Router::new().route(
-        "/rpc",
-        axum::routing::any(move |mut request: axum::extract::Request| {
-            let server = server.clone();
-            let home = checked.home(request.headers());
-            async move {
-                match home {
-                    // A user cancels their own requests, in whichever project.
-                    Ok((user, home)) => {
-                        request.extensions_mut().insert(home);
-                        request.extensions_mut().insert(CancelScope(user));
-                        server.handle(request).await.into_response()
+    let reaching = Arc::clone(&access);
+    let router = axum::Router::new()
+        .route(
+            "/rpc",
+            axum::routing::any(move |mut request: axum::extract::Request| {
+                let server = server.clone();
+                let home = checked.home(request.headers());
+                async move {
+                    match home {
+                        // A user cancels their own requests, in whichever project.
+                        Ok((user, home)) => {
+                            request.extensions_mut().insert(home);
+                            request.extensions_mut().insert(CancelScope(user));
+                            server.handle(request).await.into_response()
+                        }
+                        Err(status) => status.into_response(),
                     }
-                    Err(status) => status.into_response(),
                 }
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/ports/{capability}",
+            axum::routing::any(
+                move |Path(capability): Path<String>,
+                      headers: HeaderMap,
+                      upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>| {
+                    let access = Arc::clone(&reaching);
+                    async move { port(&access, &capability, &headers, upgrade) }
+                },
+            ),
+        );
 
     let reaping = Arc::clone(&access);
     tokio::spawn(async move {
@@ -111,4 +140,74 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+/// A request to the port `capability` opens: `426` unless it opens a WebSocket, `400` unless of
+/// the subprotocol `virtx.tcp`, and `404` for a capability no sandbox here has -- one never
+/// answered, or of a sandbox gone.
+fn port(
+    access: &Access,
+    capability: &str,
+    headers: &HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    let Ok(upgrade) = upgrade else {
+        return StatusCode::UPGRADE_REQUIRED.into_response();
+    };
+    let offered = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|offered| offered.trim() == TCP_SUBPROTOCOL)
+        });
+    if !offered {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("a port is reached over the WebSocket subprotocol {TCP_SUBPROTOCOL}"),
+        )
+            .into_response();
+    }
+    let Some(tunnel) = access.homes().find_map(|home| home.tunnel(capability)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    upgrade
+        .protocols([TCP_SUBPROTOCOL])
+        .on_upgrade(move |socket| relay(socket, tunnel))
+}
+
+/// Carry bytes between `socket` and the port `tunnel` reaches until either ends: what is
+/// read from the port as binary messages, and the binary messages to the port. Closed at once
+/// when no machine runs, as a port nothing listens on is.
+async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
+    if let Ok(mut reached) = tunnel.connect().await {
+        let (mut from, mut to) = reached.split();
+        let mut buffer = vec![0u8; CHUNK];
+        loop {
+            tokio::select! {
+                read = from.read(&mut buffer) => match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let message = Message::Binary(buffer[..n].to_vec().into());
+                        if socket.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+                received = socket.recv() => match received {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if to.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Answered by the socket itself.
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    // Text is no TCP's, and anything else is the end.
+                    Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
+                },
+            }
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::pin::pin;
 
 use futures_util::StreamExt as _;
+use tokio::io::AsyncReadExt as _;
+use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
     Error, Event, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName, MountSource, MountType,
@@ -22,7 +24,6 @@ const INVALID_PARAMS: i64 = -32602;
 const NOT_FOUND: i64 = -31001;
 const ALREADY_EXISTS: i64 = -31002;
 const IN_USE: i64 = -31003;
-const UNSUPPORTED: i64 = -31004;
 const BUILD_FAILED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
 
@@ -363,6 +364,48 @@ async fn a_mount_is_kept_at_a_path_until_it_is_removed() {
     assert_eq!(code(answered), NOT_FOUND);
 }
 
+/// What a port's URL names, as `host:port`.
+fn address(url: &str) -> &str {
+    url.strip_prefix("http://")
+        .unwrap_or_else(|| panic!("{url} is a loopback URL"))
+}
+
+#[tokio::test]
+async fn a_port_is_on_this_host_s_loopback_until_the_sandbox_goes() {
+    let server = Server::spawn("ports");
+    server.file_image("here:latest");
+    let mut args = SandboxInitArgs::new(ImageName::parse("here:latest"));
+    args.ports = vec![3000, 5900];
+    let init = server.call::<SandboxInit>(args).await.unwrap();
+    assert_eq!(
+        init.ports
+            .iter()
+            .map(|opened| opened.port)
+            .collect::<Vec<_>>(),
+        [3000, 5900]
+    );
+    let listed = server
+        .call::<SandboxList>(SandboxListArgs {})
+        .await
+        .unwrap();
+    assert_eq!(listed[0].ports, init.ports);
+
+    // Taken, and closed at once: no machine runs to reach the port in.
+    let at = address(&init.ports[0].url);
+    assert!(at.starts_with("127.0.0.1:"), "{at}");
+    let mut stream = TcpStream::connect(at).await.unwrap();
+    let mut read = Vec::new();
+    assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0);
+
+    server
+        .call::<SandboxClose>(SandboxCloseArgs { sandbox: init.id })
+        .await
+        .unwrap();
+    // Its listener goes with it, a moment after.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(TcpStream::connect(at).await.is_err());
+}
+
 /// Refused before any machine is booted.
 #[tokio::test]
 async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
@@ -371,9 +414,11 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
     let refused = async |args: SandboxInitArgs| code(server.call::<SandboxInit>(args).await);
     let here = || SandboxInitArgs::new(ImageName::parse("here:latest"));
 
-    let mut args = here();
-    args.ports = vec![8080];
-    assert_eq!(refused(args).await, UNSUPPORTED);
+    for ports in [vec![0], vec![8080, 8080]] {
+        let mut args = here();
+        args.ports = ports;
+        assert_eq!(refused(args).await, INVALID_PARAMS);
+    }
     let mut args = here();
     args.vcpus = Some(0);
     assert_eq!(refused(args).await, INVALID_PARAMS);
@@ -543,6 +588,48 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
         })
         .await
         .unwrap();
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_port_reaches_what_listens_on_it_in_the_running_machine() {
+    let server = Server::spawn("port-reached");
+    server.pull_image("alpine:3.20").await;
+    let mut args = SandboxInitArgs::new(ImageName::parse("alpine:3.20"));
+    args.ports = vec![8000];
+    let init = server.call::<SandboxInit>(args).await.unwrap();
+    let at = address(&init.ports[0].url).to_owned();
+
+    let serving = server.exec(
+        &init.id,
+        &[
+            "sh",
+            "-c",
+            "while true; do echo hello | nc -l -p 8000; done",
+        ],
+        Some(30_000),
+    );
+    let reached = async {
+        // Until the machine is up and something listens in it.
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(&at).await {
+                let mut said = Vec::new();
+                let mut chunk = [0u8; 64];
+                while let Ok(n @ 1..) = stream.read(&mut chunk).await {
+                    said.extend_from_slice(&chunk[..n]);
+                    if said.ends_with(b"hello\n") {
+                        return said;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    };
+    tokio::select! {
+        said = reached => assert_eq!(said, b"hello\n"),
+        (_, ended) = serving => panic!("nc ended before it was reached: {ended:?}"),
+    }
 }
 
 /// Boots VMs, as the one above does.

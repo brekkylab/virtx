@@ -25,7 +25,7 @@ ruzstd = "0.9"
 virtx-core = { workspace = true }
 # A layer's conversion is CPU that is moved off the runtime's threads, a served volume's
 # stores are waited on from libkrun's threads, and a VM is a process of its own.
-tokio = { workspace = true, features = ["io-util", "process", "rt", "rt-multi-thread", "time", "sync"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }
 # Notion's page ids.
 uuid = { version = "1", features = ["v4", "serde"] }
 # A volume's files, resolved under its root however a guest rearranges the tree under them.

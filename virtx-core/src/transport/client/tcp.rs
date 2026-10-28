@@ -1,6 +1,5 @@
 //! The client's end of HTTP over TCP: the server at a base URL, each endpoint a path under it.
 
-use bytes::Bytes;
 use http_body_util::BodyExt;
 
 use super::Body;
@@ -30,21 +29,21 @@ impl Tcp {
         })
     }
 
-    /// Send `request`, whose URI is a path relative to the base, such as `rpc`.
+    /// Send `request`, whose URI is a path under the base, such as `/rpc`.
     pub(super) async fn send(
         &self,
-        request: http::Request<Bytes>,
+        request: http::Request<Body>,
     ) -> Result<http::Response<Body>, String> {
         let (parts, body) = request.into_parts();
         let url = self
             .base
-            .join(&parts.uri.to_string())
+            .join(parts.uri.to_string().trim_start_matches('/'))
             .map_err(|e| format!("{e:#}"))?;
         let response = self
             .http
             .request(parts.method, url)
             .headers(parts.headers)
-            .body(body)
+            .body(reqwest::Body::wrap(body))
             .send()
             .await
             .map_err(|e| format!("{e:#}"))?;

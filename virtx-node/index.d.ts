@@ -61,6 +61,45 @@ export interface ImageBuildOutput {
   digest: string
 }
 
+/** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
+export type RegistryAuth =
+  | { type: 'basic'; username: string; password: string }
+  | { type: 'bearer'; token: string }
+
+export interface ImagePullOutput {
+  /** The digest of the image's manifest, as `algorithm:hex`. */
+  digest: string
+}
+
+export interface ImagePushOutput {
+  /** The digest of the manifest pushed, as `algorithm:hex`. */
+  digest: string
+}
+
+export interface ImageListItem {
+  /** The tag, as `name:tag`. */
+  reference: string
+  /** The digest of the manifest it points at, as `algorithm:hex`. */
+  digest: string
+}
+
+export interface ImageDownloadOutput {
+  /** The digest of the manifest written, as `algorithm:hex`. */
+  digest: string
+}
+
+export interface ImageUploadOutput {
+  /** The digest of the manifest uploaded, as `algorithm:hex`. */
+  digest: string
+}
+
+export interface ImagePruneOutput {
+  /** The digest of each image deleted, as `algorithm:hex`. */
+  images: string[]
+  /** How many bytes the server freed. */
+  reclaimed: number
+}
+
 export interface SnapshotListItem {
   name: string
   size: number
@@ -171,6 +210,24 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput, string>>
+  /** Pull `reference` from its registry, and point it at what it pulls; without `auth` the server pulls anonymously. */
+  pullImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePullOutput, string>>
+  /** Push the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
+  pushImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePushOutput, string>>
+  /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
+  listImage(): Promise<ImageListItem[]>
+  /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
+  tagImage(source: string, target: string): Promise<void>
+  /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */
+  untagImage(reference: string): Promise<void>
+  /** Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on it in that name. */
+  removeImage(reference: string): Promise<void>
+  /** Write the image `reference` names to `path`, as an OCI image layout in a tar archive, replacing what is there once all of it is written. Its events are a line of log a blob, then what it wrote. */
+  downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>
+  /** Upload the image in the OCI image layout archive at `path`, and point the tag `reference` (`name:tag`) at it: the archive's only image, or the one it names by that tag. Its events are a line of log a blob, then what it uploaded. */
+  uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
+  /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
+  pruneImage(): Promise<ImagePruneOutput>
   listSnapshot(): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>

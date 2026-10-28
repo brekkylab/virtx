@@ -1,13 +1,18 @@
-//! The typed client: each method of [`method`](crate::method) as a call, over a
-//! [`TransportClient`].
+//! The typed client: each method of [`method`](crate::method) as a call, and what is done to
+//! images through the server's registry at `/images/v2/`, over a [`TransportClient`].
 
-use std::io;
+use std::{io, path::PathBuf};
 
 use futures_util::Stream;
 use tokio::process::Command;
 
 use crate::{
-    image::{ImageBuild, ImageBuildArgs, ImageBuildOutput, Recipe},
+    Error,
+    image::{
+        ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem,
+        ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull, ImagePullArgs, ImagePullOutput,
+        ImagePush, ImagePushArgs, ImagePushOutput, ImageUploadOutput, Recipe, RegistryAuth, oci,
+    },
     method::{Event, Request},
     sandbox::{
         SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
@@ -18,7 +23,7 @@ use crate::{
         SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
         SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
     },
-    transport::{Error, TransportClient},
+    transport::TransportClient,
     volume::{
         MountSource, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeList,
         VolumeListArgs, VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs,
@@ -62,6 +67,102 @@ impl Client {
                 reference: reference.into(),
             },
         ))
+    }
+
+    /// Pull `reference` from its registry, and point it at what it pulls; without `auth` the
+    /// server pulls anonymously. The stream is the pull's log, a [`Event::Progress`] a line,
+    /// then what it pulled as its last item, an [`Event::Output`] or the error it failed with.
+    /// Dropping it drops the pull.
+    pub fn pull_image(
+        &self,
+        reference: impl Into<String>,
+        auth: Option<RegistryAuth>,
+    ) -> impl Stream<Item = Result<Event<ImagePullOutput, String>, Error>> + Unpin + Send + '_ {
+        Box::pin(self.inner.request_with_progress(
+            ImagePull::NAME,
+            ImagePullArgs {
+                reference: reference.into(),
+                auth,
+            },
+        ))
+    }
+
+    /// Push the image `reference` points at to the registry `reference` names; without `auth`
+    /// the server pushes anonymously. The stream is the push's log, a [`Event::Progress`] a
+    /// line, then what it pushed as its last item, an [`Event::Output`] or the error it failed
+    /// with. Dropping it drops the push.
+    pub fn push_image(
+        &self,
+        reference: impl Into<String>,
+        auth: Option<RegistryAuth>,
+    ) -> impl Stream<Item = Result<Event<ImagePushOutput, String>, Error>> + Unpin + Send + '_ {
+        Box::pin(self.inner.request_with_progress(
+            ImagePush::NAME,
+            ImagePushArgs {
+                reference: reference.into(),
+                auth,
+            },
+        ))
+    }
+
+    /// Every tag on the server's images, as `name:tag`, with the digest it points at.
+    pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
+        oci::list(&self.inner).await
+    }
+
+    /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
+    /// `name@algorithm:hex`), moving it if it is in use.
+    pub async fn tag_image(
+        &self,
+        source: impl AsRef<str>,
+        target: impl AsRef<str>,
+    ) -> Result<(), Error> {
+        oci::tag(&self.inner, source.as_ref(), target.as_ref()).await
+    }
+
+    /// Remove the tag `reference` (`name:tag`), leaving the image it points at.
+    pub async fn untag_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
+        oci::untag(&self.inner, reference.as_ref()).await
+    }
+
+    /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
+    /// it in that name.
+    pub async fn remove_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
+        oci::remove(&self.inner, reference.as_ref()).await
+    }
+
+    /// Write the image `reference` names to `path`, as an OCI image layout in a tar archive,
+    /// replacing what is there once all of it is written. The stream is a line of log a blob,
+    /// then what it wrote as its last item, an [`Event::Output`] or the error it failed with.
+    /// Dropping it drops the download, and writes nothing.
+    pub fn download_image(
+        &self,
+        reference: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> impl Stream<Item = Result<Event<ImageDownloadOutput, String>, Error>> + Unpin + Send + '_
+    {
+        Box::pin(oci::download(&self.inner, reference.into(), path.into()))
+    }
+
+    /// Upload the image in the archive at `path`, an OCI image layout in a tar archive, and
+    /// point the tag `reference` (`name:tag`) at it: the archive's only image, or the one it
+    /// names by that tag. Blobs the server has already are skipped. The stream is a line of log
+    /// a blob, then what it uploaded as its last item, an [`Event::Output`] or the error it
+    /// failed with. Dropping it drops the upload, and moves no tag.
+    pub fn upload_image(
+        &self,
+        path: impl Into<PathBuf>,
+        reference: impl Into<String>,
+    ) -> impl Stream<Item = Result<Event<ImageUploadOutput, String>, Error>> + Unpin + Send + '_
+    {
+        Box::pin(oci::upload(&self.inner, path.into(), reference.into()))
+    }
+
+    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
+    pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
+        self.inner
+            .request(ImagePrune::NAME, ImagePruneArgs {})
+            .await
     }
 
     /// Every snapshot the server holds.
@@ -245,7 +346,7 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::{method::Progress, transport::tests::connect};
+    use crate::{method::Progress, rpc::tests::connect};
 
     /// The first line of a log, as the test methods send it.
     fn line(line: &str) -> Progress<String> {
@@ -286,6 +387,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pull_streams_its_log_then_its_output() {
+        let client = Client { inner: connect() };
+        let events: Vec<_> = client
+            .pull_image("alpine:3.20", None)
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        let output = ImagePullOutput {
+            digest: "sha256:0".into(),
+        };
+        assert_eq!(
+            events,
+            [
+                Event::Progress(line("pulling alpine:3.20")),
+                Event::Output(output)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_pull_ends_its_stream_with_the_error() {
+        let client = Client { inner: connect() };
+        let mut pull = client.pull_image("missing", None);
+        assert!(matches!(pull.next().await, Some(Ok(Event::Progress(_)))));
+        assert!(matches!(pull.next().await, Some(Err(Error::Call(_)))));
+        assert!(pull.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_prune_answers_what_it_deleted() {
+        let client = Client { inner: connect() };
+        let pruned = client.prune_image().await.unwrap();
+        assert_eq!(pruned.images, ["sha256:0"]);
+        assert_eq!(pruned.reclaimed, 1024);
+    }
+
+    #[tokio::test]
+    async fn a_push_carries_its_credentials_and_streams_its_log_then_its_output() {
+        let client = Client { inner: connect() };
+        let auth = RegistryAuth::Bearer {
+            token: "token".into(),
+        };
+        let events: Vec<_> = client
+            .push_image("ghcr.io/owner/jq:latest", Some(auth))
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        let output = ImagePushOutput {
+            digest: "sha256:0".into(),
+        };
+        assert_eq!(
+            events,
+            [
+                Event::Progress(line("pushing ghcr.io/owner/jq:latest as bearer")),
+                Event::Output(output)
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn an_exec_streams_its_output_then_how_it_ended() {
         let client = Client { inner: connect() };
         let mut exec = client.exec_sandbox("s", ["echo", "hi"], None);
@@ -298,6 +459,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "ffi")]
 pub(crate) mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
     //! each of which starts the request and hands C its [`VirtxFuture`] or [`VirtxStream`].
@@ -310,7 +472,10 @@ pub(crate) mod ffi {
     use super::Client;
     use crate::{
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, json, release, retain, share},
-        image::ImageBuildArgs,
+        image::{
+            ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
+            ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+        },
         sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs},
         snapshot::{SnapshotCreateArgs, SnapshotRemoveArgs},
         volume::{
@@ -430,6 +595,228 @@ pub(crate) mod ffi {
                 }
             }
         })
+    }
+
+    /// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+    /// `{"reference": "alpine:3.20", "auth": {...}}`, the optional auth as
+    /// `{"type": "basic", "username": "...", "password": "..."}` or
+    /// `{"type": "bearer", "token": "..."}`. Its items are its log, as
+    /// `virtx_client_build_image`'s are, then what it pulled, as
+    /// `{"output": {"digest": "algorithm:hex"}}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_pull_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<ImagePullArgs>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let ImagePullArgs { reference, auth } = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut pull = client.pull_image(reference, auth);
+                while let Some(event) = pull.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
+        })
+    }
+
+    /// `image.push`: pushes the image `reference` points at to the registry `reference` names,
+    /// given `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
+    /// `virtx_client_pull_image`. Its items are its log, as `virtx_client_build_image`'s are,
+    /// then what it pushed, as `{"output": {"digest": "algorithm:hex"}}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_push_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<ImagePushArgs>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let ImagePushArgs { reference, auth } = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut push = client.push_image(reference, auth);
+                while let Some(event) = push.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
+        })
+    }
+
+    /// Answers with every tag on the server's images, as
+    /// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_snapshot`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
+    }
+
+    /// Points the tag `target` at the image `source` names, given
+    /// `{"source": "name:tag" or "name@algorithm:hex", "target": "name:tag"}`. Answers with
+    /// `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_tag_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ImageTagArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let ImageTagArgs { source, target } = args?;
+            client
+                .tag_image(source, target)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Removes the tag `reference`, leaving its image, given `{"reference": "name:tag"}`.
+    /// Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_untag_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ImageUntagArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .untag_image(args?.reference)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Removes the image `reference` names and every tag on it in that name, given
+    /// `{"reference": "name:tag" or "name@algorithm:hex"}`. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ImageRemoveArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .remove_image(args?.reference)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Writes the image `reference` names to `path` as an OCI image layout in a tar archive,
+    /// given `{"reference": "name:tag" or "name@algorithm:hex", "path": "..."}`. Its items are
+    /// its log, a line a blob, as `virtx_client_build_image`'s are, then what it wrote, as
+    /// `{"output": {"digest": "algorithm:hex"}}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_download_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<ImageDownloadArgs>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let ImageDownloadArgs { reference, path } = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut download = client.download_image(reference, path);
+                while let Some(event) = download.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
+        })
+    }
+
+    /// Uploads the image in the OCI image layout archive at `path` and points the tag
+    /// `reference` at it, given `{"path": "...", "reference": "name:tag"}`. Its items are its
+    /// log, a line a blob, as `virtx_client_build_image`'s are, then what it uploaded, as
+    /// `{"output": {"digest": "algorithm:hex"}}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_upload_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<ImageUploadArgs>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let ImageUploadArgs { path, reference } = match args {
+                    Ok(args) => args,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut upload = client.upload_image(path, reference);
+                while let Some(event) = upload.next().await {
+                    yield event.map_err(|e| e.to_string());
+                }
+            }
+        })
+    }
+
+    /// `image.prune`: deletes each image no tag points at and no sandbox uses, and what only
+    /// such images held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the
+    /// digests deleted and the bytes freed.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_snapshot`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_prune_image(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.prune_image().await.map_err(|e| e.to_string()) })
     }
 
     /// `snapshot.list`: answers with the snapshots, as

@@ -7,6 +7,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
+use virtx_uvm::{ImageStore, Registry};
 
 const NOT_FOUND: i64 = -31001;
 const ALREADY_EXISTS: i64 = -31002;
@@ -81,6 +82,22 @@ impl Served {
         let response = request.send().await.unwrap();
         let status = response.status();
         (status, response.json().await.ok())
+    }
+
+    /// Pull `reference` from its registry into the store the server reads.
+    async fn pull_image(&self, reference: &str) {
+        let store = ImageStore::new(self.home.join("images")).unwrap();
+        let reference = reference.parse().unwrap();
+        let registry = Registry::default();
+        let (_, manifest) = registry.pull_manifest(&reference).await.unwrap();
+        let config = registry.pull_config(&reference, &manifest).await.unwrap();
+        let mut layers = Vec::new();
+        for descriptor in manifest.layers() {
+            let tree = registry.pull_layer(&reference, descriptor).await.unwrap();
+            layers.push(store.insert_layer(&tree).unwrap());
+        }
+        let image = store.insert_image(&config, &layers).unwrap();
+        store.insert_tag(&reference, &image).unwrap();
     }
 
     /// `method`'s result, as alice in `demo`.
@@ -208,4 +225,57 @@ async fn a_project_keeps_its_snapshots_and_volumes() {
             .await,
         Err(NOT_FOUND)
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_cancelled_exec_kills_its_command_and_keeps_the_sandbox() {
+    let served = Served::spawn("exec-cancelled").await;
+    served.pull_image("alpine:3.20").await;
+    let init = served
+        .result(
+            "sandbox.init",
+            json!({"image": {"type": "tag", "tag": "alpine:3.20"}}),
+        )
+        .await
+        .unwrap();
+    let post = |message: Value| {
+        reqwest::Client::new()
+            .post(&served.url)
+            .header("accept", "application/json, text/event-stream")
+            .bearer_auth("a-token")
+            .header("virtx-project", "demo")
+            .json(&message)
+            .send()
+    };
+    let running = || async {
+        let listed = served.result("sandbox.list", json!({})).await.unwrap();
+        listed[0]["running"].as_bool().unwrap()
+    };
+
+    let exec = post(json!({
+        "jsonrpc": "2.0",
+        "id": "exec",
+        "method": "sandbox.exec",
+        "params": {"sandbox": init["id"], "cmd": ["sleep", "600"]},
+    }));
+    let cancelled = async {
+        while !running().await {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let cancel = post(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "exec"},
+        }));
+        assert_eq!(cancel.await.unwrap().status(), StatusCode::ACCEPTED);
+    };
+    let (exec, ()) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::join!(exec, cancelled)
+    })
+    .await
+    .expect("the exec ends with its cancellation");
+    // Nothing printed, so nothing streamed: no response, and no body.
+    assert_eq!(exec.unwrap().status(), StatusCode::NO_CONTENT);
+    assert!(!running().await);
 }

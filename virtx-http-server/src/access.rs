@@ -47,10 +47,11 @@ impl Access {
         self.projects.values().map(|(_, home)| home)
     }
 
-    /// The home a request with `headers` reaches: `403` from an `Origin` not let in, `401`
-    /// without a token this server knows, `400` naming no project, and `403` naming one the
-    /// user is not a member of -- or none at all, which is not told apart.
-    pub fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, StatusCode> {
+    /// The user a request with `headers` is sent by, and the home it reaches: `403` from an
+    /// `Origin` not let in, `401` without a token this server knows, `400` naming no project,
+    /// and `403` naming one the user is not a member of -- or none at all, which is not told
+    /// apart.
+    pub fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
         if let Some(origin) = headers.get(header::ORIGIN)
             && !self
                 .origins
@@ -72,7 +73,7 @@ impl Access {
         self.projects
             .get(project)
             .filter(|(members, _)| members.contains(user))
-            .map(|(_, home)| Arc::clone(home))
+            .map(|(_, home)| (user.clone(), Arc::clone(home)))
             .ok_or(StatusCode::FORBIDDEN)
     }
 }
@@ -125,7 +126,8 @@ mod tests {
         let access = access(&dir);
         let home = |token, project, origin| access.home(&headers(token, project, origin));
 
-        let reached = home(Some("a-token"), Some("demo"), None).unwrap();
+        let (user, reached) = home(Some("a-token"), Some("demo"), None).unwrap();
+        assert_eq!(user, "alice");
         assert_eq!(
             reached.snapshots.root(),
             dir.join("project").join("demo").as_path()

@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use axum::response::IntoResponse as _;
 use clap::Parser;
-use virtx_core::{Dispatcher, Server};
+use virtx_core::{CancelScope, Dispatcher, Server};
 
 use crate::access::Access;
 use crate::config::Config;
@@ -76,8 +76,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             let home = checked.home(request.headers());
             async move {
                 match home {
-                    Ok(home) => {
+                    // A user cancels their own requests, in whichever project.
+                    Ok((user, home)) => {
                         request.extensions_mut().insert(home);
+                        request.extensions_mut().insert(CancelScope(user));
                         server.handle(request).await.into_response()
                     }
                     Err(status) => status.into_response(),

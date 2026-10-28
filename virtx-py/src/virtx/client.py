@@ -27,6 +27,7 @@ from .image import (
     RegistryAuth,
     image_name,
 )
+from .files import DirEntry, FileRoot, Metadata
 from .volume import (
     MountSource,
     VolumeCreateOutput,
@@ -240,11 +241,11 @@ class Client:
             raise VirtxError("the client is closed")
         return self._raw
 
-    async def _call(self, name: str, args: bytes | None = None) -> Any:
+    async def _call(self, name: str, args: bytes | None = None, *, raw: bool = False) -> Any:
         start = getattr(self._lib, name)
-        raw = self._held()
-        handle = start(raw) if args is None else start(raw, args, len(args))
-        return await self._lib.answer(handle)
+        held = self._held()
+        handle = start(held) if args is None else start(held, args, len(args))
+        return await self._lib.answer(handle, raw)
 
     async def _events(
         self, name: str, args: bytes, output: Callable[[Any], T]
@@ -381,6 +382,65 @@ class Client:
     async def remove_volume_mount(self, volume: str, path: str) -> None:
         """Take away the mount at ``path`` in ``volume``, leaving its source as it is."""
         await self._call("virtx_client_remove_volume_mount", _args(volume=volume, path=path))
+
+    async def stat_file(self, root: FileRoot, path: str) -> Metadata:
+        """What is at ``path`` in ``root``, a path relative to its root as ``dir/file.txt``."""
+        output = await self._call("virtx_client_stat_file", _args(**root.to_dict(), path=path))
+        return Metadata.from_dict(output)
+
+    async def read_dir(self, root: FileRoot, path: str) -> list[DirEntry]:
+        """The entries of the directory at ``path`` in ``root``."""
+        items = await self._call("virtx_client_read_dir", _args(**root.to_dict(), path=path))
+        return [DirEntry.from_dict(item) for item in items]
+
+    async def read_file(
+        self, root: FileRoot, path: str, offset: int = 0, length: int | None = None
+    ) -> bytes:
+        """The file at ``path`` in ``root``, from ``offset``, ``length`` bytes of it or all that
+        is left."""
+        return await self._call(
+            "virtx_client_read_file",
+            _args(**root.to_dict(), path=path, offset=offset, length=length),
+            raw=True,
+        )
+
+    async def write_file(self, root: FileRoot, path: str, content: bytes) -> None:
+        """Write ``content`` as the whole file at ``path`` in ``root``, creating it if it does
+        not exist. Its parent directory must exist."""
+        args = _args(**root.to_dict(), path=path)
+        content = bytes(content)
+        handle = self._lib.virtx_client_write_file(
+            self._held(), args, len(args), content, len(content)
+        )
+        await self._lib.answer(handle)
+
+    async def create_dir(self, root: FileRoot, path: str) -> None:
+        """Create the directory at ``path`` in ``root``, whose parent must exist."""
+        await self._call("virtx_client_create_dir", _args(**root.to_dict(), path=path))
+
+    async def remove_file(self, root: FileRoot, path: str) -> None:
+        """Remove what is at ``path`` in ``root``: a directory with everything in it."""
+        await self._call("virtx_client_remove_file", _args(**root.to_dict(), path=path))
+
+    async def rename_file(
+        self, root: FileRoot, from_path: str, to_path: str, overwrite: bool = False
+    ) -> None:
+        """Move what is at ``from_path`` in ``root`` to ``to_path`` in it, replacing what is at
+        ``to_path`` if ``overwrite``, and refused if not and something is there."""
+        await self._call(
+            "virtx_client_rename_file",
+            _args(**root.to_dict(), **{"from": from_path}, to=to_path, overwrite=overwrite),
+        )
+
+    async def copy_file(
+        self, root: FileRoot, from_path: str, to_path: str, overwrite: bool = False
+    ) -> None:
+        """Copy what is at ``from_path`` in ``root`` to ``to_path`` in it, a directory with
+        everything in it, as ``rename_file`` replaces what is at ``to_path``."""
+        await self._call(
+            "virtx_client_copy_file",
+            _args(**root.to_dict(), **{"from": from_path}, to=to_path, overwrite=overwrite),
+        )
 
     async def list_sandbox(self) -> list[dict[str, Any]]:
         """Every sandbox the server holds, as ``{"id", "image", "snapshot", "running", "ports"}``,

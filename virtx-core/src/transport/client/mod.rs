@@ -1,6 +1,8 @@
 //! The client's end: the server's endpoints over either transport, which only opening and
-//! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`].
+//! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`],
+//! the files endpoint's WebDAV requests in [`files`].
 
+mod files;
 mod portforward;
 mod stdio;
 mod tcp;

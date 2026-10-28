@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 
 use super::{
     VIRTX_OK,
-    bytes::{VirtxBytes, failure, write},
+    bytes::{VirtxBytes, encode, failure, write},
     future::{self, VirtxFuture},
     stream::{self, VirtxStream},
 };
@@ -58,16 +58,30 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         self.runtime.block_on(make(Arc::clone(&self.value)))
     }
 
-    /// Start what `make` makes of the value, and hand C the future.
+    /// Start what `make` makes of the value, and hand C the future, answered with its output
+    /// as JSON.
     pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
     where
         F: Future<Output = Result<R, String>> + Send + 'static,
     {
-        future::start(
-            self.runtime.handle(),
-            &self.tasks,
-            make(Arc::clone(&self.value)),
-        )
+        let future = make(Arc::clone(&self.value));
+        future::start(self.runtime.handle(), &self.tasks, async move {
+            encode(future.await)
+        })
+    }
+
+    /// As [`future`](Self::future), answered with its output's bytes as they are, not as JSON.
+    pub(crate) fn future_raw<F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
+    where
+        F: Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+    {
+        let future = make(Arc::clone(&self.value));
+        future::start(self.runtime.handle(), &self.tasks, async move {
+            match future.await {
+                Ok(bytes) => (VIRTX_OK, bytes),
+                Err(message) => failure(message),
+            }
+        })
     }
 
     /// Start what `make` makes of the value, and hand C the stream.

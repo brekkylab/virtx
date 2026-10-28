@@ -24,6 +24,16 @@ console.log('reach it at', forwarder.address)
 forwarder.close()
 ```
 
+The files of a volume or a snapshot are read and written through the client, each request naming its root as `{ volume }` or `{ snapshot }`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+
+```js
+const volume = { volume: 'data' }
+await client.createDir(volume, 'in')
+await client.writeFile(volume, 'in/notes.txt', 'hello')
+for (const entry of await client.readDir(volume, 'in')) console.log(entry.name, entry.metadata.size)
+console.log((await client.readFile(volume, 'in/notes.txt')).toString())
+```
+
 The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 
 ## Tests

@@ -354,6 +354,97 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
                                                      const uint8_t *args,
                                                      size_t args_len);
 
+// The files of a volume or a snapshot: what is at `path`, given
+// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+// relative to its root as `dir/file.txt`. Answers with
+// `{"is_dir": bool, "size": n, "modified": n}`, `modified` in seconds since the Unix epoch
+// and only if the server says.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_stat_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// The entries of the directory at `path`, given as `virtx_client_stat_file` takes it.
+// Answers with `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
+// `virtx_client_stat_file` answers it.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_dir(struct VirtxClient *client,
+                                          const uint8_t *args,
+                                          size_t args_len);
+
+// The file at `path`, given `{"volume": "...", "path": "...", "offset": n, "length": n}`,
+// `offset` and `length` optional: from `offset`, `length` bytes of it or all that is
+// left. Answers with the bytes read as they are, not as JSON.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// Writes the `data_len` bytes at `data` as the whole file at `path`, given as
+// `virtx_client_stat_file` takes it, creating it if it does not exist. Its parent
+// directory must exist. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`; `data` is `data_len` readable bytes, not read after this
+// returns.
+struct VirtxFuture *virtx_client_write_file(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len,
+                                            const uint8_t *data,
+                                            size_t data_len);
+
+// Creates the directory at `path`, given as `virtx_client_stat_file` takes it, whose
+// parent must exist. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_dir(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
+// Removes what is at `path`, given as `virtx_client_stat_file` takes it: a directory with
+// everything in it. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_file(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Moves what is at `from` to `to` in the same volume or snapshot, given
+// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
+// and false without it: whether to replace what is at `to`, which is otherwise refused.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_rename_file(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Copies what is at `from` to `to`, a directory with everything in it, given as
+// `virtx_client_rename_file` takes it. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
 // `sandbox.list`: answers with the sandboxes, as
 // `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool,
 // "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and

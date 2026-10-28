@@ -289,7 +289,7 @@ impl Dispatcher {
     }
 }
 
-#[cfg(all(test, feature = "client"))]
+#[cfg(all(test, feature = "client", feature = "testing"))]
 mod tests {
     use serde_json::json;
 

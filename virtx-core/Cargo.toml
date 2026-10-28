@@ -38,6 +38,15 @@ async-stream = { version = "0.3", optional = true }
 # The framing of a port's WebSocket, whose handshake the HTTP client sends: no TLS or
 # connecting of its own.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
+# The files endpoint is WebDAV: a `PROPFIND` answers XML, its dates are HTTP dates, and each
+# segment of a path is percent-encoded.
+roxmltree = { version = "0.21", optional = true }
+httpdate = { version = "1", optional = true }
+percent-encoding = { version = "2", optional = true }
+# The test server: the files endpoints over in-memory filesystems, mounted in axum, which the
+# stdio tests serve as the hyper service `TowerToHyperService` makes of it.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+dav-server = { version = "0.11", default-features = false, features = ["memfs", "hyper"], optional = true }
 # A session brings its own runtime, since C calls in without one. `rt-multi-thread` so the
 # session's tasks run between C calls, not only inside one.
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"], optional = true }
@@ -62,7 +71,9 @@ tokio = { version = "1", features = ["io-std"] }
 [features]
 # The types (`image`, `volume`, the methods' args and outputs) are always built. `client` adds
 # the wire's client end, `server` its server end, and `ffi` the C ABI over a client, which is
-# what `libvirtx_core` is built for. The tests of both ends together run with both on.
+# what `libvirtx_core` is built for. `testing` adds the test server over `server`, which the
+# tests of both ends together, and the bindings' tests through the `files_server` example,
+# run against: `cargo test --features testing`.
 default = ["ffi"]
 client = [
     "dep:reqwest",
@@ -82,6 +93,9 @@ client = [
     "dep:tokio-tungstenite",
     "dep:tar",
     "dep:sha2",
+    "dep:roxmltree",
+    "dep:httpdate",
+    "dep:percent-encoding",
 ]
 server = [
     "dep:hyper",
@@ -99,9 +113,20 @@ server = [
     "dep:tokio",
 ]
 ffi = ["client"]
+testing = [
+    "server",
+    "dep:axum",
+    "dep:dav-server",
+    "hyper-util/service",
+]
 
 # Runs a child process of itself as the server, so libtest's output stays off its stdout.
 [[test]]
 name = "stdio"
 harness = false
 required-features = ["client", "server"]
+
+# The test server over stdio, which the bindings' tests spawn.
+[[example]]
+name = "files_server"
+required-features = ["testing"]

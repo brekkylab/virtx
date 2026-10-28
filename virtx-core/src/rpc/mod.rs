@@ -12,7 +12,7 @@ mod dispatch;
 mod message;
 #[cfg(feature = "server")]
 mod server;
-#[cfg(all(test, feature = "client", feature = "server"))]
+#[cfg(all(test, feature = "client", feature = "testing"))]
 pub(crate) mod tests;
 
 #[cfg(feature = "server")]

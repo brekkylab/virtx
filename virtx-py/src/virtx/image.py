@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -81,6 +81,33 @@ class Recipe:
 
 
 @dataclass(frozen=True)
+class BasicAuth:
+    """A username, and a password or an access token the registry takes in its place."""
+
+    username: str
+    password: str = field(repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"type": "basic", "username": self.username, "password": self.password}
+
+
+@dataclass(frozen=True)
+class BearerAuth:
+    """A token the registry takes as is."""
+
+    token: str = field(repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"type": "bearer", "token": self.token}
+
+
+RegistryAuth = BasicAuth | BearerAuth
+"""Credentials for a remote image registry."""
+
+
+@dataclass(frozen=True)
 class ImageBuildOutput:
     """What ``build_image`` built."""
 
@@ -90,3 +117,81 @@ class ImageBuildOutput:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ImageBuildOutput:
         return cls(value["digest"])
+
+
+@dataclass(frozen=True)
+class ImagePullOutput:
+    """What ``pull_image`` pulled."""
+
+    digest: str
+    """The digest of the image's manifest, as ``algorithm:hex``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImagePullOutput:
+        return cls(value["digest"])
+
+
+@dataclass(frozen=True)
+class ImagePushOutput:
+    """What ``push_image`` pushed."""
+
+    digest: str
+    """The digest of the manifest pushed, as ``algorithm:hex``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImagePushOutput:
+        return cls(value["digest"])
+
+
+@dataclass(frozen=True)
+class ImageListOutputItem:
+    """One tag on the server's images."""
+
+    reference: str
+    """The tag, as ``name:tag``."""
+
+    digest: str
+    """The digest of the manifest it points at, as ``algorithm:hex``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImageListOutputItem:
+        return cls(value["reference"], value["digest"])
+
+
+@dataclass(frozen=True)
+class ImageDownloadOutput:
+    """What ``download_image`` wrote."""
+
+    digest: str
+    """The digest of the manifest written, as ``algorithm:hex``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImageDownloadOutput:
+        return cls(value["digest"])
+
+
+@dataclass(frozen=True)
+class ImageUploadOutput:
+    """What ``upload_image`` uploaded."""
+
+    digest: str
+    """The digest of the manifest uploaded, as ``algorithm:hex``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImageUploadOutput:
+        return cls(value["digest"])
+
+
+@dataclass(frozen=True)
+class ImagePruneOutput:
+    """What ``prune_image`` deleted."""
+
+    images: list[str]
+    """The digest of each image deleted, as ``algorithm:hex``."""
+
+    reclaimed: int
+    """How many bytes the server freed."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ImagePruneOutput:
+        return cls(list(value["images"]), value["reclaimed"])

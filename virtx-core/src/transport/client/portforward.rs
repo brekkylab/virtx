@@ -9,7 +9,8 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use super::{Connection, Error, TransportClient};
+use super::{Connection, TransportClient};
+use crate::Error;
 use futures_util::{SinkExt, StreamExt};
 use http::{StatusCode, header};
 use tokio::{

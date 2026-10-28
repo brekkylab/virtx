@@ -3,12 +3,11 @@
 
 use std::{io, process::Stdio as Piped, time::Duration};
 
-use bytes::Bytes;
 use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{
@@ -27,7 +26,7 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 pub(super) struct Stdio {
     /// The connection, once its handshake is done, or why it failed. Not a type alias, which
     /// cbindgen would take for the C ABI's own `Shared`.
-    sender: Shared<BoxFuture<'static, Result<SendRequest<Full<Bytes>>, String>>>,
+    sender: Shared<BoxFuture<'static, Result<SendRequest<Body>, String>>>,
     /// Drives the connection; ending it closes the server's stdin.
     driver: JoinHandle<()>,
     child: Option<Child>,
@@ -79,20 +78,20 @@ impl Stdio {
         }
     }
 
-    /// Send `request`, whose URI is a path such as `rpc`.
+    /// Send `request`, whose URI is a path such as `/rpc`.
     pub(super) async fn send(
         &self,
-        request: http::Request<Bytes>,
+        request: http::Request<Body>,
     ) -> Result<http::Response<Body>, String> {
         let mut sender = self.sender.clone().await?;
         let gone = |e: hyper::Error| format!("the server is gone: {e}");
         sender.ready().await.map_err(gone)?;
         // The authority is not checked.
         let (mut parts, body) = request.into_parts();
-        parts.uri = format!("http://virtx/{}", parts.uri)
+        parts.uri = format!("http://virtx{}", parts.uri)
             .parse()
             .map_err(|e| format!("{e}"))?;
-        let request = http::Request::from_parts(parts, Full::new(body));
+        let request = http::Request::from_parts(parts, body);
         let response = sender.send_request(request).await.map_err(gone)?;
         Ok(response.map(|body| body.map_err(io::Error::other).boxed()))
     }

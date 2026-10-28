@@ -1,25 +1,32 @@
 //! The server's end of stdio: one HTTP/2 connection over its own stdin and stdout.
 
-use std::{convert::Infallible, io};
+use std::{convert::Infallible, future::Future, io};
 
-use hyper::service::service_fn;
+use bytes::Bytes;
+use http::{Request, Response};
+use http_body::Body;
+use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Dispatcher, Server};
-
-/// Serve `dispatcher`'s methods over `input` and `output` (a server's stdin and stdout), one
-/// HTTP/2 connection, until the client closes it or `input` ends. What is in flight then is
-/// cancelled, not waited for.
-pub async fn serve_stdio<I, O>(dispatcher: Dispatcher, input: I, output: O) -> io::Result<()>
+/// Serve one HTTP/2 connection over `input` and `output` (a server's stdin and stdout), each
+/// request answered by `handle`, until the client closes it or `input` ends. What is in flight
+/// then is cancelled, not waited for.
+///
+/// Every endpoint is `handle`'s, as a server over HTTP routes its own: [`Server`](crate::Server)
+/// answers `/rpc`.
+pub async fn serve_stdio<I, O, F, Fut, B>(handle: F, input: I, output: O) -> io::Result<()>
 where
     I: AsyncRead + Send + Unpin + 'static,
     O: AsyncWrite + Send + Unpin + 'static,
+    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response<B>> + Send + 'static,
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let server = Server::new(dispatcher);
     let service = service_fn(move |request| {
-        let server = server.clone();
-        async move { Ok::<_, Infallible>(server.handle(request).await) }
+        let answered = handle(request);
+        async move { Ok::<_, Infallible>(answered.await) }
     });
     let io = TokioIo::new(tokio::io::join(input, output));
     let served = hyper::server::conn::http2::Builder::new(TokioExecutor::new())

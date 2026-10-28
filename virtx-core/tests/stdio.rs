@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use virtx_core::{
-    Dispatcher, ErrorObject, Event, Methods, Notifier, Progress, Request, StreamingRequest,
+    Dispatcher, ErrorObject, Event, Methods, Notifier, Progress, Request, Server, StreamingRequest,
     TransportClient, serve_stdio,
 };
 
@@ -57,11 +57,12 @@ fn methods() -> Methods {
 fn main() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     if std::env::var_os(SERVER).is_some() {
-        let served = serve_stdio(
-            Dispatcher::new(methods()),
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-        );
+        let server = Server::new(Dispatcher::new(methods()));
+        let handle = move |request| {
+            let server = server.clone();
+            async move { server.handle(request).await }
+        };
+        let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout());
         runtime.block_on(served).unwrap();
         return;
     }

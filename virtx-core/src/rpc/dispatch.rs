@@ -12,11 +12,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::method::{Progress, Request, StreamingRequest};
-use crate::transport::message::{
+use super::message::{
     CANCELLED, CancelledParams, ErrorObject, Notification, PROGRESS, ProgressParams, Received,
     response,
 };
+use crate::method::{Progress, Request, StreamingRequest};
 
 /// Where a method sends the progress of the request it is answering: the request's event
 /// stream. In a method's [`Extensions`] for every request, so a method gets it with
@@ -294,7 +294,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::transport::tests::methods;
+    use crate::rpc::tests::methods;
 
     fn decode(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()

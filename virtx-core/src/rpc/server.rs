@@ -1,9 +1,7 @@
-//! The server: a [`Dispatcher`] of methods, answered by [`Server`] for whatever HTTP server
-//! mounts it at `/rpc`, or over stdio by [`serve_stdio`]. One HTTP request is answered with one
-//! message, or with an event stream of the request's notifications and then its response.
-
-mod dispatch;
-mod stdio;
+//! The server's end of `/rpc`: a [`Dispatcher`] of methods, answered by [`Server`] for whatever
+//! HTTP server mounts it at `/rpc` -- over a socket, or over stdio by
+//! [`serve_stdio`](crate::serve_stdio). One HTTP request is answered with one message, or with an
+//! event stream of the request's notifications and then its response.
 
 use std::{
     convert::Infallible,
@@ -23,12 +21,10 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
-use self::dispatch::{Answer, InFlight};
-pub use self::{
-    dispatch::{CancelScope, Dispatcher, Methods, Notifier},
-    stdio::serve_stdio,
+use super::{
+    dispatch::{Answer, Dispatcher, InFlight, Notifier},
+    message::{EVENT_STREAM, JSON, is_media_type},
 };
-use super::message::{EVENT_STREAM, JSON, is_media_type};
 
 /// The body of every response a [`Server`] answers.
 pub type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
@@ -43,7 +39,7 @@ const MAX_MESSAGE: usize = 10 * 1024 * 1024;
 /// It keeps no policy of its own: who may send a request, and which `Origin`s are let in, is
 /// the mounting server's middleware to decide, and what that middleware puts in a request's
 /// [`Extensions`](http::Extensions) is what the request's method is given. A
-/// [`CancelScope`] there is whose requests its `notifications/cancelled` may stop.
+/// [`CancelScope`](super::CancelScope) there is whose requests its `notifications/cancelled` may stop.
 #[derive(Clone)]
 pub struct Server {
     dispatcher: Dispatcher,

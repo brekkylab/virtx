@@ -199,6 +199,8 @@ A client cancels a request in either way:
   The server matches `requestId` against the requests of the same stdio connection, or over HTTP, sent with the same credentials, or against all its requests if it takes none.
   A client of an HTTP server that takes no credentials SHOULD therefore use ids that other clients will not, such as UUIDs.
 
+The request's own `POST` then ends with no response: a `text/event-stream` body ends after what it has sent, and one not yet answered is answered `204 No Content`.
+
 Once it has cancelled the request, the client forgets it.
 It SHOULD ignore any progress or response that still arrives for it.
 

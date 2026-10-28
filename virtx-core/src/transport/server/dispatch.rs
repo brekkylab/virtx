@@ -1,15 +1,21 @@
 //! The server's methods, and what one message to them answers.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use http::Extensions;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::method::{Progress, Request, StreamingRequest};
 use crate::transport::message::{
-    ErrorObject, Notification, PROGRESS, ProgressParams, Received, response,
+    CANCELLED, CancelledParams, ErrorObject, Notification, PROGRESS, ProgressParams, Received,
+    response,
 };
 
 /// Where a method sends the progress of the request it is answering: the request's event
@@ -50,6 +56,70 @@ impl Notifier {
         };
         let bytes = serde_json::to_vec(&notification).expect("a notification encodes");
         self.sender.send(bytes).is_ok()
+    }
+}
+
+/// Whose requests a `notifications/cancelled` may cancel: those of the same scope. The mounting
+/// server's middleware puts it in a request's [`Extensions`], such as the user its credentials
+/// name. Without one, a request is in the scope of every other without one, as on a server that
+/// takes no credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CancelScope(pub String);
+
+type InFlightKey = (Option<CancelScope>, Value);
+
+/// The requests in flight a cancellation can name, by scope and `id`: one [`Server`]'s, so over
+/// stdio one connection's. Cheap to clone.
+///
+/// [`Server`]: super::Server
+#[derive(Clone, Default)]
+pub(crate) struct InFlight(Arc<Mutex<HashMap<InFlightKey, oneshot::Sender<()>>>>);
+
+impl InFlight {
+    /// Hold the request `id` in `scope` until the returned [`Registered`] is dropped. `None`
+    /// when a request in flight already has that `id`, which the first keeps.
+    fn register(&self, scope: Option<CancelScope>, id: Value) -> Option<Registered> {
+        let key = (scope, id);
+        let mut requests = self.0.lock().unwrap();
+        if requests.contains_key(&key) {
+            return None;
+        }
+        let (sender, cancelled) = oneshot::channel();
+        requests.insert(key.clone(), sender);
+        Some(Registered {
+            in_flight: self.clone(),
+            key,
+            cancelled,
+        })
+    }
+
+    /// Cancel the request `id` in `scope`, if one is in flight.
+    fn cancel(&self, scope: Option<CancelScope>, id: Value) {
+        if let Some(sender) = self.0.lock().unwrap().remove(&(scope, id)) {
+            let _ = sender.send(());
+        }
+    }
+}
+
+/// A request held in an [`InFlight`] until this is dropped. `cancelled` resolves when a
+/// cancellation names it.
+struct Registered {
+    in_flight: InFlight,
+    key: InFlightKey,
+    cancelled: oneshot::Receiver<()>,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        // Closed, its sender is told from that of a later request the key has gone to since.
+        self.cancelled.close();
+        let mut requests = self.in_flight.0.lock().unwrap();
+        if requests
+            .get(&self.key)
+            .is_some_and(|sender| sender.is_closed())
+        {
+            requests.remove(&self.key);
+        }
     }
 }
 
@@ -97,6 +167,17 @@ fn read_params<A: DeserializeOwned>(params: Option<Value>) -> Result<A, ErrorObj
         .map_err(|e| ErrorObject::new(ErrorObject::INVALID_PARAMS, e.to_string()))
 }
 
+/// What one message is answered with.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Answer {
+    /// The response to a request.
+    Response(Vec<u8>),
+    /// Nothing: the message was a notification or a response.
+    Nothing,
+    /// Nothing: the request was cancelled before its method answered it.
+    Cancelled,
+}
+
 /// The methods a server answers, and what one message to them answers. Cheap to clone.
 #[derive(Clone)]
 pub struct Dispatcher {
@@ -111,11 +192,13 @@ impl Dispatcher {
     }
 
     /// Hand `message` to its method, with `extensions` the method's to read and their
-    /// [`Notifier`] bound to the request, and return the response; `None` for a message that
-    /// takes none, a notification or a response.
-    pub(crate) async fn call(&self, message: &[u8], mut extensions: Extensions) -> Option<Vec<u8>> {
+    /// [`Notifier`] bound to the request, and return what it is answered with.
+    ///
+    /// With an [`InFlight`] in `extensions`, a request is held in it under its [`CancelScope`]
+    /// while its method runs, and a `notifications/cancelled` stops the one it names there.
+    pub(crate) async fn call(&self, message: &[u8], mut extensions: Extensions) -> Answer {
         let failed = |id: &Value, code, message: &str| {
-            Some(response(id, Err(ErrorObject::new(code, message))))
+            Answer::Response(response(id, Err(ErrorObject::new(code, message))))
         };
         // One value, and nothing after it.
         let message = match serde_json::from_slice::<Value>(message) {
@@ -156,24 +239,53 @@ impl Dispatcher {
                 method
             }
             // A response: the server sends no requests, so none is awaited.
-            None if received.result.is_some() || received.error.is_some() => return None,
+            None if received.result.is_some() || received.error.is_some() => {
+                return Answer::Nothing;
+            }
             _ => {
                 let id = id.unwrap_or(Value::Null);
                 return failed(&id, ErrorObject::INVALID_REQUEST, "Invalid request");
             }
         };
 
+        let in_flight = extensions.remove::<InFlight>();
+        let scope = extensions.get::<CancelScope>().cloned();
+        if method == CANCELLED && id.is_none() {
+            // Params that do not read name no request, and a notification is never answered.
+            let params = read_params::<CancelledParams>(received.params);
+            if let (Some(in_flight), Ok(params)) = (in_flight, params) {
+                in_flight.cancel(scope, params.request_id);
+            }
+            return Answer::Nothing;
+        }
+
         if let Some(notifier) = extensions.get_mut::<Notifier>() {
             notifier.request_id = id.clone();
         }
-        let outcome = match self.methods.0.get(method.as_str()) {
-            Some(handler) => handler(received.params, extensions).await,
-            None => Err(ErrorObject::new(
-                ErrorObject::METHOD_NOT_FOUND,
-                "Method not found",
-            )),
+        let registered = in_flight
+            .zip(id.clone())
+            .and_then(|(in_flight, id)| in_flight.register(scope, id));
+        let outcome = async {
+            match self.methods.0.get(method.as_str()) {
+                Some(handler) => handler(received.params, extensions).await,
+                None => Err(ErrorObject::new(
+                    ErrorObject::METHOD_NOT_FOUND,
+                    "Method not found",
+                )),
+            }
         };
-        id.map(|id| response(&id, outcome))
+        // Cancelled, the method is dropped where it is, as a closed request's is.
+        let outcome = match registered {
+            Some(mut registered) => tokio::select! {
+                outcome = outcome => outcome,
+                _ = &mut registered.cancelled => return Answer::Cancelled,
+            },
+            None => outcome.await,
+        };
+        match id {
+            Some(id) => Answer::Response(response(&id, outcome)),
+            None => Answer::Nothing,
+        }
     }
 }
 
@@ -188,11 +300,20 @@ mod tests {
         serde_json::from_slice(bytes).unwrap()
     }
 
+    /// The response `answer` holds, if any.
+    fn decoded(answer: Answer) -> Option<Value> {
+        match answer {
+            Answer::Response(answer) => Some(decode(&answer)),
+            Answer::Nothing => None,
+            Answer::Cancelled => panic!("cancelled"),
+        }
+    }
+
     async fn call(message: Value) -> Option<Value> {
         let answer = Dispatcher::new(methods())
             .call(message.to_string().as_bytes(), Extensions::new())
             .await;
-        answer.map(|answer| decode(&answer))
+        decoded(answer)
     }
 
     #[tokio::test]
@@ -228,7 +349,7 @@ mod tests {
         while let Ok(notification) = receiver.try_recv() {
             sent.push(decode(&notification));
         }
-        (answer.map(|answer| decode(&answer)), sent)
+        (decoded(answer), sent)
     }
 
     #[tokio::test]
@@ -259,10 +380,12 @@ mod tests {
 
     /// The `error.code` `message` is answered with.
     async fn code(message: &[u8]) -> i64 {
-        let answer = Dispatcher::new(methods())
+        let Answer::Response(answer) = Dispatcher::new(methods())
             .call(message, Extensions::new())
             .await
-            .expect("a response");
+        else {
+            panic!("no response");
+        };
         let answer: Received = serde_json::from_slice(&answer).unwrap();
         answer.error.expect("an error").code
     }

@@ -23,8 +23,9 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
+use self::dispatch::{Answer, InFlight};
 pub use self::{
-    dispatch::{Dispatcher, Methods, Notifier},
+    dispatch::{CancelScope, Dispatcher, Methods, Notifier},
     stdio::serve_stdio,
 };
 use super::message::{EVENT_STREAM, JSON, is_media_type};
@@ -41,16 +42,21 @@ const MAX_MESSAGE: usize = 10 * 1024 * 1024;
 ///
 /// It keeps no policy of its own: who may send a request, and which `Origin`s are let in, is
 /// the mounting server's middleware to decide, and what that middleware puts in a request's
-/// [`Extensions`](http::Extensions) is what the request's method is given.
+/// [`Extensions`](http::Extensions) is what the request's method is given. A
+/// [`CancelScope`] there is whose requests its `notifications/cancelled` may stop.
 #[derive(Clone)]
 pub struct Server {
     dispatcher: Dispatcher,
+    in_flight: InFlight,
 }
 
 impl Server {
     /// Serve `dispatcher`'s methods.
     pub fn new(dispatcher: Dispatcher) -> Server {
-        Server { dispatcher }
+        Server {
+            dispatcher,
+            in_flight: InFlight::default(),
+        }
     }
 
     /// Answer one HTTP request to `/rpc`. Dropping the answer, or its body before it ends,
@@ -82,6 +88,7 @@ impl Server {
             notifications.close();
         }
         extensions.insert(Notifier::new(notifier));
+        extensions.insert(self.in_flight.clone());
         let dispatcher = self.dispatcher.clone();
         let mut call = Call(tokio::spawn(async move {
             dispatcher.call(&message, extensions).await
@@ -105,7 +112,7 @@ impl Server {
                         while let Ok(notification) = notifications.try_recv() {
                             yield notification;
                         }
-                        if let Ok(Some(answer)) = answer {
+                        if let Ok(Answer::Response(answer)) = answer {
                             yield answer;
                         }
                         break;
@@ -126,10 +133,10 @@ impl Server {
 }
 
 /// A request's method running, which dropping cancels.
-struct Call(JoinHandle<Option<Vec<u8>>>);
+struct Call(JoinHandle<Answer>);
 
 impl Future for Call {
-    type Output = Result<Option<Vec<u8>>, JoinError>;
+    type Output = Result<Answer, JoinError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.0).poll(cx)
@@ -142,12 +149,13 @@ impl Drop for Call {
     }
 }
 
-/// The methods' answer as one message: `202` when there is none to send, `500` when the call
-/// panicked.
-fn single(answer: Result<Option<Vec<u8>>, JoinError>) -> Response<HttpBody> {
+/// The methods' answer as one message: `202` when there is none to send, `204` when the
+/// request was cancelled, `500` when the call panicked.
+fn single(answer: Result<Answer, JoinError>) -> Response<HttpBody> {
     let body = match answer {
-        Ok(Some(body)) => body,
-        Ok(None) => return status(StatusCode::ACCEPTED),
+        Ok(Answer::Response(body)) => body,
+        Ok(Answer::Nothing) => return status(StatusCode::ACCEPTED),
+        Ok(Answer::Cancelled) => return status(StatusCode::NO_CONTENT),
         Err(_) => return status(StatusCode::INTERNAL_SERVER_ERROR),
     };
     let mut response = Response::new(HttpBody::new(Full::new(Bytes::from(body))));

@@ -9,15 +9,17 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 use virtx_core::*;
 use virtx_uvm::{
-    BuildError, Digest, ImageConfiguration, ImageStore, ImageStoreError, Machine, MachineError,
-    MachineReport, MachineSpec, Network, Os, Ports, Reference, Registry, RegistryError, Snapshot,
-    SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore, build_step,
+    BuildError, Digest, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, Machine,
+    MachineError, MachineReport, MachineSpec, Network, Os, Ports, Reference, RegistryClient,
+    RegistryError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore,
+    build_step,
 };
 
 /// The codes a method refuses with: JSON-RPC's own, and this server's beside them.
@@ -30,10 +32,15 @@ const UNSUPPORTED: i64 = -31004;
 const BOOT_FAILED: i64 = -31005;
 const BUILD_FAILED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
+const REGISTRY_FAILED: i64 = -31008;
 
 /// A machine's size where `sandbox.init` leaves it to the server.
 const DEFAULT_VCPUS: u8 = 4;
 const DEFAULT_MEMORY_MIB: u32 = 4096;
+
+/// How old what nothing needs has to be before `image.prune` takes it: a pull, push or build
+/// in flight has put it there and not yet pointed a reference at it.
+const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// What the methods answer from: the stores, and the sandboxes made from them.
 pub struct Home {
@@ -47,10 +54,10 @@ pub struct Home {
 }
 
 impl Home {
-    /// Everything under `root`: `images/`, `snapshot/` and `volume/`.
-    pub fn new(root: &Path) -> anyhow::Result<Home> {
+    /// The images in `images`, and the snapshots and volumes under `root`.
+    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
         Ok(Home {
-            images: ImageStore::new(root.join("images"))?,
+            images,
             snapshots: SnapshotStore::new(root)?,
             volumes: VolumeStore::new(root)?,
             exe: std::env::current_exe()?,
@@ -61,8 +68,10 @@ impl Home {
 
 /// A sandbox: the machine each of its commands boots, which ends with the command.
 struct Sandbox {
-    /// The image it was made from, as the store names it.
+    /// The image it was made from, as the store names it, and held there for as long as the
+    /// sandbox is.
     image: Digest,
+    _held: ImageHold,
     machine: Machine,
     /// How many of its commands run now.
     running: AtomicUsize,
@@ -85,7 +94,10 @@ impl Drop for Running<'_> {
 /// Every method, each answered from `home`.
 pub fn methods(home: &Arc<Home>) -> Methods {
     let mut methods = Methods::new();
+    add::<ImagePull, _, _>(&mut methods, home, image_pull);
+    add::<ImagePush, _, _>(&mut methods, home, image_push);
     add::<ImageBuild, _, _>(&mut methods, home, image_build);
+    add::<ImagePrune, _, _>(&mut methods, home, image_prune);
     add::<SnapshotList, _, _>(&mut methods, home, snapshot_list);
     add::<SnapshotCreate, _, _>(&mut methods, home, snapshot_create);
     add::<SnapshotRemove, _, _>(&mut methods, home, snapshot_remove);
@@ -123,6 +135,59 @@ where
     });
 }
 
+async fn image_pull(
+    home: Arc<Home>,
+    args: ImagePullArgs,
+    notifier: Notifier,
+) -> Result<ImagePullOutput, Refused> {
+    let reference: Reference = args
+        .reference
+        .parse()
+        .map_err(|e| refused(INVALID_PARAMS, format!("{}: {e}", args.reference)))?;
+    let mut progress = 0;
+    let report = |line: String| {
+        progress += 1;
+        notifier.notify::<ImagePull>(Progress {
+            progress,
+            total: None,
+            content: Some(line),
+        });
+    };
+
+    let registry = RegistryClient::new(home.images.clone(), args.auth);
+    let (digest, image) = registry.pull(&reference, report).await?;
+    home.images.insert_tag(&reference, &image)?;
+    Ok(ImagePullOutput {
+        digest: digest.to_string(),
+    })
+}
+
+async fn image_push(
+    home: Arc<Home>,
+    args: ImagePushArgs,
+    notifier: Notifier,
+) -> Result<ImagePushOutput, Refused> {
+    let reference: Reference = args
+        .reference
+        .parse()
+        .map_err(|e| refused(INVALID_PARAMS, format!("{}: {e}", args.reference)))?;
+    let mut progress = 0;
+    let report = |line: String| {
+        progress += 1;
+        notifier.notify::<ImagePush>(Progress {
+            progress,
+            total: None,
+            content: Some(line),
+        });
+    };
+
+    let registry = RegistryClient::new(home.images.clone(), args.auth);
+    let digest = registry.push(&reference, report).await?;
+    Ok(ImagePushOutput {
+        digest: digest.to_string(),
+    })
+}
+
 async fn image_build(
     home: Arc<Home>,
     args: ImageBuildArgs,
@@ -142,7 +207,7 @@ async fn image_build(
         });
     };
 
-    let (mut image, mut layers) = base(&home.images, &args.recipe.base, &mut report).await?;
+    let (mut image, mut layers, _base) = base(&home.images, &args.recipe.base, &mut report).await?;
     let steps = args.recipe.steps.len();
     for (index, step) in args.recipe.steps.iter().enumerate() {
         report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -170,53 +235,51 @@ async fn image_build(
     })
 }
 
-/// A build's base: its config and layers. Nothing for `scratch`, as in a Dockerfile; else
-/// the image tagged `base` here, or the one pulled into the store now, anonymously, and
-/// tagged so.
+/// A build's base: its config and layers, and its image held for as long as the build runs.
+/// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
+/// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
 async fn base(
     images: &ImageStore,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
-) -> Result<(ImageConfiguration, Vec<Digest>), Refused> {
+) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Refused> {
     if base == "scratch" {
         let mut image = ImageConfiguration::default();
         image.set_os(Os::Linux);
-        return Ok((image, Vec::new()));
+        return Ok((image, Vec::new(), None));
     }
     let reference: Reference = base
         .parse()
         .map_err(|e| refused(INVALID_PARAMS, format!("base {base}: {e}")))?;
-    if let Some(digest) = images.get_tag(&reference)?
-        && let Some(found) = images.get_image(&digest)?
-    {
-        return Ok(found);
-    }
-
-    report(format!("pulling {reference}"));
-    let registry = Registry::default();
-    let (_, manifest) = registry.pull_manifest(&reference).await?;
-    let config = registry.pull_config(&reference, &manifest).await?;
-    let mut layers = Vec::new();
-    for (descriptor, diff_id) in manifest.layers().iter().zip(config.rootfs().diff_ids()) {
-        // A blob pulled before is the layer it became.
-        if let Some(layer) = images.get_origin(descriptor.digest())? {
-            layers.push(layer);
-            continue;
+    let image = match images.get_tag(&reference)? {
+        Some(digest) if images.get_image(&digest)?.is_some() => digest,
+        _ => {
+            RegistryClient::new(images.clone(), None)
+                .pull(&reference, report)
+                .await?
+                .1
         }
-        let diff_id: Digest = diff_id
-            .parse()
-            .map_err(|e| refused(BUILD_FAILED, format!("{reference}: diff_id {diff_id}: {e}")))?;
-        let tree = registry.pull_layer(&reference, descriptor).await?;
-        let layer = {
-            let images = images.clone();
-            tokio::task::spawn_blocking(move || images.insert_layer(&tree)).await??
-        };
-        images.insert_origin(descriptor, &diff_id, &layer)?;
-        layers.push(layer);
-    }
-    let image = images.insert_image(&config, &layers)?;
-    images.insert_tag(&reference, &image)?;
-    Ok((config, layers))
+    };
+    let held = images.hold_image(&image)?;
+    let (config, layers) = images
+        .get_image(&image)?
+        .ok_or(ImageStoreError::Missing(image))?;
+    Ok((config, layers, Some(held)))
+}
+
+/// Delete what no reference and no sandbox needs, once it is too old to be what a pull, push
+/// or build in flight is putting together.
+async fn image_prune(
+    home: Arc<Home>,
+    _: ImagePruneArgs,
+    _: Notifier,
+) -> Result<ImagePruneOutput, Refused> {
+    let images = home.images.clone();
+    let pruned = tokio::task::spawn_blocking(move || images.prune(PRUNE_GRACE)).await??;
+    Ok(ImagePruneOutput {
+        images: pruned.images.iter().map(Digest::to_string).collect(),
+        reclaimed: pruned.reclaimed,
+    })
 }
 
 async fn snapshot_list(
@@ -417,14 +480,20 @@ async fn sandbox_init(
                 .get_tag(&reference)?
                 .ok_or_else(|| refused(NOT_FOUND, format!("no image here is tagged {tag}")))?
         }
-        ImageName::Digest { digest } => digest
-            .parse::<Digest>()
-            .map_err(|e| refused(INVALID_PARAMS, format!("{digest}: {e}")))?,
+        ImageName::Digest { digest } => {
+            let digest = digest
+                .parse::<Digest>()
+                .map_err(|e| refused(INVALID_PARAMS, format!("{digest}: {e}")))?;
+            // A registry's digest, as a pull or a push answers, names the image it copied.
+            home.images.get_image_origin(&digest)?.unwrap_or(digest)
+        }
     };
-    let (image, layers) = home
-        .images
-        .get_image(&digest)?
-        .ok_or_else(|| refused(NOT_FOUND, format!("no image here is {digest}")))?;
+    let missing = || refused(NOT_FOUND, format!("no image here is {digest}"));
+    let held = home.images.hold_image(&digest).map_err(|e| match e {
+        ImageStoreError::Missing(_) => missing(),
+        e => e.into(),
+    })?;
+    let (image, layers) = home.images.get_image(&digest)?.ok_or_else(missing)?;
 
     let snapshot = args
         .snapshot
@@ -519,6 +588,7 @@ async fn sandbox_init(
         id.clone(),
         Arc::new(Sandbox {
             image: digest,
+            _held: held,
             machine,
             running: AtomicUsize::new(0),
             ports,
@@ -657,7 +727,7 @@ impl From<ImageStoreError> for Refused {
             ImageStoreError::Missing(_) => NOT_FOUND,
             ImageStoreError::InUse(..) => IN_USE,
             ImageStoreError::Io { source, .. } => io_code(source),
-            ImageStoreError::Fstree(_) => INTERNAL_ERROR,
+            ImageStoreError::Fstree(_) | ImageStoreError::Malformed(_) => INTERNAL_ERROR,
         };
         refused(code, e)
     }
@@ -676,10 +746,17 @@ impl From<BuildError> for Refused {
     }
 }
 
-/// What pulling a build's base fails with: a build with no base to build on.
+/// What a copy to or from another registry fails with.
 impl From<RegistryError> for Refused {
     fn from(e: RegistryError) -> Refused {
-        refused(BUILD_FAILED, e)
+        match e {
+            RegistryError::Untagged(_) => refused(NOT_FOUND, e),
+            RegistryError::Store(e) => e.into(),
+            RegistryError::Fstree(_) | RegistryError::Io { .. } => refused(INTERNAL_ERROR, e),
+            RegistryError::Unauthorized { .. }
+            | RegistryError::Registry { .. }
+            | RegistryError::Manifest(..) => refused(REGISTRY_FAILED, e),
+        }
     }
 }
 

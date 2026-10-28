@@ -9,15 +9,15 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
-    Error, Event, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName, MountSource, MountType,
-    Recipe, Request, SandboxClose, SandboxCloseArgs, SandboxExec, SandboxExecArgs, SandboxInit,
-    SandboxInitArgs, SandboxList, SandboxListArgs, SandboxVolume, SnapshotCreate,
-    SnapshotCreateArgs, SnapshotList, SnapshotListArgs, SnapshotRemove, SnapshotRemoveArgs, Step,
-    TransportClient, VolumeCreate, VolumeCreateArgs, VolumeList, VolumeListArgs, VolumeMountCreate,
-    VolumeMountCreateArgs, VolumeMountList, VolumeMountListArgs, VolumeMountRemove,
-    VolumeMountRemoveArgs, VolumeRemove, VolumeRemoveArgs,
+    Error, Event, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName, ImagePrune,
+    ImagePruneArgs, MountSource, MountType, Recipe, Request, SandboxClose, SandboxCloseArgs,
+    SandboxExec, SandboxExecArgs, SandboxInit, SandboxInitArgs, SandboxList, SandboxListArgs,
+    SandboxVolume, SnapshotCreate, SnapshotCreateArgs, SnapshotList, SnapshotListArgs,
+    SnapshotRemove, SnapshotRemoveArgs, Step, TransportClient, VolumeCreate, VolumeCreateArgs,
+    VolumeList, VolumeListArgs, VolumeMountCreate, VolumeMountCreateArgs, VolumeMountList,
+    VolumeMountListArgs, VolumeMountRemove, VolumeMountRemoveArgs, VolumeRemove, VolumeRemoveArgs,
 };
-use virtx_uvm::{FsTree, ImageStore, Registry};
+use virtx_uvm::{FsTree, ImageStore, RegistryClient};
 
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -63,9 +63,9 @@ impl Server {
     async fn pull_image(&self, reference: &str) {
         let store = ImageStore::new(self.home.join("images")).unwrap();
         let reference = reference.parse().unwrap();
-        let registry = Registry::default();
-        let (_, manifest) = registry.pull_manifest(&reference).await.unwrap();
-        let config = registry.pull_config(&reference, &manifest).await.unwrap();
+        let registry = RegistryClient::new(store.clone(), None);
+        let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
+        let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
         let mut layers = Vec::new();
         for descriptor in manifest.layers() {
             let tree = registry.pull_layer(&reference, descriptor).await.unwrap();
@@ -739,4 +739,112 @@ async fn a_built_image_runs_with_what_its_steps_made() {
         .call::<SandboxInit>(SandboxInitArgs::new(ImageName::parse("failed:latest")))
         .await;
     assert_eq!(code(init), NOT_FOUND);
+}
+
+/// The images are an OCI registry at `/images/v2/` on the same stdio, beside `/rpc`.
+#[tokio::test]
+async fn the_images_are_a_registry_beside_the_rpc() {
+    use http_body_util::{BodyExt as _, Empty};
+
+    let home = std::env::temp_dir().join(format!("virtx-stdio-registry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let store = ImageStore::new(home.join("images")).unwrap();
+    let layer = store.insert_layer(&FsTree::new()).unwrap();
+    let image = store
+        .insert_image(&Default::default(), std::slice::from_ref(&layer))
+        .unwrap();
+    store
+        .insert_tag(&"alpine:3.21".parse().unwrap(), &image)
+        .unwrap();
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_virtx-uvm"))
+        .env("VIRTX_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let io = tokio::io::join(child.stdout.take().unwrap(), child.stdin.take().unwrap());
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(io),
+    )
+    .await
+    .unwrap();
+    tokio::spawn(connection);
+    let mut get = async |path: &str| {
+        let request = http::Request::get(format!("http://virtx{path}"))
+            .body(Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let status = response.status();
+        (
+            status,
+            response.into_body().collect().await.unwrap().to_bytes(),
+        )
+    };
+
+    let (status, body) = get("/images/v2/alpine/manifests/3.21").await;
+    assert_eq!(status, http::StatusCode::OK);
+    let manifest: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(manifest["layers"][0]["digest"], layer.to_string());
+    assert_eq!(
+        manifest["layers"][0]["mediaType"],
+        "application/vnd.erofs.layer.v1"
+    );
+    let (status, _) = get(&format!("/images/v2/alpine/blobs/{layer}")).await;
+    assert_eq!(status, http::StatusCode::OK);
+    let (status, _) = get("/elsewhere").await;
+    assert_eq!(status, http::StatusCode::NOT_FOUND);
+
+    drop(sender);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `image.prune` takes an image no tag names once it is old, and what only it held, and leaves
+/// a tagged one.
+#[tokio::test]
+async fn a_prune_takes_an_old_untagged_image() {
+    let server = Server::spawn("prune");
+    let tagged = server.file_image("app:v1");
+    let store = ImageStore::new(server.home.join("images")).unwrap();
+    let mut tree = FsTree::new();
+    tree.insert(
+        b"loose",
+        virtx_uvm::Entry::Directory {
+            meta: Default::default(),
+            opaque: false,
+        },
+    )
+    .unwrap();
+    let layer = store.insert_layer(&tree).unwrap();
+    let loose = store
+        .insert_image(&Default::default(), std::slice::from_ref(&layer))
+        .unwrap();
+    // Older than the prune's grace, as everything under the store now is.
+    let hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+    let mut dirs = vec![store.root().to_owned()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(entry.path());
+            } else {
+                let file = std::fs::File::options()
+                    .write(true)
+                    .open(entry.path())
+                    .unwrap();
+                file.set_modified(hours_ago).unwrap();
+            }
+        }
+    }
+
+    let pruned = server
+        .call::<ImagePrune>(ImagePruneArgs::default())
+        .await
+        .unwrap();
+    assert_eq!(pruned.images, vec![loose.to_string()]);
+    assert!(pruned.reclaimed > 0);
+    assert!(!store.contains_layer(&layer));
+    assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
 }

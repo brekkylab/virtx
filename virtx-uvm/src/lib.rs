@@ -10,8 +10,9 @@ mod volume;
 pub use fstree::*;
 pub use image::{
     image_build::{Error as BuildError, build_step},
-    registry::{Error as RegistryError, Reference, Registry, RegistryAuth},
-    store::{Error as ImageStoreError, Store as ImageStore},
+    registry_client::{Error as RegistryError, Reference, RegistryClient},
+    registry_server::{Body as RegistryBody, RegistryServer},
+    store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };
 pub use machine::{
     Error as MachineError, Machine, MachineSpec, Network, Ports, Publication,

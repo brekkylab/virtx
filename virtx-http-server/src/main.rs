@@ -2,6 +2,9 @@
 //! (see [`config`]): each request carries a user's token and names a project, and its methods
 //! are in that project's home.
 //!
+//! The images every project shares are at `/images/v2/`, as an OCI registry (see
+//! [`virtx_uvm::RegistryServer`]), to any user.
+//!
 //! A sandbox's ports are at `/ports/<capability>` beside `/rpc`, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
 //! `sandbox.init` answers, is all a connection needs, and gives no more than the one port.
@@ -27,6 +30,7 @@ use clap::Parser;
 use http::{HeaderMap, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use virtx_core::{CancelScope, Dispatcher, Server};
+use virtx_uvm::RegistryServer;
 
 use crate::access::Access;
 use crate::config::Config;
@@ -37,6 +41,9 @@ const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 
 /// How much of a port's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
+
+/// How often the images every project shares are pruned, as `image.prune` does.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// How long a sandbox is kept with no command run in it: over HTTP no client is ever known to
 /// be gone, so one that stops naming its sandboxes is taken to be, and what they hold -- their
@@ -86,6 +93,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let server = Server::new(Dispatcher::new(rpc::methods()));
     let checked = Arc::clone(&access);
     let reaching = Arc::clone(&access);
+    let registry = Arc::new(RegistryServer::new(access.images().clone(), "/images")?);
+    let reading = Arc::clone(&access);
+    let images = move |request: axum::extract::Request| {
+        let (registry, access) = (Arc::clone(&registry), Arc::clone(&reading));
+        async move {
+            match access.user(request.headers()) {
+                Ok(_) => registry
+                    .handle(request)
+                    .await
+                    .map(axum::body::Body::new)
+                    .into_response(),
+                Err(status) => status.into_response(),
+            }
+        }
+    };
     let router = axum::Router::new()
         .route(
             "/rpc",
@@ -105,6 +127,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 }
             }),
         )
+        .route("/images/v2", axum::routing::any(images.clone()))
+        .route("/images/v2/", axum::routing::any(images.clone()))
+        .route("/images/v2/{*rest}", axum::routing::any(images))
         .route(
             "/ports/{capability}",
             axum::routing::any(
@@ -124,6 +149,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             every.tick().await;
             for home in reaping.homes() {
                 home.forget_idle(IDLE);
+            }
+        }
+    });
+
+    let images = access.images().clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(PRUNE_EVERY);
+        loop {
+            every.tick().await;
+            let images = images.clone();
+            match tokio::task::spawn_blocking(move || images.prune(rpc::PRUNE_GRACE)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => eprintln!("pruning the images: {e}"),
+                Err(e) => eprintln!("pruning the images: {e}"),
             }
         }
     });

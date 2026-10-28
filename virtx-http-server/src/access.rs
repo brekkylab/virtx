@@ -21,6 +21,8 @@ pub struct Access {
     origins: Vec<String>,
     /// Each project's members, and its home.
     projects: HashMap<String, (HashSet<String>, Arc<Home>)>,
+    /// The images every project shares.
+    images: ImageStore,
 }
 
 impl Access {
@@ -39,6 +41,7 @@ impl Access {
             users: config.users(),
             origins: config.origins.clone(),
             projects,
+            images,
         })
     }
 
@@ -47,11 +50,14 @@ impl Access {
         self.projects.values().map(|(_, home)| home)
     }
 
-    /// The user a request with `headers` is sent by, and the home it reaches: `403` from an
-    /// `Origin` not let in, `401` without a token this server knows, `400` naming no project,
-    /// and `403` naming one the user is not a member of -- or none at all, which is not told
-    /// apart.
-    pub fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
+    /// The images every project shares.
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// The user a request with `headers` is sent by: `403` from an `Origin` not let in, and
+    /// `401` without a token this server knows.
+    pub fn user(&self, headers: &HeaderMap) -> Result<String, StatusCode> {
         if let Some(origin) = headers.get(header::ORIGIN)
             && !self
                 .origins
@@ -60,19 +66,27 @@ impl Access {
         {
             return Err(StatusCode::FORBIDDEN);
         }
-        let user = headers
+        headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .and_then(|token| self.users.get(&hashed(token)))
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+
+    /// The user a request with `headers` is sent by, as [`user`](Access::user) says, and the
+    /// home it reaches: `400` naming no project, and `403` naming one the user is not a member
+    /// of -- or none at all, which is not told apart.
+    pub fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
+        let user = self.user(headers)?;
         let project = headers
             .get(PROJECT_HEADER)
             .and_then(|value| value.to_str().ok())
             .ok_or(StatusCode::BAD_REQUEST)?;
         self.projects
             .get(project)
-            .filter(|(members, _)| members.contains(user))
+            .filter(|(members, _)| members.contains(&user))
             .map(|(_, home)| (user.clone(), Arc::clone(home)))
             .ok_or(StatusCode::FORBIDDEN)
     }

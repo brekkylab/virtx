@@ -25,7 +25,16 @@ ruzstd = "0.9"
 virtx-core = { workspace = true }
 # A layer's conversion is CPU that is moved off the runtime's threads, a served volume's
 # stores are waited on from libkrun's threads, and a VM is a process of its own.
-tokio = { workspace = true, features = ["io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }
+# The registry this host serves, as HTTP requests and responses: a layer streamed from its
+# file, and a request's body read as it arrives.
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+tokio-util = { version = "0.7", features = ["io"] }
+form_urlencoded = "1"
 # Notion's page ids.
 uuid = { version = "1", features = ["v4", "serde"] }
 # A volume's files, resolved under its root however a guest rearranges the tree under them.

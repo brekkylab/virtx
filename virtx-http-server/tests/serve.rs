@@ -6,11 +6,12 @@ use std::path::PathBuf;
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::{StatusCode, Url};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
-use virtx_uvm::{FsTree, ImageStore, Registry};
+use virtx_uvm::{FsTree, ImageStore, RegistryClient};
 
 const INVALID_PARAMS: i64 = -32602;
 const NOT_FOUND: i64 = -31001;
@@ -106,9 +107,9 @@ impl Served {
     async fn pull_image(&self, reference: &str) {
         let store = ImageStore::new(self.home.join("images")).unwrap();
         let reference = reference.parse().unwrap();
-        let registry = Registry::default();
-        let (_, manifest) = registry.pull_manifest(&reference).await.unwrap();
-        let config = registry.pull_config(&reference, &manifest).await.unwrap();
+        let registry = RegistryClient::new(store.clone(), None);
+        let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
+        let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
         let mut layers = Vec::new();
         for descriptor in manifest.layers() {
             let tree = registry.pull_layer(&reference, descriptor).await.unwrap();
@@ -216,6 +217,54 @@ async fn a_request_reaches_only_a_member_s_project() {
     };
     assert_eq!(from("https://allowed.example").await, StatusCode::OK);
     assert_eq!(from("https://evil.example").await, StatusCode::FORBIDDEN);
+}
+
+/// The images are an OCI registry at `/images/v2/`, to any user, naming no project.
+#[tokio::test]
+async fn the_images_are_a_registry_to_any_user() {
+    let served = Served::spawn("registry").await;
+    served.file_image("alpine:3.21");
+    let base = served.url.strip_suffix("/rpc").unwrap();
+    let client = reqwest::Client::new();
+
+    let anonymous = client
+        .get(format!("{base}/images/v2/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let root = client
+        .get(format!("{base}/images/v2/"))
+        .bearer_auth("b-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(root.status(), StatusCode::OK);
+
+    let manifest = client
+        .get(format!("{base}/images/v2/alpine/manifests/3.21"))
+        .bearer_auth("b-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(manifest.status(), StatusCode::OK);
+    let manifest: Value = manifest.json().await.unwrap();
+    let layer = &manifest["layers"][0];
+    assert_eq!(layer["mediaType"], "application/vnd.erofs.layer.v1");
+    let blob = client
+        .get(format!(
+            "{base}/images/v2/alpine/blobs/{}",
+            layer["digest"].as_str().unwrap()
+        ))
+        .bearer_auth("b-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blob.status(), StatusCode::OK);
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(blob.bytes().await.unwrap())),
+        layer["digest"]
+    );
 }
 
 #[tokio::test]

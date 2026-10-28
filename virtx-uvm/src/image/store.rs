@@ -5,33 +5,48 @@
 //!
 //! ```text
 //! <root>/
-//!   layer/sha256/<hex>.erofs   one per layer, named by its tree's digest
-//!   image/sha256/<hex>.json    one per image: its config and its layers, named by this file's digest
+//!   layer/sha256/<hex>.erofs   one per layer, named by this file's digest
 //!   rootfs/sha256/<hex>.erofs  one per list of layers, named by the list's digest: them merged
 //!                 <hex>.vmdk   ... and the disk of that image and the layers it points into
+//!   image/sha256/<hex>.json    one per image: its OCI manifest and its config, named by the
+//!                              manifest's digest
+//!                <hex>.lock    ... and what holds it for a machine, shared, or takes it away
 //!   tag/<hex>.json             one per reference: which image it names
-//!   origin/sha256/<hex>.json   one per registry blob, named by its digest: which layer it became
+//!   origin/sha256/<hex>.json   one per registry blob or manifest, named by its digest: which layer
+//!                              or image it became
 //! ```
 //!
+//! An image is its manifest and its config, each as a registry serves it, byte for byte: each
+//! layer an EROFS image here, of type [`EROFS_LAYER`] -- uncompressed, so its digest is its
+//! diff_id too. Two manifests are two images, however little tells them apart.
+//!
 //! Each shelf names only what is on the one below it: an image is refused unless its layers
-//! are here, a tag unless its image is, and nothing is removed while something still names
-//! it. Nothing lands under a name except by a rename once it is whole.
+//! are here, a tag unless its image is, and nothing is removed while something
+//! still names it. Nothing lands under a name except by a rename once it is whole.
 //!
-//! An origin and a root filesystem are the exceptions: neither holds its layers, and one
-//! whose layers are not all here is read as not there. A layer put back is the same file
-//! it was, so what was made of it is whole again.
+//! An origin and a root filesystem are the exceptions: neither holds what it names, and one
+//! whose layer, image or layers are not all here is read as not there. A layer or an image
+//! put back is the same file it was, so what was made of it is whole again.
 //!
-//! Not locked: a check and the write after it are two steps, and another thread or process
-//! can act between them.
+//! An image a machine boots from is held (see [`Store::hold_image`]): a prune leaves it, with
+//! its layers and its root filesystem, and removing it is refused.
+//!
+//! Not locked otherwise: a check and the write after it are two steps, and another thread or
+//! process can act between them.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use oci_spec::distribution::Reference;
-use oci_spec::image::{Descriptor, Digest, ImageConfiguration, Sha256Digest};
+use oci_spec::image::{
+    Descriptor, Digest, ImageConfiguration, ImageManifest, ImageManifestBuilder, MediaType,
+    Sha256Digest,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -45,6 +60,10 @@ pub enum Error {
 
     #[error("{0} is still named by {1}")]
     InUse(Digest, String),
+
+    /// A manifest that is not one of an image here.
+    #[error("not an image's manifest: {0}")]
+    Malformed(String),
 
     #[error(transparent)]
     Fstree(#[from] fstree::Error),
@@ -68,10 +87,15 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The media type of a layer that is an EROFS image, as containerd names it.
+pub const EROFS_LAYER: &str = "application/vnd.erofs.layer.v1";
+
+/// An image's manifest and config, as they were filed: a push of anything else would put them
+/// under other digests.
 #[derive(Serialize, Deserialize)]
 struct ImageFile {
-    config: ImageConfiguration,
-    layers: Vec<Digest>,
+    manifest: String,
+    config: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,11 +104,33 @@ struct TagFile {
     image: Digest,
 }
 
+/// A blob is told from a manifest by its fields: `layer` for the one, `image` for the other.
 #[derive(Serialize, Deserialize)]
-struct OriginFile {
-    layer: Digest,
-    diff_id: Digest,
-    descriptor: Descriptor,
+#[serde(untagged)]
+enum OriginFile {
+    Layer {
+        layer: Digest,
+        diff_id: Digest,
+        descriptor: Box<Descriptor>,
+    },
+    /// The manifest and its config as the registry served them, byte for byte: a push of
+    /// anything else would put them under other digests.
+    Image {
+        image: Digest,
+        manifest: String,
+        config: String,
+    },
+}
+
+/// An image held for as long as this lives: see [`Store::hold_image`].
+pub struct ImageHold(#[allow(dead_code)] File);
+
+/// What a [`prune`](Store::prune) took away.
+#[derive(Debug, Default)]
+pub struct Pruned {
+    pub images: Vec<Digest>,
+    /// The bytes of every file removed.
+    pub reclaimed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -97,10 +143,10 @@ impl Store {
         let root = root.into();
         for dir in [
             root.join("layer").join("sha256"),
+            root.join("rootfs").join("sha256"),
             root.join("image").join("sha256"),
             root.join("tag"),
             root.join("origin").join("sha256"),
-            root.join("rootfs").join("sha256"),
         ] {
             fs::create_dir_all(&dir)
                 .map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
@@ -120,15 +166,39 @@ impl Store {
         self.layer_path(layer).is_file()
     }
 
-    /// File `tree` as a layer under its digest, which is returned. A layer already here is
-    /// left as it is.
+    /// File `tree` as a layer under the digest of its EROFS image, which is returned. A layer
+    /// already here is left as it is.
+    ///
+    /// The name is only known once the image is written, so it is written beside the layers
+    /// first, and named after.
     pub fn insert_layer(&self, tree: &FsTree) -> Result<Digest> {
-        let digest = tree.digest();
-        let path = self.layer_path(&digest);
-        if !path.is_file() {
-            write_atomically(&path, |file| Ok(tree.to_erofs(file)?))?;
+        let dir = self.root.join("layer").join("sha256");
+        let part = write_part(&dir.join("layer"), |file| Ok(tree.to_erofs(file)?))?;
+        let named = (|| -> Result<Digest> {
+            let mut hasher = Sha256::new();
+            let mut file = File::open(&part)
+                .map_err(|e| Error::io(format!("reading {}", part.display()), e))?;
+            io::copy(&mut file, &mut hasher)
+                .map_err(|e| Error::io(format!("reading {}", part.display()), e))?;
+            drop(file);
+            let digest: Digest = format!("{:x}", hasher.finalize())
+                .parse::<Sha256Digest>()
+                .expect("sha2 writes 64 lowercase hex characters")
+                .into();
+            let path = self.layer_path(&digest);
+            if path.is_file() {
+                fs::remove_file(&part)
+                    .map_err(|e| Error::io(format!("removing {}", part.display()), e))?;
+            } else {
+                fs::rename(&part, &path)
+                    .map_err(|e| Error::io(format!("moving {} into place", path.display()), e))?;
+            }
+            Ok(digest)
+        })();
+        if named.is_err() {
+            let _ = fs::remove_file(&part);
         }
-        Ok(digest)
+        named
     }
 
     pub fn get_layer(&self, layer: &Digest) -> Result<Option<FsTree>> {
@@ -223,22 +293,102 @@ impl Store {
         Ok(removed)
     }
 
-    /// File an image of `layers`, bottom first, all of which must be here. Its digest is
-    /// that of the file it is kept in, which is returned.
+    /// File an image of `layers`, bottom first, all of which must be here, and `config`, whose
+    /// diff_ids are made to be the layers. Its digest -- its manifest's -- is returned. The
+    /// same config and layers are the same image.
     pub fn insert_image(&self, config: &ImageConfiguration, layers: &[Digest]) -> Result<Digest> {
-        if let Some(missing) = layers.iter().find(|layer| !self.contains_layer(layer)) {
-            return Err(Error::Missing(missing.clone()));
-        }
-        let bytes = serde_json::to_vec(&ImageFile {
-            config: config.clone(),
-            layers: layers.to_vec(),
-        })
-        .map_err(|e| Error::io("serializing an image", e.into()))?;
-        let digest: Digest = format!("{:x}", Sha256::digest(&bytes))
+        let mut config = config.clone();
+        config
+            .rootfs_mut()
+            .set_diff_ids(layers.iter().map(Digest::to_string).collect());
+        let config_body =
+            serde_json::to_vec(&config).map_err(|e| Error::io("serializing a config", e.into()))?;
+        let config_digest: Digest = format!("{:x}", Sha256::digest(&config_body))
             .parse::<Sha256Digest>()
             .expect("sha2 writes 64 lowercase hex characters")
             .into();
 
+        let mut descriptors = Vec::new();
+        for layer in layers {
+            let path = self.layer_path(layer);
+            let size = match fs::metadata(&path) {
+                Ok(metadata) => metadata.len(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(Error::Missing(layer.clone()));
+                }
+                Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+            };
+            descriptors.push(Descriptor::new(
+                MediaType::Other(EROFS_LAYER.into()),
+                size,
+                layer.clone(),
+            ));
+        }
+        let manifest = ImageManifestBuilder::default()
+            .schema_version(2u32)
+            .media_type(MediaType::ImageManifest)
+            .config(Descriptor::new(
+                MediaType::ImageConfig,
+                config_body.len() as u64,
+                config_digest,
+            ))
+            .layers(descriptors)
+            .build()
+            .expect("every field a manifest needs is set");
+        let body = serde_json::to_vec(&manifest)
+            .map_err(|e| Error::io("serializing a manifest", e.into()))?;
+        self.insert_image_manifest(&body, &config_body)
+    }
+
+    /// File the image `manifest` and `config` are, each as it is, and answer with its digest:
+    /// the manifest's. Refused unless `config` is the one the manifest names, each layer is an
+    /// EROFS one here, and the config's diff_ids are the layers.
+    pub fn insert_image_manifest(&self, manifest: &[u8], config: &[u8]) -> Result<Digest> {
+        let parsed: ImageManifest =
+            serde_json::from_slice(manifest).map_err(|e| Error::Malformed(e.to_string()))?;
+        if format!("{:x}", Sha256::digest(config)) != parsed.config().digest().digest() {
+            return Err(Error::Malformed(format!(
+                "its config is not {}",
+                parsed.config().digest()
+            )));
+        }
+        for layer in parsed.layers() {
+            if layer.media_type().to_string() != EROFS_LAYER {
+                return Err(Error::Malformed(format!(
+                    "layer {} is {}, not {EROFS_LAYER}",
+                    layer.digest(),
+                    layer.media_type()
+                )));
+            }
+            if !self.contains_layer(layer.digest()) {
+                return Err(Error::Missing(layer.digest().clone()));
+            }
+        }
+        let read: ImageConfiguration = serde_json::from_slice(config)
+            .map_err(|e| Error::Malformed(format!("its config: {e}")))?;
+        let layers: Vec<String> = parsed
+            .layers()
+            .iter()
+            .map(|layer| layer.digest().to_string())
+            .collect();
+        if *read.rootfs().diff_ids() != layers {
+            return Err(Error::Malformed(
+                "its config's diff_ids are not its layers".into(),
+            ));
+        }
+
+        let text = |bytes: &[u8]| {
+            String::from_utf8(bytes.to_vec()).map_err(|e| Error::Malformed(e.to_string()))
+        };
+        let bytes = serde_json::to_vec(&ImageFile {
+            manifest: text(manifest)?,
+            config: text(config)?,
+        })
+        .map_err(|e| Error::io("serializing an image", e.into()))?;
+        let digest: Digest = format!("{:x}", Sha256::digest(manifest))
+            .parse::<Sha256Digest>()
+            .expect("sha2 writes 64 lowercase hex characters")
+            .into();
         let path = self.shelf("image", &digest, "json");
         if !path.is_file() {
             write_atomically(&path, |file| {
@@ -249,8 +399,8 @@ impl Store {
         Ok(digest)
     }
 
-    /// An image's config and its layers, bottom first.
-    pub fn get_image(&self, image: &Digest) -> Result<Option<(ImageConfiguration, Vec<Digest>)>> {
+    /// An image's manifest and config, as they were filed.
+    pub fn get_image_manifest(&self, image: &Digest) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let path = self.shelf("image", image, "json");
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -259,20 +409,157 @@ impl Store {
         };
         let read: ImageFile = serde_json::from_slice(&bytes)
             .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(Some((read.config, read.layers)))
+        Ok(Some((read.manifest.into_bytes(), read.config.into_bytes())))
     }
 
-    /// Delete an image no tag names. Its layers stay. `false` if it was not here.
+    /// An image's config and its layers, bottom first.
+    pub fn get_image(&self, image: &Digest) -> Result<Option<(ImageConfiguration, Vec<Digest>)>> {
+        let Some((manifest, config)) = self.get_image_manifest(image)? else {
+            return Ok(None);
+        };
+        let manifest: ImageManifest =
+            serde_json::from_slice(&manifest).map_err(|e| Error::Malformed(e.to_string()))?;
+        let config = serde_json::from_slice(&config)
+            .map_err(|e| Error::Malformed(format!("its config: {e}")))?;
+        let layers = manifest
+            .layers()
+            .iter()
+            .map(|layer| layer.digest().clone())
+            .collect();
+        Ok(Some((config, layers)))
+    }
+
+    /// Delete an image no tag names and nothing holds. Its layers stay. `false` if it was not
+    /// here.
     pub fn remove_image(&self, image: &Digest) -> Result<bool> {
         if let Some((reference, _)) = self.tags()?.into_iter().find(|(_, named)| named == image) {
             return Err(Error::InUse(image.clone(), reference.to_string()));
         }
         let path = self.shelf("image", image, "json");
-        match fs::remove_file(&path) {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let lock = self.shelf("image", image, "lock");
+        let held =
+            File::create(&lock).map_err(|e| Error::io(format!("opening {}", lock.display()), e))?;
+        match held.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(Error::InUse(image.clone(), "a machine".into()));
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(Error::io(format!("locking {}", lock.display()), e));
+            }
+        }
+        let removed = match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(Error::io(format!("removing {}", path.display()), e)),
+        };
+        drop(held);
+        // A hold waiting on it finds the image gone once it has the lock.
+        let _ = fs::remove_file(&lock);
+        removed
+    }
+
+    /// Hold `image` for a machine, for as long as the answer lives: a prune leaves it, and
+    /// removing it is refused. Waits while it is being taken away, and is then refused.
+    pub fn hold_image(&self, image: &Digest) -> Result<ImageHold> {
+        let path = self.shelf("image", image, "json");
+        if !path.is_file() {
+            return Err(Error::Missing(image.clone()));
         }
+        let lock = self.shelf("image", image, "lock");
+        let held =
+            File::create(&lock).map_err(|e| Error::io(format!("opening {}", lock.display()), e))?;
+        held.lock_shared()
+            .map_err(|e| Error::io(format!("locking {}", lock.display()), e))?;
+        if !path.is_file() {
+            return Err(Error::Missing(image.clone()));
+        }
+        Ok(ImageHold(held))
+    }
+
+    /// Delete what nothing here needs and is older than `grace`: each image no tag names and
+    /// nothing holds, then each layer and root filesystem no image left stacks, each origin
+    /// whose layer or image is gone, and what a write that stopped part-way left. `grace`
+    /// spares what a pull or a build is still putting together. Blocking work.
+    pub fn prune(&self, grace: Duration) -> Result<Pruned> {
+        let mut pruned = Pruned::default();
+        let old = |path: &Path| {
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age >= grace))
+        };
+
+        let tagged: HashSet<Digest> = self.tags()?.into_iter().map(|(_, image)| image).collect();
+        let mut kept = Vec::new();
+        for image in self.images()? {
+            let path = self.shelf("image", &image, "json");
+            if tagged.contains(&image) || !old(&path) {
+                kept.push(image);
+                continue;
+            }
+            let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            match self.remove_image(&image) {
+                Ok(true) => {
+                    pruned.reclaimed += len;
+                    pruned.images.push(image);
+                }
+                Ok(false) => {}
+                Err(Error::InUse(..)) => kept.push(image),
+                Err(e) => return Err(e),
+            }
+        }
+
+        let mut layers = HashSet::new();
+        let mut rootfs = HashSet::new();
+        for image in &kept {
+            if let Some((_, stacked)) = self.get_image(image)? {
+                let (meta, _) = self.rootfs_paths(&stacked);
+                rootfs.insert(meta.file_stem().unwrap_or_default().to_owned());
+                layers.extend(stacked.into_iter().map(|layer| layer.digest().to_owned()));
+            }
+        }
+
+        // Each shelf's files that are not needed go once they are old -- but an origin
+        // whose layer or image is gone is dead whatever its age.
+        for shelf in ["layer", "rootfs", "image", "origin", "tag"] {
+            let dir = match shelf {
+                "tag" => self.root.join(shelf),
+                _ => self.root.join(shelf).join("sha256"),
+            };
+            for entry in fs::read_dir(&dir)
+                .map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
+            {
+                let path = entry
+                    .map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
+                    .path();
+                let stem = path.file_stem().unwrap_or_default();
+                let extension = path.extension().unwrap_or_default();
+                let needed = match shelf {
+                    "layer" => extension == "erofs" && layers.contains(&*stem.to_string_lossy()),
+                    "rootfs" => {
+                        (extension == "erofs" || extension == "vmdk") && rootfs.contains(stem)
+                    }
+                    // A lock is needed while its image is there.
+                    "image" => extension == "json" || path.with_extension("json").is_file(),
+                    "origin" => extension == "json" && self.origin_is_whole(&path),
+                    _ => extension == "json",
+                };
+                let dead = shelf == "origin" && extension == "json";
+                if needed || (!dead && !old(&path)) {
+                    continue;
+                }
+                let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+                match fs::remove_file(&path) {
+                    Ok(()) => pruned.reclaimed += len,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(Error::io(format!("removing {}", path.display()), e)),
+                }
+            }
+        }
+        Ok(pruned)
     }
 
     /// Every image here, tagged or not.
@@ -378,7 +665,7 @@ impl Store {
     /// `diff_id`, which is only what the image's config says: an origin a config could name
     /// would let one image's layer stand in for another's. `diff_id` is kept for a push, to
     /// say again what the config said.
-    pub fn insert_origin(
+    pub fn insert_layer_origin(
         &self,
         descriptor: &Descriptor,
         diff_id: &Digest,
@@ -388,10 +675,10 @@ impl Store {
             return Err(Error::Missing(layer.clone()));
         }
         let path = self.shelf("origin", descriptor.digest(), "json");
-        let bytes = serde_json::to_vec(&OriginFile {
+        let bytes = serde_json::to_vec(&OriginFile::Layer {
             layer: layer.clone(),
             diff_id: diff_id.clone(),
-            descriptor: descriptor.clone(),
+            descriptor: Box::new(descriptor.clone()),
         })
         .map_err(|e| Error::io("serializing an origin", e.into()))?;
         write_atomically(&path, |file| {
@@ -401,7 +688,7 @@ impl Store {
     }
 
     /// The layer the registry blob `blob` became, if it is still here.
-    pub fn get_origin(&self, blob: &Digest) -> Result<Option<Digest>> {
+    pub fn get_layer_origin(&self, blob: &Digest) -> Result<Option<Digest>> {
         let path = self.shelf("origin", blob, "json");
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -410,12 +697,15 @@ impl Store {
         };
         let read: OriginFile = serde_json::from_slice(&bytes)
             .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(self.contains_layer(&read.layer).then_some(read.layer))
+        match read {
+            OriginFile::Layer { layer, .. } => Ok(self.contains_layer(&layer).then_some(layer)),
+            OriginFile::Image { .. } => Ok(None),
+        }
     }
 
     /// Every registry blob that became `layer`, with the diff_id its config named it by:
     /// what a push can name in place of uploading `layer` again.
-    pub fn origins_of(&self, layer: &Digest) -> Result<Vec<(Descriptor, Digest)>> {
+    pub fn layer_origins_of(&self, layer: &Digest) -> Result<Vec<(Descriptor, Digest)>> {
         let dir = self.root.join("origin").join("sha256");
         let mut origins = Vec::new();
         for entry in
@@ -431,11 +721,116 @@ impl Store {
                 fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
             let read: OriginFile = serde_json::from_slice(&bytes)
                 .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-            if read.layer == *layer {
-                origins.push((read.descriptor, read.diff_id));
+            if let OriginFile::Layer {
+                layer: of,
+                diff_id,
+                descriptor,
+            } = read
+                && of == *layer
+            {
+                origins.push((*descriptor, diff_id));
             }
         }
         Ok(origins)
+    }
+
+    /// Record that the registry manifest `manifest`, naming the config `config`, became
+    /// `image`, which must be here. A pull that finds `digest` skips the config and the
+    /// layers.
+    ///
+    /// Named by `digest`, which a pull has checked: `manifest`'s own, or that of the index
+    /// it was chosen from.
+    pub fn insert_image_origin(
+        &self,
+        digest: &Digest,
+        manifest: &[u8],
+        config: &[u8],
+        image: &Digest,
+    ) -> Result<()> {
+        if !self.shelf("image", image, "json").is_file() {
+            return Err(Error::Missing(image.clone()));
+        }
+        let text = |bytes: &[u8]| {
+            String::from_utf8(bytes.to_vec()).map_err(|e| {
+                Error::io(
+                    format!("recording {digest}"),
+                    io::Error::new(io::ErrorKind::InvalidData, e),
+                )
+            })
+        };
+        let path = self.shelf("origin", digest, "json");
+        let bytes = serde_json::to_vec(&OriginFile::Image {
+            image: image.clone(),
+            manifest: text(manifest)?,
+            config: text(config)?,
+        })
+        .map_err(|e| Error::io("serializing an origin", e.into()))?;
+        write_atomically(&path, |file| {
+            file.write_all(&bytes)
+                .map_err(|e| Error::io(format!("writing {}", path.display()), e))
+        })
+    }
+
+    /// The image the registry manifest or index `digest` became, if it is still here.
+    pub fn get_image_origin(&self, digest: &Digest) -> Result<Option<Digest>> {
+        let path = self.shelf("origin", digest, "json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        };
+        let read: OriginFile = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+        match read {
+            OriginFile::Image { image, .. } => Ok(self
+                .shelf("image", &image, "json")
+                .is_file()
+                .then_some(image)),
+            OriginFile::Layer { .. } => Ok(None),
+        }
+    }
+
+    /// Every registry manifest that became `image`, and the config it names, each as it was
+    /// served or pushed: what a push can put back under the same digests.
+    pub fn image_origins_of(&self, image: &Digest) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let dir = self.root.join("origin").join("sha256");
+        let mut origins = Vec::new();
+        for entry in
+            fs::read_dir(&dir).map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
+        {
+            let path = entry
+                .map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
+                .path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let bytes =
+                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
+            let read: OriginFile = serde_json::from_slice(&bytes)
+                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            if let OriginFile::Image {
+                image: of,
+                manifest,
+                config,
+            } = read
+                && of == *image
+            {
+                origins.push((manifest.into_bytes(), config.into_bytes()));
+            }
+        }
+        Ok(origins)
+    }
+
+    /// Whether the origin at `path` still names a layer or an image here.
+    fn origin_is_whole(&self, path: &Path) -> bool {
+        let Ok(bytes) = fs::read(path) else {
+            return false;
+        };
+        match serde_json::from_slice::<OriginFile>(&bytes) {
+            Ok(OriginFile::Layer { layer, .. }) => self.contains_layer(&layer),
+            Ok(OriginFile::Image { image, .. }) => self.shelf("image", &image, "json").is_file(),
+            Err(_) => false,
+        }
     }
 
     /// A digest's algorithm and encoded halves as a directory and a file name, which keeps
@@ -469,10 +864,19 @@ impl Store {
 }
 
 /// Write `path` with `write`, and only then give it that name: a write that stops part-way
-/// leaves nothing under it. The file beside it is this process's and this call's, so two
-/// writers of one name -- threads of a server included -- each write their own and the last
-/// rename wins.
+/// leaves nothing under it, and of two writers of one name the last rename wins.
 fn write_atomically(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+    let part = write_part(path, write)?;
+    fs::rename(&part, path).map_err(|e| {
+        let _ = fs::remove_file(&part);
+        Error::io(format!("moving {} into place", path.display()), e)
+    })
+}
+
+/// Write a file beside `path` with `write`, and answer with it, for the caller to name. It is
+/// this process's and this call's, so two writers -- threads of a server included -- each
+/// write their own. One whose write fails is not left.
+fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<PathBuf> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let part = path.with_file_name(format!(
@@ -484,17 +888,13 @@ fn write_atomically(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) ->
     let mut file =
         File::create(&part).map_err(|e| Error::io(format!("creating {}", part.display()), e))?;
     let written = write(&mut file);
-    // Closed before the rename: Windows renames and removes nothing that is still open.
+    // Closed before it is named: Windows renames and removes nothing that is still open.
     drop(file);
-
-    let renamed = written.and_then(|()| {
-        fs::rename(&part, path)
-            .map_err(|e| Error::io(format!("moving {} into place", path.display()), e))
-    });
-    if renamed.is_err() {
+    if let Err(e) = written {
         let _ = fs::remove_file(&part);
+        return Err(e);
     }
-    renamed
+    Ok(part)
 }
 
 #[cfg(test)]
@@ -552,9 +952,13 @@ mod tests {
         let tree = tree(b"here");
 
         let digest = store.insert_layer(&tree).unwrap();
-        assert_eq!(digest, tree.digest());
+        let image = fs::read(store.layer_path(&digest)).unwrap();
+        assert_eq!(digest.digest(), &format!("{:x}", Sha256::digest(&image)));
         assert!(store.contains_layer(&digest));
-        assert_eq!(store.get_layer(&digest).unwrap().unwrap().digest(), digest);
+        assert_eq!(
+            store.get_layer(&digest).unwrap().unwrap().digest(),
+            tree.digest()
+        );
         assert_eq!(store.insert_layer(&tree).unwrap(), digest);
 
         assert!(store.remove_layer(&digest).unwrap());
@@ -581,10 +985,17 @@ mod tests {
         assert_ne!(store.insert_image(&config("b"), &layers).unwrap(), image);
         assert_eq!(store.images().unwrap().len(), 2);
 
+        let mut filed = config("a");
+        filed
+            .rootfs_mut()
+            .set_diff_ids(layers.iter().map(Digest::to_string).collect());
         assert_eq!(
             store.get_image(&image).unwrap(),
-            Some((config("a"), layers.clone()))
+            Some((filed, layers.clone()))
         );
+        let manifest: ImageManifest =
+            serde_json::from_slice(&store.get_image_manifest(&image).unwrap().unwrap().0).unwrap();
+        assert_eq!(manifest.layers()[0].media_type().to_string(), EROFS_LAYER);
 
         assert!(matches!(
             store.remove_layer(&layers[0]),
@@ -639,7 +1050,62 @@ mod tests {
     }
 
     #[test]
-    fn an_origin_finds_its_layer_while_it_is_here() {
+    fn a_prune_takes_what_nothing_needs() {
+        let scratch = Scratch::new("prune");
+        let store = &scratch.0;
+        let digest = |hex: char| -> Digest {
+            format!("sha256:{}", hex.to_string().repeat(64))
+                .parse()
+                .unwrap()
+        };
+        let image_of = |content: &[u8], author: &str| {
+            let layer = store.insert_layer(&tree(content)).unwrap();
+            let image = store
+                .insert_image(&config(author), std::slice::from_ref(&layer))
+                .unwrap();
+            store.insert_rootfs(std::slice::from_ref(&layer)).unwrap();
+            store
+                .insert_layer_origin(
+                    &Descriptor::new(MediaType::ImageLayerGzip, 1, layer.clone()),
+                    &digest('1'),
+                    &layer,
+                )
+                .unwrap();
+            (layer, image)
+        };
+        let (tagged_layer, tagged) = image_of(b"tagged", "a");
+        store.insert_tag(&reference("app:v1"), &tagged).unwrap();
+        let (held_layer, held) = image_of(b"held", "b");
+        let hold = store.hold_image(&held).unwrap();
+        let (loose_layer, loose) = image_of(b"loose", "c");
+
+        let young = store.prune(Duration::from_secs(3600)).unwrap();
+        assert!(young.images.is_empty(), "nothing is old yet");
+
+        let pruned = store.prune(Duration::ZERO).unwrap();
+        assert_eq!(pruned.images, vec![loose.clone()]);
+        assert!(pruned.reclaimed > 0);
+        assert!(store.get_image(&loose).unwrap().is_none());
+        assert!(!store.contains_layer(&loose_layer));
+        assert!(
+            store
+                .get_rootfs(std::slice::from_ref(&loose_layer))
+                .is_none()
+        );
+        assert_eq!(store.get_layer_origin(&loose_layer).unwrap(), None);
+        for (layer, image) in [(&tagged_layer, &tagged), (&held_layer, &held)] {
+            assert!(store.get_image(image).unwrap().is_some());
+            assert!(store.contains_layer(layer));
+            assert!(store.get_rootfs(std::slice::from_ref(layer)).is_some());
+        }
+        assert!(matches!(store.remove_image(&held), Err(Error::InUse(..))));
+
+        drop(hold);
+        assert_eq!(store.prune(Duration::ZERO).unwrap().images, vec![held]);
+    }
+
+    #[test]
+    fn a_layer_origin_finds_its_layer_while_it_is_here() {
         let scratch = Scratch::new("origin");
         let store = &scratch.0;
         let digest = |hex: char| -> Digest {
@@ -649,28 +1115,71 @@ mod tests {
         };
         let gzip = Descriptor::new(MediaType::ImageLayerGzip, 1, digest('a'));
         let zstd = Descriptor::new(MediaType::ImageLayerZstd, 1, digest('b'));
-        let layer = tree(b"one").digest();
+        let layer = store.insert_layer(&tree(b"one")).unwrap();
+        store.remove_layer(&layer).unwrap();
 
         assert!(matches!(
-            store.insert_origin(&gzip, &digest('1'), &layer),
+            store.insert_layer_origin(&gzip, &digest('1'), &layer),
             Err(Error::Missing(_))
         ));
-        store.insert_layer(&tree(b"one")).unwrap();
-        store.insert_origin(&gzip, &digest('1'), &layer).unwrap();
-        store.insert_origin(&zstd, &digest('1'), &layer).unwrap();
+        assert_eq!(store.insert_layer(&tree(b"one")).unwrap(), layer);
+        store
+            .insert_layer_origin(&gzip, &digest('1'), &layer)
+            .unwrap();
+        store
+            .insert_layer_origin(&zstd, &digest('1'), &layer)
+            .unwrap();
 
-        assert_eq!(store.get_origin(&digest('a')).unwrap(), Some(layer.clone()));
         assert_eq!(
-            store.get_origin(&digest('1')).unwrap(),
+            store.get_layer_origin(&digest('a')).unwrap(),
+            Some(layer.clone())
+        );
+        assert_eq!(
+            store.get_layer_origin(&digest('1')).unwrap(),
             None,
             "found by a diff_id"
         );
-        let mut origins = store.origins_of(&layer).unwrap();
+        let mut origins = store.layer_origins_of(&layer).unwrap();
         origins.sort_by_key(|(descriptor, _)| descriptor.digest().to_string());
         assert_eq!(origins, vec![(gzip, digest('1')), (zstd, digest('1'))]);
 
         store.remove_layer(&layer).unwrap();
-        assert_eq!(store.get_origin(&digest('a')).unwrap(), None);
+        assert_eq!(store.get_layer_origin(&digest('a')).unwrap(), None);
+    }
+
+    #[test]
+    fn an_image_origin_finds_its_image_while_it_is_here() {
+        let scratch = Scratch::new("image-origin");
+        let store = &scratch.0;
+        // Spaced as no serializer would, so that only the bytes as given come back.
+        let manifest = br#"{ "schemaVersion" : 2 }"#;
+        let served = br#"{ "os" : "linux" }"#;
+        let named: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let image = store.insert_image(&config("a"), &[]).unwrap();
+        store.remove_image(&image).unwrap();
+
+        assert!(matches!(
+            store.insert_image_origin(&named, manifest, served, &image),
+            Err(Error::Missing(_))
+        ));
+        store.insert_image(&config("a"), &[]).unwrap();
+        store
+            .insert_image_origin(&named, manifest, served, &image)
+            .unwrap();
+
+        assert_eq!(store.get_image_origin(&named).unwrap(), Some(image.clone()));
+        assert_eq!(
+            store.get_layer_origin(&named).unwrap(),
+            None,
+            "found as a blob"
+        );
+        assert_eq!(
+            store.image_origins_of(&image).unwrap(),
+            vec![(manifest.to_vec(), served.to_vec())]
+        );
+
+        store.remove_image(&image).unwrap();
+        assert_eq!(store.get_image_origin(&named).unwrap(), None);
     }
 
     /// The disk a descriptor describes, read the way a VM would: every extent it names, in

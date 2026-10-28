@@ -23,6 +23,9 @@ tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "r
 virtx-core = { workspace = true, features = ["server"] }
 # The methods, and the machines they start.
 virtx-uvm = { workspace = true }
+# Which endpoint a request is for, and one body for what each answers.
+http = "1"
+http-body-util = "0.1"
 
 [dev-dependencies]
 # The client end, to call the built binary as a client would.
@@ -32,3 +35,8 @@ serde_json = "1"
 # A call's progress, read item by item.
 futures-util = { version = "0.3", default-features = false }
 tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread"] }
+# The registry endpoint, spoken to over the server's stdio as HTTP/2 by hand: the client end
+# reaches only `/rpc`.
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+bytes = "1"

@@ -1,6 +1,7 @@
-//! `virtx-uvm` -- a virtx server over stdio: the RPC `virtx-core` names, answered on stdin and
-//! stdout to the client that spawned it, until it closes stdin. Everything this host keeps is
-//! that one client's.
+//! `virtx-uvm` -- a virtx server over stdio: the RPC `virtx-core` names at `/rpc`, and the
+//! images as an OCI registry at `/images/v2/` (see [`virtx_uvm::RegistryServer`]), answered on
+//! stdin and stdout to the client that spawned it, until it closes stdin. Everything this host
+//! keeps is that one client's.
 //!
 //! `virtx-uvm vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -9,7 +10,10 @@ mod rpc;
 
 use std::sync::Arc;
 
-use virtx_core::{Dispatcher, serve_stdio};
+use http::{Response, StatusCode};
+use http_body_util::{BodyExt as _, Empty};
+use virtx_core::{Dispatcher, Server, serve_stdio};
+use virtx_uvm::{ImageStore, RegistryBody, RegistryServer};
 
 use crate::rpc::Home;
 
@@ -29,9 +33,30 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn serve() -> anyhow::Result<()> {
-    let home = Arc::new(Home::new(&virtx_uvm::cache_root())?);
-    let dispatcher = Dispatcher::new(rpc::methods(&home));
+    let root = virtx_uvm::cache_root();
+    let images = ImageStore::new(root.join("images"))?;
+    let home = Arc::new(Home::new(images.clone(), &root)?);
+    let rpc = Server::new(Dispatcher::new(rpc::methods(&home)));
+    let registry = Arc::new(RegistryServer::new(images, "/images")?);
+    let handle = move |request: http::Request<_>| {
+        let (rpc, registry) = (rpc.clone(), Arc::clone(&registry));
+        async move {
+            let path = request.uri().path();
+            if path == "/rpc" {
+                rpc.handle(request)
+                    .await
+                    .map(|body| body.map_err(|never| match never {}).boxed_unsync())
+            } else if path == "/images/v2" || path.starts_with("/images/v2/") {
+                registry.handle(request).await
+            } else {
+                let mut response: Response<RegistryBody> =
+                    Response::new(Empty::new().map_err(|never| match never {}).boxed_unsync());
+                *response.status_mut() = StatusCode::NOT_FOUND;
+                response
+            }
+        }
+    };
     // The client is gone, and every sandbox was its: a command still running ends with this
     // process, whose machines are killed as their calls drop.
-    Ok(serve_stdio(dispatcher, tokio::io::stdin(), tokio::io::stdout()).await?)
+    Ok(serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await?)
 }

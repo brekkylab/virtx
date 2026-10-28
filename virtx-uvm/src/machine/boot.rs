@@ -126,7 +126,7 @@ pub(super) fn boot(machine: Machine, cmd: &[String]) -> Result<Infallible> {
         .env_var(&format!("KRUN_BLOCK_LOWER_FSTYPE={LOWER_FSTYPE}"))
         .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
         .env_var(&format!("KRUN_BLOCK_UPPER_FSTYPE={UPPER_FSTYPE}"));
-    if machine.network != Network::None {
+    if machine.spec.network != Network::None {
         init = init.env_var(&format!("{}={}", net::NAMESERVER_ENV, net::NAMESERVER));
     }
 
@@ -276,13 +276,13 @@ pub(super) fn boot(machine: Machine, cmd: &[String]) -> Result<Infallible> {
     devices.add(BalloonDevice::new().map_err(|e| Error::vmm("attaching a balloon", e))?);
 
     #[cfg(feature = "gpu")]
-    if machine.gpu {
-        devices.add(gpu::device(machine.gpu_memory_mib)?);
+    if machine.spec.gpu {
+        devices.add(gpu::device(machine.spec.gpu_memory_mib)?);
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.network != Network::None || !published.is_empty() {
-        devices.add(net::attach(machine.network, published)?);
+    if machine.spec.network != Network::None || !published.is_empty() {
+        devices.add(net::attach(machine.spec.network, published)?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module
@@ -295,10 +295,10 @@ pub(super) fn boot(machine: Machine, cmd: &[String]) -> Result<Infallible> {
     }
 
     let vmm = VmmBuilder::new()
-        .vcpus(machine.vcpus)
-        .map_err(|e| Error::vmm(format!("{} vCPUs", machine.vcpus), e))?
-        .ram_mib(machine.ram_mib)
-        .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.ram_mib), e))?
+        .vcpus(machine.spec.vcpus)
+        .map_err(|e| Error::vmm(format!("{} vCPUs", machine.spec.vcpus), e))?
+        .ram_mib(machine.spec.ram_mib)
+        .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?
         .payload(payload)
         .devices(devices)
         .build()

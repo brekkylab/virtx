@@ -354,6 +354,32 @@ impl<D> FsTree<D> {
         Ok(dir.children.remove(name).is_some())
     }
 
+    /// The tree under the directory at `path`, with that directory as its root: everything
+    /// else is gone. `None` if nothing is there, or something that is not a directory.
+    ///
+    /// Its paths keep the inodes they named, so what was hard-linked under it still is.
+    pub fn subtree(mut self, path: &[u8]) -> Result<Option<FsTree<D>>> {
+        let mut dir = &mut self.root;
+        for name in components(path)? {
+            match dir.children.get_mut(name) {
+                Some(child) => dir = child,
+                None => return Ok(None),
+            }
+        }
+        let mut root = std::mem::replace(dir, Node::new(Inode(0)));
+        if !matches!(self.inodes[root.inode.0 as usize], Entry::Directory { .. }) {
+            return Ok(None);
+        }
+        // The root is inode 0. What that was is the old root's, which no path under this
+        // directory names.
+        self.inodes.swap(0, root.inode.0 as usize);
+        root.inode = Inode(0);
+        Ok(Some(FsTree {
+            root,
+            inodes: self.inodes,
+        }))
+    }
+
     /// Take out every attribute under `trusted.overlay.`: what overlayfs wrote about the
     /// mount a session's upper layer was part of -- `origin`, `impure`, `nlink` and the rest
     /// -- which means nothing once that mount is gone. Whether a directory is opaque is the
@@ -662,5 +688,20 @@ mod tests {
         assert!(
             matches!(&tree.inodes[inode.0 as usize], Entry::File { data, .. } if data.block == 2)
         );
+    }
+
+    #[test]
+    fn a_subtree_is_what_was_under_its_directory() {
+        let mut tree = lower();
+        tree.link(b"etc/hosts", b"etc/hostname").unwrap();
+        let sub = tree.subtree(b"etc").unwrap().unwrap();
+        assert_eq!(paths(&sub), ["", "hostname", "hosts", "passwd"]);
+        assert_eq!(at(&sub, ""), &dir(7, false));
+        assert_eq!(at(&sub, "hosts"), &file(b"lower"));
+        let inode = |path: &str| sub.get(path.as_bytes()).unwrap().unwrap().inode;
+        assert_eq!(inode("hosts"), inode("hostname"));
+
+        assert!(lower().subtree(b"bin").unwrap().is_none());
+        assert!(lower().subtree(b"nowhere").unwrap().is_none());
     }
 }

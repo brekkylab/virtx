@@ -6,8 +6,11 @@
 //! choices. Names, symlink targets and xattr names are bytes, as Linux has them, and not
 //! text.
 //!
-//! Checksums are not verified. An image read here was written by a guest that is down and
-//! flushed, and one whose kernel found it inconsistent says so in the superblock.
+//! Checksums are not verified. An image read here was written by a guest that is down, and
+//! one whose kernel found it inconsistent says so in the superblock.
+//!
+//! An image with a journal is read as its next mount would find it: whatever a guest killed
+//! midway left committed in the journal is replayed over it, here and not in the image.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -39,14 +42,38 @@ const EXTENTS_FL: u32 = 0x8_0000;
 const EXTENT_MAGIC: u16 = 0xF30A;
 const XATTR_MAGIC: u32 = 0xEA02_0000;
 
+/// jbd2's: the magic every journal block starts with, and what kind each is.
+const JOURNAL_MAGIC: u32 = 0xC03B_3998;
+const JOURNAL_DESCRIPTOR: u32 = 1;
+const JOURNAL_COMMIT: u32 = 2;
+const JOURNAL_SUPERBLOCK_V1: u32 = 3;
+const JOURNAL_SUPERBLOCK_V2: u32 = 4;
+const JOURNAL_REVOKE: u32 = 5;
+/// The one journal feature this reads: revoke blocks, which every kernel journal has.
+const JOURNAL_INCOMPAT_REVOKE: u32 = 0x1;
+/// A tag's flags: the block's first four bytes were the magic and are zeros in the log,
+/// the tag has no UUID of its own, the tag is its descriptor's last.
+const TAG_ESCAPE: u16 = 0x1;
+const TAG_SAME_UUID: u16 = 0x2;
+const TAG_LAST: u16 = 0x8;
+
+const COMPAT_HAS_JOURNAL: u32 = 0x4;
 const INCOMPAT_FILETYPE: u32 = 0x2;
 const INCOMPAT_RECOVER: u32 = 0x4;
 const INCOMPAT_64BIT: u32 = 0x80;
-/// What this reads, beyond what it has to know about: extents, the multiple-mount guard,
-/// groups whose metadata is together, a checksum seed, three-level indexed directories,
-/// and case-insensitive lookup, none of which changes how a name or a block is found.
-const INCOMPAT_READ: u32 =
-    INCOMPAT_FILETYPE | 0x40 | INCOMPAT_64BIT | 0x100 | 0x200 | 0x2000 | 0x4000 | 0x2_0000;
+/// What this reads, beyond what it has to know about: a journal to replay, extents, the
+/// multiple-mount guard, groups whose metadata is together, a checksum seed, three-level
+/// indexed directories, and case-insensitive lookup, none of which changes how a name or a
+/// block is found.
+const INCOMPAT_READ: u32 = INCOMPAT_FILETYPE
+    | INCOMPAT_RECOVER
+    | 0x40
+    | INCOMPAT_64BIT
+    | 0x100
+    | 0x200
+    | 0x2000
+    | 0x4000
+    | 0x2_0000;
 
 /// An image, and where the things in it are.
 pub(super) struct Reader<R> {
@@ -62,6 +89,9 @@ pub(super) struct Reader<R> {
     groups: u64,
     /// Whether a directory entry says what it names, or leaves that to the inode.
     filetype: bool,
+    /// The blocks the journal's committed transactions left, by number, read in place of
+    /// the image's.
+    journaled: HashMap<u64, Vec<u8>>,
 }
 
 /// One inode, as far as this reads them.
@@ -91,11 +121,18 @@ impl<R: Read + Seek> Reader<R> {
             return Err(Error::Malformed("ext4 image: not an ext4 image".into()));
         }
         let incompat = u32_at(0x60);
-        // Set on mount and cleared on a clean unmount, as is a journal still holding what
-        // was not put in place yet.
-        if incompat & INCOMPAT_RECOVER != 0 || u16_at(0x3A) & 1 == 0 {
+        let journal = u32_at(0x5C) & COMPAT_HAS_JOURNAL != 0;
+        // Without a journal, cleared on mount and set again on a clean unmount: nothing
+        // says what a guest that never unmounted left half done. With one, the kernel
+        // leaves it set, and says so by needing recovery.
+        if u16_at(0x3A) & 1 == 0 {
             return Err(Error::Malformed(
                 "ext4 image: the filesystem was not left clean".into(),
+            ));
+        }
+        if incompat & INCOMPAT_RECOVER != 0 && !journal {
+            return Err(Error::Malformed(
+                "ext4 image: the filesystem needs a journal replayed, and has none".into(),
             ));
         }
         if u16_at(0x3A) & 2 != 0 {
@@ -146,7 +183,7 @@ impl<R: Read + Seek> Reader<R> {
             ));
         }
 
-        Ok(Reader {
+        let mut reader = Reader {
             image,
             block,
             bytes: blocks * block,
@@ -156,7 +193,18 @@ impl<R: Read + Seek> Reader<R> {
             desc_size,
             groups: (blocks - first_data_block).div_ceil(blocks_per_group),
             filetype: incompat & INCOMPAT_FILETYPE != 0,
-        })
+            journaled: HashMap::new(),
+        };
+        if incompat & INCOMPAT_RECOVER != 0 {
+            let ino = u32_at(0xE0);
+            if ino == 0 {
+                return Err(Error::Unsupported(
+                    "ext4 image: a journal on a device of its own".into(),
+                ));
+            }
+            reader.journaled = reader.replay(ino)?;
+        }
+        Ok(reader)
     }
 
     fn at(&mut self, offset: u64, len: u64) -> Result<Vec<u8>> {
@@ -176,6 +224,17 @@ impl<R: Read + Seek> Reader<R> {
                 "ext4 image: the image ends before the {len} bytes it says are at {offset}"
             ))
         })?;
+        if !self.journaled.is_empty() {
+            for number in offset / self.block..(offset + len).div_ceil(self.block) {
+                let Some(journaled) = self.journaled.get(&number) else {
+                    continue;
+                };
+                let start = number * self.block;
+                let (from, to) = (offset.max(start), (offset + len).min(start + self.block));
+                bytes[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&journaled[(from - start) as usize..(to - start) as usize]);
+            }
+        }
         Ok(bytes)
     }
 
@@ -347,6 +406,152 @@ impl<R: Read + Seek> Reader<R> {
             }
         }
         Ok(())
+    }
+
+    /// The image's blocks as the journal in inode `ino` says its committed transactions left
+    /// them, by number: what the kernel's next mount would write, and nothing it would not.
+    ///
+    /// jbd2's format, big-endian throughout. A transaction is a run of log blocks under one
+    /// sequence number: descriptor blocks, each followed by the blocks it tags -- copies of
+    /// the image's blocks as the transaction left them -- and revoke blocks, ended by a
+    /// commit block. A transaction without its commit block never happened.
+    ///
+    /// Only what a guest writes over an image without `64bit`, `metadata_csum` or
+    /// `fast_commit` is read: four-byte block numbers, no checksums, no fast commits.
+    fn replay(&mut self, ino: u32) -> Result<HashMap<u64, Vec<u8>>> {
+        let wrong = |what: String| Error::Malformed(format!("ext4 image: the journal: {what}"));
+        let be16 = |b: &[u8], at: usize| u16::from_be_bytes([b[at], b[at + 1]]);
+        let be32 = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap());
+
+        let inode = self.inode(ino)?;
+        let mut extents = Vec::new();
+        self.extents(ino, &inode.block, MAX_EXTENT_DEPTH, &mut extents)?;
+        // Block `n` of the journal, from wherever in the image it is.
+        let log = |reader: &mut Self, n: u64| {
+            let (logical, first, _) = extents
+                .iter()
+                .find(|(logical, _, count)| (*logical..logical + count).contains(&n))
+                .ok_or_else(|| wrong(format!("block {n} is mapped to nothing")))?;
+            reader.at((first + n - logical) * reader.block, reader.block)
+        };
+
+        let sb = log(self, 0)?;
+        let version = be32(&sb, 0x04);
+        if be32(&sb, 0x00) != JOURNAL_MAGIC
+            || !matches!(version, JOURNAL_SUPERBLOCK_V1 | JOURNAL_SUPERBLOCK_V2)
+        {
+            return Err(wrong("its first block is not a journal superblock".into()));
+        }
+        if u64::from(be32(&sb, 0x0C)) != self.block {
+            return Err(wrong(format!(
+                "blocks of {} bytes, in a filesystem of {}",
+                be32(&sb, 0x0C),
+                self.block
+            )));
+        }
+        if be32(&sb, 0x20) != 0 {
+            return Err(Error::Malformed(
+                "ext4 image: the kernel aborted the journal".into(),
+            ));
+        }
+        if version == JOURNAL_SUPERBLOCK_V2 && be32(&sb, 0x28) & !JOURNAL_INCOMPAT_REVOKE != 0 {
+            return Err(Error::Unsupported(format!(
+                "ext4 image: journal features {:#x}, which this does not read",
+                be32(&sb, 0x28) & !JOURNAL_INCOMPAT_REVOKE
+            )));
+        }
+        let (maxlen, first) = (u64::from(be32(&sb, 0x10)), u64::from(be32(&sb, 0x14)));
+        let (mut sequence, start) = (be32(&sb, 0x18), u64::from(be32(&sb, 0x1C)));
+        // Where the log starts, which is nowhere when it is empty.
+        if start == 0 {
+            return Ok(HashMap::new());
+        }
+        if first == 0 || !(first..maxlen).contains(&start) {
+            return Err(wrong(format!(
+                "a log from block {start}, in blocks {first} to {maxlen}"
+            )));
+        }
+
+        // The committed transactions' writes, as `(transaction, image block, log block,
+        // escaped)` in the order they were logged, and the last transaction to revoke each
+        // revoked block.
+        let mut committed = Vec::new();
+        let mut revoked: HashMap<u64, u32> = HashMap::new();
+        let (mut writes, mut revokes) = (Vec::new(), Vec::new());
+        // The log wraps from the journal's last block to its first, and is never longer.
+        let next = |n: u64| if n + 1 >= maxlen { first } else { n + 1 };
+        let (mut n, mut walked) = (start, 0);
+        loop {
+            if walked >= maxlen {
+                return Err(wrong("a log that never ends".into()));
+            }
+            let b = log(self, n)?;
+            // Past the last transaction is what an earlier lap left, under an older
+            // sequence number, or nothing.
+            if be32(&b, 0) != JOURNAL_MAGIC || be32(&b, 8) != sequence {
+                break;
+            }
+            match be32(&b, 4) {
+                JOURNAL_DESCRIPTOR => {
+                    // Each tag: the block number, a checksum, the flags, and a UUID unless
+                    // it is the last tag's.
+                    let mut at = 12;
+                    while at + 8 <= b.len() {
+                        let flags = be16(&b, at + 6);
+                        n = next(n);
+                        walked += 1;
+                        writes.push((u64::from(be32(&b, at)), n, flags & TAG_ESCAPE != 0));
+                        if flags & TAG_LAST != 0 {
+                            break;
+                        }
+                        at += if flags & TAG_SAME_UUID == 0 { 24 } else { 8 };
+                    }
+                }
+                JOURNAL_REVOKE => {
+                    let used = be32(&b, 12) as usize;
+                    if !(16..=b.len()).contains(&used) {
+                        return Err(wrong(format!("a revoke block of {used} bytes")));
+                    }
+                    revokes.extend(b[16..used].chunks_exact(4).map(|r| u64::from(be32(r, 0))));
+                }
+                JOURNAL_COMMIT => {
+                    committed.extend(
+                        writes
+                            .drain(..)
+                            .map(|(target, at, escaped)| (sequence, target, at, escaped)),
+                    );
+                    revoked.extend(revokes.drain(..).map(|target| (target, sequence)));
+                    sequence = sequence.wrapping_add(1);
+                }
+                _ => break,
+            }
+            n = next(n);
+            walked += 1;
+        }
+
+        // Later transactions over earlier ones, and none over a revoke in its own
+        // transaction or after it.
+        let mut last: HashMap<u64, (u64, bool)> = HashMap::new();
+        for (sequence, target, at, escaped) in committed {
+            let revoked = revoked
+                .get(&target)
+                .is_some_and(|by| by.wrapping_sub(sequence) as i32 >= 0);
+            if !revoked {
+                last.insert(target, (at, escaped));
+            }
+        }
+        let mut blocks = HashMap::with_capacity(last.len());
+        for (target, (at, escaped)) in last {
+            if (target + 1) * self.block > self.bytes {
+                return Err(wrong(format!("a write to block {target}, past the image")));
+            }
+            let mut data = log(self, at)?;
+            if escaped {
+                data[..4].copy_from_slice(&JOURNAL_MAGIC.to_be_bytes());
+            }
+            blocks.insert(target, data);
+        }
+        Ok(blocks)
     }
 
     /// A directory's entries, as `(name, inode)`, `.` and `..` and unused slots left out.

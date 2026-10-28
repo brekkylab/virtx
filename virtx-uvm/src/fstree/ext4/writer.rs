@@ -2,10 +2,19 @@
 //!
 //! # What is written
 //!
-//! The smallest ext4 a Linux kernel mounts read-write and `e2fsck` passes clean: extents,
-//! file types in directory entries, 256-byte inodes, and nothing else. No journal and no
-//! checksums -- the image is made once, on the host, and handed to one guest -- and no
-//! `dir_index`, which a directory linear on disk does without.
+//! The smallest ext4 a Linux kernel mounts read-write and `e2fsck` passes clean, and what a
+//! guest writing to it needs: extents, file types in directory entries, 256-byte inodes, a
+//! journal, and `dir_index`. No checksums -- the image is made once, on the host, and
+//! handed to one guest.
+//!
+//! The journal is so that a guest killed midway leaves what its kernel committed and
+//! nothing half done, which the reader replays. It is written empty, and costs nothing on
+//! the host until the guest writes it.
+//!
+//! `dir_index` is so that the guest's kernel indexes a directory as it grows past a block,
+//! and finds a name in it without reading it all. A directory written here is linear on
+//! disk, which reads the same with the feature on; the kernel indexes only one that grows
+//! from a single block, so one written longer stays linear.
 //!
 //! # The shape of the image
 //!
@@ -13,6 +22,8 @@
 //! group 0            superblock in block 0, descriptors from block 1, then as below
 //! every group        block bitmap, inode bitmap, inode table, then data
 //! ```
+//!
+//! The journal is inode 8's, and its blocks are handed out right after the root's.
 //!
 //! `sparse_super2` with no backup groups keeps the superblock and descriptors in group 0
 //! alone, so every other group starts with its bitmaps. Blocks are handed out in order
@@ -39,8 +50,10 @@ const ITABLE_BLOCKS: u64 = INODES_PER_GROUP as u64 * INODE_SIZE / BLOCK;
 /// A group descriptor without the `64bit` feature.
 const DESC_SIZE: u64 = 32;
 
-/// Inodes 1 to 10 are the filesystem's own. Of them only the root is used here.
+/// Inodes 1 to 10 are the filesystem's own. Of them only the root and the journal are used
+/// here.
 const ROOT: u32 = 2;
+const JOURNAL: u32 = 8;
 const FIRST_INO: u32 = 11;
 
 /// What every inode carries past the 128 bytes of the original layout: the high halves of
@@ -73,7 +86,9 @@ const EXTENTS_FL: u32 = 0x8_0000;
 const EXTENT_MAGIC: u16 = 0xF30A;
 const XATTR_MAGIC: u32 = 0xEA02_0000;
 
+const COMPAT_HAS_JOURNAL: u32 = 0x4;
 const COMPAT_EXT_ATTR: u32 = 0x8;
+const COMPAT_DIR_INDEX: u32 = 0x20;
 const COMPAT_SPARSE_SUPER2: u32 = 0x200;
 const INCOMPAT_FILETYPE: u32 = 0x2;
 const INCOMPAT_EXTENTS: u32 = 0x40;
@@ -83,9 +98,33 @@ const RO_COMPAT_EXTRA_ISIZE: u32 = 0x40;
 /// What overlayfs in the guest reads as "nothing from below shows through here".
 const OPAQUE: &[u8] = b"trusted.overlay.opaque";
 
+/// What the kernel hashes names in an indexed directory with: half MD4, from a seed of the
+/// filesystem's own. Fixed, so the same tree makes the same image.
+const HASH_HALF_MD4: u8 = 1;
+const HASH_SEED: [u8; 16] = *b"virtx-uvm ext4\0\0";
+/// `s_flags`: names hashed as unsigned chars, which says how the kernel hashes them
+/// whatever the guest's architecture.
+const FLAGS_UNSIGNED_HASH: u32 = 0x2;
+
+/// jbd2's: the magic every journal block starts with, and a version 2 superblock's type.
+const JOURNAL_MAGIC: u32 = 0xC03B_3998;
+const JOURNAL_SUPERBLOCK_V2: u32 = 4;
+
 /// The directory `e2fsck` puts what it finds unattached in, made when the tree has none.
 static LOST_FOUND: Meta = Meta {
     mode: 0o700,
+    uid: 0,
+    gid: 0,
+    atime: Timestamp::ZERO,
+    mtime: Timestamp::ZERO,
+    ctime: Timestamp::ZERO,
+    crtime: Timestamp::ZERO,
+    xattrs: std::collections::BTreeMap::new(),
+};
+
+/// The journal's, which nothing but the kernel opens.
+static JOURNAL_META: Meta = Meta {
+    mode: 0o600,
     uid: 0,
     gid: 0,
     atime: Timestamp::ZERO,
@@ -117,6 +156,9 @@ enum Content<'a> {
     Dir(Vec<u8>),
     /// A symlink's target, short enough to sit where the inode would map its blocks.
     Inline(&'a [u8]),
+    /// The journal's superblock, in the first of the journal's blocks; the rest are its
+    /// log, zeros until the guest writes it.
+    Journal(Vec<u8>),
 }
 
 /// One inode, and where everything of it goes.
@@ -221,16 +263,41 @@ impl<'a> Plan<'a> {
             Ok(runs)
         };
 
+        // As `mke2fs` sizes a journal, up to the 32 MiB a busy guest has room in.
+        let journal = match blocks {
+            0..32768 => 1024,
+            32768..262144 => 4096,
+            _ => 8192,
+        };
         let mut nodes = place(tree)?;
+        nodes.push(Node {
+            ino: JOURNAL,
+            mode: S_IFREG | JOURNAL_META.mode,
+            meta: &JOURNAL_META,
+            opaque: false,
+            nlink: 1,
+            size: journal * BLOCK,
+            rdev: (0, 0),
+            content: Content::Journal(journal_superblock(journal as u32)),
+            runs: Vec::new(),
+            leaves: Vec::new(),
+            xattrs: None,
+        });
+        nodes.sort_by_key(|node| node.ino);
+
         for node in &mut nodes {
             let bytes: &[u8] = match &node.content {
                 Content::Bytes(bytes) => bytes,
                 Content::Dir(bytes) => bytes,
-                Content::Empty | Content::Inline(_) => &[],
+                Content::Empty | Content::Inline(_) | Content::Journal(_) => &[],
             };
             // The stretches of blocks that hold something, as `(logical, count)`. Only a
-            // file has holes: a directory or a symlink is read whole, block by block.
-            let mut held: Vec<(u64, u64)> = Vec::new();
+            // file has holes: a directory or a symlink is read whole, block by block. The
+            // journal is held whole, for the kernel to write its log into.
+            let mut held: Vec<(u64, u64)> = match node.content {
+                Content::Journal(_) => vec![(0, node.size / BLOCK)],
+                _ => Vec::new(),
+            };
             for (index, block) in bytes.chunks(BLOCK as usize).enumerate() {
                 let index = index as u64;
                 let hole = node.mode & 0o170000 == S_IFREG && block.iter().all(|byte| *byte == 0);
@@ -401,17 +468,24 @@ impl<'a> Plan<'a> {
         for node in &self.nodes {
             let bytes: &[u8] = match &node.content {
                 Content::Bytes(bytes) => bytes,
-                Content::Dir(bytes) => bytes,
+                Content::Dir(bytes) | Content::Journal(bytes) => bytes,
                 Content::Empty | Content::Inline(_) => &[],
             };
             for (logical, first, count) in &node.runs {
                 let start = (logical * BLOCK) as usize;
                 let len = (count * BLOCK) as usize;
-                let here = &bytes[start..(start + len).min(bytes.len())];
+                let here = bytes
+                    .get(start..)
+                    .map_or(&[][..], |rest| &rest[..len.min(rest.len())]);
                 out.seek(SeekFrom::Start(first * BLOCK))?;
                 out.write_all(here)?;
-                // Whole blocks, so nothing that was there before shows through the tail.
-                out.write_all(&vec![0u8; len - here.len()])?;
+                // To the end of the last block written to, so nothing that was there before
+                // shows through its tail. Past it, `out` reads as zeros.
+                out.write_all(&vec![
+                    0u8;
+                    here.len().next_multiple_of(BLOCK as usize)
+                        - here.len()
+                ])?;
             }
 
             if !node.leaves.is_empty() {
@@ -463,7 +537,8 @@ impl<'a> Plan<'a> {
         put(
             &mut sb,
             0x5C,
-            &(COMPAT_EXT_ATTR | COMPAT_SPARSE_SUPER2).to_le_bytes(),
+            &(COMPAT_HAS_JOURNAL | COMPAT_EXT_ATTR | COMPAT_DIR_INDEX | COMPAT_SPARSE_SUPER2)
+                .to_le_bytes(),
         );
         put(
             &mut sb,
@@ -475,11 +550,42 @@ impl<'a> Plan<'a> {
             0x64,
             &(RO_COMPAT_LARGE_FILE | RO_COMPAT_EXTRA_ISIZE).to_le_bytes(),
         );
+        put(&mut sb, 0xE0, &JOURNAL.to_le_bytes()); // s_journal_inum
+        put(&mut sb, 0xEC, &HASH_SEED); // s_hash_seed
+        put(&mut sb, 0xFC, &[HASH_HALF_MD4]); // s_def_hash_version
+        // s_jnl_blocks: the journal inode's block map and size, for `e2fsck` to find the
+        // journal by should the inode be lost.
+        let journal = self
+            .nodes
+            .iter()
+            .find(|node| node.ino == JOURNAL)
+            .expect("every plan has a journal");
+        let raw = inode(journal);
+        put(&mut sb, 0xFD, &[1]); // s_jnl_backup_type: a copy of the block map
+        put(&mut sb, 0x10C, &raw[0x28..0x64]);
+        put(&mut sb, 0x148, &raw[0x6C..0x70]);
+        put(&mut sb, 0x14C, &raw[0x04..0x08]);
         put(&mut sb, 0x15C, &EXTRA_ISIZE.to_le_bytes()); // s_min_extra_isize
         put(&mut sb, 0x15E, &EXTRA_ISIZE.to_le_bytes()); // s_want_extra_isize
+        put(&mut sb, 0x160, &FLAGS_UNSIGNED_HASH.to_le_bytes()); // s_flags
         // s_backup_bgs at 0x24C stays zero: no group but the first holds a superblock.
         sb
     }
+}
+
+/// The superblock of a journal `blocks` long: empty, with nothing for a mount to replay.
+fn journal_superblock(blocks: u32) -> Vec<u8> {
+    let mut sb = vec![0u8; BLOCK as usize];
+    let mut put = |at: usize, value: u32| sb[at..at + 4].copy_from_slice(&value.to_be_bytes());
+    put(0x00, JOURNAL_MAGIC);
+    put(0x04, JOURNAL_SUPERBLOCK_V2);
+    put(0x0C, BLOCK as u32); // s_blocksize
+    put(0x10, blocks); // s_maxlen
+    put(0x14, 1); // s_first: the log, past this block
+    put(0x18, 1); // s_sequence: the first transaction's
+    // s_start 0 is a log with nothing in it.
+    put(0x40, 1); // s_nr_users: the filesystem it is in
+    sb
 }
 
 /// Every inode the tree has, numbered, with its directory entries packed: the root as

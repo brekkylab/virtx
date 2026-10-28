@@ -7,13 +7,13 @@ use std::pin::pin;
 use futures_util::StreamExt as _;
 use tokio::process::Command;
 use virtx_core::{
-    Error, Event, ImageBuild, ImageBuildArgs, ImageName, MountSource, MountType, Recipe, Request,
-    SandboxClose, SandboxCloseArgs, SandboxExec, SandboxExecArgs, SandboxInit, SandboxInitArgs,
-    SandboxList, SandboxListArgs, SandboxVolume, SnapshotCreate, SnapshotCreateArgs, SnapshotList,
-    SnapshotListArgs, SnapshotRemove, SnapshotRemoveArgs, TransportClient, VolumeCreate,
-    VolumeCreateArgs, VolumeList, VolumeListArgs, VolumeMountCreate, VolumeMountCreateArgs,
-    VolumeMountList, VolumeMountListArgs, VolumeMountRemove, VolumeMountRemoveArgs, VolumeRemove,
-    VolumeRemoveArgs,
+    Error, Event, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName, MountSource, MountType,
+    Recipe, Request, SandboxClose, SandboxCloseArgs, SandboxExec, SandboxExecArgs, SandboxInit,
+    SandboxInitArgs, SandboxList, SandboxListArgs, SandboxVolume, SnapshotCreate,
+    SnapshotCreateArgs, SnapshotList, SnapshotListArgs, SnapshotRemove, SnapshotRemoveArgs, Step,
+    TransportClient, VolumeCreate, VolumeCreateArgs, VolumeList, VolumeListArgs, VolumeMountCreate,
+    VolumeMountCreateArgs, VolumeMountList, VolumeMountListArgs, VolumeMountRemove,
+    VolumeMountRemoveArgs, VolumeRemove, VolumeRemoveArgs,
 };
 use virtx_uvm::{FsTree, ImageStore, Registry};
 
@@ -23,6 +23,7 @@ const NOT_FOUND: i64 = -31001;
 const ALREADY_EXISTS: i64 = -31002;
 const IN_USE: i64 = -31003;
 const UNSUPPORTED: i64 = -31004;
+const BUILD_FAILED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
 
 /// A server over an empty `VIRTX_HOME`, removed when this drops.
@@ -109,6 +110,31 @@ impl Server {
         }
         unreachable!("a call's events end with its output or its error")
     }
+
+    /// What building `recipe` as `reference` logged, a line at a time, and how it ended.
+    async fn build(
+        &self,
+        recipe: Recipe,
+        reference: &str,
+    ) -> (Vec<String>, Result<ImageBuildOutput, Error>) {
+        let args = ImageBuildArgs {
+            recipe,
+            reference: reference.into(),
+        };
+        let mut events = pin!(
+            self.client
+                .request_with_progress::<ImageBuildOutput, String>(ImageBuild::NAME, args)
+        );
+        let mut lines = Vec::new();
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(Event::Progress(progress)) => lines.extend(progress.content),
+                Ok(Event::Output(output)) => return (lines, Ok(output)),
+                Err(e) => return (lines, Err(e)),
+            }
+        }
+        unreachable!("a call's events end with its output or its error")
+    }
 }
 
 impl Drop for Server {
@@ -135,16 +161,16 @@ async fn an_unknown_method_is_refused_as_one() {
 }
 
 #[tokio::test]
-async fn a_build_is_not_there_yet() {
-    let server = Server::spawn("build");
-    let recipe = Recipe::new("alpine:3.20");
-    let answered = server
-        .call::<ImageBuild>(ImageBuildArgs {
-            recipe,
-            reference: "built:latest".into(),
-        })
+async fn what_cannot_be_built_is_refused_before_it_boots() {
+    let server = Server::spawn("build-refused");
+    let (_, built) = server
+        .build(Recipe::new("alpine:3.20"), "not a reference")
         .await;
-    assert_eq!(code(answered), UNSUPPORTED);
+    assert_eq!(code(built), INVALID_PARAMS);
+    let (_, built) = server
+        .build(Recipe::new("Not A Base!"), "built:latest")
+        .await;
+    assert_eq!(code(built), INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -517,4 +543,113 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
         })
         .await
         .unwrap();
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed() {
+    let server = Server::spawn("killed");
+    server.pull_image("alpine:3.20").await;
+    server
+        .call::<SnapshotCreate>(SnapshotCreateArgs {
+            name: Some("work".into()),
+            disk_gib: Some(1),
+        })
+        .await
+        .unwrap();
+    let mut args = SandboxInitArgs::new(ImageName::parse("alpine:3.20"));
+    args.snapshot = Some("work".into());
+    let id = server.call::<SandboxInit>(args).await.unwrap().id;
+
+    // Synced, so committed, and then killed with the snapshot still mounted.
+    let (lines, ended) = server
+        .exec(
+            &id,
+            &[
+                "sh",
+                "-c",
+                "mkdir /root/kept && for i in $(seq 100); do echo $i > /root/kept/$i; done \
+                 && sync && echo synced && sleep 30",
+            ],
+            Some(5000),
+        )
+        .await;
+    assert_eq!(lines, ["synced"]);
+    assert_eq!(code(ended), TIMED_OUT);
+
+    let path = server.home.join("snapshot/work.ext4");
+    let image = std::fs::read(&path).unwrap();
+    let incompat = u32::from_le_bytes(image[1024 + 0x60..1024 + 0x64].try_into().unwrap());
+    assert_ne!(incompat & 0x4, 0, "left needing its journal replayed");
+    let tree = FsTree::from_ext4(std::fs::File::open(&path).unwrap()).unwrap();
+    let kept = tree
+        .walk()
+        .into_iter()
+        .filter(|(path, ..)| path.starts_with(b"upper/root/kept/"))
+        .count();
+    assert_eq!(kept, 100);
+
+    // And the next machine over it finds the same.
+    let (lines, ended) = server.exec(&id, &["cat", "/root/kept/100"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["100".into()], 0));
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_built_image_runs_with_what_its_steps_made() {
+    let server = Server::spawn("build");
+    let recipe = Recipe::new("alpine:3.20")
+        .step("apk add --no-cache jq")
+        .step(Step::env("GREETING", "hello"))
+        .step(Step::workdir("/work"))
+        .step("echo \"$GREETING\" > note && rm /etc/motd");
+    let (lines, built) = server.build(recipe, "built:latest").await;
+    let built = built.unwrap();
+    assert!(
+        lines.contains(&"pulling docker.io/library/alpine:3.20".to_string()),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"STEP 4/4: RUN echo \"$GREETING\" > note && rm /etc/motd".to_string()));
+
+    let id = server
+        .call::<SandboxInit>(SandboxInitArgs::new(ImageName::parse("built:latest")))
+        .await
+        .unwrap()
+        .id;
+    let (lines, ended) = server
+        .exec(
+            &id,
+            &[
+                "sh",
+                "-c",
+                "jq -n 1 && echo $GREETING && pwd && cat note && test ! -e /etc/motd",
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(
+        (lines, ended.unwrap()),
+        (
+            ["1", "hello", "/work", "hello"].map(String::from).to_vec(),
+            0
+        )
+    );
+    let by_digest = server
+        .call::<SandboxInit>(SandboxInitArgs::new(ImageName::Digest {
+            digest: built.digest,
+        }))
+        .await;
+    assert!(by_digest.is_ok());
+
+    // A step that fails fails the build, and names nothing.
+    let (_, failed) = server
+        .build(Recipe::new("built:latest").step("exit 3"), "failed:latest")
+        .await;
+    assert_eq!(code(failed), BUILD_FAILED);
+    let init = server
+        .call::<SandboxInit>(SandboxInitArgs::new(ImageName::parse("failed:latest")))
+        .await;
+    assert_eq!(code(init), NOT_FOUND);
 }

@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 
 use virtx_core::*;
 use virtx_uvm::{
-    Digest, ImageStore, ImageStoreError, Machine, MachineError, MachineReport, Network, Reference,
-    Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore,
+    BuildError, Digest, ImageConfiguration, ImageStore, ImageStoreError, Machine, MachineError,
+    MachineReport, MachineSpec, Network, Os, Reference, Registry, RegistryError, Snapshot,
+    SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore, build_step,
 };
 
 /// The codes a method refuses with: JSON-RPC's own, and this server's beside them.
@@ -23,6 +24,7 @@ const ALREADY_EXISTS: i64 = -31002;
 const IN_USE: i64 = -31003;
 const UNSUPPORTED: i64 = -31004;
 const BOOT_FAILED: i64 = -31005;
+const BUILD_FAILED: i64 = -31006;
 const TIMED_OUT: i64 = -31007;
 
 /// A machine's size where `sandbox.init` leaves it to the server.
@@ -55,6 +57,8 @@ impl Home {
 
 /// A sandbox: the machine each of its commands boots, which ends with the command.
 struct Sandbox {
+    /// The image it was made from, as the store names it.
+    image: Digest,
     machine: Machine,
     /// How many of its commands run now.
     running: AtomicUsize,
@@ -111,12 +115,99 @@ where
 }
 
 async fn image_build(
-    _: Arc<Home>,
-    _: ImageBuildArgs,
-    _: Notifier,
+    home: Arc<Home>,
+    args: ImageBuildArgs,
+    notifier: Notifier,
 ) -> Result<ImageBuildOutput, Refused> {
-    // TODO: run the recipe's steps in a machine and file what they made.
-    Err(refused(UNSUPPORTED, "image.build is not implemented yet"))
+    let reference: Reference = args
+        .reference
+        .parse()
+        .map_err(|e| refused(INVALID_PARAMS, format!("{}: {e}", args.reference)))?;
+    let mut progress = 0;
+    let mut report = |line: String| {
+        progress += 1;
+        notifier.notify::<ImageBuild>(Progress {
+            progress,
+            total: None,
+            content: Some(line),
+        });
+    };
+
+    let (mut image, mut layers) = base(&home.images, &args.recipe.base, &mut report).await?;
+    let steps = args.recipe.steps.len();
+    for (index, step) in args.recipe.steps.iter().enumerate() {
+        report(format!("STEP {}/{steps}: {step}", index + 1));
+        build_step(
+            &home.images,
+            &mut image,
+            &mut layers,
+            step,
+            &home.exe,
+            &MachineSpec {
+                vcpus: DEFAULT_VCPUS,
+                ram_mib: DEFAULT_MEMORY_MIB,
+                gpu: false,
+                gpu_memory_mib: None,
+                network: Network::Public,
+            },
+            &mut report,
+        )
+        .await?;
+    }
+    let digest = home.images.insert_image(&image, &layers)?;
+    home.images.insert_tag(&reference, &digest)?;
+    Ok(ImageBuildOutput {
+        digest: digest.to_string(),
+    })
+}
+
+/// A build's base: its config and layers. Nothing for `scratch`, as in a Dockerfile; else
+/// the image tagged `base` here, or the one pulled into the store now, anonymously, and
+/// tagged so.
+async fn base(
+    images: &ImageStore,
+    base: &str,
+    report: &mut (impl FnMut(String) + Send),
+) -> Result<(ImageConfiguration, Vec<Digest>), Refused> {
+    if base == "scratch" {
+        let mut image = ImageConfiguration::default();
+        image.set_os(Os::Linux);
+        return Ok((image, Vec::new()));
+    }
+    let reference: Reference = base
+        .parse()
+        .map_err(|e| refused(INVALID_PARAMS, format!("base {base}: {e}")))?;
+    if let Some(digest) = images.get_tag(&reference)?
+        && let Some(found) = images.get_image(&digest)?
+    {
+        return Ok(found);
+    }
+
+    report(format!("pulling {reference}"));
+    let registry = Registry::default();
+    let (_, manifest) = registry.pull_manifest(&reference).await?;
+    let config = registry.pull_config(&reference, &manifest).await?;
+    let mut layers = Vec::new();
+    for (descriptor, diff_id) in manifest.layers().iter().zip(config.rootfs().diff_ids()) {
+        // A blob pulled before is the layer it became.
+        if let Some(layer) = images.get_origin(descriptor.digest())? {
+            layers.push(layer);
+            continue;
+        }
+        let diff_id: Digest = diff_id
+            .parse()
+            .map_err(|e| refused(BUILD_FAILED, format!("{reference}: diff_id {diff_id}: {e}")))?;
+        let tree = registry.pull_layer(&reference, descriptor).await?;
+        let layer = {
+            let images = images.clone();
+            tokio::task::spawn_blocking(move || images.insert_layer(&tree)).await??
+        };
+        images.insert_origin(descriptor, &diff_id, &layer)?;
+        layers.push(layer);
+    }
+    let image = images.insert_image(&config, &layers)?;
+    images.insert_tag(&reference, &image)?;
+    Ok((config, layers))
 }
 
 async fn snapshot_list(
@@ -256,7 +347,7 @@ async fn sandbox_list(
         .iter()
         .map(|(id, sandbox)| SandboxListOutputItem {
             id: id.clone(),
-            image: sandbox.machine.image.to_string(),
+            image: sandbox.image.to_string(),
             snapshot: sandbox
                 .machine
                 .snapshot
@@ -346,20 +437,20 @@ async fn sandbox_init(
     let rootfs = tokio::task::spawn_blocking(move || images.insert_rootfs(&layers)).await??;
 
     let machine = Machine {
-        image: digest,
         rootfs,
         config: image.config().clone().unwrap_or_default(),
         snapshot,
-        vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
-        ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-        gpu,
-        gpu_memory_mib: args.gpu_memory_mib,
-        volumes,
-        // A server over stdio is on its client's own computer.
-        network: match args.network {
-            true => Network::Host,
-            false => Network::None,
+        spec: MachineSpec {
+            vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
+            ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
+            gpu,
+            gpu_memory_mib: args.gpu_memory_mib,
+            network: match args.network {
+                true => Network::Public,
+                false => Network::None,
+            },
         },
+        volumes,
         ports: Vec::new(),
     };
 
@@ -381,6 +472,7 @@ async fn sandbox_init(
     sandboxes.insert(
         id.clone(),
         Arc::new(Sandbox {
+            image: digest,
             machine,
             running: AtomicUsize::new(0),
         }),
@@ -512,6 +604,26 @@ impl From<ImageStoreError> for Refused {
             ImageStoreError::Fstree(_) => INTERNAL_ERROR,
         };
         refused(code, e)
+    }
+}
+
+/// What a build's step fails with: its command, or what it is made of.
+impl From<BuildError> for Refused {
+    fn from(e: BuildError) -> Refused {
+        match e {
+            BuildError::Failed { .. } => refused(BUILD_FAILED, e),
+            BuildError::Store(e) => e.into(),
+            BuildError::Machine(e) => e.into(),
+            BuildError::Snapshot(e) => e.into(),
+            BuildError::Fstree(_) | BuildError::Io { .. } => refused(INTERNAL_ERROR, e),
+        }
+    }
+}
+
+/// What pulling a build's base fails with: a build with no base to build on.
+impl From<RegistryError> for Refused {
+    fn from(e: RegistryError) -> Refused {
+        refused(BUILD_FAILED, e)
     }
 }
 

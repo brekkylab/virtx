@@ -9,15 +9,18 @@ mod volume;
 
 pub use fstree::*;
 pub use image::{
+    image_build::{Error as BuildError, build_step},
     registry::{Error as RegistryError, Reference, Registry, RegistryAuth},
     store::{Error as ImageStoreError, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, Network, Report as MachineReport,
+    Error as MachineError, Machine, MachineSpec, Network, Report as MachineReport,
     SUBCOMMAND as MACHINE_SUBCOMMAND, VolumeMount, enter as enter_machine, wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;
+/// An image's config, and the OS it says it is for.
+pub use oci_spec::image::{ImageConfiguration, Os};
 pub use snapshot::{
     Error as SnapshotError, Lock as SnapshotLock, Snapshot, Store as SnapshotStore,
 };

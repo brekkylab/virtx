@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use oci_spec::image::{Config, Digest};
+use oci_spec::image::Config;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
 use tokio::process::Command;
@@ -146,13 +146,10 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How many of the last lines the guest's console and libkrun said a failure is told with.
 const TAIL: usize = 50;
 
-/// What a machine is: the image it boots, the image's config it runs under, where its writes
-/// go, and how big a machine runs them.
+/// What a machine is: the root filesystem it boots, the image's config it runs under, where
+/// its writes go, and how big a machine runs them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Machine {
-    /// The image, as the store names it.
-    pub image: Digest,
-
     /// Its root filesystem's disk, as [`Store::insert_rootfs`](crate::ImageStore::insert_rootfs)
     /// answers it.
     pub rootfs: PathBuf,
@@ -164,6 +161,23 @@ pub struct Machine {
     /// Where the machine's writes go. `None` is a temporary one, gone with the machine.
     pub snapshot: Option<Snapshot>,
 
+    /// How big it is, and where it may connect to.
+    pub spec: MachineSpec,
+
+    /// The volumes the guest sees, in the order they are mounted.
+    #[serde(default)]
+    pub volumes: Vec<VolumeMount>,
+
+    /// TCP ports in the guest the machine's process reaches, each on its loopback at a port
+    /// of its choosing: the way in, which does not need a
+    /// [`network`](MachineSpec::network).
+    #[serde(default)]
+    pub ports: Vec<u16>,
+}
+
+/// How big a machine is and where it may connect to, whatever it boots and runs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MachineSpec {
     pub vcpus: u8,
 
     pub ram_mib: u32,
@@ -174,22 +188,12 @@ pub struct Machine {
     pub gpu: bool,
 
     /// How much memory the guest's GPU may hold, in mebibytes. `None` is libkrun's 8 GiB.
-    /// Ignored without [`gpu`](Machine::gpu).
+    /// Ignored without [`gpu`](MachineSpec::gpu).
     pub gpu_memory_mib: Option<u32>,
-
-    /// The volumes the guest sees, in the order they are mounted.
-    #[serde(default)]
-    pub volumes: Vec<VolumeMount>,
 
     /// Where the guest's own connections may go: the way out.
     #[serde(default)]
     pub network: Network,
-
-    /// TCP ports in the guest the machine's process reaches, each on its loopback at a port
-    /// of its choosing: the way in, which does not need a
-    /// [`network`](Machine::network).
-    #[serde(default)]
-    pub ports: Vec<u16>,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -450,32 +454,32 @@ mod tests {
         let mut config = Config::default();
         config.set_env(Some(vec!["A=1".to_string()]));
         let sent = Machine {
-            image: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
             rootfs: PathBuf::from("/store/rootfs/sha256/abc.vmdk"),
             config,
             snapshot: Some(Snapshot {
                 name: "work".to_string(),
                 path: PathBuf::from("/snapshot/work.ext4"),
             }),
-            vcpus: 2,
-            ram_mib: 2048,
-            gpu: false,
-            gpu_memory_mib: None,
+            spec: MachineSpec {
+                vcpus: 2,
+                ram_mib: 2048,
+                gpu: false,
+                gpu_memory_mib: None,
+                network: Network::Public,
+            },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),
                 at: "/data".to_string(),
                 read_only: true,
             }],
-            network: Network::Public,
             ports: vec![3000],
         };
         let read: Machine = serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
-        assert_eq!(read.image, sent.image);
         assert_eq!(read.rootfs, sent.rootfs);
         assert_eq!(read.config, sent.config);
         assert_eq!(read.snapshot, sent.snapshot);
         assert_eq!(read.volumes, sent.volumes);
-        assert_eq!(read.network, sent.network);
+        assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
     }
 }

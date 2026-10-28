@@ -156,6 +156,25 @@ export interface VolumeMountListOutputItem {
   mountType: MountType
 }
 
+/** Whose files a request names: a volume's, or a snapshot's. A snapshot in use, held by a sandbox, refuses every request. */
+export type FileRoot = { volume: string } | { snapshot: string }
+
+/** What a file or directory is. */
+export interface Metadata {
+  isDir: boolean
+  /** Its size in bytes; `0` for a directory. */
+  size: number
+  /** When it was last modified, in seconds since the Unix epoch, if the server says. */
+  modified?: number
+}
+
+/** One entry of a directory. */
+export interface DirEntry {
+  /** Its name in the directory: one path segment. */
+  name: string
+  metadata: Metadata
+}
+
 export interface SandboxListItem {
   id: string
   /** The digest of the image it was made from. */
@@ -258,6 +277,21 @@ export class Client {
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
   createVolumeMount(volume: string, path: string, source: MountSource): Promise<void>
   removeVolumeMount(volume: string, path: string): Promise<void>
+  /** A path is relative to its root, as `dir/file.txt`; the empty path is the root. */
+  statFile(root: FileRoot, path: string): Promise<Metadata>
+  readDir(root: FileRoot, path: string): Promise<DirEntry[]>
+  /** From `offset`, `length` bytes of the file or all that is left. */
+  readFile(root: FileRoot, path: string, offset?: number, length?: number): Promise<Buffer>
+  /** The whole file, created if it does not exist; its parent directory must exist. */
+  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string): Promise<void>
+  /** The parent must exist. */
+  createDir(root: FileRoot, path: string): Promise<void>
+  /** A directory goes with everything in it. */
+  removeFile(root: FileRoot, path: string): Promise<void>
+  /** What is at `to` is replaced if `overwrite`, and the move refused if not and something is there. */
+  renameFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
+  /** A directory with everything in it; `overwrite` as in `renameFile`. */
+  copyFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
   listSandbox(): Promise<SandboxListItem[]>
   initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
   /** Killed after `timeoutMs` if one is given. */

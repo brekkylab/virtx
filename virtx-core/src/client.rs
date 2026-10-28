@@ -1,14 +1,17 @@
-//! The typed client: each method of [`method`](crate::method) as a call, and what is done to
-//! images through the server's registry at `/images/v2/`, over a [`TransportClient`].
+//! The typed client: each method of [`method`](crate::method) as a call, each request to
+//! the files of a volume or a snapshot, and what is done to images through the server's
+//! registry at `/images/v2/`, over a [`TransportClient`].
 
 use std::{io, path::PathBuf};
 
+use bytes::Bytes;
 use futures_util::Stream;
 use http::HeaderMap;
 use tokio::process::Command;
 
 use crate::{
     Auth, Error,
+    files::{DirEntry, FileRoot, Metadata},
     image::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem,
         ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull, ImagePullArgs, ImagePullOutput,
@@ -307,6 +310,72 @@ impl Client {
         Ok(())
     }
 
+    /// What is at `path` in `root`.
+    pub async fn stat_file(&self, root: &FileRoot, path: &str) -> Result<Metadata, Error> {
+        self.inner.stat(root, path).await
+    }
+
+    /// The entries of the directory at `path` in `root`.
+    pub async fn read_dir(&self, root: &FileRoot, path: &str) -> Result<Vec<DirEntry>, Error> {
+        self.inner.read_dir(root, path).await
+    }
+
+    /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
+    pub async fn read_file(
+        &self,
+        root: &FileRoot,
+        path: &str,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<Bytes, Error> {
+        self.inner.read(root, path, offset, length).await
+    }
+
+    /// Write `content` as the whole file at `path` in `root`, creating it if it does not
+    /// exist. Its parent directory must exist.
+    pub async fn write_file(
+        &self,
+        root: &FileRoot,
+        path: &str,
+        content: impl Into<Bytes>,
+    ) -> Result<(), Error> {
+        self.inner.write(root, path, content).await
+    }
+
+    /// Create the directory at `path` in `root`, whose parent must exist.
+    pub async fn create_dir(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
+        self.inner.create_dir(root, path).await
+    }
+
+    /// Remove what is at `path` in `root`: a directory with everything in it.
+    pub async fn remove_file(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
+        self.inner.remove(root, path).await
+    }
+
+    /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
+    /// `overwrite`, and refused if not and something is there.
+    pub async fn rename_file(
+        &self,
+        root: &FileRoot,
+        from: &str,
+        to: &str,
+        overwrite: bool,
+    ) -> Result<(), Error> {
+        self.inner.rename(root, from, to, overwrite).await
+    }
+
+    /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
+    /// [`rename_file`](Self::rename_file) replaces what is at `to`.
+    pub async fn copy_file(
+        &self,
+        root: &FileRoot,
+        from: &str,
+        to: &str,
+        overwrite: bool,
+    ) -> Result<(), Error> {
+        self.inner.copy(root, from, to, overwrite).await
+    }
+
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<SandboxListOutputItem>, Error> {
         self.inner
@@ -360,7 +429,7 @@ impl Client {
     }
 }
 
-#[cfg(all(test, feature = "server"))]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use futures_util::StreamExt;
 
@@ -483,8 +552,12 @@ pub(crate) mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
     //! each of which starts the request and hands C its [`VirtxFuture`] or [`VirtxStream`].
 
-    use std::ffi::{CStr, c_char, c_int};
+    use std::{
+        ffi::{CStr, c_char, c_int},
+        slice,
+    };
 
+    use bytes::Bytes;
     use futures_util::StreamExt;
     use http::{HeaderMap, HeaderName, HeaderValue};
     use tokio::process::Command;
@@ -496,6 +569,7 @@ pub(crate) mod ffi {
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
         },
+        files::{FileMoveArgs, FilePathArgs, FileReadArgs},
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
@@ -1149,6 +1223,214 @@ pub(crate) mod ffi {
             let VolumeMountRemoveArgs { volume, path } = args?;
             client
                 .remove_volume_mount(volume, path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The files of a volume or a snapshot: what is at `path`, given
+    /// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+    /// relative to its root as `dir/file.txt`. Answers with
+    /// `{"is_dir": bool, "size": n, "modified": n}`, `modified` in seconds since the Unix epoch
+    /// and only if the server says.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_stat_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .stat_file(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The entries of the directory at `path`, given as `virtx_client_stat_file` takes it.
+    /// Answers with `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
+    /// `virtx_client_stat_file` answers it.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_read_dir(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .read_dir(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The file at `path`, given `{"volume": "...", "path": "...", "offset": n, "length": n}`,
+    /// `offset` and `length` optional: from `offset`, `length` bytes of it or all that is
+    /// left. Answers with the bytes read as they are, not as JSON.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_read_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FileReadArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future_raw(|client| async move {
+            let FileReadArgs {
+                root,
+                path,
+                offset,
+                length,
+            } = args?;
+            client
+                .read_file(&root, &path, offset, length)
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Writes the `data_len` bytes at `data` as the whole file at `path`, given as
+    /// `virtx_client_stat_file` takes it, creating it if it does not exist. Its parent
+    /// directory must exist. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`; `data` is `data_len` readable bytes, not read after this
+    /// returns.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_write_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+        data: *const u8,
+        data_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        let content = if data.is_null() {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(unsafe { slice::from_raw_parts(data, data_len) })
+        };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .write_file(&root, &path, content)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Creates the directory at `path`, given as `virtx_client_stat_file` takes it, whose
+    /// parent must exist. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_dir(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .create_dir(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Removes what is at `path`, given as `virtx_client_stat_file` takes it: a directory with
+    /// everything in it. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .remove_file(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Moves what is at `from` to `to` in the same volume or snapshot, given
+    /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
+    /// and false without it: whether to replace what is at `to`, which is otherwise refused.
+    /// Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_rename_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FileMoveArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FileMoveArgs {
+                root,
+                from,
+                to,
+                overwrite,
+            } = args?;
+            client
+                .rename_file(&root, &from, &to, overwrite)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Copies what is at `from` to `to`, a directory with everything in it, given as
+    /// `virtx_client_rename_file` takes it. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_copy_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FileMoveArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FileMoveArgs {
+                root,
+                from,
+                to,
+                overwrite,
+            } = args?;
+            client
+                .copy_file(&root, &from, &to, overwrite)
                 .await
                 .map_err(|e| e.to_string())
         })

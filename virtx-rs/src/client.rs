@@ -8,14 +8,15 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    Auth, ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput,
-    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs,
-    ImagePushOutput, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs,
-    SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
-    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRoot, ImageBuildArgs,
+    ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
+    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, Metadata,
+    MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput,
+    SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs,
+    SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs,
+    VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
+    VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -374,6 +375,101 @@ impl Client {
         self.call(self.api.virtx_client_remove_volume_mount, args)
     }
 
+    /// What is at `path` in `root`, a path relative to its root as `dir/file.txt`.
+    pub fn stat_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<Metadata> {
+        self.call(self.api.virtx_client_stat_file, self.at(root, path))
+    }
+
+    /// The entries of the directory at `path` in `root`.
+    pub fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
+        self.call(self.api.virtx_client_read_dir, self.at(root, path))
+    }
+
+    /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
+    pub fn read_file(
+        &self,
+        root: &FileRoot,
+        path: impl Into<String>,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Call<Vec<u8>> {
+        let args = FileReadArgs {
+            root: root.clone(),
+            path: path.into(),
+            offset,
+            length,
+        };
+        Call::raw(self.api, self.start(self.api.virtx_client_read_file, args))
+    }
+
+    /// Write `content` as the whole file at `path` in `root`, creating it if it does not
+    /// exist. Its parent directory must exist.
+    pub fn write_file(
+        &self,
+        root: &FileRoot,
+        path: impl Into<String>,
+        content: impl AsRef<[u8]>,
+    ) -> Call<()> {
+        let args = serde_json::to_vec(&self.at(root, path)).expect("a request's args encode");
+        let content = content.as_ref();
+        let future = unsafe {
+            (self.api.virtx_client_write_file)(
+                self.raw,
+                args.as_ptr(),
+                args.len(),
+                content.as_ptr(),
+                content.len(),
+            )
+        };
+        Call::new(self.api, future)
+    }
+
+    /// Create the directory at `path` in `root`, whose parent must exist.
+    pub fn create_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+        self.call(self.api.virtx_client_create_dir, self.at(root, path))
+    }
+
+    /// Remove what is at `path` in `root`: a directory with everything in it.
+    pub fn remove_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+        self.call(self.api.virtx_client_remove_file, self.at(root, path))
+    }
+
+    /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
+    /// `overwrite`, and refused if not and something is there.
+    pub fn rename_file(
+        &self,
+        root: &FileRoot,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        overwrite: bool,
+    ) -> Call<()> {
+        let args = FileMoveArgs {
+            root: root.clone(),
+            from: from.into(),
+            to: to.into(),
+            overwrite,
+        };
+        self.call(self.api.virtx_client_rename_file, args)
+    }
+
+    /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
+    /// [`rename_file`](Client::rename_file) replaces what is at `to`.
+    pub fn copy_file(
+        &self,
+        root: &FileRoot,
+        from: impl Into<String>,
+        to: impl Into<String>,
+        overwrite: bool,
+    ) -> Call<()> {
+        let args = FileMoveArgs {
+            root: root.clone(),
+            from: from.into(),
+            to: to.into(),
+            overwrite,
+        };
+        self.call(self.api.virtx_client_copy_file, args)
+    }
+
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<SandboxListOutputItem>> {
         Call::new(self.api, unsafe {
@@ -411,6 +507,14 @@ impl Client {
             sandbox: sandbox.into(),
         };
         self.call(self.api.virtx_client_close_sandbox, args)
+    }
+
+    /// `path` in `root`, as a files request names it.
+    fn at(&self, root: &FileRoot, path: impl Into<String>) -> FilePathArgs {
+        FilePathArgs {
+            root: root.clone(),
+            path: path.into(),
+        }
     }
 
     /// Start `request` with `args` as JSON, which the library has read by the time it returns.

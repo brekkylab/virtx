@@ -135,6 +135,17 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_list_volume_mount": _WITH_ARGS,
     "virtx_client_create_volume_mount": _WITH_ARGS,
     "virtx_client_remove_volume_mount": _WITH_ARGS,
+    "virtx_client_stat_file": _WITH_ARGS,
+    "virtx_client_read_dir": _WITH_ARGS,
+    "virtx_client_read_file": _WITH_ARGS,
+    "virtx_client_write_file": (
+        [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t],
+        _HANDLE,
+    ),
+    "virtx_client_create_dir": _WITH_ARGS,
+    "virtx_client_remove_file": _WITH_ARGS,
+    "virtx_client_rename_file": _WITH_ARGS,
+    "virtx_client_copy_file": _WITH_ARGS,
     "virtx_client_list_sandbox": _PLAIN,
     "virtx_client_init_sandbox": _WITH_ARGS,
     "virtx_client_exec_sandbox": _WITH_ARGS,
@@ -166,13 +177,14 @@ class Library:
             function.restype = restype
             setattr(self, name, function)
 
-    def take(self, status: int, out: _Bytes) -> Any:
-        """What the library wrote for ``status``, read and freed: the output, or raised."""
+    def take(self, status: int, out: _Bytes, raw: bool = False) -> Any:
+        """What the library wrote for ``status``, read and freed: the output, as JSON unless
+        ``raw``, or raised."""
         data = ctypes.string_at(out.data, out.len) if out.data else b""
         if out.data:
             self.virtx_bytes_free(out)
         if status == OK:
-            return json.loads(data)
+            return data if raw else json.loads(data)
         if status == ERROR:
             raise VirtxError(json.loads(data) if data else "the call failed")
         raise VirtxError(f"unknown status {status}")
@@ -188,13 +200,14 @@ class Library:
         status = poll(handle, _Waker(key, _wake, _release), ctypes.byref(out))
         return status, out, future
 
-    async def answer(self, handle: int) -> Any:
-        """Await the future ``handle``, freeing it after, or on cancelling, which cancels it."""
+    async def answer(self, handle: int, raw: bool = False) -> Any:
+        """Await the future ``handle``, freeing it after, or on cancelling, which cancels it.
+        Its answer is JSON, or bytes as they are if ``raw``."""
         try:
             while True:
                 status, out, woken = self._poll(self.virtx_future_poll, handle)
                 if status != PENDING:
-                    return self.take(status, out)
+                    return self.take(status, out, raw)
                 await woken
         finally:
             self.virtx_future_free(handle)

@@ -256,7 +256,10 @@ async fn serve_at(path: &str, methods: Methods, tokens: Option<Tokens>) -> Strin
 /// A client of [`methods`] over each transport.
 async fn clients() -> [TransportClient; 2] {
     let url = serve(methods(), None).await;
-    [TransportClient::connect(&url).unwrap(), piped(methods())]
+    [
+        TransportClient::connect(&url, HeaderMap::new()).unwrap(),
+        piped(methods()),
+    ]
 }
 
 /// What `count` sends as its `n`th progress, counting to `to`.
@@ -342,7 +345,10 @@ async fn dropping_a_call_cancels_it_on_the_server() {
     let url = serve(http, None).await;
     let (piped_methods, mut piped_dropped) = hanging();
     let cases = [
-        (TransportClient::connect(&url).unwrap(), &mut http_dropped),
+        (
+            TransportClient::connect(&url, HeaderMap::new()).unwrap(),
+            &mut http_dropped,
+        ),
         (piped(piped_methods), &mut piped_dropped),
     ];
     for (client, dropped) in cases {
@@ -359,7 +365,7 @@ async fn a_failed_post_fails_its_call() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     drop(listener);
-    let client = TransportClient::connect(&url).unwrap();
+    let client = TransportClient::connect(&url, HeaderMap::new()).unwrap();
     for _ in 0..2 {
         assert!(client.request::<String>("echo", ["hi"]).await.is_err());
     }
@@ -368,15 +374,40 @@ async fn a_failed_post_fails_its_call() {
 #[tokio::test]
 async fn an_http_error_fails_its_call_with_the_status() {
     let url = serve(methods(), Some(Tokens { users: vec![] })).await;
-    let client = TransportClient::connect(&url).unwrap();
+    let client = TransportClient::connect(&url, HeaderMap::new()).unwrap();
     let error = client.request::<String>("echo", ["hi"]).await.unwrap_err();
     assert!(error.to_string().contains("401"), "{error}");
+}
+
+#[tokio::test]
+async fn the_headers_given_at_connect_go_with_every_request() {
+    let mut methods = methods();
+    methods.add::<WhoAmI, _, _>(|_, extensions| async move {
+        Ok(extensions.get::<User>().expect("a user").0.clone())
+    });
+    let url = serve(
+        methods,
+        Some(Tokens {
+            users: vec!["alice"],
+        }),
+    )
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer alice".parse().unwrap());
+    let client = TransportClient::connect(&url, headers).unwrap();
+    for _ in 0..2 {
+        let user: String = client.request("user", [(); 0]).await.unwrap();
+        assert_eq!(user, "alice");
+    }
 }
 
 #[test]
 fn connect_refuses_anything_but_an_http_url() {
     for url in ["not a url", "file:///tmp/x"] {
-        assert!(TransportClient::connect(url).is_err(), "{url}");
+        assert!(
+            TransportClient::connect(url, HeaderMap::new()).is_err(),
+            "{url}"
+        );
     }
 }
 
@@ -384,7 +415,7 @@ fn connect_refuses_anything_but_an_http_url() {
 async fn rpc_is_under_the_base_url_with_or_without_its_slash() {
     let url = serve_at("/base/rpc", methods(), None).await;
     for base in [format!("{url}base"), format!("{url}base/")] {
-        let client = TransportClient::connect(&base).unwrap();
+        let client = TransportClient::connect(&base, HeaderMap::new()).unwrap();
         let answer: String = client.request("echo", ["hi"]).await.unwrap();
         assert_eq!(answer, "hi");
     }

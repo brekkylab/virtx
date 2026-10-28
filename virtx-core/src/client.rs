@@ -4,6 +4,7 @@
 use std::{io, path::PathBuf};
 
 use futures_util::Stream;
+use http::HeaderMap;
 use tokio::process::Command;
 
 use crate::{
@@ -46,9 +47,11 @@ impl Client {
         Ok(Client { inner })
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL.
-    pub fn connect(url: &str) -> anyhow::Result<Client> {
-        let inner = TransportClient::connect(url)?;
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `headers` with every
+    /// request: what the server asks of each, such as the `Authorization` its credentials go
+    /// in.
+    pub fn connect(url: &str, headers: HeaderMap) -> anyhow::Result<Client> {
+        let inner = TransportClient::connect(url, headers)?;
         Ok(Client { inner })
     }
 
@@ -467,6 +470,7 @@ pub(crate) mod ffi {
     use std::ffi::{CStr, c_char, c_int};
 
     use futures_util::StreamExt;
+    use http::{HeaderMap, HeaderName, HeaderValue};
     use tokio::process::Command;
 
     use super::Client;
@@ -519,22 +523,43 @@ pub(crate) mod ffi {
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), and write
-    /// the client, held once, to `client`.
+    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+    /// the `headers_len` headers in `headers` -- each its name then its value, so `2 *
+    /// headers_len` strings -- with every request, and write the client, held once, to
+    /// `client`. The headers are what the server asks of each request, such as the
+    /// `Authorization` its credentials go in.
     ///
     /// # Safety
     ///
-    /// `url` is NUL-terminated UTF-8. `client` is writable. `error` is null or writable.
+    /// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
+    /// `client` is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_connect(
         url: *const c_char,
+        headers: *const *const c_char,
+        headers_len: usize,
         client: *mut *mut VirtxClient,
         error: *mut VirtxBytes,
     ) -> c_int {
-        let opened = unsafe { CStr::from_ptr(url) }
-            .to_str()
-            .map_err(|e| e.to_string())
-            .and_then(|url| Runtime::open(|| Client::connect(url).map_err(|e| format!("{e:#}"))));
+        let opened = (|| {
+            let utf8 = |ptr| {
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_str()
+                    .map_err(|e| e.to_string())
+            };
+            let url = utf8(url)?;
+            let mut map = HeaderMap::with_capacity(headers_len);
+            for i in 0..headers_len {
+                let name = utf8(unsafe { *headers.add(2 * i) })?;
+                let value = utf8(unsafe { *headers.add(2 * i + 1) })?;
+                map.insert(
+                    HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|e| format!("header {name}: {e}"))?,
+                    HeaderValue::from_str(value).map_err(|e| format!("header {name}: {e}"))?,
+                );
+            }
+            Runtime::open(|| Client::connect(url, map).map_err(|e| format!("{e:#}")))
+        })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 

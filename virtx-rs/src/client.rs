@@ -66,14 +66,32 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). Blocks
-    /// until the client is made.
-    pub fn connect(url: impl AsRef<str>) -> Result<Client, Error> {
+    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+    /// `headers`, each a name and a value, with every request: what the server asks of each,
+    /// such as the `Authorization` its credentials go in. Blocks until the client is made.
+    pub fn connect(
+        url: impl AsRef<str>,
+        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
+        let mut strings = Vec::new();
+        for (name, value) in headers {
+            strings.push(c_string(name.as_ref())?);
+            strings.push(c_string(value.as_ref())?);
+        }
+        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
-        let status = unsafe { (api.virtx_client_connect)(url.as_ptr(), &mut raw, &mut error) };
+        let status = unsafe {
+            (api.virtx_client_connect)(
+                url.as_ptr(),
+                pointers.as_ptr(),
+                strings.len() / 2,
+                &mut raw,
+                &mut error,
+            )
+        };
         unsafe { opened(api, status, raw, error) }
     }
 

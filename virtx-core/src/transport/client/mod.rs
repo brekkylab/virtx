@@ -8,6 +8,7 @@ mod tcp;
 use std::io;
 
 use bytes::Bytes;
+use http::HeaderMap;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
@@ -58,10 +59,11 @@ impl TransportClient {
         Stdio::spawn(command).map(|stdio| Self::new(Connection::Stdio(stdio)))
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL. Nothing is sent until the
-    /// first request.
-    pub fn connect(url: &str) -> anyhow::Result<Self> {
-        Tcp::connect(url).map(|tcp| Self::new(Connection::Tcp(tcp)))
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `headers` with every
+    /// request: what the server asks of each, such as the `Authorization` its credentials go
+    /// in. Nothing is sent until the first request.
+    pub fn connect(url: &str, headers: HeaderMap) -> anyhow::Result<Self> {
+        Tcp::connect(url, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
     }
 
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.

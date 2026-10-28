@@ -81,13 +81,21 @@ int virtx_client_spawn(const char *program,
                        struct VirtxClient **client,
                        struct VirtxBytes *error);
 
-// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), and write
-// the client, held once, to `client`.
+// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+// the `headers_len` headers in `headers` -- each its name then its value, so `2 *
+// headers_len` strings -- with every request, and write the client, held once, to
+// `client`. The headers are what the server asks of each request, such as the
+// `Authorization` its credentials go in.
 //
 // # Safety
 //
-// `url` is NUL-terminated UTF-8. `client` is writable. `error` is null or writable.
-int virtx_client_connect(const char *url, struct VirtxClient **client, struct VirtxBytes *error);
+// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
+// `client` is writable. `error` is null or writable.
+int virtx_client_connect(const char *url,
+                         const char *const *headers,
+                         size_t headers_len,
+                         struct VirtxClient **client,
+                         struct VirtxBytes *error);
 
 // Hold `client` once more, for another holder to release.
 //

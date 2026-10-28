@@ -1,5 +1,6 @@
 //! The client's end of HTTP over TCP: the server at a base URL, each endpoint a path under it.
 
+use http::HeaderMap;
 use http_body_util::BodyExt;
 
 use super::Body;
@@ -12,9 +13,10 @@ pub(super) struct Tcp {
 }
 
 impl Tcp {
-    /// The server whose base URL is `url`, an `http` or `https` URL. Nothing is sent until the
-    /// first request.
-    pub(super) fn connect(url: &str) -> anyhow::Result<Tcp> {
+    /// The server whose base URL is `url`, an `http` or `https` URL, with `headers` sent on
+    /// every request to it -- the credentials it wants, such as `Authorization`. Nothing is
+    /// sent until the first request.
+    pub(super) fn connect(url: &str, headers: HeaderMap) -> anyhow::Result<Tcp> {
         let mut base = reqwest::Url::parse(url)?;
         anyhow::ensure!(
             matches!(base.scheme(), "http" | "https"),
@@ -24,7 +26,9 @@ impl Tcp {
             base.set_path(&format!("{}/", base.path()));
         }
         Ok(Tcp {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .build()?,
             base,
         })
     }

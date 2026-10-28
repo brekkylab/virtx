@@ -226,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_connection_is_carried_in_a_websocket_to_the_url_under_the_base() {
-        let client = TransportClient::connect(&serve().await).unwrap();
+        let client = TransportClient::connect(&serve().await, HeaderMap::new()).unwrap();
         let forward = PortForwarder::open(&client, "ports/open").await.unwrap();
         assert!(forward.address().ip().is_loopback());
 
@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_the_server_refuses_is_closed() {
-        let client = TransportClient::connect(&serve().await).unwrap();
+        let client = TransportClient::connect(&serve().await, HeaderMap::new()).unwrap();
         let forward = PortForwarder::open(&client, "ports/shut").await.unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
@@ -364,7 +364,9 @@ mod ffi {
             };
             // Nothing listens there: each connection to the forwarder is closed.
             let url = c"http://127.0.0.1:9/";
-            let status = unsafe { virtx_client_connect(url.as_ptr(), &mut client, &mut out) };
+            let status = unsafe {
+                virtx_client_connect(url.as_ptr(), std::ptr::null(), 0, &mut client, &mut out)
+            };
             assert_eq!(status, crate::ffi::VIRTX_OK);
 
             let args = br#"{"url": "ports/abc"}"#;

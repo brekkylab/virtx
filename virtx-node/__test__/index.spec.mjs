@@ -52,6 +52,10 @@ function read(host, port) {
   })
 }
 
+test('a header that cannot be sent is refused at connect', () => {
+  assert.throws(() => Client.connect('http://127.0.0.1:9/', { 'not a name': 'x' }), /not a name/)
+})
+
 test('a forwarder is on the loopback until it is closed', async () => {
   // Nothing listens there: each connection to the forwarder is closed.
   const client = Client.connect('http://127.0.0.1:9/')

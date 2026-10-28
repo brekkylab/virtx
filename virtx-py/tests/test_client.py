@@ -44,6 +44,11 @@ def test_a_streamed_event_reads_back() -> None:
     assert _event({"output": {"code": 0}}, dict) == virtx.Output({"code": 0})
 
 
+def test_a_header_that_cannot_be_sent_is_refused_at_connect() -> None:
+    with pytest.raises(VirtxError, match="not a name"):
+        Client.connect("http://127.0.0.1:9/", {"not a name": "x"})
+
+
 def test_a_forwarder_is_on_the_loopback_until_it_is_closed() -> None:
     # Nothing listens there: each connection to the forwarder is closed.
     with (

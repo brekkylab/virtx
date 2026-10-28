@@ -111,13 +111,18 @@ class Client:
         return cls._opened(lib, status, raw, error)
 
     @classmethod
-    def connect(cls, url: str) -> Client:
+    def connect(cls, url: str, headers: Mapping[str, str] | None = None) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
-        it)."""
+        it), sending ``headers`` with every request: what the server asks of each, such as the
+        ``Authorization`` its credentials go in."""
         lib = library()
+        strings = [s.encode() for name, value in (headers or {}).items() for s in (name, value)]
+        array = (ctypes.c_char_p * len(strings))(*strings)
         raw = ctypes.c_void_p()
         error = _Bytes()
-        status = lib.virtx_client_connect(url.encode(), ctypes.byref(raw), ctypes.byref(error))
+        status = lib.virtx_client_connect(
+            url.encode(), array, len(strings) // 2, ctypes.byref(raw), ctypes.byref(error)
+        )
         return cls._opened(lib, status, raw, error)
 
     @classmethod

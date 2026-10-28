@@ -56,7 +56,10 @@ const SIGNATURES = {
     'int',
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
-  virtx_client_connect: ['int', ['const char *', koffi.out(koffi.pointer('uintptr_t')), Out]],
+  virtx_client_connect: [
+    'int',
+    ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
+  ],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -299,12 +302,15 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it).
-  static connect(url) {
+  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+  // `headers`, a name to a value, with every request: what the server asks of each, such as the
+  // `Authorization` its credentials go in.
+  static connect(url, headers = {}) {
     const lib = library()
+    const strings = Object.entries(headers).flat()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect(url, raw, error)
+    const status = lib.virtx_client_connect(url, strings, strings.length / 2, raw, error)
     return opening(lib, status, raw, error)
   }
 

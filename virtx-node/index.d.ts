@@ -195,8 +195,12 @@ export interface SandboxInitOutput {
 export class Client {
   /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
   static spawn(program: string, args?: string[]): Client
-  /** Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). */
-  static connect(url: string): Client
+  /**
+   * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+   * `headers` with every request: what the server asks of each, such as the `Authorization` its
+   * credentials go in.
+   */
+  static connect(url: string, headers?: Record<string, string>): Client
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */

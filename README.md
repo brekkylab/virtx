@@ -374,6 +374,26 @@ async fn main() -> anyhow::Result<()> {
 Rebuilding under the same ref moves it to the new build, while `ImageSource::digest(&built.digest)` stays on this one.  
 `images.list()` shows what's built, and `images.remove(...)` deletes an image by its ref or digest.
 
+## Remote servers
+
+A client reaches a server over HTTP by its base URL. Credentials and the project go with every
+request: an API key of virtx cloud, say, which names its project itself.
+
+```python
+client = virtx.Client.connect("https://apne2.api.example.com", token=api_key)
+client = virtx.Client.from_env()  # VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+```
+
+```js
+const client = Client.connect('https://apne2.api.example.com', { token: apiKey })
+const fromEnv = Client.fromEnv() // VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+```
+
+```rust
+let client = Client::connect_with("https://apne2.api.example.com", Some(&api_key), None)?;
+let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+```
+
 ## Cache
 
 virtx keeps all persistent state in a single cache directory that you can safely delete at any time:

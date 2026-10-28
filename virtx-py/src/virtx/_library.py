@@ -98,6 +98,10 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         ctypes.c_int,
     ),
     "virtx_client_connect": ([ctypes.c_char_p, ctypes.POINTER(_HANDLE), _OUT], ctypes.c_int),
+    "virtx_client_connect_with": (
+        [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(_HANDLE), _OUT],
+        ctypes.c_int,
+    ),
     "virtx_client_retain": ([_HANDLE], None),
     "virtx_client_release": ([_HANDLE], None),
     "virtx_client_build_image": _WITH_ARGS,

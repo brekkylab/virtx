@@ -73,6 +73,44 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
+    /// Reach the server at `url`, sending `token` as `Authorization: Bearer` and `project` as
+    /// `virtx-project` with every request, when given: an API key of virtx cloud, say, or a
+    /// user's access token and the project it is for.
+    pub fn connect_with(
+        url: impl AsRef<str>,
+        token: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Client, Error> {
+        let api = api()?;
+        let url = c_string(url.as_ref())?;
+        let token = token.map(c_string).transpose()?;
+        let project = project.map(c_string).transpose()?;
+        let as_ptr = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        let mut raw = ptr::null_mut();
+        let mut error = VirtxBytes::empty();
+        let status = unsafe {
+            (api.virtx_client_connect_with)(
+                url.as_ptr(),
+                as_ptr(&token),
+                as_ptr(&project),
+                &mut raw,
+                &mut error,
+            )
+        };
+        unsafe { opened(api, status, raw, error) }
+    }
+
+    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+    pub fn from_env() -> Result<Client, Error> {
+        let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
+        let url = var("VIRTX_URL").ok_or_else(|| Error::Call("VIRTX_URL is not set".to_owned()))?;
+        Client::connect_with(
+            url,
+            var("VIRTX_API_KEY").as_deref(),
+            var("VIRTX_PROJECT").as_deref(),
+        )
+    }
+
     /// The `VirtxClient*` this holds, still held by it: for another module over the same
     /// library to [`from_raw`](Client::from_raw), or to retain itself.
     pub fn as_raw(&self) -> *mut c_void {

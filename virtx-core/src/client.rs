@@ -43,7 +43,17 @@ impl Client {
 
     /// Reach the server at `url`, its base `http` or `https` URL.
     pub fn connect(url: &str) -> anyhow::Result<Client> {
-        let inner = TransportClient::connect(url)?;
+        Self::connect_with(url, None, None)
+    }
+
+    /// Reach the server at `url`, sending `token` (`Authorization: Bearer`) and `project`
+    /// (`virtx-project`) with every request, when given.
+    pub fn connect_with(
+        url: &str,
+        token: Option<&str>,
+        project: Option<&str>,
+    ) -> anyhow::Result<Client> {
+        let inner = TransportClient::connect_with(url, token, project)?;
         Ok(Client { inner })
     }
 
@@ -370,6 +380,40 @@ pub(crate) mod ffi {
             .to_str()
             .map_err(|e| e.to_string())
             .and_then(|url| Runtime::open(|| Client::connect(url).map_err(|e| format!("{e:#}"))));
+        unsafe { share(opened.map(VirtxClient), client, error) }
+    }
+
+    /// As [`virtx_client_connect`], sending `token` as `Authorization: Bearer` and `project`
+    /// as `virtx-project` with every request. Either may be null, for none.
+    ///
+    /// # Safety
+    ///
+    /// `url` is NUL-terminated UTF-8, and so are `token` and `project` unless null. `client`
+    /// is writable. `error` is null or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_connect_with(
+        url: *const c_char,
+        token: *const c_char,
+        project: *const c_char,
+        client: *mut *mut VirtxClient,
+        error: *mut VirtxBytes,
+    ) -> c_int {
+        let text = |p: *const c_char| -> Result<Option<&str>, String> {
+            match p.is_null() {
+                true => Ok(None),
+                false => unsafe { CStr::from_ptr(p) }
+                    .to_str()
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+            }
+        };
+        let opened = (|| {
+            let url = text(url)?.ok_or("no url")?;
+            let (token, project) = (text(token)?, text(project)?);
+            Runtime::open(|| {
+                Client::connect_with(url, token, project).map_err(|e| format!("{e:#}"))
+            })
+        })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 

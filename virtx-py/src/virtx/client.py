@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import ctypes
 import json
+import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -98,14 +99,29 @@ class Client:
         return cls._opened(lib, status, raw, error)
 
     @classmethod
-    def connect(cls, url: str) -> Client:
+    def connect(cls, url: str, token: str | None = None, project: str | None = None) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
-        it)."""
+        it), sending ``token`` as ``Authorization: Bearer`` and ``project`` as ``virtx-project``
+        with every request when given: an API key of virtx cloud, say."""
         lib = library()
         raw = ctypes.c_void_p()
         error = _Bytes()
-        status = lib.virtx_client_connect(url.encode(), ctypes.byref(raw), ctypes.byref(error))
+        encoded = [None if v is None else v.encode() for v in (token, project)]
+        status = lib.virtx_client_connect_with(
+            url.encode(), encoded[0], encoded[1], ctypes.byref(raw), ctypes.byref(error)
+        )
         return cls._opened(lib, status, raw, error)
+
+    @classmethod
+    def from_env(cls) -> Client:
+        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_PROJECT`` if
+        set."""
+        url = os.environ.get("VIRTX_URL")
+        if not url:
+            raise VirtxError("VIRTX_URL is not set")
+        return cls.connect(
+            url, os.environ.get("VIRTX_API_KEY") or None, os.environ.get("VIRTX_PROJECT") or None
+        )
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:

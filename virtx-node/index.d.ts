@@ -156,8 +156,14 @@ export interface SandboxInitOutput {
 export class Client {
   /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
   static spawn(program: string, args?: string[]): Client
-  /** Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). */
-  static connect(url: string): Client
+  /**
+   * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+   * `token` as `Authorization: Bearer` and `project` as `virtx-project` with every request when
+   * given: an API key of virtx cloud, say.
+   */
+  static connect(url: string, options?: { token?: string | null; project?: string | null }): Client
+  /** Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set. */
+  static fromEnv(): Client
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */

@@ -334,6 +334,69 @@ async fn an_http_error_fails_its_call_with_the_status() {
     assert!(error.to_string().contains("401"), "{error}");
 }
 
+#[tokio::test]
+async fn a_client_sends_its_token_and_project_with_every_request() {
+    let url = serve(
+        methods(),
+        Some(Tokens {
+            users: vec!["alice"],
+        }),
+    )
+    .await;
+    let client = TransportClient::connect_with(&url, Some("alice"), Some("demo")).unwrap();
+    for _ in 0..2 {
+        let answer: String = client.request("echo", ["hi"]).await.unwrap();
+        assert_eq!(answer, "hi");
+    }
+    let stranger = TransportClient::connect_with(&url, Some("mallory"), None).unwrap();
+    let error = stranger
+        .request::<String>("echo", ["hi"])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("403"), "{error}");
+    assert!(TransportClient::connect_with(&url, Some("bad\ntoken"), None).is_err());
+}
+
+#[tokio::test]
+async fn the_project_is_sent_as_its_header() {
+    // A server that answers every call with the project its request named.
+    let router = axum::Router::new().route(
+        "/rpc",
+        axum::routing::post(|headers: HeaderMap, body: axum::body::Bytes| async move {
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let project = headers
+                .get("virtx-project")
+                .map(|v| v.to_str().unwrap().to_owned());
+            (
+                [("content-type", "application/json")],
+                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": project })
+                    .to_string(),
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let named = TransportClient::connect_with(&url, None, Some("demo")).unwrap();
+    assert_eq!(
+        named
+            .request::<Option<String>>("any", [(); 0])
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("demo")
+    );
+    let unnamed = TransportClient::connect(&url).unwrap();
+    assert_eq!(
+        unnamed
+            .request::<Option<String>>("any", [(); 0])
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 #[test]
 fn connect_refuses_anything_but_an_http_url() {
     for url in ["not a url", "file:///tmp/x"] {

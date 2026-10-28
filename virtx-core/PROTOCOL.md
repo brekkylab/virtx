@@ -34,6 +34,10 @@ The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bea
 How the client obtains the token is outside this protocol.
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
+A server that keeps projects apart, each with its own snapshots, volumes and sandboxes, takes the project a request is for in the `virtx-project` header.
+A credential that is a project's own, such as an API key, names its project already, and the header MAY be left out.
+A server answers `400 Bad Request` to a request that names no project when it needs one, and `403 Forbidden` to one naming a project the credentials do not reach.
+
 #### Origin
 
 A web page could reach a server through DNS rebinding, so the server MUST check the `Origin` header of every request.

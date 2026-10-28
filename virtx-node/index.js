@@ -57,6 +57,10 @@ const SIGNATURES = {
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
   virtx_client_connect: ['int', ['const char *', koffi.out(koffi.pointer('uintptr_t')), Out]],
+  virtx_client_connect_with: [
+    'int',
+    ['const char *', 'const char *', 'const char *', koffi.out(koffi.pointer('uintptr_t')), Out],
+  ],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -290,13 +294,25 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it).
-  static connect(url) {
+  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+  // `token` as `Authorization: Bearer` and `project` as `virtx-project` with every request when
+  // given: an API key of virtx cloud, say.
+  static connect(url, { token = null, project = null } = {}) {
     const lib = library()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect(url, raw, error)
+    const status = lib.virtx_client_connect_with(url, token, project, raw, error)
     return opening(lib, status, raw, error)
+  }
+
+  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+  static fromEnv() {
+    const url = process.env.VIRTX_URL
+    if (!url) throw new VirtxError('VIRTX_URL is not set')
+    return Client.connect(url, {
+      token: process.env.VIRTX_API_KEY || null,
+      project: process.env.VIRTX_PROJECT || null,
+    })
   }
 
   // Take over one hold of the `VirtxClient*` `raw`, as `intoRaw` or C's `virtx_client_retain`

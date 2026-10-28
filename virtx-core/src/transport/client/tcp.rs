@@ -5,6 +5,10 @@ use http_body_util::BodyExt;
 
 use super::Body;
 
+/// The header a request names its project in, on a server that keeps projects apart
+/// (PROTOCOL.md, Authentication).
+const PROJECT_HEADER: &str = "virtx-project";
+
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
     pub(super) http: reqwest::Client,
@@ -13,9 +17,14 @@ pub(super) struct Tcp {
 }
 
 impl Tcp {
-    /// The server whose base URL is `url`, an `http` or `https` URL. Nothing is sent until the
-    /// first request.
-    pub(super) fn connect(url: &str) -> anyhow::Result<Tcp> {
+    /// The server whose base URL is `url`, an `http` or `https` URL. Every request carries
+    /// `token` as `Authorization: Bearer`, and `project` as `virtx-project`, when given.
+    /// Nothing is sent until the first request.
+    pub(super) fn connect(
+        url: &str,
+        token: Option<&str>,
+        project: Option<&str>,
+    ) -> anyhow::Result<Tcp> {
         let mut base = reqwest::Url::parse(url)?;
         anyhow::ensure!(
             matches!(base.scheme(), "http" | "https"),
@@ -24,8 +33,22 @@ impl Tcp {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
+        let mut headers = http::HeaderMap::new();
+        if let Some(token) = token {
+            let mut value = http::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_| anyhow::anyhow!("the token is not one an HTTP header can carry"))?;
+            value.set_sensitive(true);
+            headers.insert(http::header::AUTHORIZATION, value);
+        }
+        if let Some(project) = project {
+            let value = http::HeaderValue::from_str(project)
+                .map_err(|_| anyhow::anyhow!("the project is not one an HTTP header can carry"))?;
+            headers.insert(PROJECT_HEADER, value);
+        }
         Ok(Tcp {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .build()?,
             base,
         })
     }

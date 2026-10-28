@@ -91,7 +91,18 @@ impl TransportClient {
     /// Reach the server at `url`, its base `http` or `https` URL. Nothing is sent until the
     /// first request.
     pub fn connect(url: &str) -> anyhow::Result<Self> {
-        Tcp::connect(url).map(|tcp| Self::new(Connection::Tcp(tcp)))
+        Self::connect_with(url, None, None)
+    }
+
+    /// As [`connect`](Self::connect), sending `token` as `Authorization: Bearer` and `project`
+    /// as `virtx-project` with every request: what a server reachable from other machines
+    /// asks, such as an API key and, with a user's token, the project it is for.
+    pub fn connect_with(
+        url: &str,
+        token: Option<&str>,
+        project: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        Tcp::connect(url, token, project).map(|tcp| Self::new(Connection::Tcp(tcp)))
     }
 
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.

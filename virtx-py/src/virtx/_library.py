@@ -114,6 +114,11 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_init_sandbox": _WITH_ARGS,
     "virtx_client_exec_sandbox": _WITH_ARGS,
     "virtx_client_close_sandbox": _WITH_ARGS,
+    "virtx_port_forwarder_open": (
+        [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],
+        ctypes.c_int,
+    ),
+    "virtx_port_forwarder_free": ([_HANDLE], None),
     "virtx_bytes_free": ([_Bytes], None),
     "virtx_future_poll": ([_HANDLE, _Waker, _OUT], ctypes.c_int),
     "virtx_future_free": ([_HANDLE], None),

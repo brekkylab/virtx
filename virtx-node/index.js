@@ -38,7 +38,8 @@ class VirtxError extends Error {
   }
 }
 
-// Handles (`VirtxClient*`, `VirtxFuture*`, `VirtxStream*`) are held as their addresses.
+// Handles (`VirtxClient*`, `VirtxFuture*`, `VirtxStream*`, `VirtxPortForwarder*`) are held as
+// their addresses.
 const VirtxBytes = koffi.struct('VirtxBytes', { data: 'uint8_t *', len: 'size_t' })
 const Callback = koffi.proto('void VirtxCallback(uintptr_t data)')
 const VirtxWaker = koffi.struct('VirtxWaker', {
@@ -72,6 +73,11 @@ const SIGNATURES = {
   virtx_client_init_sandbox: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
   virtx_client_close_sandbox: WITH_ARGS,
+  virtx_port_forwarder_open: [
+    'int',
+    ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
+  ],
+  virtx_port_forwarder_free: ['void', ['uintptr_t']],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_future_free: ['void', ['uintptr_t']],
@@ -424,9 +430,64 @@ class Client {
 // `await using`, where the runtime has it.
 if (Symbol.asyncDispose) Client.prototype[Symbol.asyncDispose] = Client.prototype.close
 
+// Each forwarder not closed, freed when it is collected.
+const forwarders = new FinalizationRegistry(({ lib, raw }) => {
+  lib.virtx_port_forwarder_free(raw)
+})
+
+// A sandbox's port at an address on this machine's loopback, until it is closed.
+//
+// It runs on its client's session, so the client's last close stops it. Over stdio the server is
+// on this machine and its own address is the forwarder's; over HTTP each connection to the
+// forwarder is carried to the port in a WebSocket.
+class PortForwarder {
+  constructor(raw, lib, address) {
+    this._raw = raw
+    this._lib = lib
+    // Where the port is reached, as `host:port`.
+    this.address = address
+    this._token = {}
+    forwarders.register(this, { lib, raw }, this._token)
+  }
+
+  // Forward the port a sandbox answered `url` for, as `initSandbox` and `listSandbox` answer one
+  // in `ports`, over `client`'s session. Blocks until it is open.
+  static open(client, url) {
+    const lib = client._lib
+    const bytes = encode({ url })
+    const raw = [0]
+    const out = {}
+    const status = lib.virtx_port_forwarder_open(client._held(), bytes, bytes.length, raw, out)
+    const { address } = lib.take(status, out)
+    return new PortForwarder(raw[0], lib, address)
+  }
+
+  // The address's host: a loopback IP.
+  get host() {
+    return this.address.slice(0, this.address.lastIndexOf(':')).replace(/^\[|\]$/g, '')
+  }
+
+  // The address's port.
+  get port() {
+    return Number(this.address.slice(this.address.lastIndexOf(':') + 1))
+  }
+
+  // Stop forwarding. Closing twice does nothing.
+  close() {
+    if (this._raw === null) return
+    forwarders.unregister(this._token)
+    this._lib.virtx_port_forwarder_free(this._raw)
+    this._raw = null
+  }
+}
+
+// `using`, where the runtime has it.
+if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
+
 module.exports = {
   Client,
   LIBRARY_ENV,
+  PortForwarder,
   Recipe,
   VirtxError,
   imageName,

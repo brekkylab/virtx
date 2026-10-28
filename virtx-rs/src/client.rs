@@ -26,8 +26,8 @@ use crate::{
 /// answers every request not yet answered with an error. Each method starts its request at
 /// once and returns a [`Call`] or [`Events`] to await, or to wait on without a runtime.
 pub struct Client {
-    api: &'static Api,
-    raw: *mut Opaque,
+    pub(crate) api: &'static Api,
+    pub(crate) raw: *mut Opaque,
 }
 
 // A `VirtxClient` is shared across threads by its reference count.

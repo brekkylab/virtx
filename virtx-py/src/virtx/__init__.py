@@ -9,6 +9,9 @@ is, with ``Client.as_raw``, ``Client.into_raw`` and ``Client.from_raw``.
 Requests take and answer the types of ``virtx.image`` and ``virtx.volume``, and plain values
 elsewhere: what the wire calls a map is a ``dict``. A request that streams yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
+
+A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
+the sandbox answered for it: an address on this machine's loopback.
 """
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
@@ -21,6 +24,7 @@ from .image import (
     Recipe,
     image_name,
 )
+from .portforward import PortForwarder
 from .volume import (
     GdriveSource,
     MountSource,
@@ -46,6 +50,7 @@ __all__ = [
     "NotionSource",
     "OnedriveSource",
     "Output",
+    "PortForwarder",
     "Progress",
     "Recipe",
     "VirtxError",

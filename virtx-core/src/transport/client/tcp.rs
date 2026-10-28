@@ -7,9 +7,9 @@ use super::Body;
 
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
-    http: reqwest::Client,
+    pub(super) http: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
-    base: reqwest::Url,
+    pub(super) base: reqwest::Url,
 }
 
 impl Tcp {

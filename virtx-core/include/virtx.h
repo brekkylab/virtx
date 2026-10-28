@@ -6,8 +6,10 @@
  * a stream with virtx_stream_poll_next: each answers VIRTX_PENDING and keeps the waker given
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
- * left, and ends after an error. Free every VirtxBytes written with virtx_bytes_free, every
- * future with virtx_future_free, and every stream with virtx_stream_free.
+ * left, and ends after an error. A port forwarder opens over a client, blocking as opening
+ * one does, and forwards until it is freed or the client's last release. Free every VirtxBytes
+ * written with virtx_bytes_free, every future with virtx_future_free, every stream with
+ * virtx_stream_free, and every forwarder with virtx_port_forwarder_free.
  */
 
 #ifndef VIRTX_H
@@ -38,6 +40,9 @@ typedef struct VirtxClient VirtxClient;
 
 // A request that answers once: polled until it answers, then freed.
 typedef struct VirtxFuture VirtxFuture;
+
+// A `PortForwarder`, as C holds it: held for the forwarding it does until it is freed.
+typedef struct VirtxPortForwarder VirtxPortForwarder;
 
 // A request that answers item by item: polled for each until it ends, then freed.
 typedef struct VirtxStream VirtxStream;
@@ -314,6 +319,32 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 //
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
+
+// Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
+// `virtx_client_init_sandbox` or `virtx_client_list_sandbox` answered it, to this machine's
+// loopback: write the forwarder to `forwarder`, and where it is to `out`, as
+// `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
+//
+// It runs on `client`'s runtime, so the client's last release stops it, and is freed with
+// `virtx_port_forwarder_free`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`, and `args` as in
+// `virtx_client_build_image`. `forwarder` and `out` are writable. Not called from a `wake`,
+// which runs on the runtime this blocks on.
+int virtx_port_forwarder_open(struct VirtxClient *client,
+                              const uint8_t *args,
+                              size_t args_len,
+                              struct VirtxPortForwarder **forwarder,
+                              struct VirtxBytes *out);
+
+// Stop `forwarder` and free it. Null does nothing.
+//
+// # Safety
+//
+// `forwarder` is null, or one `virtx_port_forwarder_open` wrote, not used again.
+void virtx_port_forwarder_free(struct VirtxPortForwarder *forwarder);
 
 #ifdef __cplusplus
 }  // extern "C"

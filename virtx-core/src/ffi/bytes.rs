@@ -35,7 +35,7 @@ pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Re
 }
 
 /// `output` as a status, and its JSON or its error's.
-pub(super) fn encode<T: Serialize>(output: Result<T, String>) -> (c_int, Vec<u8>) {
+pub(crate) fn encode<T: Serialize>(output: Result<T, String>) -> (c_int, Vec<u8>) {
     let encoded = output.and_then(|output| serde_json::to_vec(&output).map_err(|e| e.to_string()));
     match encoded {
         Ok(bytes) => (VIRTX_OK, bytes),
@@ -50,7 +50,7 @@ pub(super) fn failure(message: impl Into<String>) -> (c_int, Vec<u8>) {
 }
 
 /// Write `bytes` to `out` for C to free, unless `out` is null.
-pub(super) unsafe fn write(out: *mut VirtxBytes, bytes: Vec<u8>) {
+pub(crate) unsafe fn write(out: *mut VirtxBytes, bytes: Vec<u8>) {
     if out.is_null() {
         return;
     }

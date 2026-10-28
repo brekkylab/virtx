@@ -186,3 +186,21 @@ export class Client {
   execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }, string>>
   closeSandbox(sandbox: string): Promise<void>
 }
+
+/**
+ * A sandbox's port at an address on this machine's loopback, until it is closed. It runs on its
+ * client's session, so the client's last close stops it.
+ */
+export class PortForwarder {
+  /** Forward the port a sandbox answered `url` for, as `SandboxPort.url`, over `client`'s session. Blocks until it is open. */
+  static open(client: Client, url: string): PortForwarder
+  /** Where the port is reached, as `host:port`. */
+  readonly address: string
+  /** The address's host: a loopback IP. */
+  readonly host: string
+  /** The address's port. */
+  readonly port: number
+  /** Stop forwarding. Closing twice does nothing. */
+  close(): void
+  [Symbol.dispose](): void
+}

@@ -8,7 +8,9 @@ use std::{
     sync::OnceLock,
 };
 
-use virtx_rs::{Client, Error};
+use std::{io::Read, net::TcpStream};
+
+use virtx_rs::{Client, Error, PortForwarder};
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
 /// one in `deps`: that is the dependency's, built without the C ABI.
@@ -56,6 +58,21 @@ fn a_second_library_is_refused() {
     virtx_rs::load(library()).unwrap();
 }
 
+fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
+    // Nothing listens there: each connection to the forwarder is closed.
+    let client = Client::connect("http://127.0.0.1:9/").unwrap();
+    let forwarder = PortForwarder::open(&client, "ports/abc").unwrap();
+    let address = forwarder.address();
+    assert!(address.ip().is_loopback());
+    let mut read = Vec::new();
+    let mut stream = TcpStream::connect(address).unwrap();
+    assert_eq!(stream.read_to_end(&mut read).unwrap(), 0);
+
+    drop(forwarder);
+    drop(client);
+    assert!(TcpStream::connect(address).is_err());
+}
+
 fn main() -> ExitCode {
     virtx_rs::load(library()).unwrap();
 
@@ -67,6 +84,7 @@ fn main() -> ExitCode {
     let tests = tests![
         spawning_nothing_fails_with_a_message,
         a_second_library_is_refused,
+        a_forwarder_is_on_the_loopback_until_it_is_dropped,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

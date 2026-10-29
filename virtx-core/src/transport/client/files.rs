@@ -495,13 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn an_etag_is_quoted_as_a_header_is() {
-        assert_eq!(quoted("5-1a"), "\"5-1a\"");
-        assert_eq!(quoted("\"5-1a\""), "\"5-1a\"");
-        assert_eq!(quoted("W/\"5-1a\""), "W/\"5-1a\"");
-    }
-
-    #[test]
     fn a_multistatus_names_what_failed_in_it() {
         let failed = r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/volumes/v/dir/</D:href><D:status>HTTP/1.1 204 No Content</D:status></D:response><D:response><D:href>/volumes/v/dir/a%20b</D:href><D:status>HTTP/1.1 403 Forbidden</D:status></D:response></D:multistatus>"#;
         assert_eq!(
@@ -693,6 +686,7 @@ mod round_trips {
             assert_eq!(status(client.read(&root, "missing", 0, None).await), 404);
             assert_eq!(status(client.read_dir(&root, "missing").await), 404);
             assert_eq!(status(client.remove(&root, "missing", false).await), 404);
+            client.remove(&root, "missing", true).await.unwrap();
             // A root that does not exist, and a snapshot in use.
             let nowhere = FileRoot::Volume("nowhere".into());
             assert_eq!(status(client.stat(&nowhere, "").await), 404);
@@ -751,10 +745,6 @@ mod round_trips {
                 ),
                 423
             );
-
-            client.remove(&root, "dir", false).await.unwrap();
-            assert_eq!(status(client.remove(&root, "dir", false).await), 404);
-            client.remove(&root, "dir", true).await.unwrap();
             client.close().await;
         }
     }

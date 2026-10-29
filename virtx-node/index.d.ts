@@ -294,7 +294,6 @@ export class Client {
    * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
    */
   writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
-  writeText(root: FileRoot, path: string, text: string, ifMatch?: string): Promise<void>
   /** The parent must exist. */
   createDir(root: FileRoot, path: string): Promise<void>
   /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */

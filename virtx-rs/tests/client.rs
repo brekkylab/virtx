@@ -108,7 +108,7 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
 
     // Text, an etag to write over, and what is there, told without an error.
     client
-        .write_text(&volume, "dir/t.txt", "텍스트", None)
+        .write_file(&volume, "dir/t.txt", "텍스트", None)
         .unwrap_wait();
     assert_eq!(
         client.read_text(&volume, "dir/t.txt").wait().unwrap(),
@@ -121,10 +121,10 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .etag
         .unwrap();
     client
-        .write_text(&volume, "dir/t.txt", "text 2", Some(&etag))
+        .write_file(&volume, "dir/t.txt", "text 2", Some(&etag))
         .unwrap_wait();
     let stale = client
-        .write_text(&volume, "dir/t.txt", "text 3", Some(&etag))
+        .write_file(&volume, "dir/t.txt", "text 3", Some(&etag))
         .wait()
         .unwrap_err();
     assert!(stale.to_string().contains("412"), "{stale}");

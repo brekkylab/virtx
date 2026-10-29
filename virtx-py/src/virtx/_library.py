@@ -148,7 +148,6 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_read_file": _WITH_ARGS,
     "virtx_client_read_text": _WITH_ARGS,
     "virtx_client_write_file": _WITH_DATA,
-    "virtx_client_write_text": _WITH_DATA,
     "virtx_client_create_dir": _WITH_ARGS,
     "virtx_client_create_dir_all": _WITH_ARGS,
     "virtx_client_remove_file": _WITH_ARGS,

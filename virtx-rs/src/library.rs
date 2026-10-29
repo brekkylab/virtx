@@ -146,7 +146,6 @@ api! {
     virtx_client_read_file: WithArgs,
     virtx_client_read_text: WithArgs,
     virtx_client_write_file: WithData,
-    virtx_client_write_text: WithData,
     virtx_client_create_dir: WithArgs,
     virtx_client_create_dir_all: WithArgs,
     virtx_client_remove_file: WithArgs,

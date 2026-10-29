@@ -365,19 +365,6 @@ impl Client {
         self.inner.write(root, path, content, if_match).await
     }
 
-    /// Write `text` as the whole file at `path` in `root`, as [`write_file`](Self::write_file).
-    pub async fn write_text(
-        &self,
-        root: &FileRoot,
-        path: &str,
-        text: &str,
-        if_match: Option<&str>,
-    ) -> Result<(), Error> {
-        self.inner
-            .write(root, path, text.as_bytes().to_vec(), if_match)
-            .await
-    }
-
     /// Create the directory at `path` in `root`, whose parent must exist.
     pub async fn create_dir(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
         self.inner.create_dir(root, path).await
@@ -1468,41 +1455,6 @@ pub(crate) mod ffi {
             } = args?;
             client
                 .write_file(&root, &path, content, if_match.as_deref())
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// Writes the `text_len` bytes at `text`, which have to be UTF-8, as the whole file at
-    /// `path`, given as `virtx_client_write_file` takes it. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_write_file`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_write_text(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-        text: *const u8,
-        text_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<FileWriteArgs>(args, args_len) };
-        let text = if text.is_null() {
-            Ok(String::new())
-        } else {
-            std::str::from_utf8(unsafe { slice::from_raw_parts(text, text_len) })
-                .map(str::to_owned)
-                .map_err(|e| format!("the text is not UTF-8: {e}"))
-        };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let FileWriteArgs {
-                root,
-                path,
-                if_match,
-            } = args?;
-            client
-                .write_text(&root, &path, &text?, if_match.as_deref())
                 .await
                 .map_err(|e| e.to_string())
         })

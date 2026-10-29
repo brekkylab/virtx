@@ -421,27 +421,16 @@ class Client:
         return await self._call("virtx_client_read_text", _args(**root.to_dict(), path=path))
 
     async def write_file(
-        self, root: FileRoot, path: str, content: bytes, if_match: str | None = None
+        self, root: FileRoot, path: str, content: bytes | str, if_match: str | None = None
     ) -> None:
-        """Write ``content`` as the whole file at ``path`` in ``root``, creating it if it does
-        not exist. Its parent directory must exist. With ``if_match``, the ``etag`` a
-        :class:`Metadata` of the file gave, the write goes only while the file still has it,
-        and is refused with a ``412`` otherwise."""
+        """Write ``content``, a ``str`` as UTF-8, as the whole file at ``path`` in ``root``,
+        creating it if it does not exist. Its parent directory must exist. With ``if_match``,
+        the ``etag`` a :class:`Metadata` of the file gave, the write goes only while the file
+        still has it, and is refused with a ``412`` otherwise."""
         args = _args(**root.to_dict(), path=path, if_match=if_match)
-        content = bytes(content)
+        content = content.encode() if isinstance(content, str) else bytes(content)
         handle = self._lib.virtx_client_write_file(
             self._held(), args, len(args), content, len(content)
-        )
-        await self._lib.answer(handle)
-
-    async def write_text(
-        self, root: FileRoot, path: str, text: str, if_match: str | None = None
-    ) -> None:
-        """Write ``text`` as the whole file at ``path`` in ``root``, as :meth:`write_file`."""
-        args = _args(**root.to_dict(), path=path, if_match=if_match)
-        encoded = text.encode()
-        handle = self._lib.virtx_client_write_text(
-            self._held(), args, len(args), encoded, len(encoded)
         )
         await self._lib.answer(handle)
 

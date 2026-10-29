@@ -433,48 +433,15 @@ impl Client {
         content: impl AsRef<[u8]>,
         if_match: Option<&str>,
     ) -> Call<()> {
-        self.write_with(
-            self.api.virtx_client_write_file,
-            root,
-            path,
-            content.as_ref(),
-            if_match,
-        )
-    }
-
-    /// Write `text` as the whole file at `path` in `root`, as [`write_file`](Self::write_file).
-    pub fn write_text(
-        &self,
-        root: &FileRoot,
-        path: impl Into<String>,
-        text: &str,
-        if_match: Option<&str>,
-    ) -> Call<()> {
-        self.write_with(
-            self.api.virtx_client_write_text,
-            root,
-            path,
-            text.as_bytes(),
-            if_match,
-        )
-    }
-
-    fn write_with(
-        &self,
-        write: crate::library::WithData,
-        root: &FileRoot,
-        path: impl Into<String>,
-        content: &[u8],
-        if_match: Option<&str>,
-    ) -> Call<()> {
         let args = FileWriteArgs {
             root: root.clone(),
             path: path.into(),
             if_match: if_match.map(str::to_owned),
         };
         let args = serde_json::to_vec(&args).expect("a request's args encode");
+        let content = content.as_ref();
         let future = unsafe {
-            write(
+            (self.api.virtx_client_write_file)(
                 self.raw,
                 args.as_ptr(),
                 args.len(),

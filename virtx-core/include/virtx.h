@@ -445,18 +445,6 @@ struct VirtxFuture *virtx_client_write_file(struct VirtxClient *client,
                                             const uint8_t *data,
                                             size_t data_len);
 
-// Writes the `text_len` bytes at `text`, which have to be UTF-8, as the whole file at
-// `path`, given as `virtx_client_write_file` takes it. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_write_file`.
-struct VirtxFuture *virtx_client_write_text(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len,
-                                            const uint8_t *text,
-                                            size_t text_len);
-
 // Creates the directory at `path`, given as `virtx_client_stat_file` takes it, whose
 // parent must exist. Answers with `null`.
 //

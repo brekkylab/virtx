@@ -117,6 +117,48 @@ impl TransportClient {
         self.files_request(request).await.map(drop)
     }
 
+    /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
+    /// needed, and one there already is left as it is. Refused with a `405` when a file is at
+    /// `path`.
+    pub async fn create_dir_all(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            return Ok(());
+        }
+        match self.create_dir(root, path).await {
+            Err(Error::Status(409, _)) => {}
+            other => return self.created_or_there(root, path, other).await,
+        }
+        // A parent is missing: from the top down, whichever are not there yet. A parent that is
+        // a file is not checked: the `MKCOL` under it is refused anyway.
+        for end in 1..segments.len() {
+            match self.create_dir(root, &segments[..end].join("/")).await {
+                Ok(()) | Err(Error::Status(405, _)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let created = self.create_dir(root, path).await;
+        self.created_or_there(root, path, created).await
+    }
+
+    /// `created`, an `MKCOL` at `path`, as `Ok` also when it answered `405` for a directory
+    /// there already.
+    async fn created_or_there(
+        &self,
+        root: &FileRoot,
+        path: &str,
+        created: Result<(), Error>,
+    ) -> Result<(), Error> {
+        let Err(Error::Status(405, _)) = &created else {
+            return created;
+        };
+        if self.stat(root, path).await?.is_dir {
+            Ok(())
+        } else {
+            created
+        }
+    }
+
     /// Remove what is at `path` in `root`: a directory with everything in it.
     pub async fn remove(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
         let request = http::Request::delete(uri(root, path)).body(full(Bytes::new()));
@@ -485,6 +527,28 @@ mod round_trips {
             client.remove(&root, "dir").await.unwrap();
             assert_eq!(status(client.stat(&root, "dir").await), 404);
             assert_eq!(status(client.stat(&root, "dir/a.txt").await), 404);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_is_had_with_its_parents_and_as_often_as_asked() {
+        for client in clients().await {
+            let root = volume();
+            client.create_dir_all(&root, "a/b/c").await.unwrap();
+            assert!(client.stat(&root, "a/b/c").await.unwrap().is_dir);
+            // Some parents there, some not; all there, spelled otherwise; nothing to make.
+            client.create_dir_all(&root, "a/x/y").await.unwrap();
+            assert!(client.stat(&root, "a/x/y").await.unwrap().is_dir);
+            client.create_dir_all(&root, "a/b/c").await.unwrap();
+            client.create_dir_all(&root, "/a//b/").await.unwrap();
+            client.create_dir_all(&root, "").await.unwrap();
+
+            client.write(&root, "a/file", "x").await.unwrap();
+            assert_eq!(status(client.create_dir_all(&root, "a/file").await), 405);
+            // Under a file: the `409` RFC 4918 names, or the `403` it also allows.
+            let under_file = status(client.create_dir_all(&root, "a/file/sub").await);
+            assert!(matches!(under_file, 403 | 409), "{under_file}");
             client.close().await;
         }
     }

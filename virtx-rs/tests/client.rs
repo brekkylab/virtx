@@ -78,6 +78,15 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     client
         .write_file(&volume, "dir/a.txt", "hello world")
         .unwrap_wait();
+    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
+    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
+    assert!(
+        client
+            .stat_file(&volume, "deep/er/dir")
+            .wait()
+            .unwrap()
+            .is_dir
+    );
 
     let metadata = client.stat_file(&volume, "dir/a.txt").wait().unwrap();
     assert!(!metadata.is_dir && metadata.size == 11, "{metadata:?}");

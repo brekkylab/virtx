@@ -347,6 +347,13 @@ impl Client {
         self.inner.create_dir(root, path).await
     }
 
+    /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
+    /// needed, and one there already is left as it is. Refused with a `405` when a file is at
+    /// `path`.
+    pub async fn create_dir_all(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
+        self.inner.create_dir_all(root, path).await
+    }
+
     /// Remove what is at `path` in `root`: a directory with everything in it.
     pub async fn remove_file(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
         self.inner.remove(root, path).await
@@ -1353,6 +1360,29 @@ pub(crate) mod ffi {
             let FilePathArgs { root, path } = args?;
             client
                 .create_dir(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Has the directory at `path`, given as `virtx_client_stat_file` takes it, as `mkdir -p`:
+    /// its parents are created as needed, and one there already is left as it is. Refused with
+    /// a `405` when a file is at `path`. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_dir_all(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .create_dir_all(&root, &path)
                 .await
                 .map_err(|e| e.to_string())
         })

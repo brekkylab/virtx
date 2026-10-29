@@ -96,6 +96,7 @@ const SIGNATURES = {
   virtx_client_read_file: WITH_ARGS,
   virtx_client_write_file: ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']],
   virtx_client_create_dir: WITH_ARGS,
+  virtx_client_create_dir_all: WITH_ARGS,
   virtx_client_remove_file: WITH_ARGS,
   virtx_client_rename_file: WITH_ARGS,
   virtx_client_copy_file: WITH_ARGS,
@@ -546,6 +547,11 @@ class Client {
 
   async createDir(root, at) {
     await this._call('virtx_client_create_dir', { ...root, path: at })
+  }
+
+  // Removes what is at `path`: a directory with everything in it.
+  async createDirAll(root, at) {
+    await this._call('virtx_client_create_dir_all', { ...root, path: at })
   }
 
   // Removes what is at `path`: a directory with everything in it.

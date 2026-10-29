@@ -429,6 +429,13 @@ impl Client {
         self.call(self.api.virtx_client_create_dir, self.at(root, path))
     }
 
+    /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
+    /// needed, and one there already is left as it is. Refused with a `405` when a file is at
+    /// `path`.
+    pub fn create_dir_all(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+        self.call(self.api.virtx_client_create_dir_all, self.at(root, path))
+    }
+
     /// Remove what is at `path` in `root`: a directory with everything in it.
     pub fn remove_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
         self.call(self.api.virtx_client_remove_file, self.at(root, path))

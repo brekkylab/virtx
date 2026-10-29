@@ -286,6 +286,8 @@ export class Client {
   writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string): Promise<void>
   /** The parent must exist. */
   createDir(root: FileRoot, path: string): Promise<void>
+  /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */
+  createDirAll(root: FileRoot, path: string): Promise<void>
   /** A directory goes with everything in it. */
   removeFile(root: FileRoot, path: string): Promise<void>
   /** What is at `to` is replaced if `overwrite`, and the move refused if not and something is there. */

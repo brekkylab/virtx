@@ -12,6 +12,9 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
     with Client.spawn(files_server) as client:
         await client.create_dir(volume, "dir")
         await client.write_file(volume, "dir/a.txt", b"hello world")
+        await client.create_dir_all(volume, "deep/er/dir")
+        await client.create_dir_all(volume, "deep/er/dir")
+        assert (await client.stat_file(volume, "deep/er/dir")).is_dir
 
         metadata = await client.stat_file(volume, "dir/a.txt")
         assert isinstance(metadata, Metadata)

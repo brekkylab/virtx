@@ -1,20 +1,17 @@
-//! The RPC endpoint of `PROTOCOL.md`: JSON-RPC 2.0, each message a `POST` to `/rpc`, answered
-//! with one JSON message or with an event stream of the request's notifications and then its
-//! response.
+//! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
+//! or one HTTP/2 connection over the server's stdin and stdout. Each endpoint's protocol, such
+//! as [`rpc`](crate::rpc)'s, is built on it and knows no transport.
 //!
-//! Both transports carry HTTP: over TCP, or as one HTTP/2 connection over the server's stdin
-//! and stdout. The client end is the `client` feature, the server end the `server` feature.
+//! The client end is the `client` feature, the server end the `server` feature.
 
 #[cfg(feature = "client")]
 mod client;
-mod message;
 #[cfg(feature = "server")]
 mod server;
-#[cfg(all(test, feature = "client", feature = "server"))]
-pub(crate) mod tests;
 
 #[cfg(feature = "client")]
-pub use client::{Error, PortForwarder, TransportClient};
-pub use message::ErrorObject;
+pub(crate) use client::{Body, full};
+#[cfg(feature = "client")]
+pub use client::{PortForwarder, TransportClient};
 #[cfg(feature = "server")]
-pub use server::{CancelScope, Dispatcher, HttpBody, Methods, Notifier, Server, serve_stdio};
+pub use server::serve_stdio;

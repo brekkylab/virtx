@@ -2,16 +2,20 @@
 
 use std::{
     ffi::{CString, c_void},
+    path::PathBuf,
     ptr,
 };
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    ImageBuildArgs, ImageBuildOutput, MountSource, Recipe, SandboxCloseArgs, SandboxExecArgs,
-    SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
-    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
+    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, MountSource,
+    Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput, SandboxInitArgs,
+    SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs, SnapshotCreateOutput,
+    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountListOutputItem,
+    VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -153,6 +157,111 @@ impl Client {
             self.api,
             self.start(self.api.virtx_client_build_image, args),
         )
+    }
+
+    /// Pull `reference` from its registry, and point it at what it pulls; without `auth` the
+    /// server pulls anonymously. Its events are the pull's log, then what it pulled.
+    pub fn pull_image(
+        &self,
+        reference: impl Into<String>,
+        auth: Option<RegistryAuth>,
+    ) -> Events<ImagePullOutput, String> {
+        let args = ImagePullArgs {
+            reference: reference.into(),
+            auth,
+        };
+        Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
+    }
+
+    /// Push the image `reference` points at to the registry `reference` names; without `auth`
+    /// the server pushes anonymously. Its events are the push's log, then what it pushed.
+    pub fn push_image(
+        &self,
+        reference: impl Into<String>,
+        auth: Option<RegistryAuth>,
+    ) -> Events<ImagePushOutput, String> {
+        let args = ImagePushArgs {
+            reference: reference.into(),
+            auth,
+        };
+        Events::new(self.api, self.start(self.api.virtx_client_push_image, args))
+    }
+
+    /// Every tag on the server's images, as `name:tag`, with the digest it points at.
+    pub fn list_image(&self) -> Call<Vec<ImageListOutputItem>> {
+        Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_image)(self.raw)
+        })
+    }
+
+    /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
+    /// `name@algorithm:hex`), moving it if it is in use.
+    pub fn tag_image(&self, source: impl Into<String>, target: impl Into<String>) -> Call<()> {
+        let args = ImageTagArgs {
+            source: source.into(),
+            target: target.into(),
+        };
+        self.call(self.api.virtx_client_tag_image, args)
+    }
+
+    /// Remove the tag `reference` (`name:tag`), leaving the image it points at.
+    pub fn untag_image(&self, reference: impl Into<String>) -> Call<()> {
+        let args = ImageUntagArgs {
+            reference: reference.into(),
+        };
+        self.call(self.api.virtx_client_untag_image, args)
+    }
+
+    /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
+    /// it in that name.
+    pub fn remove_image(&self, reference: impl Into<String>) -> Call<()> {
+        let args = ImageRemoveArgs {
+            reference: reference.into(),
+        };
+        self.call(self.api.virtx_client_remove_image, args)
+    }
+
+    /// Write the image `reference` names to `path`, as an OCI image layout in a tar archive,
+    /// replacing what is there once all of it is written. Its events are a line of log a blob,
+    /// then what it wrote.
+    pub fn download_image(
+        &self,
+        reference: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Events<ImageDownloadOutput, String> {
+        let args = ImageDownloadArgs {
+            reference: reference.into(),
+            path: path.into(),
+        };
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_download_image, args),
+        )
+    }
+
+    /// Upload the image in the OCI image layout archive at `path`, and point the tag
+    /// `reference` (`name:tag`) at it: the archive's only image, or the one it names by that
+    /// tag. Its events are a line of log a blob, then what it uploaded.
+    pub fn upload_image(
+        &self,
+        path: impl Into<PathBuf>,
+        reference: impl Into<String>,
+    ) -> Events<ImageUploadOutput, String> {
+        let args = ImageUploadArgs {
+            path: path.into(),
+            reference: reference.into(),
+        };
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_upload_image, args),
+        )
+    }
+
+    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
+    pub fn prune_image(&self) -> Call<ImagePruneOutput> {
+        Call::new(self.api, unsafe {
+            (self.api.virtx_client_prune_image)(self.raw)
+        })
     }
 
     /// Every snapshot the server holds.

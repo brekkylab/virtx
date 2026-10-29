@@ -133,6 +133,104 @@ struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
 
+// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+// `{"reference": "alpine:3.20", "auth": {...}}`, the optional auth as
+// `{"type": "basic", "username": "...", "password": "..."}` or
+// `{"type": "bearer", "token": "..."}`. Its items are its log, as
+// `virtx_client_build_image`'s are, then what it pulled, as
+// `{"output": {"digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
+// `image.push`: pushes the image `reference` points at to the registry `reference` names,
+// given `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
+// `virtx_client_pull_image`. Its items are its log, as `virtx_client_build_image`'s are,
+// then what it pushed, as `{"output": {"digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_push_image(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
+// Answers with every tag on the server's images, as
+// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`.
+struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
+
+// Points the tag `target` at the image `source` names, given
+// `{"source": "name:tag" or "name@algorithm:hex", "target": "name:tag"}`. Answers with
+// `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_tag_image(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// Removes the tag `reference`, leaving its image, given `{"reference": "name:tag"}`.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_untag_image(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Removes the image `reference` names and every tag on it in that name, given
+// `{"reference": "name:tag" or "name@algorithm:hex"}`. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
+
+// Writes the image `reference` names to `path` as an OCI image layout in a tar archive,
+// given `{"reference": "name:tag" or "name@algorithm:hex", "path": "..."}`. Its items are
+// its log, a line a blob, as `virtx_client_build_image`'s are, then what it wrote, as
+// `{"output": {"digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_download_image(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Uploads the image in the OCI image layout archive at `path` and points the tag
+// `reference` at it, given `{"path": "...", "reference": "name:tag"}`. Its items are its
+// log, a line a blob, as `virtx_client_build_image`'s are, then what it uploaded, as
+// `{"output": {"digest": "algorithm:hex"}}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
+
+// `image.prune`: deletes each image no tag points at and no sandbox uses, and what only
+// such images held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the
+// digests deleted and the bytes freed.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`.
+struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
+
 // `snapshot.list`: answers with the snapshots, as
 // `[{"name": "...", "size": n, "in_use": false}, ...]`.
 //

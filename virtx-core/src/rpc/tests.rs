@@ -3,6 +3,9 @@
 //! hand.
 //!
 //! `image.build` sends `pulling <base>` as its progress, and fails for the base `missing`.
+//! `image.pull` does the same for its reference, and `image.push` sends
+//! `pushing <reference> as <auth>`, the type of its credentials or `anonymous`. `image.prune`
+//! deletes `sha256:0`, of 1024 bytes.
 //! `sandbox.exec` runs everything as `echo`, sending its line as its progress.
 
 use std::{sync::Arc, time::Duration};
@@ -14,13 +17,15 @@ use serde_json::{Value, json};
 use sse_stream::SseStream;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinSet};
 
-use super::{
-    CancelScope, Dispatcher, ErrorObject, Methods, Notifier, Server, TransportClient, serve_stdio,
-};
+use super::{CancelScope, Dispatcher, ErrorObject, Methods, Notifier, Server};
 use crate::{
-    image::{ImageBuild, ImageBuildOutput},
+    image::{
+        ImageBuild, ImageBuildOutput, ImagePrune, ImagePruneOutput, ImagePull, ImagePullOutput,
+        ImagePush, ImagePushOutput, RegistryAuth,
+    },
     method::{Event, Progress, Request, StreamingRequest},
     sandbox::{SandboxExec, SandboxExecOutput},
+    transport::{TransportClient, serve_stdio},
 };
 
 /// `echo`: answers the text it is given.
@@ -82,6 +87,36 @@ pub fn methods() -> Methods {
                 digest: "sha256:0".into(),
             })
         })
+        .add::<ImagePull, _, _>(|args, extensions| async move {
+            let notifier = extensions.get::<Notifier>().expect("a notifier");
+            let reference = &args.reference;
+            notifier.notify::<ImagePull>(line(1, format!("pulling {reference}")));
+            if reference == "missing" {
+                return Err(ErrorObject::new(1, format!("no image {reference}")));
+            }
+            Ok(ImagePullOutput {
+                digest: "sha256:0".into(),
+            })
+        })
+        .add::<ImagePush, _, _>(|args, extensions| async move {
+            let notifier = extensions.get::<Notifier>().expect("a notifier");
+            let auth = match args.auth {
+                None => "anonymous",
+                Some(RegistryAuth::Basic { .. }) => "basic",
+                Some(RegistryAuth::Bearer { .. }) => "bearer",
+            };
+            let reference = &args.reference;
+            notifier.notify::<ImagePush>(line(1, format!("pushing {reference} as {auth}")));
+            Ok(ImagePushOutput {
+                digest: "sha256:0".into(),
+            })
+        })
+        .add::<ImagePrune, _, _>(|_, _| async move {
+            Ok(ImagePruneOutput {
+                images: vec!["sha256:0".into()],
+                reclaimed: 1024,
+            })
+        })
         .add::<SandboxExec, _, _>(|args, extensions| async move {
             let notifier = extensions.get::<Notifier>().expect("a notifier");
             notifier.notify::<SandboxExec>(line(1, args.cmd[1..].join(" ")));
@@ -94,12 +129,16 @@ pub fn methods() -> Methods {
 pub fn piped(methods: Methods) -> TransportClient {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (input, output) = tokio::io::split(server);
-    tokio::spawn(serve_stdio(Dispatcher::new(methods), input, output));
+    let server = Server::new(Dispatcher::new(methods));
+    let handle = move |request| {
+        let server = server.clone();
+        async move { server.handle(request).await }
+    };
+    tokio::spawn(serve_stdio(handle, input, output));
     TransportClient::over(client)
 }
 
 /// A client of [`methods`], served on this runtime over an in-memory pipe.
-#[cfg(feature = "ffi")]
 pub fn connect() -> TransportClient {
     piped(methods())
 }
@@ -428,7 +467,12 @@ async fn a_server_that_exits_fails_every_call() {
 async fn serve_returns_once_its_client_is_gone() {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (input, output) = tokio::io::split(server);
-    let served = tokio::spawn(serve_stdio(Dispatcher::new(methods()), input, output));
+    let server = Server::new(Dispatcher::new(methods()));
+    let handle = move |request| {
+        let server = server.clone();
+        async move { server.handle(request).await }
+    };
+    let served = tokio::spawn(serve_stdio(handle, input, output));
     let client = TransportClient::over(client);
     let answer: String = client.request("echo", ["hi"]).await.unwrap();
     assert_eq!(answer, "hi");

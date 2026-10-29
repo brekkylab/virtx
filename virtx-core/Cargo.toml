@@ -40,7 +40,11 @@ async-stream = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
 # A session brings its own runtime, since C calls in without one. `rt-multi-thread` so the
 # session's tasks run between C calls, not only inside one.
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"], optional = true }
+# An image downloaded or uploaded is an OCI image layout in a tar archive, each blob's digest
+# checked as it is read.
+tar = { version = "0.4", default-features = false, optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [build-dependencies]
 # Writes `include/virtx.h` from `src/ffi.rs`.
@@ -76,6 +80,8 @@ client = [
     "dep:async-stream",
     "dep:tokio",
     "dep:tokio-tungstenite",
+    "dep:tar",
+    "dep:sha2",
 ]
 server = [
     "dep:hyper",

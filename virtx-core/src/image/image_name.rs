@@ -38,7 +38,8 @@ impl ImageName {
     }
 }
 
-fn is_digest(s: &str) -> bool {
+/// Whether `s` is a digest, as [`ImageName::parse`] reads one.
+pub(crate) fn is_digest(s: &str) -> bool {
     let Some((algorithm, hex)) = s.split_once(':') else {
         return false;
     };

@@ -183,11 +183,13 @@ The server answers with an HTTP error status, and no message, only when it canno
 A client MAY cancel a request it sent and has no response to yet.
 Only the client cancels. The server never cancels a request this way.
 
-Cancellation is for long-running methods, those marked Stream in [Methods](#methods), such as `image.build` and `sandbox.exec`.
+Cancellation is for long-running methods, those marked Stream in [Methods](#methods), such as `image.build`, `image.pull`, `image.push` and `sandbox.exec`.
 On a cancellation, the server SHOULD stop the request and free what it holds, and SHOULD NOT send its response.
 What stopping means for each method:
 
 - `image.build` leaves no tag changed. Layers already built MAY be kept for reuse.
+- `image.pull` leaves no tag changed. Blobs already fetched MAY be kept for reuse.
+- `image.push` puts no manifest to the other registry. Blobs already pushed there stay.
 - `sandbox.exec` kills the command, as its `timeout_ms` does. The sandbox stays.
 
 A client cancels a request in either way:
@@ -223,9 +225,26 @@ A cancelled request MAY therefore still have taken effect: a client that needs t
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
+| `image.pull` | `reference`, `auth?` | `{digest}` | Stream |
+| `image.push` | `reference`, `auth?` | `{digest}` | Stream |
 | `image.build` | `recipe`, `reference` | `{digest}` | Stream |
+| `image.prune` | | `{images, reclaimed}` | |
+
+`image.pull` and `image.push` copy an image between the server's images and another registry, the one `reference` names, as `docker pull` and `docker push` do: `ghcr.io/owner/name:tag` is `owner/name:tag` at `ghcr.io`, and a reference that names no registry, such as `alpine:3.20`, is at Docker Hub.
+Each keeps the reference as it is on the server's side, so what `image.pull` pulls is tagged `reference` here, and `image.push` pushes the image `reference` tags here.
+Each skips a blob the other side already has, and moves the tag on the receiving side to the image.
+`digest` is the digest of the manifest copied; for an image index, the index's own.
+
+`auth` is the credentials for the other registry, as `{"type": "basic", "username", "password"}`, the password possibly an access token the registry takes in its place, or `{"type": "bearer", "token"}`.
+Without it the server goes to the registry anonymously.
+The server uses `auth` for that request alone: it MUST NOT keep it, write it to a log or a notification, or send it to any other host.
 
 `image.build` builds an image from `recipe` into the server's [images](#images) and tags it `reference`, as a push of it would.
+
+`image.prune` deletes each image no reference points at and no sandbox uses, and what only such images held, such as their layers.
+`images` is the digest of each image it deleted, and `reclaimed` how many bytes that freed.
+It MAY leave what is too new to tell from what a pull, push or build still in flight will point a reference at.
+
 Everything else about images is done through `/images/v2/`.
 
 #### Snapshot
@@ -322,9 +341,8 @@ What were image methods are the specification's requests:
 A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 
-The server does not pull from other registries.
-A client pulls an image into it by copying it: it fetches the image from that registry and pushes it here, skipping each blob a `HEAD` shows the server already has.
-The other registry's credentials stay with the client.
+The server copies images to and from other registries with [`image.pull` and `image.push`](#image), which take that registry's credentials.
+A client that would rather keep them can copy an image itself instead: it fetches the image from that registry and pushes it here, skipping each blob a `HEAD` shows the server already has, or the other way round.
 
 A request that fails is answered with the specification's error codes, in its `{"errors": [...]}` body.
 

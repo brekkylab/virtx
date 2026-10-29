@@ -363,7 +363,7 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength` and `getlastmodified`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says.
 - `MOVE` and `COPY` take a `Destination` in the same volume or snapshot, and refuse any other with `502 Bad Gateway`.
 - A request naming a volume or snapshot that does not exist is answered `404 Not Found`.
 

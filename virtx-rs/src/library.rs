@@ -140,6 +140,7 @@ api! {
         data_len: usize,
     ) -> *mut Opaque,
     virtx_client_create_dir: WithArgs,
+    virtx_client_create_dir_all: WithArgs,
     virtx_client_remove_file: WithArgs,
     virtx_client_rename_file: WithArgs,
     virtx_client_copy_file: WithArgs,

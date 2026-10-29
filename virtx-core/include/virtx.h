@@ -413,6 +413,17 @@ struct VirtxFuture *virtx_client_create_dir(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
+// Has the directory at `path`, given as `virtx_client_stat_file` takes it, as `mkdir -p`:
+// its parents are created as needed, and one there already is left as it is. Refused with
+// a `405` when a file is at `path`. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_dir_all(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
 // Removes what is at `path`, given as `virtx_client_stat_file` takes it: a directory with
 // everything in it. Answers with `null`.
 //

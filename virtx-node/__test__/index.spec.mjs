@@ -86,6 +86,9 @@ test('the files of a volume are written, listed, moved and read back', async () 
     const volume = { volume: 'v' }
     await client.createDir(volume, 'dir')
     await client.writeFile(volume, 'dir/a.txt', 'hello world')
+    await client.createDirAll(volume, 'deep/er/dir')
+    await client.createDirAll(volume, 'deep/er/dir')
+    assert.equal((await client.statFile(volume, 'deep/er/dir')).isDir, true)
 
     const metadata = await client.statFile(volume, 'dir/a.txt')
     assert.equal(metadata.isDir, false)

@@ -418,6 +418,12 @@ class Client:
         """Create the directory at ``path`` in ``root``, whose parent must exist."""
         await self._call("virtx_client_create_dir", _args(**root.to_dict(), path=path))
 
+    async def create_dir_all(self, root: FileRoot, path: str) -> None:
+        """Have the directory at ``path`` in ``root``, as ``mkdir -p``: its parents are
+        created as needed, and one there already is left as it is. Refused with a ``405``
+        when a file is at ``path``."""
+        await self._call("virtx_client_create_dir_all", _args(**root.to_dict(), path=path))
+
     async def remove_file(self, root: FileRoot, path: str) -> None:
         """Remove what is at ``path`` in ``root``: a directory with everything in it."""
         await self._call("virtx_client_remove_file", _args(**root.to_dict(), path=path))

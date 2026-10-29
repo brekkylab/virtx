@@ -164,6 +164,30 @@ A request that fails is answered with a JSON-RPC error response, in place of a r
 A method MAY answer other codes for its own failures, such as a name already in use or a sandbox that does not exist.
 The codes from -32768 to -32000 are reserved by JSON-RPC.
 
+virtx-uvm's servers answer these, from -31001 up:
+
+| Code | Name | When |
+| --- | --- | --- |
+| -31001 | Not found | No image, snapshot, volume or sandbox has the name or id asked for. |
+| -31002 | Already exists | A snapshot or volume of the name asked for is there already. |
+| -31003 | In use | A snapshot or volume is held by a machine, or a sandbox's command is still running. |
+| -31004 | Unsupported | What was asked for is not offered here, such as a GPU. |
+| -31005 | Boot failed | The machine did not start. |
+| -31006 | Build failed | A step of an image's build failed. |
+| -31007 | Timed out | A command ran past its `timeout_ms`, and its machine was stopped. |
+| -31008 | Registry failed | Another registry refused or failed a pull or a push. |
+| -31009 | Closed | The sandbox was closed while its command ran. |
+| -31010 | Capacity | The server has no room for another machine now. |
+
+virtx cloud's gateway answers its own, from -31100 up, with `data.reason` saying more:
+
+| Code | Name | When |
+| --- | --- | --- |
+| -31100 | Unsupported | Not offered by virtx cloud yet, such as a GPU (`gpu_unsupported`). |
+| -31101 | Quota | Past one of the organization's quotas: `sandboxes`, `machines`, `vcpus`, `memory`, `machine_size`, `snapshots`, `volumes` or `images`. |
+
+It also answers `429 Too Many Requests`, with `Retry-After`, past the organization's requests per second.
+
 When the server cannot tell the request's `id`, as with a parse error, the response's `id` is `null`.
 A notification is never answered, even when it fails.
 A response the client sends is ignored, since the server sends no requests.

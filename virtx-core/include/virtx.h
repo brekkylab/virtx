@@ -367,6 +367,36 @@ struct VirtxFuture *virtx_client_stat_file(struct VirtxClient *client,
                                            const uint8_t *args,
                                            size_t args_len);
 
+// Whether anything is at `path`, given as `virtx_client_stat_file` takes it. Answers
+// with `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_file_exists(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Whether a file is at `path`, given as `virtx_client_stat_file` takes it. Answers with
+// `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_is_file(struct VirtxClient *client,
+                                         const uint8_t *args,
+                                         size_t args_len);
+
+// Whether a directory is at `path`, given as `virtx_client_stat_file` takes it. Answers
+// with `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_is_dir(struct VirtxClient *client,
+                                        const uint8_t *args,
+                                        size_t args_len);
+
 // The entries of the directory at `path`, given as `virtx_client_stat_file` takes it.
 // Answers with `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
 // `virtx_client_stat_file` answers it.
@@ -389,6 +419,16 @@ struct VirtxFuture *virtx_client_read_file(struct VirtxClient *client,
                                            const uint8_t *args,
                                            size_t args_len);
 
+// The whole file at `path`, given as `virtx_client_stat_file` takes it, as text: refused
+// unless it is UTF-8. Answers with the text as a JSON string.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_text(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
 // Writes the `data_len` bytes at `data` as the whole file at `path`, given
 // `{"volume": "...", "path": "...", "if_match": "..."}`, `if_match` optional: the `etag`
 // `virtx_client_stat_file` gave, which the file has to have still, or the write is refused
@@ -404,6 +444,18 @@ struct VirtxFuture *virtx_client_write_file(struct VirtxClient *client,
                                             size_t args_len,
                                             const uint8_t *data,
                                             size_t data_len);
+
+// Writes the `text_len` bytes at `text`, which have to be UTF-8, as the whole file at
+// `path`, given as `virtx_client_write_file` takes it. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_write_file`.
+struct VirtxFuture *virtx_client_write_text(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len,
+                                            const uint8_t *text,
+                                            size_t text_len);
 
 // Creates the directory at `path`, given as `virtx_client_stat_file` takes it, whose
 // parent must exist. Answers with `null`.
@@ -426,8 +478,10 @@ struct VirtxFuture *virtx_client_create_dir_all(struct VirtxClient *client,
                                                 const uint8_t *args,
                                                 size_t args_len);
 
-// Removes what is at `path`, given as `virtx_client_stat_file` takes it: a directory with
-// everything in it. Answers with `null`.
+// Removes what is at `path`, given `{"volume": "...", "path": "...", "missing_ok": bool}`,
+// `missing_ok` optional and false without it: a directory with everything in it. With
+// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`. Answers with
+// `null`.
 //
 // # Safety
 //

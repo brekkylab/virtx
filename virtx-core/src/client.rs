@@ -315,6 +315,21 @@ impl Client {
         self.inner.stat(root, path).await
     }
 
+    /// Whether anything is at `path` in `root`.
+    pub async fn exists(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        self.inner.exists(root, path).await
+    }
+
+    /// Whether a file is at `path` in `root`.
+    pub async fn is_file(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        self.inner.is_file(root, path).await
+    }
+
+    /// Whether a directory is at `path` in `root`.
+    pub async fn is_dir(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        self.inner.is_dir(root, path).await
+    }
+
     /// The entries of the directory at `path` in `root`.
     pub async fn read_dir(&self, root: &FileRoot, path: &str) -> Result<Vec<DirEntry>, Error> {
         self.inner.read_dir(root, path).await
@@ -331,6 +346,11 @@ impl Client {
         self.inner.read(root, path, offset, length).await
     }
 
+    /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
+    pub async fn read_text(&self, root: &FileRoot, path: &str) -> Result<String, Error> {
+        self.inner.read_text(root, path).await
+    }
+
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
     /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
     /// the file gave, the write goes only while the file still has it, and is refused with a
@@ -345,6 +365,19 @@ impl Client {
         self.inner.write(root, path, content, if_match).await
     }
 
+    /// Write `text` as the whole file at `path` in `root`, as [`write_file`](Self::write_file).
+    pub async fn write_text(
+        &self,
+        root: &FileRoot,
+        path: &str,
+        text: &str,
+        if_match: Option<&str>,
+    ) -> Result<(), Error> {
+        self.inner
+            .write(root, path, text.as_bytes().to_vec(), if_match)
+            .await
+    }
+
     /// Create the directory at `path` in `root`, whose parent must exist.
     pub async fn create_dir(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
         self.inner.create_dir(root, path).await
@@ -357,9 +390,15 @@ impl Client {
         self.inner.create_dir_all(root, path).await
     }
 
-    /// Remove what is at `path` in `root`: a directory with everything in it.
-    pub async fn remove_file(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
-        self.inner.remove(root, path).await
+    /// Remove what is at `path` in `root`: a directory with everything in it. With
+    /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`.
+    pub async fn remove_file(
+        &self,
+        root: &FileRoot,
+        path: &str,
+        missing_ok: bool,
+    ) -> Result<(), Error> {
+        self.inner.remove(root, path, missing_ok).await
     }
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
@@ -579,7 +618,7 @@ pub(crate) mod ffi {
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
         },
-        files::{FileMoveArgs, FilePathArgs, FileReadArgs, FileWriteArgs},
+        files::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
@@ -1263,6 +1302,66 @@ pub(crate) mod ffi {
         })
     }
 
+    /// Whether anything is at `path`, given as `virtx_client_stat_file` takes it. Answers
+    /// with `true` or `false`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_file_exists(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client.exists(&root, &path).await.map_err(|e| e.to_string())
+        })
+    }
+
+    /// Whether a file is at `path`, given as `virtx_client_stat_file` takes it. Answers with
+    /// `true` or `false`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_is_file(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .is_file(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Whether a directory is at `path`, given as `virtx_client_stat_file` takes it. Answers
+    /// with `true` or `false`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_is_dir(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client.is_dir(&root, &path).await.map_err(|e| e.to_string())
+        })
+    }
+
     /// The entries of the directory at `path`, given as `virtx_client_stat_file` takes it.
     /// Answers with `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
     /// `virtx_client_stat_file` answers it.
@@ -1315,6 +1414,28 @@ pub(crate) mod ffi {
         })
     }
 
+    /// The whole file at `path`, given as `virtx_client_stat_file` takes it, as text: refused
+    /// unless it is UTF-8. Answers with the text as a JSON string.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_read_text(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FilePathArgs { root, path } = args?;
+            client
+                .read_text(&root, &path)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     /// Writes the `data_len` bytes at `data` as the whole file at `path`, given
     /// `{"volume": "...", "path": "...", "if_match": "..."}`, `if_match` optional: the `etag`
     /// `virtx_client_stat_file` gave, which the file has to have still, or the write is refused
@@ -1347,6 +1468,41 @@ pub(crate) mod ffi {
             } = args?;
             client
                 .write_file(&root, &path, content, if_match.as_deref())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Writes the `text_len` bytes at `text`, which have to be UTF-8, as the whole file at
+    /// `path`, given as `virtx_client_write_file` takes it. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_write_file`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_write_text(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+        text: *const u8,
+        text_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<FileWriteArgs>(args, args_len) };
+        let text = if text.is_null() {
+            Ok(String::new())
+        } else {
+            std::str::from_utf8(unsafe { slice::from_raw_parts(text, text_len) })
+                .map(str::to_owned)
+                .map_err(|e| format!("the text is not UTF-8: {e}"))
+        };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let FileWriteArgs {
+                root,
+                path,
+                if_match,
+            } = args?;
+            client
+                .write_text(&root, &path, &text?, if_match.as_deref())
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -1397,8 +1553,10 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Removes what is at `path`, given as `virtx_client_stat_file` takes it: a directory with
-    /// everything in it. Answers with `null`.
+    /// Removes what is at `path`, given `{"volume": "...", "path": "...", "missing_ok": bool}`,
+    /// `missing_ok` optional and false without it: a directory with everything in it. With
+    /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`. Answers with
+    /// `null`.
     ///
     /// # Safety
     ///
@@ -1409,11 +1567,15 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        let args = unsafe { json::<FileRemoveArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            let FilePathArgs { root, path } = args?;
+            let FileRemoveArgs {
+                root,
+                path,
+                missing_ok,
+            } = args?;
             client
-                .remove_file(&root, &path)
+                .remove_file(&root, &path, missing_ok)
                 .await
                 .map_err(|e| e.to_string())
         })

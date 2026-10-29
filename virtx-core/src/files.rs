@@ -57,6 +57,18 @@ pub struct FileWriteArgs {
     pub if_match: Option<String>,
 }
 
+/// What a removal names: a path, and whether nothing being there is fine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRemoveArgs {
+    #[serde(flatten)]
+    pub root: FileRoot,
+    pub path: String,
+
+    /// Whether a path with nothing at it is removed already, as `rm -f`, rather than a `404`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_ok: bool,
+}
+
 /// What a rename or a copy names: a path, where it goes in the same root, and whether what
 /// is there already is replaced.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +144,9 @@ mod tests {
         let written: FileWriteArgs =
             serde_json::from_value(json!({"volume": "v", "path": "a"})).unwrap();
         assert_eq!(written.if_match, None);
+        let removed: FileRemoveArgs =
+            serde_json::from_value(json!({"volume": "v", "path": "a"})).unwrap();
+        assert!(!removed.missing_ok);
     }
 
     #[test]

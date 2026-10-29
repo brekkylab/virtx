@@ -388,6 +388,18 @@ class Client:
         output = await self._call("virtx_client_stat_file", _args(**root.to_dict(), path=path))
         return Metadata.from_dict(output)
 
+    async def exists(self, root: FileRoot, path: str) -> bool:
+        """Whether anything is at ``path`` in ``root``."""
+        return await self._call("virtx_client_file_exists", _args(**root.to_dict(), path=path))
+
+    async def is_file(self, root: FileRoot, path: str) -> bool:
+        """Whether a file is at ``path`` in ``root``."""
+        return await self._call("virtx_client_is_file", _args(**root.to_dict(), path=path))
+
+    async def is_dir(self, root: FileRoot, path: str) -> bool:
+        """Whether a directory is at ``path`` in ``root``."""
+        return await self._call("virtx_client_is_dir", _args(**root.to_dict(), path=path))
+
     async def read_dir(self, root: FileRoot, path: str) -> list[DirEntry]:
         """The entries of the directory at ``path`` in ``root``."""
         items = await self._call("virtx_client_read_dir", _args(**root.to_dict(), path=path))
@@ -404,6 +416,10 @@ class Client:
             raw=True,
         )
 
+    async def read_text(self, root: FileRoot, path: str) -> str:
+        """The whole file at ``path`` in ``root`` as text, which it has to be: UTF-8."""
+        return await self._call("virtx_client_read_text", _args(**root.to_dict(), path=path))
+
     async def write_file(
         self, root: FileRoot, path: str, content: bytes, if_match: str | None = None
     ) -> None:
@@ -418,6 +434,17 @@ class Client:
         )
         await self._lib.answer(handle)
 
+    async def write_text(
+        self, root: FileRoot, path: str, text: str, if_match: str | None = None
+    ) -> None:
+        """Write ``text`` as the whole file at ``path`` in ``root``, as :meth:`write_file`."""
+        args = _args(**root.to_dict(), path=path, if_match=if_match)
+        encoded = text.encode()
+        handle = self._lib.virtx_client_write_text(
+            self._held(), args, len(args), encoded, len(encoded)
+        )
+        await self._lib.answer(handle)
+
     async def create_dir(self, root: FileRoot, path: str) -> None:
         """Create the directory at ``path`` in ``root``, whose parent must exist."""
         await self._call("virtx_client_create_dir", _args(**root.to_dict(), path=path))
@@ -428,9 +455,13 @@ class Client:
         when a file is at ``path``."""
         await self._call("virtx_client_create_dir_all", _args(**root.to_dict(), path=path))
 
-    async def remove_file(self, root: FileRoot, path: str) -> None:
-        """Remove what is at ``path`` in ``root``: a directory with everything in it."""
-        await self._call("virtx_client_remove_file", _args(**root.to_dict(), path=path))
+    async def remove_file(self, root: FileRoot, path: str, missing_ok: bool = False) -> None:
+        """Remove what is at ``path`` in ``root``: a directory with everything in it. With
+        ``missing_ok``, nothing being there is fine, as ``rm -f``; without it, a ``404``."""
+        await self._call(
+            "virtx_client_remove_file",
+            _args(**root.to_dict(), path=path, missing_ok=missing_ok or None),
+        )
 
     async def rename_file(
         self, root: FileRoot, from_path: str, to_path: str, overwrite: bool = False

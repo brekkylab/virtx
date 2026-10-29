@@ -106,25 +106,37 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .unwrap();
     assert_eq!(read, b"wor");
 
-    // An etag to write over, and only over the file that still has it.
+    // Text, an etag to write over, and what is there, told without an error.
     client
-        .write_file(&volume, "dir/e.txt", "e", None)
+        .write_text(&volume, "dir/t.txt", "텍스트", None)
         .unwrap_wait();
+    assert_eq!(
+        client.read_text(&volume, "dir/t.txt").wait().unwrap(),
+        "텍스트"
+    );
     let etag = client
-        .stat_file(&volume, "dir/e.txt")
+        .stat_file(&volume, "dir/t.txt")
         .wait()
         .unwrap()
         .etag
         .unwrap();
     client
-        .write_file(&volume, "dir/e.txt", "ee", Some(&etag))
+        .write_text(&volume, "dir/t.txt", "text 2", Some(&etag))
         .unwrap_wait();
     let stale = client
-        .write_file(&volume, "dir/e.txt", "eee", Some(&etag))
+        .write_text(&volume, "dir/t.txt", "text 3", Some(&etag))
         .wait()
         .unwrap_err();
     assert!(stale.to_string().contains("412"), "{stale}");
-    client.remove_file(&volume, "dir/e.txt").unwrap_wait();
+    assert!(client.exists(&volume, "dir/t.txt").wait().unwrap());
+    assert!(client.is_file(&volume, "dir/t.txt").wait().unwrap());
+    assert!(!client.is_dir(&volume, "dir/t.txt").wait().unwrap());
+    assert!(client.is_dir(&volume, "dir").wait().unwrap());
+    client
+        .remove_file(&volume, "dir/t.txt", false)
+        .unwrap_wait();
+    assert!(!client.exists(&volume, "dir/t.txt").wait().unwrap());
+    client.remove_file(&volume, "dir/t.txt", true).unwrap_wait();
 
     client
         .rename_file(&volume, "dir/a.txt", "b.txt", false)
@@ -137,7 +149,7 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .wait()
         .unwrap_err();
     assert!(refused.to_string().contains("412"), "{refused}");
-    client.remove_file(&volume, "dir").unwrap_wait();
+    client.remove_file(&volume, "dir", false).unwrap_wait();
     let gone = client.stat_file(&volume, "dir").wait().unwrap_err();
     assert!(gone.to_string().contains("404"), "{gone}");
     assert_eq!(

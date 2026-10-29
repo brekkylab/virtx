@@ -40,6 +40,30 @@ impl TransportClient {
             .ok_or_else(|| Error::Transport("a PROPFIND answered no response".into()))
     }
 
+    /// What is at `path` in `root`, if anything: `None` for a `404`.
+    async fn found(&self, root: &FileRoot, path: &str) -> Result<Option<Metadata>, Error> {
+        match self.stat(root, path).await {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether anything is at `path` in `root`.
+    pub async fn exists(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        Ok(self.found(root, path).await?.is_some())
+    }
+
+    /// Whether a file is at `path` in `root`.
+    pub async fn is_file(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        Ok(self.found(root, path).await?.is_some_and(|m| !m.is_dir))
+    }
+
+    /// Whether a directory is at `path` in `root`.
+    pub async fn is_dir(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
+        Ok(self.found(root, path).await?.is_some_and(|m| m.is_dir))
+    }
+
     /// The entries of the directory at `path` in `root`.
     pub async fn read_dir(&self, root: &FileRoot, path: &str) -> Result<Vec<DirEntry>, Error> {
         let url = uri(root, path);
@@ -94,6 +118,14 @@ impl TransportClient {
             return Ok(body.slice(start..end));
         }
         Ok(body)
+    }
+
+    /// The whole file at `path` in `root`, as text: refused as an [`Error::File`] unless it is
+    /// UTF-8.
+    pub async fn read_text(&self, root: &FileRoot, path: &str) -> Result<String, Error> {
+        let bytes = self.read(root, path, 0, None).await?;
+        String::from_utf8(bytes.into())
+            .map_err(|e| Error::File(format!("{path} is not UTF-8 text: {e}")))
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
@@ -167,10 +199,14 @@ impl TransportClient {
         }
     }
 
-    /// Remove what is at `path` in `root`: a directory with everything in it.
-    pub async fn remove(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
+    /// Remove what is at `path` in `root`: a directory with everything in it. With
+    /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`.
+    pub async fn remove(&self, root: &FileRoot, path: &str, missing_ok: bool) -> Result<(), Error> {
         let request = http::Request::delete(uri(root, path)).body(full(Bytes::new()));
-        self.files_request(request).await.map(drop)
+        match self.files_request(request).await {
+            Err(Error::Status(404, _)) if missing_ok => Ok(()),
+            other => other.map(drop),
+        }
     }
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
@@ -617,7 +653,7 @@ mod round_trips {
                 .collect();
             assert!(names.contains(&"dir".to_owned()), "{names:?}");
 
-            client.remove(&root, "dir").await.unwrap();
+            client.remove(&root, "dir", false).await.unwrap();
             assert_eq!(status(client.stat(&root, "dir").await), 404);
             assert_eq!(status(client.stat(&root, "dir/a.txt").await), 404);
             client.close().await;
@@ -656,7 +692,7 @@ mod round_trips {
             // Nothing to read, list or remove.
             assert_eq!(status(client.read(&root, "missing", 0, None).await), 404);
             assert_eq!(status(client.read_dir(&root, "missing").await), 404);
-            assert_eq!(status(client.remove(&root, "missing").await), 404);
+            assert_eq!(status(client.remove(&root, "missing", false).await), 404);
             // A root that does not exist, and a snapshot in use.
             let nowhere = FileRoot::Volume("nowhere".into());
             assert_eq!(status(client.stat(&nowhere, "").await), 404);
@@ -680,6 +716,65 @@ mod round_trips {
             );
             assert_eq!(client.read(&root, "a", 0, None).await.unwrap(), "BB");
             assert_ne!(client.stat(&root, "a").await.unwrap().etag.unwrap(), etag);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn what_is_at_a_path_is_told_without_an_error() {
+        for client in clients().await {
+            let root = volume();
+            client.create_dir(&root, "dir").await.unwrap();
+            client.write(&root, "dir/f", "x", None).await.unwrap();
+            let tell = async |path: &str| {
+                (
+                    client.exists(&root, path).await.unwrap(),
+                    client.is_file(&root, path).await.unwrap(),
+                    client.is_dir(&root, path).await.unwrap(),
+                )
+            };
+            assert_eq!(tell("dir").await, (true, false, true));
+            assert_eq!(tell("dir/f").await, (true, true, false));
+            assert_eq!(tell("dir/missing").await, (false, false, false));
+            assert_eq!(tell("").await, (true, false, true));
+            assert!(
+                !client
+                    .exists(&FileRoot::Volume("nobody".into()), "")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                status(
+                    client
+                        .exists(&FileRoot::Snapshot("locked".into()), "")
+                        .await
+                ),
+                423
+            );
+
+            client.remove(&root, "dir", false).await.unwrap();
+            assert_eq!(status(client.remove(&root, "dir", false).await), 404);
+            client.remove(&root, "dir", true).await.unwrap();
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_reads_as_text_when_it_is_utf_8() {
+        for client in clients().await {
+            let root = volume();
+            client.write(&root, "t", "한글 text", None).await.unwrap();
+            assert_eq!(client.read_text(&root, "t").await.unwrap(), "한글 text");
+            client
+                .write(&root, "b", &[0xff, 0xfe][..], None)
+                .await
+                .unwrap();
+            let refused = client.read_text(&root, "b").await.unwrap_err();
+            assert!(
+                matches!(refused, Error::File(ref m) if m.contains("UTF-8")),
+                "{refused}"
+            );
+            assert_eq!(status(client.read_text(&root, "missing").await), 404);
             client.close().await;
         }
     }

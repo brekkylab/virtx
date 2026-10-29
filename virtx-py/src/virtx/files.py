@@ -52,9 +52,13 @@ class Metadata:
     modified: int | None = None
     """When it was last modified, in seconds since the Unix epoch, if the server says."""
 
+    etag: str | None = None
+    """Its entity tag as an ``ETag`` header spells it, if the server gives one: what a write
+    names as ``if_match`` to go only over the file it read."""
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> Metadata:
-        return cls(value["is_dir"], value["size"], value.get("modified"))
+        return cls(value["is_dir"], value["size"], value.get("modified"), value.get("etag"))
 
 
 @dataclass(frozen=True)

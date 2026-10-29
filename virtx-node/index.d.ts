@@ -166,6 +166,8 @@ export interface Metadata {
   size: number
   /** When it was last modified, in seconds since the Unix epoch, if the server says. */
   modified?: number
+  /** Its entity tag as an `ETag` header spells it, if the server gives one: what `writeFile` takes as `ifMatch`. */
+  etag?: string
 }
 
 /** One entry of a directory. */
@@ -282,8 +284,11 @@ export class Client {
   readDir(root: FileRoot, path: string): Promise<DirEntry[]>
   /** From `offset`, `length` bytes of the file or all that is left. */
   readFile(root: FileRoot, path: string, offset?: number, length?: number): Promise<Buffer>
-  /** The whole file, created if it does not exist; its parent directory must exist. */
-  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string): Promise<void>
+  /**
+   * The whole file, created if it does not exist; its parent directory must exist. With `ifMatch`, the `etag`
+   * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
+   */
+  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
   /** The parent must exist. */
   createDir(root: FileRoot, path: string): Promise<void>
   /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */

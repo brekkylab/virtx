@@ -25,6 +25,15 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         assert await client.read_file(volume, "dir/a.txt") == b"hello world"
         assert await client.read_file(volume, "dir/a.txt", offset=6, length=3) == b"wor"
 
+        # An etag to write over, and only over the file that still has it.
+        await client.write_file(volume, "dir/e.txt", b"e")
+        etag = (await client.stat_file(volume, "dir/e.txt")).etag
+        assert etag
+        await client.write_file(volume, "dir/e.txt", b"ee", if_match=etag)
+        with pytest.raises(VirtxError, match="412"):
+            await client.write_file(volume, "dir/e.txt", b"eee", if_match=etag)
+        await client.remove_file(volume, "dir/e.txt")
+
         await client.rename_file(volume, "dir/a.txt", "b.txt")
         await client.copy_file(volume, "b.txt", "c.txt")
         with pytest.raises(VirtxError, match="412"):

@@ -538,8 +538,10 @@ class Client {
 
   // Writes `content` (a `Buffer`, a `Uint8Array` or a string, as UTF-8) as the whole file at
   // `path`, creating it if it does not exist. Its parent directory must exist.
-  async writeFile(root, at, content) {
-    const bytes = encode({ ...root, path: at })
+  // With `ifMatch`, the `etag` a stat gave, the write goes only while the file still has it,
+  // and is refused with a `412` otherwise.
+  async writeFile(root, at, content, ifMatch) {
+    const bytes = encode({ ...root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
     const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
     await this._lib.answer(handle)

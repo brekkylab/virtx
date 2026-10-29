@@ -8,8 +8,8 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRoot, ImageBuildArgs,
-    ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
+    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRoot, FileWriteArgs,
+    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
     ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
     ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, Metadata,
     MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput,
@@ -403,17 +403,41 @@ impl Client {
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
-    /// exist. Its parent directory must exist.
+    /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
+    /// the file gave, the write goes only while the file still has it, and is refused with a
+    /// `412` otherwise.
     pub fn write_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
         content: impl AsRef<[u8]>,
+        if_match: Option<&str>,
     ) -> Call<()> {
-        let args = serde_json::to_vec(&self.at(root, path)).expect("a request's args encode");
-        let content = content.as_ref();
+        self.write_with(
+            self.api.virtx_client_write_file,
+            root,
+            path,
+            content.as_ref(),
+            if_match,
+        )
+    }
+
+    fn write_with(
+        &self,
+        write: crate::library::WithData,
+        root: &FileRoot,
+        path: impl Into<String>,
+        content: &[u8],
+        if_match: Option<&str>,
+    ) -> Call<()> {
+        let args = FileWriteArgs {
+            root: root.clone(),
+            path: path.into(),
+            if_match: if_match.map(str::to_owned),
+        };
+        let args = serde_json::to_vec(&args).expect("a request's args encode");
         let future = unsafe {
-            (self.api.virtx_client_write_file)(
+            write(
                 self.raw,
                 args.as_ptr(),
                 args.len(),

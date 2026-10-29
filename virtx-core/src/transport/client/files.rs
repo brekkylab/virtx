@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// What a `PROPFIND` asks for: the properties `PROTOCOL.md` says every server answers.
-const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/></D:prop></D:propfind>"#;
+const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/><D:getetag/></D:prop></D:propfind>"#;
 
 /// The WebDAV namespace.
 const DAV: &str = "DAV:";
@@ -97,15 +97,23 @@ impl TransportClient {
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
-    /// exist. Its parent directory must exist.
+    /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
+    /// the file gave, the write goes only while the file still has it, and is refused with a
+    /// `412` otherwise.
     pub async fn write(
         &self,
         root: &FileRoot,
         path: &str,
         content: impl Into<Bytes>,
+        if_match: Option<&str>,
     ) -> Result<(), Error> {
-        let request = http::Request::put(uri(root, path)).body(full(content));
-        self.files_request(request).await.map(drop)
+        let mut request = http::Request::put(uri(root, path));
+        if let Some(etag) = if_match {
+            request = request.header(header::IF_MATCH, etag);
+        }
+        self.files_request(request.body(full(content)))
+            .await
+            .map(drop)
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
@@ -332,6 +340,7 @@ fn multistatus(xml: &str) -> Result<Vec<(String, Metadata)>, String> {
             is_dir: false,
             size: 0,
             modified: None,
+            etag: None,
         };
         for propstat in response.children().filter(|node| is(*node, "propstat")) {
             let ok = propstat
@@ -359,6 +368,9 @@ fn multistatus(xml: &str) -> Result<Vec<(String, Metadata)>, String> {
                             .ok()
                             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                             .map(|since| since.as_secs());
+                    }
+                    "getetag" if property.tag_name().namespace() == Some(DAV) => {
+                        metadata.etag = (!text.is_empty()).then(|| quoted(text));
                     }
                     _ => {}
                 }
@@ -402,6 +414,16 @@ fn failure_in(xml: &str) -> Option<(u16, String)> {
         })
 }
 
+/// `tag` as an `ETag` header spells it: in quotes, which a `getetag` is to carry already
+/// (RFC 4918) and some servers leave off.
+fn quoted(tag: &str) -> String {
+    if tag.starts_with('"') || tag.starts_with("W/\"") {
+        tag.to_owned()
+    } else {
+        format!("\"{tag}\"")
+    }
+}
+
 /// Whether `node` is the `DAV:` element `name`.
 fn is(node: roxmltree::Node<'_, '_>, name: &str) -> bool {
     node.is_element() && node.tag_name().name() == name && node.tag_name().namespace() == Some(DAV)
@@ -434,6 +456,13 @@ mod tests {
             href_path("http://host/base/volumes/v/a%20b"),
             "/base/volumes/v/a b"
         );
+    }
+
+    #[test]
+    fn an_etag_is_quoted_as_a_header_is() {
+        assert_eq!(quoted("5-1a"), "\"5-1a\"");
+        assert_eq!(quoted("\"5-1a\""), "\"5-1a\"");
+        assert_eq!(quoted("W/\"5-1a\""), "W/\"5-1a\"");
     }
 
     #[test]
@@ -484,6 +513,7 @@ mod tests {
                         is_dir: true,
                         size: 4096,
                         modified: None,
+                        etag: None,
                     }
                 ),
                 (
@@ -492,6 +522,7 @@ mod tests {
                         is_dir: false,
                         size: 5,
                         modified: Some(100),
+                        etag: None,
                     }
                 ),
             ]
@@ -523,7 +554,7 @@ mod round_trips {
         for client in clients().await {
             let root = volume();
             client
-                .write(&root, "hello.txt", "hello world")
+                .write(&root, "hello.txt", "hello world", None)
                 .await
                 .unwrap();
             let metadata = client.stat(&root, "hello.txt").await.unwrap();
@@ -548,7 +579,7 @@ mod round_trips {
                 ""
             );
 
-            client.write(&root, "hello.txt", "bye").await.unwrap();
+            client.write(&root, "hello.txt", "bye", None).await.unwrap();
             assert_eq!(
                 client.read(&root, "hello.txt", 0, None).await.unwrap(),
                 "bye"
@@ -563,7 +594,10 @@ mod round_trips {
             let root = volume();
             client.create_dir(&root, "dir").await.unwrap();
             client.create_dir(&root, "dir/sub").await.unwrap();
-            client.write(&root, "dir/a.txt", "aaaa").await.unwrap();
+            client
+                .write(&root, "dir/a.txt", "aaaa", None)
+                .await
+                .unwrap();
             assert!(client.stat(&root, "dir").await.unwrap().is_dir);
 
             let mut entries = client.read_dir(&root, "dir").await.unwrap();
@@ -603,7 +637,7 @@ mod round_trips {
             client.create_dir_all(&root, "/a//b/").await.unwrap();
             client.create_dir_all(&root, "").await.unwrap();
 
-            client.write(&root, "a/file", "x").await.unwrap();
+            client.write(&root, "a/file", "x", None).await.unwrap();
             assert_eq!(status(client.create_dir_all(&root, "a/file").await), 405);
             // Under a file: the `409` RFC 4918 names, or the `403` it also allows.
             let under_file = status(client.create_dir_all(&root, "a/file/sub").await);
@@ -618,7 +652,7 @@ mod round_trips {
             let root = volume();
             // A parent that does not exist.
             assert_eq!(status(client.create_dir(&root, "no/dir").await), 409);
-            assert_eq!(status(client.write(&root, "no/file", "x").await), 409);
+            assert_eq!(status(client.write(&root, "no/file", "x", None).await), 409);
             // Nothing to read, list or remove.
             assert_eq!(status(client.read(&root, "missing", 0, None).await), 404);
             assert_eq!(status(client.read_dir(&root, "missing").await), 404);
@@ -628,7 +662,24 @@ mod round_trips {
             assert_eq!(status(client.stat(&nowhere, "").await), 404);
             let locked = FileRoot::Snapshot("locked".into());
             assert_eq!(status(client.read_dir(&locked, "").await), 423);
-            assert_eq!(status(client.write(&locked, "a", "x").await), 423);
+            assert_eq!(status(client.write(&locked, "a", "x", None).await), 423);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_with_an_etag_goes_only_over_the_file_that_has_it() {
+        for client in clients().await {
+            let root = volume();
+            client.write(&root, "a", "A", None).await.unwrap();
+            let etag = client.stat(&root, "a").await.unwrap().etag.unwrap();
+            client.write(&root, "a", "BB", Some(&etag)).await.unwrap();
+            assert_eq!(
+                status(client.write(&root, "a", "C", Some(&etag)).await),
+                412
+            );
+            assert_eq!(client.read(&root, "a", 0, None).await.unwrap(), "BB");
+            assert_ne!(client.stat(&root, "a").await.unwrap().etag.unwrap(), etag);
             client.close().await;
         }
     }
@@ -637,8 +688,8 @@ mod round_trips {
     async fn a_rename_and_a_copy_replace_only_when_told_to() {
         for client in clients().await {
             let root = FileRoot::Snapshot("s".into());
-            client.write(&root, "a", "A").await.unwrap();
-            client.write(&root, "b", "B").await.unwrap();
+            client.write(&root, "a", "A", None).await.unwrap();
+            client.write(&root, "b", "B", None).await.unwrap();
 
             assert_eq!(status(client.rename(&root, "a", "b", false).await), 412);
             assert_eq!(client.read(&root, "a", 0, None).await.unwrap(), "A");
@@ -647,7 +698,7 @@ mod round_trips {
             assert_eq!(client.read(&root, "b", 0, None).await.unwrap(), "A");
 
             client.create_dir(&root, "dir").await.unwrap();
-            client.write(&root, "dir/c", "C").await.unwrap();
+            client.write(&root, "dir/c", "C", None).await.unwrap();
             client.copy(&root, "dir", "copy", false).await.unwrap();
             assert_eq!(client.read(&root, "copy/c", 0, None).await.unwrap(), "C");
             assert_eq!(client.read(&root, "dir/c", 0, None).await.unwrap(), "C");
@@ -679,7 +730,7 @@ mod round_trips {
             let name = "한글 & spaces #1.txt";
             client.create_dir(&root, "dir 2").await.unwrap();
             client
-                .write(&root, &format!("dir 2/{name}"), "x")
+                .write(&root, &format!("dir 2/{name}"), "x", None)
                 .await
                 .unwrap();
             let entries = client.read_dir(&root, "dir 2").await.unwrap();

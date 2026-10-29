@@ -357,8 +357,8 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
 // The files of a volume or a snapshot: what is at `path`, given
 // `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
 // relative to its root as `dir/file.txt`. Answers with
-// `{"is_dir": bool, "size": n, "modified": n}`, `modified` in seconds since the Unix epoch
-// and only if the server says.
+// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
+// the Unix epoch and `etag` as the server spells it, each only if the server says.
 //
 // # Safety
 //
@@ -389,9 +389,11 @@ struct VirtxFuture *virtx_client_read_file(struct VirtxClient *client,
                                            const uint8_t *args,
                                            size_t args_len);
 
-// Writes the `data_len` bytes at `data` as the whole file at `path`, given as
-// `virtx_client_stat_file` takes it, creating it if it does not exist. Its parent
-// directory must exist. Answers with `null`.
+// Writes the `data_len` bytes at `data` as the whole file at `path`, given
+// `{"volume": "...", "path": "...", "if_match": "..."}`, `if_match` optional: the `etag`
+// `virtx_client_stat_file` gave, which the file has to have still, or the write is refused
+// with a `412`. The file is created if it does not exist; its parent directory must exist.
+// Answers with `null`.
 //
 // # Safety
 //

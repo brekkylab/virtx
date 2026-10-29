@@ -97,6 +97,22 @@ int virtx_client_connect(const char *url,
                          struct VirtxClient **client,
                          struct VirtxBytes *error);
 
+// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
+// every request from now on, in place of those sent until now: new credentials, when the
+// server's are short-lived. A forwarder already open sends them with its next connection.
+// Over stdio, where none are sent, nothing changes. Answers `VIRTX_OK`, or `VIRTX_ERROR`
+// with why a header cannot be sent written to `error`, the headers unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. Each
+// of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8. `error` is null
+// or writable.
+int virtx_client_set_headers(struct VirtxClient *client,
+                             const char *const *headers,
+                             size_t headers_len,
+                             struct VirtxBytes *error);
+
 // Hold `client` once more, for another holder to release.
 //
 // # Safety

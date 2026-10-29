@@ -19,6 +19,7 @@ use tokio::{net::TcpListener, sync::mpsc, task::JoinSet};
 
 use super::{CancelScope, Dispatcher, ErrorObject, Methods, Notifier, Server};
 use crate::{
+    Error,
     image::{
         ImageBuild, ImageBuildOutput, ImagePrune, ImagePruneOutput, ImagePull, ImagePullOutput,
         ImagePush, ImagePushOutput, RegistryAuth,
@@ -376,29 +377,53 @@ async fn an_http_error_fails_its_call_with_the_status() {
     let url = serve(methods(), Some(Tokens { users: vec![] })).await;
     let client = TransportClient::connect(&url, HeaderMap::new()).unwrap();
     let error = client.request::<String>("echo", ["hi"]).await.unwrap_err();
+    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
     assert!(error.to_string().contains("401"), "{error}");
 }
 
-#[tokio::test]
-async fn the_headers_given_at_connect_go_with_every_request() {
+/// `WhoAmI` behind `users`, and a client with `token`.
+async fn as_user(users: Vec<&'static str>, token: &str) -> TransportClient {
     let mut methods = methods();
     methods.add::<WhoAmI, _, _>(|_, extensions| async move {
         Ok(extensions.get::<User>().expect("a user").0.clone())
     });
-    let url = serve(
-        methods,
-        Some(Tokens {
-            users: vec!["alice"],
-        }),
-    )
-    .await;
+    let url = serve(methods, Some(Tokens { users })).await;
+    TransportClient::connect(&url, bearer_token(token)).unwrap()
+}
+
+/// `Authorization: Bearer {token}`.
+fn bearer_token(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert("authorization", "Bearer alice".parse().unwrap());
-    let client = TransportClient::connect(&url, headers).unwrap();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    headers
+}
+
+#[tokio::test]
+async fn the_headers_given_at_connect_go_with_every_request() {
+    let client = as_user(vec!["alice"], "alice").await;
     for _ in 0..2 {
         let user: String = client.request("user", [(); 0]).await.unwrap();
         assert_eq!(user, "alice");
     }
+}
+
+#[tokio::test]
+async fn the_headers_set_later_go_with_the_requests_after() {
+    let client = as_user(vec!["alice", "bob"], "alice").await;
+    let user: String = client.request("user", [(); 0]).await.unwrap();
+    assert_eq!(user, "alice");
+
+    client.set_headers(bearer_token("bob"));
+    let user: String = client.request("user", [(); 0]).await.unwrap();
+    assert_eq!(user, "bob");
+
+    // The old ones are gone with the new, not kept under them.
+    client.set_headers(HeaderMap::new());
+    let error = client.request::<String>("user", [(); 0]).await.unwrap_err();
+    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+    client.set_headers(bearer_token("carol"));
+    let error = client.request::<String>("user", [(); 0]).await.unwrap_err();
+    assert!(matches!(error, Error::Status(403, _)), "{error:?}");
 }
 
 #[test]

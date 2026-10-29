@@ -74,6 +74,12 @@ def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]
 
 # Every client not yet closed, closed at exit: a hold left to the interpreter's teardown would
 # end its session after the waker's callbacks can still run.
+def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_char_p]:
+    """``headers`` as ``virtx_client_connect`` takes them: each name then its value."""
+    strings = [s.encode() for name, value in (headers or {}).items() for s in (name, value)]
+    return (ctypes.c_char_p * len(strings))(*strings)
+
+
 _open: weakref.WeakSet[Client] = weakref.WeakSet()
 
 
@@ -116,14 +122,26 @@ class Client:
         it), sending ``headers`` with every request: what the server asks of each, such as the
         ``Authorization`` its credentials go in."""
         lib = library()
-        strings = [s.encode() for name, value in (headers or {}).items() for s in (name, value)]
-        array = (ctypes.c_char_p * len(strings))(*strings)
+        array = _header_array(headers)
         raw = ctypes.c_void_p()
         error = _Bytes()
         status = lib.virtx_client_connect(
-            url.encode(), array, len(strings) // 2, ctypes.byref(raw), ctypes.byref(error)
+            url.encode(), array, len(array) // 2, ctypes.byref(raw), ctypes.byref(error)
         )
         return cls._opened(lib, status, raw, error)
+
+    def set_headers(self, headers: Mapping[str, str]) -> None:
+        """Send ``headers`` with every request from now on, in place of those given at
+        ``connect``: new credentials, when the server's are short-lived. A forwarder already
+        open sends them with its next connection. Over stdio, where none are sent, nothing
+        changes. A header that cannot be sent raises, the headers unchanged."""
+        array = _header_array(headers)
+        error = _Bytes()
+        status = self._lib.virtx_client_set_headers(
+            self._held(), array, len(array) // 2, ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:

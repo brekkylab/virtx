@@ -201,6 +201,13 @@ export class Client {
    * credentials go in.
    */
   static connect(url: string, headers?: Record<string, string>): Client
+  /**
+   * Send `headers` with every request from now on, in place of those given at `connect`: new
+   * credentials, when the server's are short-lived. A forwarder already open sends them with its
+   * next connection. Over stdio, where none are sent, nothing changes. A header that cannot be
+   * sent throws, the headers unchanged.
+   */
+  setHeaders(headers: Record<string, string>): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */

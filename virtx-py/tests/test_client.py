@@ -49,6 +49,13 @@ def test_a_header_that_cannot_be_sent_is_refused_at_connect() -> None:
         Client.connect("http://127.0.0.1:9/", {"not a name": "x"})
 
 
+def test_a_header_that_cannot_be_sent_is_refused_when_set() -> None:
+    with Client.connect("http://127.0.0.1:9/") as client:
+        client.set_headers({"authorization": "Bearer x"})
+        with pytest.raises(VirtxError, match="not a name"):
+            client.set_headers({"not a name": "x"})
+
+
 def test_a_forwarder_is_on_the_loopback_until_it_is_closed() -> None:
     # Nothing listens there: each connection to the forwarder is closed.
     with (

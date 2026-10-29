@@ -55,6 +55,14 @@ impl Client {
         Ok(Client { inner })
     }
 
+    /// Send `headers` with every request from now on, in place of those given at
+    /// [`connect`](Self::connect): new credentials, when the server's are short-lived. A
+    /// forwarder already open sends them with its next connection. Over stdio, where none
+    /// are sent, nothing changes.
+    pub fn set_headers(&self, headers: HeaderMap) {
+        self.inner.set_headers(headers);
+    }
+
     /// Build `recipe`, and point `reference` at it. The stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
     /// item, an [`Event::Output`] or the error it failed with. Dropping it drops the build.
     pub fn build_image(
@@ -475,7 +483,10 @@ pub(crate) mod ffi {
 
     use super::Client;
     use crate::{
-        ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, json, release, retain, share},
+        ffi::{
+            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
+            retain, share, write,
+        },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
@@ -523,6 +534,40 @@ pub(crate) mod ffi {
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
+    /// `ptr` as a `&str`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is NUL-terminated UTF-8, kept for `'a`.
+    unsafe fn utf8<'a>(ptr: *const c_char) -> Result<&'a str, String> {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .map_err(|e| e.to_string())
+    }
+
+    /// The `headers_len` headers in `headers`, each its name then its value, so `2 *
+    /// headers_len` strings.
+    ///
+    /// # Safety
+    ///
+    /// Each of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8.
+    unsafe fn header_map(
+        headers: *const *const c_char,
+        headers_len: usize,
+    ) -> Result<HeaderMap, String> {
+        let mut map = HeaderMap::with_capacity(headers_len);
+        for i in 0..headers_len {
+            let name = unsafe { utf8(*headers.add(2 * i)) }?;
+            let value = unsafe { utf8(*headers.add(2 * i + 1)) }?;
+            map.insert(
+                HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|e| format!("header {name}: {e}"))?,
+                HeaderValue::from_str(value).map_err(|e| format!("header {name}: {e}"))?,
+            );
+        }
+        Ok(map)
+    }
+
     /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
     /// the `headers_len` headers in `headers` -- each its name then its value, so `2 *
     /// headers_len` strings -- with every request, and write the client, held once, to
@@ -542,25 +587,42 @@ pub(crate) mod ffi {
         error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
-            let utf8 = |ptr| {
-                unsafe { CStr::from_ptr(ptr) }
-                    .to_str()
-                    .map_err(|e| e.to_string())
-            };
-            let url = utf8(url)?;
-            let mut map = HeaderMap::with_capacity(headers_len);
-            for i in 0..headers_len {
-                let name = utf8(unsafe { *headers.add(2 * i) })?;
-                let value = utf8(unsafe { *headers.add(2 * i + 1) })?;
-                map.insert(
-                    HeaderName::from_bytes(name.as_bytes())
-                        .map_err(|e| format!("header {name}: {e}"))?,
-                    HeaderValue::from_str(value).map_err(|e| format!("header {name}: {e}"))?,
-                );
-            }
+            let url = unsafe { utf8(url) }?;
+            let map = unsafe { header_map(headers, headers_len) }?;
             Runtime::open(|| Client::connect(url, map).map_err(|e| format!("{e:#}")))
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
+    }
+
+    /// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
+    /// every request from now on, in place of those sent until now: new credentials, when the
+    /// server's are short-lived. A forwarder already open sends them with its next connection.
+    /// Over stdio, where none are sent, nothing changes. Answers `VIRTX_OK`, or `VIRTX_ERROR`
+    /// with why a header cannot be sent written to `error`, the headers unchanged.
+    ///
+    /// # Safety
+    ///
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. Each
+    /// of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8. `error` is null
+    /// or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_headers(
+        client: *mut VirtxClient,
+        headers: *const *const c_char,
+        headers_len: usize,
+        error: *mut VirtxBytes,
+    ) -> c_int {
+        match unsafe { header_map(headers, headers_len) } {
+            Ok(map) => {
+                unsafe { &(*client).0 }.value().set_headers(map);
+                VIRTX_OK
+            }
+            Err(message) => {
+                let (status, message) = failure(message);
+                unsafe { write(error, message) };
+                status
+            }
+        }
     }
 
     /// Hold `client` once more, for another holder to release.
@@ -1145,6 +1207,28 @@ pub(crate) mod ffi {
             assert!(client.is_null());
             assert!(!error.data.is_null());
             unsafe { virtx_bytes_free(error) };
+        }
+
+        #[test]
+        fn a_header_that_cannot_be_sent_is_refused() {
+            let mut client = ptr::null_mut();
+            let url = c"http://127.0.0.1:9/";
+            let status = unsafe {
+                virtx_client_connect(url.as_ptr(), ptr::null(), 0, &mut client, ptr::null_mut())
+            };
+            assert_eq!(status, VIRTX_OK);
+            let mut error = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            let headers = [c"not a name".as_ptr(), c"x".as_ptr()];
+            let status =
+                unsafe { virtx_client_set_headers(client, headers.as_ptr(), 1, &mut error) };
+            assert_eq!(status, crate::ffi::VIRTX_ERROR);
+            let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
+            assert!(String::from_utf8_lossy(message).contains("not a name"));
+            unsafe { virtx_bytes_free(error) };
+            unsafe { virtx_client_release(client) };
         }
     }
 }

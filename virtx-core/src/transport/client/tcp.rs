@@ -1,15 +1,30 @@
 //! The client's end of HTTP over TCP: the server at a base URL, each endpoint a path under it.
 
+use std::sync::{Arc, PoisonError, RwLock};
+
 use http::HeaderMap;
 use http_body_util::BodyExt;
 
 use super::Body;
+
+/// The headers sent with every request, read as each is sent, so that a change reaches the
+/// next one: a forwarder opened before keeps a hold on them too.
+pub(super) type Headers = Arc<RwLock<HeaderMap>>;
+
+/// `headers`, as sent now.
+pub(super) fn current(headers: &Headers) -> HeaderMap {
+    headers
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
 
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
     pub(super) http: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
     pub(super) base: reqwest::Url,
+    pub(super) headers: Headers,
 }
 
 impl Tcp {
@@ -26,11 +41,15 @@ impl Tcp {
             base.set_path(&format!("{}/", base.path()));
         }
         Ok(Tcp {
-            http: reqwest::Client::builder()
-                .default_headers(headers)
-                .build()?,
+            http: reqwest::Client::new(),
             base,
+            headers: Arc::new(RwLock::new(headers)),
         })
+    }
+
+    /// Send `headers` with every request from now on, in place of those sent until now.
+    pub(super) fn set_headers(&self, headers: HeaderMap) {
+        *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
     }
 
     /// Send `request`, whose URI is a path under the base, such as `/rpc`.
@@ -43,10 +62,13 @@ impl Tcp {
             .base
             .join(parts.uri.to_string().trim_start_matches('/'))
             .map_err(|e| format!("{e:#}"))?;
+        // The request's own headers win over the ones sent with every request.
+        let mut headers = current(&self.headers);
+        headers.extend(parts.headers);
         let response = self
             .http
             .request(parts.method, url)
-            .headers(parts.headers)
+            .headers(headers)
             .body(reqwest::Body::wrap(body))
             .send()
             .await

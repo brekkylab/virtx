@@ -75,11 +75,7 @@ impl Client {
     ) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
-        let mut strings = Vec::new();
-        for (name, value) in headers {
-            strings.push(c_string(name.as_ref())?);
-            strings.push(c_string(value.as_ref())?);
-        }
+        let strings = header_strings(headers)?;
         let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
@@ -93,6 +89,31 @@ impl Client {
             )
         };
         unsafe { opened(api, status, raw, error) }
+    }
+
+    /// Send `headers` with every request from now on, in place of those given at
+    /// [`connect`](Self::connect): new credentials, when the server's are short-lived. A
+    /// forwarder already open sends them with its next connection. Over stdio, where none are
+    /// sent, nothing changes. A header that cannot be sent is refused, the headers unchanged.
+    pub fn set_headers(
+        &self,
+        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Result<(), Error> {
+        let strings = header_strings(headers)?;
+        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
+        let mut error = VirtxBytes::empty();
+        let status = unsafe {
+            (self.api.virtx_client_set_headers)(
+                self.raw,
+                pointers.as_ptr(),
+                strings.len() / 2,
+                &mut error,
+            )
+        };
+        if status == VIRTX_OK {
+            return Ok(());
+        }
+        unsafe { take(self.api, status, error) }
     }
 
     /// The `VirtxClient*` this holds, still held by it: for another module over the same
@@ -404,6 +425,18 @@ impl Drop for Client {
     fn drop(&mut self) {
         unsafe { (self.api.virtx_client_release)(self.raw) };
     }
+}
+
+/// `headers`, each name then its value, as `virtx_client_connect` takes them.
+fn header_strings(
+    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+) -> Result<Vec<CString>, Error> {
+    let mut strings = Vec::new();
+    for (name, value) in headers {
+        strings.push(c_string(name.as_ref())?);
+        strings.push(c_string(value.as_ref())?);
+    }
+    Ok(strings)
 }
 
 fn c_string(s: &str) -> Result<CString, Error> {

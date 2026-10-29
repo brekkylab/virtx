@@ -107,6 +107,10 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         ],
         ctypes.c_int,
     ),
+    "virtx_client_set_headers": (
+        [_HANDLE, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t, _OUT],
+        ctypes.c_int,
+    ),
     "virtx_client_retain": ([_HANDLE], None),
     "virtx_client_release": ([_HANDLE], None),
     "virtx_client_build_image": _WITH_ARGS,

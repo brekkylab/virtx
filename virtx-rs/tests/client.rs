@@ -65,6 +65,15 @@ fn a_header_that_cannot_be_sent_is_refused_at_connect() {
     assert!(error.to_string().contains("not a name"), "{error}");
 }
 
+fn a_header_that_cannot_be_sent_is_refused_when_set() {
+    let client = Client::connect("http://127.0.0.1:9/", [] as [(&str, &str); 0]).unwrap();
+    assert!(client.set_headers([("authorization", "Bearer x")]).is_ok());
+    let Err(error) = client.set_headers([("not a name", "x")]) else {
+        panic!("set");
+    };
+    assert!(error.to_string().contains("not a name"), "{error}");
+}
+
 fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
     // Nothing listens there: each connection to the forwarder is closed.
     let client = Client::connect("http://127.0.0.1:9/", [] as [(&str, &str); 0]).unwrap();
@@ -91,6 +100,7 @@ fn main() -> ExitCode {
     let tests = tests![
         spawning_nothing_fails_with_a_message,
         a_header_that_cannot_be_sent_is_refused_at_connect,
+        a_header_that_cannot_be_sent_is_refused_when_set,
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
     ];

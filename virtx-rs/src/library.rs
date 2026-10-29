@@ -94,6 +94,12 @@ api! {
         client: *mut *mut Opaque,
         error: *mut VirtxBytes,
     ) -> c_int,
+    virtx_client_set_headers: unsafe extern "C" fn(
+        client: *mut Opaque,
+        headers: *const *const c_char,
+        headers_len: usize,
+        error: *mut VirtxBytes,
+    ) -> c_int,
     virtx_client_retain: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_release: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_build_image: WithArgs,

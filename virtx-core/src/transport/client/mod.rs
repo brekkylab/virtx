@@ -8,7 +8,7 @@ mod tcp;
 use std::io;
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
@@ -21,6 +21,18 @@ pub(crate) type Body = BoxBody<Bytes, io::Error>;
 /// `bytes`, as a whole [`Body`].
 pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|e| match e {}).boxed()
+}
+
+/// `response`, a refusal, as the [`Error::Status`] it is: its body read, for a person.
+pub(crate) async fn refused(response: http::Response<Body>) -> Error {
+    let status = response.status().as_u16();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map(|body| body.to_bytes())
+        .unwrap_or_default();
+    Error::Status(status, String::from_utf8_lossy(&body).trim().to_owned())
 }
 
 /// How a client reaches the server's endpoints.
@@ -66,6 +78,16 @@ impl TransportClient {
         Tcp::connect(url, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
     }
 
+    /// Send `headers` with every request from now on, in place of those given at
+    /// [`connect`](Self::connect): new credentials, when the server's are short-lived. A
+    /// forwarder already open sends them with its next connection. Over stdio, where none
+    /// are sent, nothing changes.
+    pub fn set_headers(&self, headers: HeaderMap) {
+        if let Connection::Tcp(tcp) = &self.connection {
+            tcp.set_headers(headers);
+        }
+    }
+
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.
     #[cfg(all(test, feature = "server"))]
     pub(crate) fn over<T>(io: T) -> Self
@@ -76,15 +98,22 @@ impl TransportClient {
     }
 
     /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/rpc`, names. An `Err` says why no response came.
+    /// `/rpc`, names. An `Err` says why no response came, or that the server refused the
+    /// headers with a `401` or a `403`, which every endpoint's are alike.
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
     ) -> Result<http::Response<Body>, Error> {
-        self.connection
+        let response = self
+            .connection
             .send(request)
             .await
-            .map_err(Error::Transport)
+            .map_err(Error::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(refused(response).await);
+        }
+        Ok(response)
     }
 
     /// End the session. Over stdio, close the server's stdin and kill it if it has not exited

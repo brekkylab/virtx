@@ -16,7 +16,7 @@ use super::message::{
 use crate::{
     Error,
     method::{Event, Progress},
-    transport::{Body, TransportClient, full},
+    transport::{Body, TransportClient, full, refused},
 };
 
 /// Each request is a `POST` of its own: nothing is shared between requests but the connection,
@@ -68,17 +68,12 @@ impl TransportClient {
                 .body(full(message))
                 .expect("a valid request");
             let response = self.send(request).await?;
-            let status = response.status();
-            let (parts, body) = response.into_parts();
-            let body = if status == StatusCode::OK {
-                body
+            let response = if response.status() == StatusCode::OK {
+                response
             } else {
-                let body = body.collect().await.map(|body| body.to_bytes()).unwrap_or_default();
-                let body = String::from_utf8_lossy(&body);
-                Err::<Body, _>(Error::Transport(
-                    format!("the server answered {status}: {body}").trim_end().to_owned(),
-                ))?
+                Err(refused(response).await)?
             };
+            let (parts, body) = response.into_parts();
             let content_type = parts
                 .headers
                 .get(header::CONTENT_TYPE)

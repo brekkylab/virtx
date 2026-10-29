@@ -404,10 +404,14 @@ class Client:
             raw=True,
         )
 
-    async def write_file(self, root: FileRoot, path: str, content: bytes) -> None:
+    async def write_file(
+        self, root: FileRoot, path: str, content: bytes, if_match: str | None = None
+    ) -> None:
         """Write ``content`` as the whole file at ``path`` in ``root``, creating it if it does
-        not exist. Its parent directory must exist."""
-        args = _args(**root.to_dict(), path=path)
+        not exist. Its parent directory must exist. With ``if_match``, the ``etag`` a
+        :class:`Metadata` of the file gave, the write goes only while the file still has it,
+        and is refused with a ``412`` otherwise."""
+        args = _args(**root.to_dict(), path=path, if_match=if_match)
         content = bytes(content)
         handle = self._lib.virtx_client_write_file(
             self._held(), args, len(args), content, len(content)

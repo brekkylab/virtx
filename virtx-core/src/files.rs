@@ -44,6 +44,19 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// What a write names: a path, and the entity tag the file there has to have still.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileWriteArgs {
+    #[serde(flatten)]
+    pub root: FileRoot,
+    pub path: String,
+
+    /// The `etag` a [`Metadata`] of the file gave: the write is refused with a `412` unless
+    /// the file still has it. Without it, the write goes over whatever is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_match: Option<String>,
+}
+
 /// What a rename or a copy names: a path, where it goes in the same root, and whether what
 /// is there already is replaced.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +82,11 @@ pub struct Metadata {
     /// When it was last modified, in seconds since the Unix epoch, if the server says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<u64>,
+
+    /// Its entity tag as an `ETag` header spells it, quotes and all, if the server gives one:
+    /// what a write names as `if_match` to go only over the file it read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
 }
 
 /// One entry of a directory, as a `PROPFIND` of depth 1 answers it.
@@ -111,6 +129,9 @@ mod tests {
             serde_json::from_value(json!({"volume": "v", "from": "a", "to": "b"})).unwrap();
         assert!(!moved.overwrite);
         assert!(serde_json::from_value::<FilePathArgs>(json!({"path": "a"})).is_err());
+        let written: FileWriteArgs =
+            serde_json::from_value(json!({"volume": "v", "path": "a"})).unwrap();
+        assert_eq!(written.if_match, None);
     }
 
     #[test]
@@ -119,6 +140,7 @@ mod tests {
             is_dir: true,
             size: 0,
             modified: None,
+            etag: None,
         };
         assert_eq!(
             serde_json::to_value(&metadata).unwrap(),

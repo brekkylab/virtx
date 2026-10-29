@@ -76,7 +76,7 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     let volume = FileRoot::Volume("v".into());
     client.create_dir(&volume, "dir").unwrap_wait();
     client
-        .write_file(&volume, "dir/a.txt", "hello world")
+        .write_file(&volume, "dir/a.txt", "hello world", None)
         .unwrap_wait();
     client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
     client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
@@ -105,6 +105,26 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .wait()
         .unwrap();
     assert_eq!(read, b"wor");
+
+    // An etag to write over, and only over the file that still has it.
+    client
+        .write_file(&volume, "dir/e.txt", "e", None)
+        .unwrap_wait();
+    let etag = client
+        .stat_file(&volume, "dir/e.txt")
+        .wait()
+        .unwrap()
+        .etag
+        .unwrap();
+    client
+        .write_file(&volume, "dir/e.txt", "ee", Some(&etag))
+        .unwrap_wait();
+    let stale = client
+        .write_file(&volume, "dir/e.txt", "eee", Some(&etag))
+        .wait()
+        .unwrap_err();
+    assert!(stale.to_string().contains("412"), "{stale}");
+    client.remove_file(&volume, "dir/e.txt").unwrap_wait();
 
     client
         .rename_file(&volume, "dir/a.txt", "b.txt", false)

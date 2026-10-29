@@ -332,14 +332,17 @@ impl Client {
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
-    /// exist. Its parent directory must exist.
+    /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
+    /// the file gave, the write goes only while the file still has it, and is refused with a
+    /// `412` otherwise.
     pub async fn write_file(
         &self,
         root: &FileRoot,
         path: &str,
         content: impl Into<Bytes>,
+        if_match: Option<&str>,
     ) -> Result<(), Error> {
-        self.inner.write(root, path, content).await
+        self.inner.write(root, path, content, if_match).await
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
@@ -576,7 +579,7 @@ pub(crate) mod ffi {
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
         },
-        files::{FileMoveArgs, FilePathArgs, FileReadArgs},
+        files::{FileMoveArgs, FilePathArgs, FileReadArgs, FileWriteArgs},
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
@@ -1238,8 +1241,8 @@ pub(crate) mod ffi {
     /// The files of a volume or a snapshot: what is at `path`, given
     /// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
     /// relative to its root as `dir/file.txt`. Answers with
-    /// `{"is_dir": bool, "size": n, "modified": n}`, `modified` in seconds since the Unix epoch
-    /// and only if the server says.
+    /// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
+    /// the Unix epoch and `etag` as the server spells it, each only if the server says.
     ///
     /// # Safety
     ///
@@ -1312,9 +1315,11 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Writes the `data_len` bytes at `data` as the whole file at `path`, given as
-    /// `virtx_client_stat_file` takes it, creating it if it does not exist. Its parent
-    /// directory must exist. Answers with `null`.
+    /// Writes the `data_len` bytes at `data` as the whole file at `path`, given
+    /// `{"volume": "...", "path": "...", "if_match": "..."}`, `if_match` optional: the `etag`
+    /// `virtx_client_stat_file` gave, which the file has to have still, or the write is refused
+    /// with a `412`. The file is created if it does not exist; its parent directory must exist.
+    /// Answers with `null`.
     ///
     /// # Safety
     ///
@@ -1328,16 +1333,20 @@ pub(crate) mod ffi {
         data: *const u8,
         data_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<FilePathArgs>(args, args_len) };
+        let args = unsafe { json::<FileWriteArgs>(args, args_len) };
         let content = if data.is_null() {
             Bytes::new()
         } else {
             Bytes::copy_from_slice(unsafe { slice::from_raw_parts(data, data_len) })
         };
         unsafe { &(*client).0 }.future(|client| async move {
-            let FilePathArgs { root, path } = args?;
+            let FileWriteArgs {
+                root,
+                path,
+                if_match,
+            } = args?;
             client
-                .write_file(&root, &path, content)
+                .write_file(&root, &path, content, if_match.as_deref())
                 .await
                 .map_err(|e| e.to_string())
         })

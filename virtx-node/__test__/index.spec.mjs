@@ -98,6 +98,14 @@ test('the files of a volume are written, listed, moved and read back', async () 
     assert.equal((await client.readFile(volume, 'dir/a.txt')).toString(), 'hello world')
     assert.equal((await client.readFile(volume, 'dir/a.txt', 6, 3)).toString(), 'wor')
 
+    // An etag to write over, and only over the file that still has it.
+    await client.writeFile(volume, 'dir/e.txt', 'e')
+    const { etag } = await client.statFile(volume, 'dir/e.txt')
+    assert.ok(etag)
+    await client.writeFile(volume, 'dir/e.txt', 'ee', etag)
+    await assert.rejects(client.writeFile(volume, 'dir/e.txt', 'eee', etag), /412/)
+    await client.removeFile(volume, 'dir/e.txt')
+
     await client.renameFile(volume, 'dir/a.txt', 'b.txt')
     await client.copyFile(volume, 'b.txt', 'c.txt')
     await assert.rejects(client.copyFile(volume, 'b.txt', 'c.txt'), /412/)

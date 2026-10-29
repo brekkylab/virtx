@@ -422,10 +422,14 @@ def nearest_endpoint(domain: str | None = None) -> str:
 
 def endpoint_of(key: str, domain: str | None = None) -> str | None:
     """The cell endpoint an API key of virtx cloud names (``vx_sk_<cell>_...``), under
-    ``domain`` (``DOMAIN`` without): ``None`` for a key that is no such key."""
+    ``domain`` (``DOMAIN`` without): ``None`` for a key that is no such key, as a key made
+    since 2026-10-30 is not (``vx_sk_<hex>``): it is every cell's, and the client finds the
+    nearest."""
     if not key.startswith("vx_sk_"):
         return None
-    cell = key[len("vx_sk_"):].split("_")[0]
+    cell, _, rest = key[len("vx_sk_"):].partition("_")
+    if not rest:
+        return None
     if not cell or not all(c.isdigit() or ("a" <= c <= "z") for c in cell):
         return None
     return f"https://{cell}.api.{domain or DOMAIN}"

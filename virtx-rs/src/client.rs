@@ -483,9 +483,10 @@ pub fn nearest_endpoint(domain: Option<&str>) -> Result<String, Error> {
 pub const DOMAIN: &str = "virtx.brekkylab.com";
 
 /// The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
-/// ([`DOMAIN`] without): `None` for a key that is no such key.
+/// ([`DOMAIN`] without): `None` for a key that is no such key, as a key made since
+/// 2026-10-30 is not (`vx_sk_<hex>`): it is every cell's, and the client finds the nearest.
 pub fn endpoint_of(key: &str, domain: Option<&str>) -> Option<String> {
-    let cell = key.strip_prefix("vx_sk_")?.split('_').next()?;
+    let (cell, _) = key.strip_prefix("vx_sk_")?.split_once('_')?;
     if cell.is_empty()
         || !cell
             .bytes()
@@ -510,7 +511,14 @@ mod endpoint_tests {
             endpoint_of("vx_sk_apne2_0a38", Some("dev.virtx.brekkylab.com")).as_deref(),
             Some("https://apne2.api.dev.virtx.brekkylab.com")
         );
-        for key in ["sk_apne2_x", "vx_sk__x", "vx_sk_ap.ne2_x", "a-user-token"] {
+        for key in [
+            "sk_apne2_x",
+            "vx_sk__x",
+            "vx_sk_ap.ne2_x",
+            "a-user-token",
+            // Every cell's.
+            "vx_sk_0a38b9c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+        ] {
             assert_eq!(endpoint_of(key, None), None, "{key}");
         }
     }

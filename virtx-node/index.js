@@ -101,7 +101,6 @@ const SIGNATURES = {
   virtx_client_read_file: WITH_ARGS,
   virtx_client_read_text: WITH_ARGS,
   virtx_client_write_file: WITH_DATA,
-  virtx_client_write_text: WITH_DATA,
   virtx_client_create_dir: WITH_ARGS,
   virtx_client_create_dir_all: WITH_ARGS,
   virtx_client_remove_file: WITH_ARGS,
@@ -569,13 +568,6 @@ class Client {
     const bytes = encode({ ...root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
     const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
-    await this._lib.answer(handle)
-  }
-
-  async writeText(root, at, text, ifMatch) {
-    const bytes = encode({ ...root, path: at, ifMatch })
-    const data = Buffer.from(text, 'utf8')
-    const handle = this._lib.virtx_client_write_text(this._held(), bytes, bytes.length, data, data.length)
     await this._lib.answer(handle)
   }
 

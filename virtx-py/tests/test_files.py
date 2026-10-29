@@ -26,13 +26,13 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         assert await client.read_file(volume, "dir/a.txt", offset=6, length=3) == b"wor"
 
         # Text, an etag to write over, and what is there, told without an error.
-        await client.write_text(volume, "dir/t.txt", "텍스트")
+        await client.write_file(volume, "dir/t.txt", "텍스트")
         assert await client.read_text(volume, "dir/t.txt") == "텍스트"
         etag = (await client.stat_file(volume, "dir/t.txt")).etag
         assert etag
-        await client.write_text(volume, "dir/t.txt", "text 2", if_match=etag)
+        await client.write_file(volume, "dir/t.txt", "text 2", if_match=etag)
         with pytest.raises(VirtxError, match="412"):
-            await client.write_text(volume, "dir/t.txt", "text 3", if_match=etag)
+            await client.write_file(volume, "dir/t.txt", "text 3", if_match=etag)
         await client.write_file(volume, "dir/bin", b"\xff\xfe")
         with pytest.raises(VirtxError, match="UTF-8"):
             await client.read_text(volume, "dir/bin")

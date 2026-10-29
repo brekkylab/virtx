@@ -61,6 +61,7 @@ const SIGNATURES = {
     'int',
     ['const char *', 'const char *', 'const char *', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
+  virtx_nearest_endpoint: ['int', ['const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -315,13 +316,26 @@ class Client {
   }
 
   // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
-  // Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
-  // `VIRTX_DOMAIN` (`DOMAIN` by default).
+  // Without `VIRTX_URL`, a cell of virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the
+  // one `VIRTX_REGION` names (`apne2`), or else the nearest, timed from here (`nearestEndpoint`);
+  // failing that, the one an API key's prefix names.
   static fromEnv() {
     const key = process.env.VIRTX_API_KEY || null
-    const url = process.env.VIRTX_URL || (key && endpointOf(key, process.env.VIRTX_DOMAIN || null))
-    if (!url) throw new VirtxError('VIRTX_URL is not set, and VIRTX_API_KEY names no cell')
-    return Client.connect(url, { token: key, org: process.env.VIRTX_ORG || null })
+    const org = process.env.VIRTX_ORG || null
+    const domain = process.env.VIRTX_DOMAIN || null
+    const region = process.env.VIRTX_REGION || null
+    let url = process.env.VIRTX_URL || null
+    if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
+    if (!url && (key || org)) {
+      try {
+        url = nearestEndpoint(domain)
+      } catch (e) {
+        if (!(e instanceof VirtxError)) throw e
+        url = key && endpointOf(key, domain)
+      }
+    }
+    if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
+    return Client.connect(url, { token: key, org })
   }
 
   // Take over one hold of the `VirtxClient*` `raw`, as `intoRaw` or C's `virtx_client_retain`
@@ -555,6 +569,15 @@ function endpointOf(key, domain = null) {
   return cell ? `https://${cell}.api.${domain || DOMAIN}` : null
 }
 
+// The endpoint of the nearest cell of virtx cloud offered under `domain` (`DOMAIN` without):
+// the one this machine reaches fastest, a few round trips to each timed at once. Blocks.
+function nearestEndpoint(domain = null) {
+  const lib = library()
+  const out = {}
+  const status = lib.virtx_nearest_endpoint(domain || DOMAIN, out)
+  return lib.take(status, out)
+}
+
 module.exports = {
   Client,
   DOMAIN,
@@ -564,6 +587,7 @@ module.exports = {
   VirtxError,
   endpointOf,
   imageName,
+  nearestEndpoint,
   libraryPath,
   load,
 }

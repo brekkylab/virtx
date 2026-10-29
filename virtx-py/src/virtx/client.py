@@ -128,15 +128,25 @@ class Client:
     @classmethod
     def from_env(cls) -> Client:
         """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set.
-        Without ``VIRTX_URL``, a virtx cloud API key names its own: the cell in its prefix,
-        under ``VIRTX_DOMAIN`` (``DOMAIN`` by default)."""
+
+        Without ``VIRTX_URL``, a cell of virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by
+        default): the one ``VIRTX_REGION`` names (``apne2``), or else the nearest, timed from
+        here (:func:`nearest_endpoint`); failing that, the one an API key's prefix names."""
         key = os.environ.get("VIRTX_API_KEY") or None
-        url = os.environ.get("VIRTX_URL") or (
-            key and endpoint_of(key, os.environ.get("VIRTX_DOMAIN") or None)
-        )
+        org = os.environ.get("VIRTX_ORG") or None
+        domain = os.environ.get("VIRTX_DOMAIN") or None
+        region = os.environ.get("VIRTX_REGION") or None
+        url = os.environ.get("VIRTX_URL") or None
+        if not url and region:
+            url = f"https://{region}.api.{domain or DOMAIN}"
+        if not url and (key or org):
+            try:
+                url = nearest_endpoint(domain)
+            except VirtxError:
+                url = key and endpoint_of(key, domain)
         if not url:
-            raise VirtxError("VIRTX_URL is not set, and VIRTX_API_KEY names no cell")
-        return cls.connect(url, key, os.environ.get("VIRTX_ORG") or None)
+            raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
+        return cls.connect(url, key, org)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
@@ -399,6 +409,15 @@ class Client:
 
 DOMAIN = "virtx.brekkylab.com"
 """Where virtx cloud's cells are, by default: ``<cell>.api.<DOMAIN>``."""
+
+
+def nearest_endpoint(domain: str | None = None) -> str:
+    """The endpoint of the nearest cell of virtx cloud offered under ``domain`` (``DOMAIN``
+    without): the one this machine reaches fastest, a few round trips to each timed at once."""
+    lib = library()
+    out = _Bytes()
+    status = lib.virtx_nearest_endpoint((domain or DOMAIN).encode(), ctypes.byref(out))
+    return lib.take(status, out)
 
 
 def endpoint_of(key: str, domain: str | None = None) -> str | None:

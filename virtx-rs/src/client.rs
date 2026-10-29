@@ -105,17 +105,30 @@ impl Client {
     }
 
     /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
-    /// Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
-    /// `VIRTX_DOMAIN` ([`DOMAIN`] by default).
+    ///
+    /// Without `VIRTX_URL`, a cell of virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default):
+    /// the one `VIRTX_REGION` names (`apne2`), or else the nearest, timed from here
+    /// ([`nearest_endpoint`]); failing that, the one an API key's prefix names.
     pub fn from_env() -> Result<Client, Error> {
         let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
-        let key = var("VIRTX_API_KEY");
-        let url = var("VIRTX_URL")
-            .or_else(|| endpoint_of(key.as_deref()?, var("VIRTX_DOMAIN").as_deref()))
-            .ok_or_else(|| {
-                Error::Call("VIRTX_URL is not set, and VIRTX_API_KEY names no cell".to_owned())
-            })?;
-        Client::connect_with(url, key.as_deref(), var("VIRTX_ORG").as_deref())
+        let (key, org, domain) = (var("VIRTX_API_KEY"), var("VIRTX_ORG"), var("VIRTX_DOMAIN"));
+        let mut url = var("VIRTX_URL").or_else(|| {
+            var("VIRTX_REGION").map(|region| {
+                format!(
+                    "https://{region}.api.{}",
+                    domain.as_deref().unwrap_or(DOMAIN)
+                )
+            })
+        });
+        if url.is_none() && (key.is_some() || org.is_some()) {
+            url = nearest_endpoint(domain.as_deref())
+                .ok()
+                .or_else(|| endpoint_of(key.as_deref()?, domain.as_deref()));
+        }
+        let url = url.ok_or_else(|| {
+            Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())
+        })?;
+        Client::connect_with(url, key.as_deref(), org.as_deref())
     }
 
     /// The `VirtxClient*` this holds, still held by it: for another module over the same
@@ -452,6 +465,18 @@ unsafe fn opened(
         Err(error) => Err(error),
         Ok(()) => Err(Error::Library(format!("unknown status {status}"))),
     }
+}
+
+/// The endpoint of the nearest cell of virtx cloud offered under `domain` ([`DOMAIN`]
+/// without): the one this machine reaches fastest, a few round trips to each timed at once.
+/// Blocks.
+pub fn nearest_endpoint(domain: Option<&str>) -> Result<String, Error> {
+    let api = api()?;
+    let domain = CString::new(domain.unwrap_or(DOMAIN))
+        .map_err(|e| Error::Call(format!("the domain: {e}")))?;
+    let mut out = VirtxBytes::empty();
+    let status = unsafe { (api.virtx_nearest_endpoint)(domain.as_ptr(), &mut out) };
+    unsafe { take(api, status, out) }
 }
 
 /// Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`.

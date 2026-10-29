@@ -14,6 +14,8 @@ export const DOMAIN: string
  * (`DOMAIN` without): null for a key that is no such key.
  */
 export function endpointOf(key: string, domain?: string | null): string | null
+/** The endpoint of the nearest cell of virtx cloud offered under `domain` (`DOMAIN` without): the one this machine reaches fastest. Blocks. */
+export function nearestEndpoint(domain?: string | null): string
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
 export function load(file: string): void

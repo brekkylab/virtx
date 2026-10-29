@@ -18,6 +18,8 @@ mod error;
 mod ffi;
 mod image;
 mod method;
+#[cfg(feature = "client")]
+pub mod nearest;
 #[cfg(any(feature = "client", feature = "server"))]
 mod rpc;
 mod sandbox;

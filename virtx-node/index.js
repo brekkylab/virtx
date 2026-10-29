@@ -51,6 +51,8 @@ const Out = koffi.out(koffi.pointer(VirtxBytes))
 
 const PLAIN = ['uintptr_t', ['uintptr_t']]
 const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
+// A request with a body of bytes beside its args.
+const WITH_DATA = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']]
 const SIGNATURES = {
   virtx_client_spawn: [
     'int',
@@ -93,8 +95,13 @@ const SIGNATURES = {
   virtx_client_remove_volume_mount: WITH_ARGS,
   virtx_client_stat_file: WITH_ARGS,
   virtx_client_read_dir: WITH_ARGS,
+  virtx_client_file_exists: WITH_ARGS,
+  virtx_client_is_file: WITH_ARGS,
+  virtx_client_is_dir: WITH_ARGS,
   virtx_client_read_file: WITH_ARGS,
-  virtx_client_write_file: ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']],
+  virtx_client_read_text: WITH_ARGS,
+  virtx_client_write_file: WITH_DATA,
+  virtx_client_write_text: WITH_DATA,
   virtx_client_create_dir: WITH_ARGS,
   virtx_client_create_dir_all: WITH_ARGS,
   virtx_client_remove_file: WITH_ARGS,
@@ -538,6 +545,24 @@ class Client {
 
   // Writes `content` (a `Buffer`, a `Uint8Array` or a string, as UTF-8) as the whole file at
   // `path`, creating it if it does not exist. Its parent directory must exist.
+  // Whether anything, a file, or a directory is at `at`.
+  async exists(root, at) {
+    return await this._call('virtx_client_file_exists', { ...root, path: at })
+  }
+
+  async isFile(root, at) {
+    return await this._call('virtx_client_is_file', { ...root, path: at })
+  }
+
+  async isDir(root, at) {
+    return await this._call('virtx_client_is_dir', { ...root, path: at })
+  }
+
+  // The whole file as text, which it has to be: UTF-8.
+  async readText(root, at) {
+    return await this._call('virtx_client_read_text', { ...root, path: at })
+  }
+
   // With `ifMatch`, the `etag` a stat gave, the write goes only while the file still has it,
   // and is refused with a `412` otherwise.
   async writeFile(root, at, content, ifMatch) {
@@ -547,18 +572,25 @@ class Client {
     await this._lib.answer(handle)
   }
 
+  async writeText(root, at, text, ifMatch) {
+    const bytes = encode({ ...root, path: at, ifMatch })
+    const data = Buffer.from(text, 'utf8')
+    const handle = this._lib.virtx_client_write_text(this._held(), bytes, bytes.length, data, data.length)
+    await this._lib.answer(handle)
+  }
+
   async createDir(root, at) {
     await this._call('virtx_client_create_dir', { ...root, path: at })
   }
 
-  // Removes what is at `path`: a directory with everything in it.
   async createDirAll(root, at) {
     await this._call('virtx_client_create_dir_all', { ...root, path: at })
   }
 
   // Removes what is at `path`: a directory with everything in it.
-  async removeFile(root, at) {
-    await this._call('virtx_client_remove_file', { ...root, path: at })
+  // With `missingOk`, nothing being there is fine, as `rm -f`; without it, a `404`.
+  async removeFile(root, at, missingOk = false) {
+    await this._call('virtx_client_remove_file', { ...root, path: at, missingOk: missingOk || undefined })
   }
 
   // Moves what is at `from` to `to` in the same root, replacing what is at `to` if `overwrite`,

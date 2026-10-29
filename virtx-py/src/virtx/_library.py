@@ -86,6 +86,11 @@ _OUT = ctypes.POINTER(_Bytes)
 # client and, unless it is a list, its arguments as `(bytes, len)`.
 _PLAIN = ([_HANDLE], _HANDLE)
 _WITH_ARGS = ([_HANDLE, ctypes.c_char_p, ctypes.c_size_t], _HANDLE)
+# A request with a body of bytes beside its args.
+_WITH_DATA = (
+    [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t],
+    _HANDLE,
+)
 _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_spawn": (
         [
@@ -137,11 +142,13 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_remove_volume_mount": _WITH_ARGS,
     "virtx_client_stat_file": _WITH_ARGS,
     "virtx_client_read_dir": _WITH_ARGS,
+    "virtx_client_file_exists": _WITH_ARGS,
+    "virtx_client_is_file": _WITH_ARGS,
+    "virtx_client_is_dir": _WITH_ARGS,
     "virtx_client_read_file": _WITH_ARGS,
-    "virtx_client_write_file": (
-        [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t],
-        _HANDLE,
-    ),
+    "virtx_client_read_text": _WITH_ARGS,
+    "virtx_client_write_file": _WITH_DATA,
+    "virtx_client_write_text": _WITH_DATA,
     "virtx_client_create_dir": _WITH_ARGS,
     "virtx_client_create_dir_all": _WITH_ARGS,
     "virtx_client_remove_file": _WITH_ARGS,

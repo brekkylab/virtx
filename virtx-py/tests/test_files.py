@@ -25,14 +25,27 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         assert await client.read_file(volume, "dir/a.txt") == b"hello world"
         assert await client.read_file(volume, "dir/a.txt", offset=6, length=3) == b"wor"
 
-        # An etag to write over, and only over the file that still has it.
-        await client.write_file(volume, "dir/e.txt", b"e")
-        etag = (await client.stat_file(volume, "dir/e.txt")).etag
+        # Text, an etag to write over, and what is there, told without an error.
+        await client.write_text(volume, "dir/t.txt", "텍스트")
+        assert await client.read_text(volume, "dir/t.txt") == "텍스트"
+        etag = (await client.stat_file(volume, "dir/t.txt")).etag
         assert etag
-        await client.write_file(volume, "dir/e.txt", b"ee", if_match=etag)
+        await client.write_text(volume, "dir/t.txt", "text 2", if_match=etag)
         with pytest.raises(VirtxError, match="412"):
-            await client.write_file(volume, "dir/e.txt", b"eee", if_match=etag)
-        await client.remove_file(volume, "dir/e.txt")
+            await client.write_text(volume, "dir/t.txt", "text 3", if_match=etag)
+        await client.write_file(volume, "dir/bin", b"\xff\xfe")
+        with pytest.raises(VirtxError, match="UTF-8"):
+            await client.read_text(volume, "dir/bin")
+        assert await client.exists(volume, "dir/t.txt")
+        assert await client.is_file(volume, "dir/t.txt")
+        assert not await client.is_dir(volume, "dir/t.txt")
+        assert await client.is_dir(volume, "dir")
+        await client.remove_file(volume, "dir/t.txt")
+        await client.remove_file(volume, "dir/bin")
+        assert not await client.exists(volume, "dir/t.txt")
+        with pytest.raises(VirtxError, match="404"):
+            await client.remove_file(volume, "dir/t.txt")
+        await client.remove_file(volume, "dir/t.txt", missing_ok=True)
 
         await client.rename_file(volume, "dir/a.txt", "b.txt")
         await client.copy_file(volume, "b.txt", "c.txt")

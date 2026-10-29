@@ -8,15 +8,15 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRoot, FileWriteArgs,
-    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
-    ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
-    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, Metadata,
-    MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput,
-    SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs,
-    SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs,
-    VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
-    VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
+    FileWriteArgs, ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput,
+    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs,
+    ImagePushOutput, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+    ImageUploadOutput, Metadata, MountSource, Recipe, RegistryAuth, SandboxCloseArgs,
+    SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
+    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
+    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -381,6 +381,21 @@ impl Client {
     }
 
     /// The entries of the directory at `path` in `root`.
+    /// Whether anything is at `path` in `root`.
+    pub fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+        self.call(self.api.virtx_client_file_exists, self.at(root, path))
+    }
+
+    /// Whether a file is at `path` in `root`.
+    pub fn is_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+        self.call(self.api.virtx_client_is_file, self.at(root, path))
+    }
+
+    /// Whether a directory is at `path` in `root`.
+    pub fn is_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+        self.call(self.api.virtx_client_is_dir, self.at(root, path))
+    }
+
     pub fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
         self.call(self.api.virtx_client_read_dir, self.at(root, path))
     }
@@ -402,6 +417,11 @@ impl Client {
         Call::raw(self.api, self.start(self.api.virtx_client_read_file, args))
     }
 
+    /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
+    pub fn read_text(&self, root: &FileRoot, path: impl Into<String>) -> Call<String> {
+        self.call(self.api.virtx_client_read_text, self.at(root, path))
+    }
+
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
     /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
     /// the file gave, the write goes only while the file still has it, and is refused with a
@@ -418,6 +438,23 @@ impl Client {
             root,
             path,
             content.as_ref(),
+            if_match,
+        )
+    }
+
+    /// Write `text` as the whole file at `path` in `root`, as [`write_file`](Self::write_file).
+    pub fn write_text(
+        &self,
+        root: &FileRoot,
+        path: impl Into<String>,
+        text: &str,
+        if_match: Option<&str>,
+    ) -> Call<()> {
+        self.write_with(
+            self.api.virtx_client_write_text,
+            root,
+            path,
+            text.as_bytes(),
             if_match,
         )
     }
@@ -460,9 +497,20 @@ impl Client {
         self.call(self.api.virtx_client_create_dir_all, self.at(root, path))
     }
 
-    /// Remove what is at `path` in `root`: a directory with everything in it.
-    pub fn remove_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
-        self.call(self.api.virtx_client_remove_file, self.at(root, path))
+    /// Remove what is at `path` in `root`: a directory with everything in it. With
+    /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`.
+    pub fn remove_file(
+        &self,
+        root: &FileRoot,
+        path: impl Into<String>,
+        missing_ok: bool,
+    ) -> Call<()> {
+        let args = FileRemoveArgs {
+            root: root.clone(),
+            path: path.into(),
+            missing_ok,
+        };
+        self.call(self.api.virtx_client_remove_file, args)
     }
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if

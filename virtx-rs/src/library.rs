@@ -92,7 +92,7 @@ api! {
     virtx_client_connect_with: unsafe extern "C" fn(
         url: *const c_char,
         token: *const c_char,
-        project: *const c_char,
+        org: *const c_char,
         client: *mut *mut Opaque,
         error: *mut VirtxBytes,
     ) -> c_int,

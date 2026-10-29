@@ -374,7 +374,7 @@ async fn an_http_error_fails_its_call_with_the_status() {
 }
 
 #[tokio::test]
-async fn a_client_sends_its_token_and_project_with_every_request() {
+async fn a_client_sends_its_token_and_org_with_every_request() {
     let url = serve(
         methods(),
         Some(Tokens {
@@ -397,18 +397,18 @@ async fn a_client_sends_its_token_and_project_with_every_request() {
 }
 
 #[tokio::test]
-async fn the_project_is_sent_as_its_header() {
-    // A server that answers every call with the project its request named.
+async fn the_org_is_sent_as_its_header() {
+    // A server that answers every call with the org its request named.
     let router = axum::Router::new().route(
         "/rpc",
         axum::routing::post(|headers: HeaderMap, body: axum::body::Bytes| async move {
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let project = headers
-                .get("virtx-project")
+            let org = headers
+                .get("virtx-org")
                 .map(|v| v.to_str().unwrap().to_owned());
             (
                 [("content-type", "application/json")],
-                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": project })
+                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": org })
                     .to_string(),
             )
         }),

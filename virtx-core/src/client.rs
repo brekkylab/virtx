@@ -51,14 +51,14 @@ impl Client {
         Self::connect_with(url, None, None)
     }
 
-    /// Reach the server at `url`, sending `token` (`Authorization: Bearer`) and `project`
-    /// (`virtx-project`) with every request, when given.
+    /// Reach the server at `url`, sending `token` (`Authorization: Bearer`) and `org`
+    /// (`virtx-org`) with every request, when given.
     pub fn connect_with(
         url: &str,
         token: Option<&str>,
-        project: Option<&str>,
+        org: Option<&str>,
     ) -> anyhow::Result<Client> {
-        let inner = TransportClient::connect_with(url, token, project)?;
+        let inner = TransportClient::connect_with(url, token, org)?;
         Ok(Client { inner })
     }
 
@@ -548,18 +548,18 @@ pub(crate) mod ffi {
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
-    /// As [`virtx_client_connect`], sending `token` as `Authorization: Bearer` and `project`
-    /// as `virtx-project` with every request. Either may be null, for none.
+    /// As [`virtx_client_connect`], sending `token` as `Authorization: Bearer` and `org` as
+    /// `virtx-org` with every request. Either may be null, for none.
     ///
     /// # Safety
     ///
-    /// `url` is NUL-terminated UTF-8, and so are `token` and `project` unless null. `client`
+    /// `url` is NUL-terminated UTF-8, and so are `token` and `org` unless null. `client`
     /// is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_connect_with(
         url: *const c_char,
         token: *const c_char,
-        project: *const c_char,
+        org: *const c_char,
         client: *mut *mut VirtxClient,
         error: *mut VirtxBytes,
     ) -> c_int {
@@ -574,10 +574,8 @@ pub(crate) mod ffi {
         };
         let opened = (|| {
             let url = text(url)?.ok_or("no url")?;
-            let (token, project) = (text(token)?, text(project)?);
-            Runtime::open(|| {
-                Client::connect_with(url, token, project).map_err(|e| format!("{e:#}"))
-            })
+            let (token, org) = (text(token)?, text(org)?);
+            Runtime::open(|| Client::connect_with(url, token, org).map_err(|e| format!("{e:#}")))
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }

@@ -111,14 +111,15 @@ class Client:
         return cls._opened(lib, status, raw, error)
 
     @classmethod
-    def connect(cls, url: str, token: str | None = None, project: str | None = None) -> Client:
+    def connect(cls, url: str, token: str | None = None, org: str | None = None) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
-        it), sending ``token`` as ``Authorization: Bearer`` and ``project`` as ``virtx-project``
-        with every request when given: an API key of virtx cloud, say."""
+        it), sending ``token`` as ``Authorization: Bearer`` and ``org`` as ``virtx-org`` with
+        every request when given: an API key of virtx cloud, say, or a user's access token and
+        the organization it is for."""
         lib = library()
         raw = ctypes.c_void_p()
         error = _Bytes()
-        encoded = [None if v is None else v.encode() for v in (token, project)]
+        encoded = [None if v is None else v.encode() for v in (token, org)]
         status = lib.virtx_client_connect_with(
             url.encode(), encoded[0], encoded[1], ctypes.byref(raw), ctypes.byref(error)
         )
@@ -126,8 +127,8 @@ class Client:
 
     @classmethod
     def from_env(cls) -> Client:
-        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_PROJECT`` if
-        set. Without ``VIRTX_URL``, a virtx cloud API key names its own: the cell in its prefix,
+        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set.
+        Without ``VIRTX_URL``, a virtx cloud API key names its own: the cell in its prefix,
         under ``VIRTX_DOMAIN`` (``DOMAIN`` by default)."""
         key = os.environ.get("VIRTX_API_KEY") or None
         url = os.environ.get("VIRTX_URL") or (
@@ -135,7 +136,7 @@ class Client:
         )
         if not url:
             raise VirtxError("VIRTX_URL is not set, and VIRTX_API_KEY names no cell")
-        return cls.connect(url, key, os.environ.get("VIRTX_PROJECT") or None)
+        return cls.connect(url, key, os.environ.get("VIRTX_ORG") or None)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:

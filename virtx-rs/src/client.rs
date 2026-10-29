@@ -77,18 +77,18 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, sending `token` as `Authorization: Bearer` and `project` as
-    /// `virtx-project` with every request, when given: an API key of virtx cloud, say, or a
-    /// user's access token and the project it is for.
+    /// Reach the server at `url`, sending `token` as `Authorization: Bearer` and `org` as
+    /// `virtx-org` with every request, when given: an API key of virtx cloud, say, or a user's
+    /// access token and the organization it is for.
     pub fn connect_with(
         url: impl AsRef<str>,
         token: Option<&str>,
-        project: Option<&str>,
+        org: Option<&str>,
     ) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
         let token = token.map(c_string).transpose()?;
-        let project = project.map(c_string).transpose()?;
+        let org = org.map(c_string).transpose()?;
         let as_ptr = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
@@ -96,7 +96,7 @@ impl Client {
             (api.virtx_client_connect_with)(
                 url.as_ptr(),
                 as_ptr(&token),
-                as_ptr(&project),
+                as_ptr(&org),
                 &mut raw,
                 &mut error,
             )
@@ -104,7 +104,7 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
     /// Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
     /// `VIRTX_DOMAIN` ([`DOMAIN`] by default).
     pub fn from_env() -> Result<Client, Error> {
@@ -115,7 +115,7 @@ impl Client {
             .ok_or_else(|| {
                 Error::Call("VIRTX_URL is not set, and VIRTX_API_KEY names no cell".to_owned())
             })?;
-        Client::connect_with(url, key.as_deref(), var("VIRTX_PROJECT").as_deref())
+        Client::connect_with(url, key.as_deref(), var("VIRTX_ORG").as_deref())
     }
 
     /// The `VirtxClient*` this holds, still held by it: for another module over the same

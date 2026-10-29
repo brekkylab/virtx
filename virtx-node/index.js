@@ -304,24 +304,24 @@ class Client {
   }
 
   // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-  // `token` as `Authorization: Bearer` and `project` as `virtx-project` with every request when
-  // given: an API key of virtx cloud, say.
-  static connect(url, { token = null, project = null } = {}) {
+  // `token` as `Authorization: Bearer` and `org` as `virtx-org` with every request when given:
+  // an API key of virtx cloud, say, or a user's access token and the organization it is for.
+  static connect(url, { token = null, org = null } = {}) {
     const lib = library()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect_with(url, token, project, raw, error)
+    const status = lib.virtx_client_connect_with(url, token, org, raw, error)
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
   // Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
   // `VIRTX_DOMAIN` (`DOMAIN` by default).
   static fromEnv() {
     const key = process.env.VIRTX_API_KEY || null
     const url = process.env.VIRTX_URL || (key && endpointOf(key, process.env.VIRTX_DOMAIN || null))
     if (!url) throw new VirtxError('VIRTX_URL is not set, and VIRTX_API_KEY names no cell')
-    return Client.connect(url, { token: key, project: process.env.VIRTX_PROJECT || null })
+    return Client.connect(url, { token: key, org: process.env.VIRTX_ORG || null })
   }
 
   // Take over one hold of the `VirtxClient*` `raw`, as `intoRaw` or C's `virtx_client_retain`

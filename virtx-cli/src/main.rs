@@ -13,8 +13,8 @@
 //! `~/.config/virtx/<domain>.token`, readable by its owner alone. An access token lasts 15
 //! minutes, and `virtx token` gives a fresh one each time.
 //!
-//! With an access token, a client names its project as well -- `VIRTX_PROJECT` -- and its
-//! cell's endpoint, `VIRTX_URL`: unlike an API key, a person's token names neither.
+//! With an access token, a client names its organization as well -- `VIRTX_ORG`, its UUID --
+//! and its cell's endpoint, `VIRTX_URL`: unlike an API key, a person's token names neither.
 
 use std::path::PathBuf;
 use std::thread::sleep;

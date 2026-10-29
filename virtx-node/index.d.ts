@@ -206,12 +206,12 @@ export class Client {
   static spawn(program: string, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-   * `token` as `Authorization: Bearer` and `project` as `virtx-project` with every request when
-   * given: an API key of virtx cloud, say.
+   * `token` as `Authorization: Bearer` and `org` as `virtx-org` with every request when given:
+   * an API key of virtx cloud, say, or a user's access token and the organization it is for.
    */
-  static connect(url: string, options?: { token?: string | null; project?: string | null }): Client
+  static connect(url: string, options?: { token?: string | null; org?: string | null }): Client
   /**
-   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set. Without
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set. Without
    * `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
    * `VIRTX_DOMAIN` (`DOMAIN` by default).
    */

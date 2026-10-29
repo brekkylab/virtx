@@ -4,9 +4,9 @@ use http_body_util::BodyExt;
 
 use super::Body;
 
-/// The header a request names its project in, on a server that keeps projects apart
-/// (PROTOCOL.md, Authentication).
-const PROJECT_HEADER: &str = "virtx-project";
+/// The header a request names its organization in, on a server that keeps organizations
+/// apart (PROTOCOL.md, Authentication).
+const ORG_HEADER: &str = "virtx-org";
 
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
@@ -17,12 +17,12 @@ pub(super) struct Tcp {
 
 impl Tcp {
     /// The server whose base URL is `url`, an `http` or `https` URL. Every request carries
-    /// `token` as `Authorization: Bearer`, and `project` as `virtx-project`, when given.
+    /// `token` as `Authorization: Bearer`, and `org` as `virtx-org`, when given.
     /// Nothing is sent until the first request.
     pub(super) fn connect(
         url: &str,
         token: Option<&str>,
-        project: Option<&str>,
+        org: Option<&str>,
     ) -> anyhow::Result<Tcp> {
         let mut base = reqwest::Url::parse(url)?;
         anyhow::ensure!(
@@ -39,10 +39,10 @@ impl Tcp {
             value.set_sensitive(true);
             headers.insert(http::header::AUTHORIZATION, value);
         }
-        if let Some(project) = project {
-            let value = http::HeaderValue::from_str(project)
-                .map_err(|_| anyhow::anyhow!("the project is not one an HTTP header can carry"))?;
-            headers.insert(PROJECT_HEADER, value);
+        if let Some(org) = org {
+            let value = http::HeaderValue::from_str(org)
+                .map_err(|_| anyhow::anyhow!("the org is not one an HTTP header can carry"))?;
+            headers.insert(ORG_HEADER, value);
         }
         Ok(Tcp {
             http: reqwest::Client::builder()

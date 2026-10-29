@@ -376,8 +376,8 @@ Rebuilding under the same ref moves it to the new build, while `ImageSource::dig
 
 ## Remote servers
 
-A client reaches a server over HTTP by its base URL. Credentials and the project go with every
-request: an API key of virtx cloud, say, which names its project itself.
+A client reaches a server over HTTP by its base URL. Credentials and the organization go with
+every request: an API key of virtx cloud, say, which names its organization itself.
 
 Without `VIRTX_URL`, `from_env` takes the endpoint from a virtx cloud API key itself: its
 prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.brekkylab.com`), under
@@ -385,26 +385,26 @@ prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.brekkylab.c
 
 ```python
 client = virtx.Client.connect("https://apne2.api.example.com", token=api_key)
-client = virtx.Client.from_env()  # VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+client = virtx.Client.from_env()  # VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
 ```js
 const client = Client.connect('https://apne2.api.example.com', { token: apiKey })
-const fromEnv = Client.fromEnv() // VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+const fromEnv = Client.fromEnv() // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
 ```rust
 let client = Client::connect_with("https://apne2.api.example.com", Some(&api_key), None)?;
-let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_PROJECT
+let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
 A person signs in from a terminal with `virtx login` (the `virtx-cli` crate). `virtx token`
-prints an access token for their session, refreshed. Unlike an API key, it names no project
-and no cell, so `VIRTX_PROJECT` and `VIRTX_URL` go with it:
+prints an access token for their session, refreshed. Unlike an API key, it names no
+organization and no cell, so `VIRTX_ORG` (the organization's UUID) and `VIRTX_URL` go with it:
 
 ```sh
 virtx login
-VIRTX_API_KEY=$(virtx token) VIRTX_PROJECT=<project id> VIRTX_URL=https://apne2.api.virtx.brekkylab.com python agent.py
+VIRTX_API_KEY=$(virtx token) VIRTX_ORG=<org uuid> VIRTX_URL=https://apne2.api.virtx.brekkylab.com python agent.py
 ```
 
 ## Cache

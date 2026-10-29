@@ -89,16 +89,16 @@ int virtx_client_spawn(const char *program,
 // `url` is NUL-terminated UTF-8. `client` is writable. `error` is null or writable.
 int virtx_client_connect(const char *url, struct VirtxClient **client, struct VirtxBytes *error);
 
-// As [`virtx_client_connect`], sending `token` as `Authorization: Bearer` and `project`
-// as `virtx-project` with every request. Either may be null, for none.
+// As [`virtx_client_connect`], sending `token` as `Authorization: Bearer` and `org` as
+// `virtx-org` with every request. Either may be null, for none.
 //
 // # Safety
 //
-// `url` is NUL-terminated UTF-8, and so are `token` and `project` unless null. `client`
+// `url` is NUL-terminated UTF-8, and so are `token` and `org` unless null. `client`
 // is writable. `error` is null or writable.
 int virtx_client_connect_with(const char *url,
                               const char *token,
-                              const char *project,
+                              const char *org,
                               struct VirtxClient **client,
                               struct VirtxBytes *error);
 

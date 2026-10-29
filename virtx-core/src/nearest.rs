@@ -1,7 +1,8 @@
 //! The nearest of virtx cloud's cells, as this machine reaches them: the control plane lists
 //! the cells offered (`https://api.<domain>/v1/cells`), and each is timed at its gateway's
-//! `/healthz`, a few times over one connection, so that what is timed is the round trip and not
-//! the handshake. The fastest is the nearest.
+//! `/serving`, a few times over one connection, so that what is timed is the round trip and not
+//! the handshake. A cell with no node up answers `503` there, and is passed by. The fastest of
+//! the rest is the nearest.
 
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ pub struct Cell {
 }
 
 /// The cells offered under `domain`, nearest first, each with its round trip from here. A cell
-/// that does not answer is left out.
+/// that does not answer, or has no node up, is left out.
 pub async fn cells_by_distance(domain: &str) -> anyhow::Result<Vec<(Cell, Duration)>> {
     let http = reqwest::Client::builder().timeout(WAIT).build()?;
     let listed = http
@@ -36,7 +37,7 @@ pub async fn cells_by_distance(domain: &str) -> anyhow::Result<Vec<(Cell, Durati
     let timed = cells.into_iter().map(|cell| {
         let http = http.clone();
         async move {
-            let url = format!("{}/healthz", cell.api_url.trim_end_matches('/'));
+            let url = format!("{}/serving", cell.api_url.trim_end_matches('/'));
             let mut fastest: Option<Duration> = None;
             for asked in 0..ASKED {
                 let started = Instant::now();

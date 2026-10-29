@@ -227,6 +227,9 @@ impl TransportClient {
         request: http::Result<http::Request<Body>>,
     ) -> Result<(StatusCode, Bytes), Error> {
         let request = request.map_err(|e| Error::Transport(format!("not a request: {e}")))?;
+        // What a `207` means depends on the request: a `PROPFIND` succeeds with one, and these
+        // report what failed in a directory, per path.
+        let per_path = matches!(request.method().as_str(), "DELETE" | "COPY" | "MOVE");
         let response = self.send(request).await?;
         let status = response.status();
         let body = response
@@ -238,6 +241,14 @@ impl TransportClient {
         if !status.is_success() {
             let body = String::from_utf8_lossy(&body).trim().to_owned();
             return Err(Error::Status(status.as_u16(), body));
+        }
+        if status == StatusCode::MULTI_STATUS && per_path {
+            // A `207` whose paths all succeeded is a success.
+            let xml = std::str::from_utf8(&body)
+                .map_err(|e| Error::Transport(format!("a 207 answered no XML: {e}")))?;
+            if let Some((status, path)) = failure_in(xml) {
+                return Err(Error::Status(status, path));
+            }
         }
         Ok((status, body))
     }
@@ -358,6 +369,39 @@ fn multistatus(xml: &str) -> Result<Vec<(String, Metadata)>, String> {
     Ok(responses)
 }
 
+/// The first `response` of `xml`, a `multistatus`, with a `status` of its own outside `2xx`:
+/// that status, and the path of its `href`. `None` where there is none, or `xml` is not a
+/// `multistatus`.
+fn failure_in(xml: &str) -> Option<(u16, String)> {
+    let document = roxmltree::Document::parse(xml).ok()?;
+    let root = document.root_element();
+    if !is(root, "multistatus") {
+        return None;
+    }
+    root.children()
+        .filter(|node| is(*node, "response"))
+        .find_map(|response| {
+            let status = response
+                .children()
+                .find(|node| is(*node, "status"))?
+                .text()?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u16>()
+                .ok()?;
+            if (200..300).contains(&status) {
+                return None;
+            }
+            let href = response
+                .children()
+                .find(|node| is(*node, "href"))
+                .and_then(|node| node.text())
+                .map(|href| href_path(href.trim()))
+                .unwrap_or_default();
+            Some((status, href))
+        })
+}
+
 /// Whether `node` is the `DAV:` element `name`.
 fn is(node: roxmltree::Node<'_, '_>, name: &str) -> bool {
     node.is_element() && node.tag_name().name() == name && node.tag_name().namespace() == Some(DAV)
@@ -390,6 +434,21 @@ mod tests {
             href_path("http://host/base/volumes/v/a%20b"),
             "/base/volumes/v/a b"
         );
+    }
+
+    #[test]
+    fn a_multistatus_names_what_failed_in_it() {
+        let failed = r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/volumes/v/dir/</D:href><D:status>HTTP/1.1 204 No Content</D:status></D:response><D:response><D:href>/volumes/v/dir/a%20b</D:href><D:status>HTTP/1.1 403 Forbidden</D:status></D:response></D:multistatus>"#;
+        assert_eq!(
+            failure_in(failed),
+            Some((403, "/volumes/v/dir/a b".to_owned()))
+        );
+        let all_well = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/x</D:href><D:status>HTTP/1.1 201 Created</D:status></D:response></D:multistatus>"#;
+        assert_eq!(failure_in(all_well), None);
+        // A PROPFIND's responses carry their statuses in propstats, which are not failures.
+        let propfind = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/x</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>"#;
+        assert_eq!(failure_in(propfind), None);
+        assert_eq!(failure_in("not xml"), None);
     }
 
     #[test]
@@ -595,6 +654,20 @@ mod round_trips {
             assert_eq!(status(client.copy(&root, "dir", "copy", false).await), 412);
             client.copy(&root, "b", "copy/c", true).await.unwrap();
             assert_eq!(client.read(&root, "copy/c", 0, None).await.unwrap(), "A");
+
+            // A directory moves with everything in it, onto one there only when told to.
+            client.create_dir_all(&root, "dir/sub").await.unwrap();
+            assert_eq!(
+                status(client.rename(&root, "dir", "copy", false).await),
+                412
+            );
+            client.rename(&root, "dir", "moved", false).await.unwrap();
+            assert_eq!(status(client.stat(&root, "dir").await), 404);
+            assert_eq!(client.read(&root, "moved/c", 0, None).await.unwrap(), "C");
+            assert!(client.stat(&root, "moved/sub").await.unwrap().is_dir);
+            client.rename(&root, "moved", "copy", true).await.unwrap();
+            assert_eq!(client.read(&root, "copy/c", 0, None).await.unwrap(), "C");
+            assert!(client.stat(&root, "copy/sub").await.unwrap().is_dir);
             client.close().await;
         }
     }

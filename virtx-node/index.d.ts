@@ -6,6 +6,15 @@ export const LIBRARY_ENV: 'VIRTX_CORE_LIB'
 /** A request failed: the server's error, the transport's, or the library's. */
 export class VirtxError extends Error {}
 
+/** Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`. */
+export const DOMAIN: string
+
+/**
+ * The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
+ * (`DOMAIN` without): null for a key that is no such key.
+ */
+export function endpointOf(key: string, domain?: string | null): string | null
+
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
 export function load(file: string): void
 
@@ -201,7 +210,11 @@ export class Client {
    * given: an API key of virtx cloud, say.
    */
   static connect(url: string, options?: { token?: string | null; project?: string | null }): Client
-  /** Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set. */
+  /**
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set. Without
+   * `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
+   * `VIRTX_DOMAIN` (`DOMAIN` by default).
+   */
   static fromEnv(): Client
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client

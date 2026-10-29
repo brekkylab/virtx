@@ -105,14 +105,17 @@ impl Client {
     }
 
     /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+    /// Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
+    /// `VIRTX_DOMAIN` ([`DOMAIN`] by default).
     pub fn from_env() -> Result<Client, Error> {
         let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
-        let url = var("VIRTX_URL").ok_or_else(|| Error::Call("VIRTX_URL is not set".to_owned()))?;
-        Client::connect_with(
-            url,
-            var("VIRTX_API_KEY").as_deref(),
-            var("VIRTX_PROJECT").as_deref(),
-        )
+        let key = var("VIRTX_API_KEY");
+        let url = var("VIRTX_URL")
+            .or_else(|| endpoint_of(key.as_deref()?, var("VIRTX_DOMAIN").as_deref()))
+            .ok_or_else(|| {
+                Error::Call("VIRTX_URL is not set, and VIRTX_API_KEY names no cell".to_owned())
+            })?;
+        Client::connect_with(url, key.as_deref(), var("VIRTX_PROJECT").as_deref())
     }
 
     /// The `VirtxClient*` this holds, still held by it: for another module over the same
@@ -448,5 +451,42 @@ unsafe fn opened(
     match unsafe { take::<()>(api, status, error) } {
         Err(error) => Err(error),
         Ok(()) => Err(Error::Library(format!("unknown status {status}"))),
+    }
+}
+
+/// Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`.
+pub const DOMAIN: &str = "virtx.brekkylab.com";
+
+/// The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
+/// ([`DOMAIN`] without): `None` for a key that is no such key.
+pub fn endpoint_of(key: &str, domain: Option<&str>) -> Option<String> {
+    let cell = key.strip_prefix("vx_sk_")?.split('_').next()?;
+    if cell.is_empty()
+        || !cell
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("https://{cell}.api.{}", domain.unwrap_or(DOMAIN)))
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::endpoint_of;
+
+    #[test]
+    fn a_key_names_its_cell() {
+        assert_eq!(
+            endpoint_of("vx_sk_apne2_0a38", None).as_deref(),
+            Some("https://apne2.api.virtx.brekkylab.com")
+        );
+        assert_eq!(
+            endpoint_of("vx_sk_apne2_0a38", Some("dev.virtx.brekkylab.com")).as_deref(),
+            Some("https://apne2.api.dev.virtx.brekkylab.com")
+        );
+        for key in ["sk_apne2_x", "vx_sk__x", "vx_sk_ap.ne2_x", "a-user-token"] {
+            assert_eq!(endpoint_of(key, None), None, "{key}");
+        }
     }
 }

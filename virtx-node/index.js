@@ -315,13 +315,13 @@ class Client {
   }
 
   // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_PROJECT` if set.
+  // Without `VIRTX_URL`, a virtx cloud API key names its own: the cell in its prefix, under
+  // `VIRTX_DOMAIN` (`DOMAIN` by default).
   static fromEnv() {
-    const url = process.env.VIRTX_URL
-    if (!url) throw new VirtxError('VIRTX_URL is not set')
-    return Client.connect(url, {
-      token: process.env.VIRTX_API_KEY || null,
-      project: process.env.VIRTX_PROJECT || null,
-    })
+    const key = process.env.VIRTX_API_KEY || null
+    const url = process.env.VIRTX_URL || (key && endpointOf(key, process.env.VIRTX_DOMAIN || null))
+    if (!url) throw new VirtxError('VIRTX_URL is not set, and VIRTX_API_KEY names no cell')
+    return Client.connect(url, { token: key, project: process.env.VIRTX_PROJECT || null })
   }
 
   // Take over one hold of the `VirtxClient*` `raw`, as `intoRaw` or C's `virtx_client_retain`
@@ -545,12 +545,24 @@ class PortForwarder {
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
+// Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`.
+const DOMAIN = 'virtx.brekkylab.com'
+
+// The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
+// (`DOMAIN` without): null for a key that is no such key.
+function endpointOf(key, domain = null) {
+  const cell = /^vx_sk_([a-z0-9]+)_/.exec(key)?.[1]
+  return cell ? `https://${cell}.api.${domain || DOMAIN}` : null
+}
+
 module.exports = {
   Client,
+  DOMAIN,
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
   VirtxError,
+  endpointOf,
   imageName,
   libraryPath,
   load,

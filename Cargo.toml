@@ -3,4 +3,4 @@
 # run time.
 [workspace]
 resolver = "3"
-members = ["virtx-core", "virtx-rs"]
+members = ["virtx-core", "virtx-rs", "virtx-cli"]

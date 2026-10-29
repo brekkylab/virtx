@@ -1,0 +1,23 @@
+[package]
+name = "virtx-cli"
+version = "0.1.2"
+edition = "2024"
+description = "virtx's command line: signing in to virtx cloud, for the SDKs to use."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "virtx"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+# The control plane's device flow and tokens, over HTTPS.
+reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Where a session's refresh token is kept: the OS's keychain -- macOS's Keychain, Windows'
+# Credential Manager, Linux's Secret Service -- and a file only readable by its owner where
+# there is none, as on a server with no desktop.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+anyhow = "1"

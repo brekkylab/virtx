@@ -127,13 +127,15 @@ class Client:
     @classmethod
     def from_env(cls) -> Client:
         """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_PROJECT`` if
-        set."""
-        url = os.environ.get("VIRTX_URL")
-        if not url:
-            raise VirtxError("VIRTX_URL is not set")
-        return cls.connect(
-            url, os.environ.get("VIRTX_API_KEY") or None, os.environ.get("VIRTX_PROJECT") or None
+        set. Without ``VIRTX_URL``, a virtx cloud API key names its own: the cell in its prefix,
+        under ``VIRTX_DOMAIN`` (``DOMAIN`` by default)."""
+        key = os.environ.get("VIRTX_API_KEY") or None
+        url = os.environ.get("VIRTX_URL") or (
+            key and endpoint_of(key, os.environ.get("VIRTX_DOMAIN") or None)
         )
+        if not url:
+            raise VirtxError("VIRTX_URL is not set, and VIRTX_API_KEY names no cell")
+        return cls.connect(url, key, os.environ.get("VIRTX_PROJECT") or None)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
@@ -392,3 +394,18 @@ class Client:
     async def close_sandbox(self, sandbox: str) -> None:
         """Stop ``sandbox`` and forget its id, keeping its snapshot and volumes."""
         await self._call("virtx_client_close_sandbox", _args(sandbox=sandbox))
+
+
+DOMAIN = "virtx.brekkylab.com"
+"""Where virtx cloud's cells are, by default: ``<cell>.api.<DOMAIN>``."""
+
+
+def endpoint_of(key: str, domain: str | None = None) -> str | None:
+    """The cell endpoint an API key of virtx cloud names (``vx_sk_<cell>_...``), under
+    ``domain`` (``DOMAIN`` without): ``None`` for a key that is no such key."""
+    if not key.startswith("vx_sk_"):
+        return None
+    cell = key[len("vx_sk_"):].split("_")[0]
+    if not cell or not all(c.isdigit() or ("a" <= c <= "z") for c in cell):
+        return None
+    return f"https://{cell}.api.{domain or DOMAIN}"

@@ -12,10 +12,10 @@ use virtx_core::{
     ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
     ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, MountSource,
     Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput, SandboxInitArgs,
-    SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs, SnapshotCreateOutput,
-    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountListOutputItem,
-    VolumeMountRemoveArgs, VolumeRemoveArgs,
+    SandboxInitOutput, SandboxListOutputItem, SandboxPort, SandboxPortsArgs, SnapshotCreateArgs,
+    SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs,
+    VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
+    VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -122,7 +122,10 @@ impl Client {
             })
         });
         if url.is_none() && (key.is_some() || org.is_some()) {
-            url = Some(format!("https://run.{}", domain.as_deref().unwrap_or(DOMAIN)));
+            url = Some(format!(
+                "https://run.{}",
+                domain.as_deref().unwrap_or(DOMAIN)
+            ));
         }
         let url = url.ok_or_else(|| {
             Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())
@@ -395,6 +398,21 @@ impl Client {
             self.api,
             self.start(self.api.virtx_client_exec_sandbox, args),
         )
+    }
+
+    /// Make `sandbox`'s ports `ports`, answered with where each is reached from, in the order
+    /// given: a port kept keeps its URL, one left out is closed, one added gets a URL of its
+    /// own. A machine running keeps the ports it started with; the next one opens these.
+    pub fn ports_sandbox(
+        &self,
+        sandbox: impl Into<String>,
+        ports: impl IntoIterator<Item = u16>,
+    ) -> Call<Vec<SandboxPort>> {
+        let args = SandboxPortsArgs {
+            sandbox: sandbox.into(),
+            ports: ports.into_iter().collect(),
+        };
+        self.call(self.api.virtx_client_ports_sandbox, args)
     }
 
     /// Stop `sandbox` and forget its id, keeping its snapshot and volumes.

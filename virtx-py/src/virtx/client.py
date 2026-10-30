@@ -400,6 +400,15 @@ class Client:
             dict,
         )
 
+    async def ports_sandbox(self, sandbox: str, ports: Iterable[int]) -> list[dict[str, Any]]:
+        """Make ``sandbox``'s ports ``ports``. Answers where each is reached from, in the order
+        given, as ``{"port", "url"}``: a port kept keeps its URL, one left out is closed, one
+        added gets a URL of its own. A machine running keeps the ports it started with; the
+        next one opens these."""
+        return await self._call(
+            "virtx_client_ports_sandbox", _args(sandbox=sandbox, ports=list(ports))
+        )
+
     async def close_sandbox(self, sandbox: str) -> None:
         """Stop ``sandbox`` and forget its id, keeping its snapshot and volumes."""
         await self._call("virtx_client_close_sandbox", _args(sandbox=sandbox))

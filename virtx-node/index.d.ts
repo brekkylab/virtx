@@ -254,6 +254,8 @@ export class Client {
   initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
   /** Killed after `timeoutMs` if one is given. */
   execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }, string>>
+  /** Make the sandbox's ports `ports`: answered with where each is reached from, in the order given. A port kept keeps its URL, one left out is closed, one added gets a URL of its own. A machine running keeps the ports it started with; the next one opens these. */
+  portsSandbox(sandbox: string, ports: number[]): Promise<SandboxPort[]>
   closeSandbox(sandbox: string): Promise<void>
 }
 

@@ -120,6 +120,7 @@ api! {
     virtx_client_list_sandbox: Plain,
     virtx_client_init_sandbox: WithArgs,
     virtx_client_exec_sandbox: WithArgs,
+    virtx_client_ports_sandbox: WithArgs,
     virtx_client_close_sandbox: WithArgs,
     virtx_port_forwarder_open: unsafe extern "C" fn(
         client: *mut Opaque,

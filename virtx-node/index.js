@@ -85,6 +85,7 @@ const SIGNATURES = {
   virtx_client_list_sandbox: PLAIN,
   virtx_client_init_sandbox: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
+  virtx_client_ports_sandbox: WITH_ARGS,
   virtx_client_close_sandbox: WITH_ARGS,
   virtx_port_forwarder_open: [
     'int',
@@ -487,6 +488,10 @@ class Client {
 
   execSandbox(sandbox, cmd, timeoutMs) {
     return this._events('virtx_client_exec_sandbox', { sandbox, cmd, timeoutMs })
+  }
+
+  portsSandbox(sandbox, ports) {
+    return this._call('virtx_client_ports_sandbox', { sandbox, ports })
   }
 
   async closeSandbox(sandbox) {

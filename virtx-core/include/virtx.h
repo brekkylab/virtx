@@ -360,6 +360,16 @@ struct VirtxStream *virtx_client_exec_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
+// `sandbox.ports`: given `{"sandbox": "...", "ports": [n]}`, makes the sandbox's ports
+// those. Answers with `[{"port": n, "url": "..."}]`, in the order given.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_ports_sandbox(struct VirtxClient *client,
+                                               const uint8_t *args,
+                                               size_t args_len);
+
 // `sandbox.close`: given `{"sandbox": "..."}`, stops the sandbox. Answers with `null`.
 //
 // # Safety

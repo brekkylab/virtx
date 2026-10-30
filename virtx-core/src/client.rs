@@ -17,7 +17,8 @@ use crate::{
     sandbox::{
         SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
         SandboxExecOutput, SandboxInit, SandboxInitArgs, SandboxInitOutput, SandboxList,
-        SandboxListArgs, SandboxListOutputItem,
+        SandboxListArgs, SandboxListOutputItem, SandboxPort, SandboxPorts, SandboxPortsArgs,
+        SandboxPortsOutput,
     },
     snapshot::{
         SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
@@ -331,6 +332,27 @@ impl Client {
         ))
     }
 
+    /// Make `sandbox`'s ports `ports`, answered with where each is reached from, in the order
+    /// given: a port kept keeps its URL, one left out is closed, one added gets a URL of its
+    /// own. A machine running keeps the ports it started with; the next one opens these.
+    pub async fn ports_sandbox(
+        &self,
+        sandbox: impl Into<String>,
+        ports: impl IntoIterator<Item = u16>,
+    ) -> Result<Vec<SandboxPort>, Error> {
+        let output: SandboxPortsOutput = self
+            .inner
+            .request(
+                SandboxPorts::NAME,
+                SandboxPortsArgs {
+                    sandbox: sandbox.into(),
+                    ports: ports.into_iter().collect(),
+                },
+            )
+            .await?;
+        Ok(output.ports)
+    }
+
     /// Stop `sandbox` and forget its id, keeping its snapshot and volumes.
     pub async fn close_sandbox(&self, sandbox: impl Into<String>) -> Result<(), Error> {
         let _: SandboxCloseOutput = self
@@ -486,7 +508,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs},
+        sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs, SandboxPortsArgs},
         snapshot::{SnapshotCreateArgs, SnapshotRemoveArgs},
         volume::{
             VolumeCreateArgs, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs,
@@ -1117,6 +1139,28 @@ pub(crate) mod ffi {
                     yield event.map_err(|e| e.to_string());
                 }
             }
+        })
+    }
+
+    /// `sandbox.ports`: given `{"sandbox": "...", "ports": [n]}`, makes the sandbox's ports
+    /// those. Answers with `[{"port": n, "url": "..."}]`, in the order given.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_ports_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<SandboxPortsArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let SandboxPortsArgs { sandbox, ports } = args?;
+            client
+                .ports_sandbox(sandbox, ports)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 

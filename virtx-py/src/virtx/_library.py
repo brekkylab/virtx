@@ -126,6 +126,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_list_sandbox": _PLAIN,
     "virtx_client_init_sandbox": _WITH_ARGS,
     "virtx_client_exec_sandbox": _WITH_ARGS,
+    "virtx_client_ports_sandbox": _WITH_ARGS,
     "virtx_client_close_sandbox": _WITH_ARGS,
     "virtx_port_forwarder_open": (
         [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],

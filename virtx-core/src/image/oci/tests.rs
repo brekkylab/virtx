@@ -401,7 +401,10 @@ async fn images_are_listed_a_page_at_a_time_by_reference() {
         let listing = client.list_image(args);
         async move {
             let listed = listing.await.unwrap();
-            listed.into_iter().map(|image| image.reference).collect::<Vec<_>>()
+            listed
+                .into_iter()
+                .map(|image| image.reference)
+                .collect::<Vec<_>>()
         }
     };
 

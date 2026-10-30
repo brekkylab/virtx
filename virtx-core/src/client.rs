@@ -179,7 +179,7 @@ impl Client {
     /// Every snapshot the server holds.
     pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
         self.inner
-            .request(SnapshotList::NAME, SnapshotListArgs {})
+            .request(SnapshotList::NAME, SnapshotListArgs::default())
             .await
     }
 
@@ -216,7 +216,7 @@ impl Client {
     /// Every volume the server holds.
     pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
         self.inner
-            .request(VolumeList::NAME, VolumeListArgs {})
+            .request(VolumeList::NAME, VolumeListArgs::default())
             .await
     }
 

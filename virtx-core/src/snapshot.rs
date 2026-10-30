@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::method::Request;
 
-/// `snapshot.list`: every snapshot the server holds.
+/// `snapshot.list`: the snapshots the server holds, by name.
 pub struct SnapshotList;
 
 impl Request for SnapshotList {
@@ -14,10 +14,19 @@ impl Request for SnapshotList {
     type Output = Vec<SnapshotListOutputItem>;
 }
 
-/// What `snapshot.list` takes: nothing.
+/// What `snapshot.list` takes: a page of them, by name ([`page`](crate::page)); every one
+/// without either.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SnapshotListArgs {}
+pub struct SnapshotListArgs {
+    /// Those named after this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    /// At most this many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
 
 /// One snapshot in what `snapshot.list` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

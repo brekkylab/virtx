@@ -279,12 +279,15 @@ Its files are reached at [`/snapshots/{name}/`](#files).
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
-| `snapshot.list` | | array of `{name, size, in_use}` | |
+| `snapshot.list` | `after?`, `limit?` | array of `{name, size, in_use}` | |
 | `snapshot.create` | `name?`, `disk_gib?` | `{name}` | |
 | `snapshot.remove` | `name` | `{}` | |
 
 `in_use` is whether a sandbox holds the snapshot now, from its `sandbox.init` until its `sandbox.close`.
 `snapshot.remove` refuses a snapshot in use.
+
+`snapshot.list` answers them in order by name, and `volume.list` the same: those named after `after`, `limit` at most, or every one without either.
+A page shorter than `limit` is the last.
 
 #### Volume
 
@@ -294,7 +297,7 @@ Its files are reached at [`/volumes/{name}/`](#files).
 
 | Method | Params | Result | |
 | --- | --- | --- | --- |
-| `volume.list` | | array of `{name, size}` | |
+| `volume.list` | `after?`, `limit?` | array of `{name, size}` | |
 | `volume.create` | `name?` | `{name}` | |
 | `volume.remove` | `name` | `{}` | |
 | `volume.mount.list` | `volume` | array of `{path, mount_type}` | |

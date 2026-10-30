@@ -18,7 +18,7 @@ mod error;
 mod ffi;
 mod image;
 mod method;
-#[cfg(feature = "client")]
+mod page;
 #[cfg(any(feature = "client", feature = "server"))]
 mod rpc;
 mod sandbox;
@@ -33,6 +33,7 @@ pub use client::Client;
 pub use error::Error;
 pub use image::*;
 pub use method::*;
+pub use page::page;
 #[cfg(any(feature = "client", feature = "server"))]
 pub use rpc::*;
 pub use sandbox::*;

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{MountSource, MountType};
 use crate::method::Request;
 
-/// `volume.list`: every volume the server holds.
+/// `volume.list`: the volumes the server holds, by name.
 pub struct VolumeList;
 
 impl Request for VolumeList {
@@ -15,10 +15,19 @@ impl Request for VolumeList {
     type Output = Vec<VolumeListOutputItem>;
 }
 
-/// What `volume.list` takes: nothing.
+/// What `volume.list` takes: a page of them, by name ([`page`](crate::page)); every one
+/// without either.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct VolumeListArgs {}
+pub struct VolumeListArgs {
+    /// Those named after this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    /// At most this many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
 
 /// One volume in what `volume.list` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

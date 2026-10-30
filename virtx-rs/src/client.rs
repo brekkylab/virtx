@@ -106,9 +106,10 @@ impl Client {
 
     /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
     ///
-    /// Without `VIRTX_URL`, a cell of virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default):
-    /// the one `VIRTX_REGION` names (`apne2`), or else the nearest, timed from here
-    /// ([`nearest_endpoint`]); failing that, the one an API key's prefix names.
+    /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
+    /// `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS
+    /// answers with the cell nearest this machine. A sandbox of another cell is reached
+    /// through it as well.
     pub fn from_env() -> Result<Client, Error> {
         let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
         let (key, org, domain) = (var("VIRTX_API_KEY"), var("VIRTX_ORG"), var("VIRTX_DOMAIN"));
@@ -121,9 +122,7 @@ impl Client {
             })
         });
         if url.is_none() && (key.is_some() || org.is_some()) {
-            url = nearest_endpoint(domain.as_deref())
-                .ok()
-                .or_else(|| endpoint_of(key.as_deref()?, domain.as_deref()));
+            url = Some(format!("https://run.{}", domain.as_deref().unwrap_or(DOMAIN)));
         }
         let url = url.ok_or_else(|| {
             Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())

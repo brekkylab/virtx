@@ -129,9 +129,10 @@ class Client:
     def from_env(cls) -> Client:
         """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set.
 
-        Without ``VIRTX_URL``, a cell of virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by
-        default): the one ``VIRTX_REGION`` names (``apne2``), or else the nearest, timed from
-        here (:func:`nearest_endpoint`); failing that, the one an API key's prefix names."""
+        Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
+        cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
+        which DNS answers with the cell nearest this machine. A sandbox of another cell is
+        reached through it as well."""
         key = os.environ.get("VIRTX_API_KEY") or None
         org = os.environ.get("VIRTX_ORG") or None
         domain = os.environ.get("VIRTX_DOMAIN") or None
@@ -140,10 +141,7 @@ class Client:
         if not url and region:
             url = f"https://{region}.api.{domain or DOMAIN}"
         if not url and (key or org):
-            try:
-                url = nearest_endpoint(domain)
-            except VirtxError:
-                url = key and endpoint_of(key, domain)
+            url = f"https://run.{domain or DOMAIN}"
         if not url:
             raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
         return cls.connect(url, key, org)

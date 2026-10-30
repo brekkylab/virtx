@@ -316,9 +316,9 @@ class Client {
   }
 
   // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
-  // Without `VIRTX_URL`, a cell of virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the
-  // one `VIRTX_REGION` names (`apne2`), or else the nearest, timed from here (`nearestEndpoint`);
-  // failing that, the one an API key's prefix names.
+  // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
+  // `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers
+  // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
   static fromEnv() {
     const key = process.env.VIRTX_API_KEY || null
     const org = process.env.VIRTX_ORG || null
@@ -326,14 +326,7 @@ class Client {
     const region = process.env.VIRTX_REGION || null
     let url = process.env.VIRTX_URL || null
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
-    if (!url && (key || org)) {
-      try {
-        url = nearestEndpoint(domain)
-      } catch (e) {
-        if (!(e instanceof VirtxError)) throw e
-        url = key && endpointOf(key, domain)
-      }
-    }
+    if (!url && (key || org)) url = `https://run.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
     return Client.connect(url, { token: key, org })
   }

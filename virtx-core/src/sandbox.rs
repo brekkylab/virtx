@@ -228,6 +228,38 @@ pub struct SandboxCloseArgs {
 #[serde(deny_unknown_fields)]
 pub struct SandboxCloseOutput {}
 
+/// `sandbox.ports`: change which TCP ports a sandbox opens, to `ports` -- what
+/// `sandbox.init`'s `ports` is to one it makes. A port kept keeps its URL; one left out is
+/// closed, its URL reaching nothing from then on; one added is answered with a URL of its own.
+/// A machine running already keeps the ports it was started with; the next one opens these.
+pub struct SandboxPorts;
+
+impl Request for SandboxPorts {
+    const NAME: &'static str = "sandbox.ports";
+    type Args = SandboxPortsArgs;
+    type Output = SandboxPortsOutput;
+}
+
+/// What `sandbox.ports` takes. `0` and a port given twice are refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPortsArgs {
+    /// Which sandbox, by id.
+    pub sandbox: String,
+
+    /// Every port it opens from now on: none closes them all.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+}
+
+/// What `sandbox.ports` answers: where each port is reached from, in the order asked for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPortsOutput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<SandboxPort>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

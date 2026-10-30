@@ -310,6 +310,7 @@ A sandbox is a VM booted from an image, optionally on a snapshot, with volumes m
 | `sandbox.list` | | array of `{id, image, snapshot?, running, ports?}` | |
 | `sandbox.init` | `image`, `snapshot?`, `network?`, `ports?`, `vcpus?`, `memory_mib?`, `gpu?`, `gpu_memory_mib?`, `volumes?` | `{id, ports?}` | |
 | `sandbox.exec` | `sandbox`, `cmd`, `timeout_ms?` | `{code}` | Stream |
+| `sandbox.ports` | `sandbox`, `ports` | `{ports?}` | |
 | `sandbox.close` | `sandbox` | `{}` | |
 
 `image` in `sandbox.init` is a reference or a digest of an image in the server's [images](#images).
@@ -328,7 +329,9 @@ A sandbox belongs to the client that made it, and ends when that client goes: ov
 ##### Ports
 
 `ports` are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
-They are reserved when `sandbox.init` makes the sandbox, and kept until it ends. `0` and a port given twice are refused.
+They are reserved when `sandbox.init` makes the sandbox, and kept until it ends or `sandbox.ports` changes them. `0` and a port given twice are refused.
+
+`sandbox.ports` makes a sandbox's ports the ones it gives, answered as `sandbox.init` answers them. A port it keeps keeps its URL; a port it leaves out is closed at once, and its URL reaches nothing more; a port it adds is given a URL of its own. A machine already running keeps the ports it started with: the change reaches the sandbox's next machine.
 
 `sandbox.init` answers each with where it is reached from, as `{port, url}`, in the order given; `sandbox.list` answers them again.
 

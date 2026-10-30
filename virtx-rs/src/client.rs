@@ -8,13 +8,14 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
-    ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
-    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, MountSource,
-    Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput, SandboxInitArgs,
-    SandboxInitOutput, SandboxListOutputItem, SandboxPort, SandboxPortsArgs, SnapshotCreateArgs,
-    SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs,
-    VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
+    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListArgs,
+    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs,
+    ImagePushOutput, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+    ImageUploadOutput, MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs,
+    SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem, SandboxPort,
+    SandboxPortsArgs, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListArgs,
+    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
+    VolumeListArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs,
     VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
@@ -205,11 +206,10 @@ impl Client {
         Events::new(self.api, self.start(self.api.virtx_client_push_image, args))
     }
 
-    /// Every tag on the server's images, as `name:tag`, with the digest it points at.
-    pub fn list_image(&self) -> Call<Vec<ImageListOutputItem>> {
-        Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_image)(self.raw)
-        })
+    /// The tags on the server's images, as `name:tag`, with the digest each points at: a page
+    /// of them by name and then tag, as `page` asks (`ImageListArgs::default()` for every one).
+    pub fn list_image(&self, page: ImageListArgs) -> Call<Vec<ImageListOutputItem>> {
+        self.call(self.api.virtx_client_list_image, page)
     }
 
     /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
@@ -282,11 +282,10 @@ impl Client {
         })
     }
 
-    /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<SnapshotListOutputItem>> {
-        Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_snapshot)(self.raw)
-        })
+    /// The snapshots the server holds: a page of them by name, as `page` asks
+    /// (`SnapshotListArgs::default()` for every one).
+    pub fn list_snapshot(&self, page: SnapshotListArgs) -> Call<Vec<SnapshotListOutputItem>> {
+        self.call(self.api.virtx_client_list_snapshot, page)
     }
 
     /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
@@ -309,11 +308,10 @@ impl Client {
         self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
-    /// Every volume the server holds.
-    pub fn list_volume(&self) -> Call<Vec<VolumeListOutputItem>> {
-        Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_volume)(self.raw)
-        })
+    /// The volumes the server holds: a page of them by name, as `page` asks
+    /// (`VolumeListArgs::default()` for every one).
+    pub fn list_volume(&self, page: VolumeListArgs) -> Call<Vec<VolumeListOutputItem>> {
+        self.call(self.api.virtx_client_list_volume, page)
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.

@@ -9,9 +9,10 @@ use tokio::process::Command;
 use crate::{
     Error,
     image::{
-        ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem,
-        ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull, ImagePullArgs, ImagePullOutput,
-        ImagePush, ImagePushArgs, ImagePushOutput, ImageUploadOutput, Recipe, RegistryAuth, oci,
+        ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListArgs,
+        ImageListOutputItem, ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull,
+        ImagePullArgs, ImagePullOutput, ImagePush, ImagePushArgs, ImagePushOutput,
+        ImageUploadOutput, Recipe, RegistryAuth, oci,
     },
     method::{Event, Request},
     sandbox::{
@@ -117,8 +118,8 @@ impl Client {
     }
 
     /// Every tag on the server's images, as `name:tag`, with the digest it points at.
-    pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
-        oci::list(&self.inner).await
+    pub async fn list_image(&self, page: ImageListArgs) -> Result<Vec<ImageListOutputItem>, Error> {
+        oci::list(&self.inner, page).await
     }
 
     /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
@@ -177,10 +178,11 @@ impl Client {
     }
 
     /// Every snapshot the server holds.
-    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
-        self.inner
-            .request(SnapshotList::NAME, SnapshotListArgs::default())
-            .await
+    pub async fn list_snapshot(
+        &self,
+        page: SnapshotListArgs,
+    ) -> Result<Vec<SnapshotListOutputItem>, Error> {
+        self.inner.request(SnapshotList::NAME, page).await
     }
 
     /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
@@ -214,10 +216,11 @@ impl Client {
     }
 
     /// Every volume the server holds.
-    pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
-        self.inner
-            .request(VolumeList::NAME, VolumeListArgs::default())
-            .await
+    pub async fn list_volume(
+        &self,
+        page: VolumeListArgs,
+    ) -> Result<Vec<VolumeListOutputItem>, Error> {
+        self.inner.request(VolumeList::NAME, page).await
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
@@ -505,14 +508,14 @@ pub(crate) mod ffi {
     use crate::{
         ffi::{Runtime, VirtxBytes, VirtxFuture, VirtxStream, json, release, retain, share},
         image::{
-            ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
-            ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+            ImageBuildArgs, ImageDownloadArgs, ImageListArgs, ImagePullArgs, ImagePushArgs,
+            ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
         sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs, SandboxPortsArgs},
-        snapshot::{SnapshotCreateArgs, SnapshotRemoveArgs},
+        snapshot::{SnapshotCreateArgs, SnapshotListArgs, SnapshotRemoveArgs},
         volume::{
-            VolumeCreateArgs, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountRemoveArgs,
-            VolumeRemoveArgs,
+            VolumeCreateArgs, VolumeListArgs, VolumeMountCreateArgs, VolumeMountListArgs,
+            VolumeMountRemoveArgs, VolumeRemoveArgs,
         },
     };
 
@@ -727,16 +730,23 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Answers with every tag on the server's images, as
-    /// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
+    /// Given `{"after": "name:tag", "limit": n}`, both optional, answers with a page of the
+    /// tags on the server's images, by name and then tag, as
+    /// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`: every one given `{}`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
+    pub unsafe extern "C" fn virtx_client_list_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ImageListArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client.list_image(args?).await.map_err(|e| e.to_string())
+        })
     }
 
     /// Points the tag `target` at the image `source` names, given
@@ -883,21 +893,27 @@ pub(crate) mod ffi {
             .future(|client| async move { client.prune_image().await.map_err(|e| e.to_string()) })
     }
 
-    /// `snapshot.list`: answers with the snapshots, as
-    /// `[{"name": "...", "size": n, "in_use": false}, ...]`.
+    /// `snapshot.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page
+    /// of the snapshots by name, as `[{"name": "...", "size": n, "in_use": false}, ...]`: every
+    /// one given `{}`.
     ///
     /// Every value here is JSON. A request that takes arguments takes them as `args`, the
     /// `args_len` bytes of one object, the method's params.
     ///
     /// # Safety
     ///
-    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+    /// is as in `virtx_client_build_image`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_snapshot(
         client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_snapshot().await.map_err(|e| e.to_string()) })
+        let args = unsafe { json::<SnapshotListArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client.list_snapshot(args?).await.map_err(|e| e.to_string())
+        })
     }
 
     /// `snapshot.create`: keeps a new, empty upper layer under `name`, holding at most
@@ -944,17 +960,22 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.list`: answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
+    /// `volume.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page of
+    /// the volumes by name, as `[{"name": "...", "size": n}, ...]`: every one given `{}`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_volume().await.map_err(|e| e.to_string()) })
+        let args = unsafe { json::<VolumeListArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client.list_volume(args?).await.map_err(|e| e.to_string())
+        })
     }
 
     /// `volume.create`: keeps a new, empty volume under `name`, or a name the server picks if

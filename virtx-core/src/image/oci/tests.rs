@@ -367,7 +367,7 @@ async fn every_tag_is_listed_with_its_digest_across_pages() {
     let client = registry.client();
 
     let listed: Vec<_> = client
-        .list_image()
+        .list_image(Default::default())
         .await
         .unwrap()
         .into_iter()
@@ -382,6 +382,33 @@ async fn every_tag_is_listed_with_its_digest_across_pages() {
             ("team/base:1".to_owned(), base),
         ]
     );
+}
+
+#[tokio::test]
+async fn images_are_listed_a_page_at_a_time_by_reference() {
+    let registry = Registry::default();
+    for tag in ["1", "2", "3"] {
+        registry.image("alpine", Some(tag), "alpine");
+    }
+    registry.image("jq", Some("latest"), "jq");
+    registry.image("team/base", Some("1"), "base");
+    let client = registry.client();
+    let page = |after: Option<&str>, limit| {
+        let args = crate::image::ImageListArgs {
+            after: after.map(str::to_owned),
+            limit: Some(limit),
+        };
+        let listing = client.list_image(args);
+        async move {
+            let listed = listing.await.unwrap();
+            listed.into_iter().map(|image| image.reference).collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(page(None, 2).await, ["alpine:1", "alpine:2"]);
+    assert_eq!(page(Some("alpine:2"), 2).await, ["alpine:3", "jq:latest"]);
+    assert_eq!(page(Some("jq:latest"), 2).await, ["team/base:1"]);
+    assert_eq!(page(Some("team/base:1"), 2).await, [] as [&str; 0]);
 }
 
 #[tokio::test]

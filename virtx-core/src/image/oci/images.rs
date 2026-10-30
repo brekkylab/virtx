@@ -6,22 +6,51 @@ use super::{
     manifest::{Child, Manifest},
     reference::{Reference, Target},
 };
-use crate::{Error, image::ImageListOutputItem, transport::TransportClient};
+use crate::{
+    Error,
+    image::{ImageListArgs, ImageListOutputItem},
+    transport::TransportClient,
+};
 
-/// Every tag in every repository, with the digest it points at, sorted by reference.
-pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
+/// The tags `page` asks for, by repository and then tag, with the digest each points at: the
+/// registry asked for no more than that, and only those tags' digests.
+pub(crate) async fn list(
+    client: &TransportClient,
+    page: ImageListArgs,
+) -> Result<Vec<ImageListOutputItem>, Error> {
     let registry = Registry::new(client);
-    let mut images = Vec::new();
-    for name in registry.repositories().await? {
-        for tag in registry.tags(&name).await? {
-            let digest = registry.manifest_digest(&name, &tag).await?;
-            images.push(ImageListOutputItem {
-                reference: format!("{name}:{tag}"),
-                digest,
-            });
+    let limit = page.limit.map(|limit| limit as usize);
+    let mut tags: Vec<(String, String)> = Vec::new();
+    // The rest of `after`'s repository first, then the repositories after it.
+    let repositories = match &page.after {
+        Some(after) => {
+            let (name, tag) = after.rsplit_once(':').ok_or_else(|| {
+                Error::Registry(format!("after: {after:?} is not a reference, name:tag"))
+            })?;
+            for later in registry.tags_after(name, Some(tag), limit).await? {
+                tags.push((name.to_owned(), later));
+            }
+            registry.repositories_after(name).await?
+        }
+        None => registry.repositories().await?,
+    };
+    for name in repositories {
+        let left = limit.map(|limit| limit - tags.len());
+        if left == Some(0) {
+            break;
+        }
+        for tag in registry.tags_after(&name, None, left).await? {
+            tags.push((name.clone(), tag));
         }
     }
-    images.sort_by(|a, b| a.reference.cmp(&b.reference));
+    let mut images = Vec::new();
+    for (name, tag) in tags {
+        let digest = registry.manifest_digest(&name, &tag).await?;
+        images.push(ImageListOutputItem {
+            reference: format!("{name}:{tag}"),
+            digest,
+        });
+    }
     Ok(images)
 }
 

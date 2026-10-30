@@ -159,13 +159,16 @@ struct VirtxStream *virtx_client_push_image(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
-// Answers with every tag on the server's images, as
-// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
+// Given `{"after": "name:tag", "limit": n}`, both optional, answers with a page of the
+// tags on the server's images, by name and then tag, as
+// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`: every one given `{}`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
-struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
 
 // Points the tag `target` at the image `source` names, given
 // `{"source": "name:tag" or "name@algorithm:hex", "target": "name:tag"}`. Answers with
@@ -231,16 +234,20 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
 // `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 
-// `snapshot.list`: answers with the snapshots, as
-// `[{"name": "...", "size": n, "in_use": false}, ...]`.
+// `snapshot.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page
+// of the snapshots by name, as `[{"name": "...", "size": n, "in_use": false}, ...]`: every
+// one given `{}`.
 //
 // Every value here is JSON. A request that takes arguments takes them as `args`, the
 // `args_len` bytes of one object, the method's params.
 //
 // # Safety
 //
-// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+// is as in `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client,
+                                               const uint8_t *args,
+                                               size_t args_len);
 
 // `snapshot.create`: keeps a new, empty upper layer under `name`, holding at most
 // `disk_gib` GiB, the server picking either one not given, given
@@ -263,12 +270,15 @@ struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
-// `volume.list`: answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
+// `volume.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page of
+// the volumes by name, as `[{"name": "...", "size": n}, ...]`: every one given `{}`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
-struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client);
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
 
 // `volume.create`: keeps a new, empty volume under `name`, or a name the server picks if
 // there is none, given `{"name": "..."}` or `{}`. Answers with `{"name": "..."}`.

@@ -62,37 +62,59 @@ impl<'a> Registry<'a> {
             #[serde(default)]
             repositories: Option<Vec<String>>,
         }
-        self.pages("_catalog", |body| {
+        self.pages("_catalog", None, None, |body| {
             serde_json::from_slice::<Catalog>(body)
                 .map(|page| page.repositories.unwrap_or_default())
         })
         .await
     }
 
-    /// Every tag in `name`.
-    pub(crate) async fn tags(&self, name: &str) -> Result<Vec<String>, Error> {
+    /// The repositories after `last`, by name.
+    pub(crate) async fn repositories_after(&self, last: &str) -> Result<Vec<String>, Error> {
+        #[derive(Deserialize)]
+        struct Catalog {
+            #[serde(default)]
+            repositories: Option<Vec<String>>,
+        }
+        self.pages("_catalog", Some(last), None, |body| {
+            serde_json::from_slice::<Catalog>(body)
+                .map(|page| page.repositories.unwrap_or_default())
+        })
+        .await
+    }
+
+    /// The tags in `name` after `last`, `limit` at most.
+    pub(crate) async fn tags_after(
+        &self,
+        name: &str,
+        last: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<String>, Error> {
         #[derive(Deserialize)]
         struct Tags {
             #[serde(default)]
             tags: Option<Vec<String>>,
         }
-        self.pages(&format!("{name}/tags/list"), |body| {
+        self.pages(&format!("{name}/tags/list"), last, limit, |body| {
             serde_json::from_slice::<Tags>(body).map(|page| page.tags.unwrap_or_default())
         })
         .await
     }
 
-    /// Each page of the listing at `path`, read by `read`, until one comes without a `Link` to
-    /// the next.
+    /// Each page of the listing at `path` after `after`, read by `read`, until one comes without
+    /// a `Link` to the next or `limit` are read.
     async fn pages(
         &self,
         path: &str,
+        after: Option<&str>,
+        limit: Option<usize>,
         read: impl Fn(&[u8]) -> serde_json::Result<Vec<String>>,
     ) -> Result<Vec<String>, Error> {
         let mut all: Vec<String> = Vec::new();
         loop {
-            let mut query = format!("{path}?n={PAGE}");
-            if let Some(last) = all.last() {
+            let n = limit.map_or(PAGE, |limit| PAGE.min(limit - all.len()));
+            let mut query = format!("{path}?n={n}");
+            if let Some(last) = all.last().map(String::as_str).or(after) {
                 query.push_str(&format!("&last={last}"));
             }
             let response = self
@@ -103,7 +125,10 @@ impl<'a> Registry<'a> {
                 .map_err(|e| Error::Registry(format!("GET {path}: {e}")))?;
             let ended = page.is_empty();
             all.extend(page);
-            if !more || ended {
+            if let Some(limit) = limit {
+                all.truncate(limit);
+            }
+            if !more || ended || limit.is_some_and(|limit| all.len() >= limit) {
                 return Ok(all);
             }
         }

@@ -10,6 +10,21 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// A page of the images listing answers, by reference: those after `after` (`name:tag`), by
+/// name and then tag, `limit` at most -- as the registry pages its repositories and tags, by
+/// `last` and `n`. Every one without either.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageListArgs {
+    /// Those after this reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+
+    /// At most this many.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// One tag in what listing images answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

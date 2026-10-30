@@ -258,9 +258,13 @@ class Client:
             ImagePushOutput.from_dict,
         )
 
-    async def list_image(self) -> list[ImageListOutputItem]:
-        """Every tag on the server's images, as ``name:tag``, with the digest it points at."""
-        items = await self._call("virtx_client_list_image")
+    async def list_image(
+        self, *, after: str | None = None, limit: int | None = None
+    ) -> list[ImageListOutputItem]:
+        """The tags on the server's images, as ``name:tag``, with the digest each points at: by
+        name and then tag, those after the reference ``after``, ``limit`` at most, or every
+        one."""
+        items = await self._call("virtx_client_list_image", _args(after=after, limit=limit))
         return [ImageListOutputItem.from_dict(item) for item in items]
 
     async def tag_image(self, source: str, target: str) -> None:
@@ -306,10 +310,13 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
-    async def list_snapshot(self) -> list[dict[str, Any]]:
-        """Every snapshot the server holds, as ``{"name", "size", "in_use"}``, ``in_use`` whether
-        a sandbox holds it now."""
-        return await self._call("virtx_client_list_snapshot")
+    async def list_snapshot(
+        self, *, after: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """The snapshots the server holds, as ``{"name", "size", "in_use"}``, ``in_use`` whether
+        a sandbox holds it now: by name, those after ``after``, ``limit`` at most, or every
+        one."""
+        return await self._call("virtx_client_list_snapshot", _args(after=after, limit=limit))
 
     async def create_snapshot(
         self, name: str | None = None, disk_gib: int | None = None
@@ -322,9 +329,12 @@ class Client:
         """Delete the snapshot ``name`` and its upper layer."""
         await self._call("virtx_client_remove_snapshot", _args(name=name))
 
-    async def list_volume(self) -> list[VolumeListOutputItem]:
-        """Every volume the server holds."""
-        items = await self._call("virtx_client_list_volume")
+    async def list_volume(
+        self, *, after: str | None = None, limit: int | None = None
+    ) -> list[VolumeListOutputItem]:
+        """The volumes the server holds: by name, those after ``after``, ``limit`` at most, or
+        every one."""
+        items = await self._call("virtx_client_list_volume", _args(after=after, limit=limit))
         return [VolumeListOutputItem.from_dict(item) for item in items]
 
     async def create_volume(self, name: str | None = None) -> VolumeCreateOutput:

@@ -103,6 +103,12 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
+/** A page of a list: those after `after`, `limit` at most. */
+export interface ListPage {
+  after?: string
+  limit?: number
+}
+
 export interface SnapshotListItem {
   name: string
   size: number
@@ -228,7 +234,8 @@ export class Client {
   /** Push the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePushOutput, string>>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
-  listImage(): Promise<ImageListItem[]>
+  /** The tags on the server's images, by name and then tag: those after the reference `after`, `limit` at most, or every one. */
+  listImage(page?: ListPage): Promise<ImageListItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
   tagImage(source: string, target: string): Promise<void>
   /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */
@@ -241,10 +248,12 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<SnapshotListItem[]>
+  /** The snapshots, by name: those after `after`, `limit` at most, or every one. */
+  listSnapshot(page?: ListPage): Promise<SnapshotListItem[]>
   createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
   removeSnapshot(name: string): Promise<void>
-  listVolume(): Promise<VolumeListOutputItem[]>
+  /** The volumes, by name: those after `after`, `limit` at most, or every one. */
+  listVolume(page?: ListPage): Promise<VolumeListOutputItem[]>
   createVolume(name?: string): Promise<VolumeCreateOutput>
   removeVolume(name: string): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>

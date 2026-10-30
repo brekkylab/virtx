@@ -66,17 +66,17 @@ const SIGNATURES = {
   virtx_client_build_image: WITH_ARGS,
   virtx_client_pull_image: WITH_ARGS,
   virtx_client_push_image: WITH_ARGS,
-  virtx_client_list_image: PLAIN,
+  virtx_client_list_image: WITH_ARGS,
   virtx_client_tag_image: WITH_ARGS,
   virtx_client_untag_image: WITH_ARGS,
   virtx_client_remove_image: WITH_ARGS,
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_list_snapshot: PLAIN,
+  virtx_client_list_snapshot: WITH_ARGS,
   virtx_client_create_snapshot: WITH_ARGS,
   virtx_client_remove_snapshot: WITH_ARGS,
-  virtx_client_list_volume: PLAIN,
+  virtx_client_list_volume: WITH_ARGS,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_remove_volume: WITH_ARGS,
   virtx_client_list_volume_mount: WITH_ARGS,
@@ -414,8 +414,8 @@ class Client {
     return this._events('virtx_client_push_image', { reference, auth })
   }
 
-  listImage() {
-    return this._call('virtx_client_list_image')
+  listImage(page = {}) {
+    return this._call('virtx_client_list_image', page)
   }
 
   async tagImage(source, target) {
@@ -442,8 +442,8 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  listSnapshot() {
-    return this._call('virtx_client_list_snapshot')
+  listSnapshot(page = {}) {
+    return this._call('virtx_client_list_snapshot', page)
   }
 
   createSnapshot(name, diskGib) {
@@ -454,8 +454,8 @@ class Client {
     await this._call('virtx_client_remove_snapshot', { name })
   }
 
-  listVolume() {
-    return this._call('virtx_client_list_volume')
+  listVolume(page = {}) {
+    return this._call('virtx_client_list_volume', page)
   }
 
   createVolume(name) {

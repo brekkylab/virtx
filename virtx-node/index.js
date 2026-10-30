@@ -51,6 +51,8 @@ const Out = koffi.out(koffi.pointer(VirtxBytes))
 
 const PLAIN = ['uintptr_t', ['uintptr_t']]
 const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
+// A request with a body of bytes beside its args.
+const WITH_DATA = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']]
 const SIGNATURES = {
   virtx_client_spawn: [
     'int',
@@ -91,6 +93,19 @@ const SIGNATURES = {
   virtx_client_list_volume_mount: WITH_ARGS,
   virtx_client_create_volume_mount: WITH_ARGS,
   virtx_client_remove_volume_mount: WITH_ARGS,
+  virtx_client_stat_file: WITH_ARGS,
+  virtx_client_read_dir: WITH_ARGS,
+  virtx_client_file_exists: WITH_ARGS,
+  virtx_client_is_file: WITH_ARGS,
+  virtx_client_is_dir: WITH_ARGS,
+  virtx_client_read_file: WITH_ARGS,
+  virtx_client_read_text: WITH_ARGS,
+  virtx_client_write_file: WITH_DATA,
+  virtx_client_create_dir: WITH_ARGS,
+  virtx_client_create_dir_all: WITH_ARGS,
+  virtx_client_remove_file: WITH_ARGS,
+  virtx_client_rename_file: WITH_ARGS,
+  virtx_client_copy_file: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_init_sandbox: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -138,14 +153,15 @@ class Library {
     }
   }
 
-  // What the library wrote for `status`, read and freed: the output, or thrown.
-  take(status, out) {
+  // What the library wrote for `status`, read and freed: the output, as JSON unless `raw`, or
+  // thrown.
+  take(status, out, raw = false) {
     let data = Buffer.alloc(0)
     if (out.data !== null) {
       data = Buffer.from(new Uint8Array(koffi.view(out.data, out.len)))
       this.virtx_bytes_free(out)
     }
-    if (status === OK) return JSON.parse(data.toString('utf8'))
+    if (status === OK) return raw ? data : JSON.parse(data.toString('utf8'))
     if (status === ERROR) {
       throw new VirtxError(data.length ? JSON.parse(data.toString('utf8')) : 'the call failed')
     }
@@ -161,12 +177,13 @@ class Library {
     return { status, out, woken }
   }
 
-  // Await the future `handle`, freeing it after.
-  async answer(handle) {
+  // Await the future `handle`, freeing it after. Its answer is JSON, or a `Buffer` as it is
+  // if `raw`.
+  async answer(handle, raw = false) {
     try {
       for (;;) {
         const { status, out, woken } = this.poll(this.virtx_future_poll, handle)
-        if (status !== PENDING) return this.take(status, out)
+        if (status !== PENDING) return this.take(status, out, raw)
         await woken
       }
     } finally {
@@ -409,17 +426,18 @@ class Client {
     return this._raw
   }
 
-  async _call(name, args) {
+  async _call(name, args, raw = false) {
     const start = this._lib[name]
-    const raw = this._held()
+    const held = this._held()
     let handle
     if (args === undefined) {
-      handle = start(raw)
+      handle = start(held)
     } else {
       const bytes = encode(args)
-      handle = start(raw, bytes, bytes.length)
+      handle = start(held, bytes, bytes.length)
     }
-    return rekey(await this._lib.answer(handle), camel)
+    const answer = await this._lib.answer(handle, raw)
+    return raw ? answer : rekey(answer, camel)
   }
 
   async *_events(name, args) {
@@ -507,6 +525,76 @@ class Client {
 
   async removeVolumeMount(volume, at) {
     await this._call('virtx_client_remove_volume_mount', { volume, path: at })
+  }
+
+  // What is at `path` in `root`, `{ volume }` or `{ snapshot }`, the path relative to its root
+  // as `dir/file.txt`.
+  statFile(root, at) {
+    return this._call('virtx_client_stat_file', { ...root, path: at })
+  }
+
+  readDir(root, at) {
+    return this._call('virtx_client_read_dir', { ...root, path: at })
+  }
+
+  // The file at `path`, from `offset`, `length` bytes of it or all that is left, as a `Buffer`.
+  readFile(root, at, offset, length) {
+    return this._call('virtx_client_read_file', { ...root, path: at, offset, length }, true)
+  }
+
+  // Writes `content` (a `Buffer`, a `Uint8Array` or a string, as UTF-8) as the whole file at
+  // `path`, creating it if it does not exist. Its parent directory must exist.
+  // Whether anything, a file, or a directory is at `at`.
+  async exists(root, at) {
+    return await this._call('virtx_client_file_exists', { ...root, path: at })
+  }
+
+  async isFile(root, at) {
+    return await this._call('virtx_client_is_file', { ...root, path: at })
+  }
+
+  async isDir(root, at) {
+    return await this._call('virtx_client_is_dir', { ...root, path: at })
+  }
+
+  // The whole file as text, which it has to be: UTF-8.
+  async readText(root, at) {
+    return await this._call('virtx_client_read_text', { ...root, path: at })
+  }
+
+  // With `ifMatch`, the `etag` a stat gave, the write goes only while the file still has it,
+  // and is refused with a `412` otherwise.
+  async writeFile(root, at, content, ifMatch) {
+    const bytes = encode({ ...root, path: at, ifMatch })
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
+    const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
+    await this._lib.answer(handle)
+  }
+
+  async createDir(root, at) {
+    await this._call('virtx_client_create_dir', { ...root, path: at })
+  }
+
+  async createDirAll(root, at) {
+    await this._call('virtx_client_create_dir_all', { ...root, path: at })
+  }
+
+  // Removes what is at `path`: a directory with everything in it.
+  // With `missingOk`, nothing being there is fine, as `rm -f`; without it, a `404`.
+  async removeFile(root, at, missingOk = false) {
+    await this._call('virtx_client_remove_file', { ...root, path: at, missingOk: missingOk || undefined })
+  }
+
+  // Moves what is at `from` to `to` in the same root, replacing what is at `to` if `overwrite`,
+  // and refused if not and something is there.
+  async renameFile(root, from, to, overwrite = false) {
+    await this._call('virtx_client_rename_file', { ...root, from, to, overwrite })
+  }
+
+  // Copies what is at `from` to `to`, a directory with everything in it, as `renameFile`
+  // replaces what is at `to`.
+  async copyFile(root, from, to, overwrite = false) {
+    await this._call('virtx_client_copy_file', { ...root, from, to, overwrite })
   }
 
   listSandbox() {

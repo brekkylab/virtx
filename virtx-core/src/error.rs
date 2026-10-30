@@ -20,7 +20,8 @@ pub enum Error {
     Json(String),
     /// The server's image registry answered with an error, or with what is not an image.
     Registry(String),
-    /// A file on this machine could not be read or written, or is not what it should be.
+    /// A file on this machine could not be read or written, or a file is not what it should
+    /// be: one read as text that is not UTF-8.
     File(String),
 }
 

@@ -7,12 +7,16 @@
 //! `pushing <reference> as <auth>`, the type of its credentials or `anonymous`. `image.prune`
 //! deletes `sha256:0`, of 1024 bytes.
 //! `sandbox.exec` runs everything as `echo`, sending its line as its progress.
+//!
+//! The files endpoint is [`testing`](crate::testing)'s.
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{extract::State, middleware::Next, response::IntoResponse};
+use axum::{Router, extract::State, middleware::Next, response::IntoResponse};
 use futures_util::StreamExt;
 use http::{HeaderMap, StatusCode};
+use hyper::service::Service as _;
+use hyper_util::service::TowerToHyperService;
 use serde_json::{Value, json};
 use sse_stream::SseStream;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinSet};
@@ -126,14 +130,27 @@ pub fn methods() -> Methods {
     methods
 }
 
-/// A client of `methods` over an in-memory HTTP/2 connection, served as stdio serves.
+/// `methods` at `rpc`, beside the files endpoint.
+pub fn router(rpc: &str, methods: Methods) -> Router {
+    let server = Server::new(Dispatcher::new(methods));
+    crate::testing::files_router().route(
+        rpc,
+        axum::routing::any(move |request: axum::extract::Request| {
+            let server = server.clone();
+            async move { server.handle(request).await }
+        }),
+    )
+}
+
+/// A client of `methods` and the files endpoint over an in-memory HTTP/2 connection, served
+/// as stdio serves.
 pub fn piped(methods: Methods) -> TransportClient {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (input, output) = tokio::io::split(server);
-    let server = Server::new(Dispatcher::new(methods));
+    let service = TowerToHyperService::new(router("/rpc", methods));
     let handle = move |request| {
-        let server = server.clone();
-        async move { server.handle(request).await }
+        let service = service.clone();
+        async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
     };
     tokio::spawn(serve_stdio(handle, input, output));
     TransportClient::over(client)
@@ -237,14 +254,7 @@ async fn serve(methods: Methods, tokens: Option<Tokens>) -> String {
 
 /// `methods` served at `path`, and the server's base URL.
 async fn serve_at(path: &str, methods: Methods, tokens: Option<Tokens>) -> String {
-    let server = Server::new(Dispatcher::new(methods));
-    let mut router = axum::Router::new().route(
-        path,
-        axum::routing::any(move |request: axum::extract::Request| {
-            let server = server.clone();
-            async move { server.handle(request).await }
-        }),
-    );
+    let mut router = router(path, methods);
     if let Some(tokens) = tokens {
         router = router.layer(axum::middleware::from_fn_with_state(tokens, self::tokens));
     }
@@ -254,8 +264,8 @@ async fn serve_at(path: &str, methods: Methods, tokens: Option<Tokens>) -> Strin
     url
 }
 
-/// A client of [`methods`] over each transport.
-async fn clients() -> [TransportClient; 2] {
+/// A client of [`methods`] and the files endpoint over each transport.
+pub(crate) async fn clients() -> [TransportClient; 2] {
     let url = serve(methods(), None).await;
     [
         TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap(),
@@ -506,10 +516,10 @@ async fn a_server_that_exits_fails_every_call() {
 async fn serve_returns_once_its_client_is_gone() {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (input, output) = tokio::io::split(server);
-    let server = Server::new(Dispatcher::new(methods()));
+    let service = TowerToHyperService::new(router("/rpc", methods()));
     let handle = move |request| {
-        let server = server.clone();
-        async move { server.handle(request).await }
+        let service = service.clone();
+        async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
     };
     let served = tokio::spawn(serve_stdio(handle, input, output));
     let client = TransportClient::over(client);

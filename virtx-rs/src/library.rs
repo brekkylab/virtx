@@ -52,6 +52,15 @@ type Plain = unsafe extern "C" fn(client: *mut Opaque) -> *mut Opaque;
 type WithArgs =
     unsafe extern "C" fn(client: *mut Opaque, args: *const u8, len: usize) -> *mut Opaque;
 
+/// A request that takes a body of bytes beside its JSON args, and answers once.
+pub(crate) type WithData = unsafe extern "C" fn(
+    client: *mut Opaque,
+    args: *const u8,
+    args_len: usize,
+    data: *const u8,
+    data_len: usize,
+) -> *mut Opaque;
+
 macro_rules! api {
     ($($name:ident: $ty:ty,)*) => {
         /// The functions of `virtx.h`, and the library they are in.
@@ -129,6 +138,19 @@ api! {
     virtx_client_list_volume_mount: WithArgs,
     virtx_client_create_volume_mount: WithArgs,
     virtx_client_remove_volume_mount: WithArgs,
+    virtx_client_stat_file: WithArgs,
+    virtx_client_file_exists: WithArgs,
+    virtx_client_is_file: WithArgs,
+    virtx_client_is_dir: WithArgs,
+    virtx_client_read_dir: WithArgs,
+    virtx_client_read_file: WithArgs,
+    virtx_client_read_text: WithArgs,
+    virtx_client_write_file: WithData,
+    virtx_client_create_dir: WithArgs,
+    virtx_client_create_dir_all: WithArgs,
+    virtx_client_remove_file: WithArgs,
+    virtx_client_rename_file: WithArgs,
+    virtx_client_copy_file: WithArgs,
     virtx_client_list_sandbox: Plain,
     virtx_client_init_sandbox: WithArgs,
     virtx_client_exec_sandbox: WithArgs,

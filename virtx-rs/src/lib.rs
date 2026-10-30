@@ -19,7 +19,7 @@ mod library;
 mod portforward;
 
 pub use call::{Call, Events};
-pub use client::{Client, DOMAIN, endpoint_of, nearest_endpoint};
+pub use client::{Client, DOMAIN};
 pub use error::Error;
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;

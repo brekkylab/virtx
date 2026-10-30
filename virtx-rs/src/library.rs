@@ -96,7 +96,6 @@ api! {
         client: *mut *mut Opaque,
         error: *mut VirtxBytes,
     ) -> c_int,
-    virtx_nearest_endpoint: unsafe extern "C" fn(domain: *const c_char, out: *mut VirtxBytes) -> c_int,
     virtx_client_retain: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_release: unsafe extern "C" fn(client: *mut Opaque),
     virtx_client_build_image: WithArgs,

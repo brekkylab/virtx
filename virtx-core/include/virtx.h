@@ -431,15 +431,6 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
 
-// Write the endpoint of the nearest cell of virtx cloud offered under `domain` -- the one
-// this machine reaches fastest -- to `out`, as a JSON string; or, failing, the error, as
-// every call's is. Blocks while the cells are timed: a few round trips to each, at once.
-//
-// # Safety
-//
-// `domain` is NUL-terminated UTF-8. `out` is writable.
-int virtx_nearest_endpoint(const char *domain, struct VirtxBytes *out);
-
 // Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
 // `virtx_client_init_sandbox` or `virtx_client_list_sandbox` answered it, to this machine's
 // loopback: write the forwarder to `forwarder`, and where it is to `out`, as

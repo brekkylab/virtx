@@ -61,7 +61,6 @@ const SIGNATURES = {
     'int',
     ['const char *', 'const char *', 'const char *', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
-  virtx_nearest_endpoint: ['int', ['const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -552,25 +551,9 @@ class PortForwarder {
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
-// Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`.
+// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
+// for one.
 const DOMAIN = 'virtx.brekkylab.com'
-
-// The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
-// (`DOMAIN` without): null for a key that is no such key, as a key made since 2026-10-30 is not
-// (`vx_sk_<hex>`): it is every cell's, and the client finds the nearest.
-function endpointOf(key, domain = null) {
-  const cell = /^vx_sk_([a-z0-9]+)_/.exec(key)?.[1]
-  return cell ? `https://${cell}.api.${domain || DOMAIN}` : null
-}
-
-// The endpoint of the nearest cell of virtx cloud offered under `domain` (`DOMAIN` without):
-// the one this machine reaches fastest, a few round trips to each timed at once. Blocks.
-function nearestEndpoint(domain = null) {
-  const lib = library()
-  const out = {}
-  const status = lib.virtx_nearest_endpoint(domain || DOMAIN, out)
-  return lib.take(status, out)
-}
 
 module.exports = {
   Client,
@@ -579,9 +562,7 @@ module.exports = {
   PortForwarder,
   Recipe,
   VirtxError,
-  endpointOf,
   imageName,
-  nearestEndpoint,
   libraryPath,
   load,
 }

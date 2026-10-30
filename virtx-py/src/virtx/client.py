@@ -406,28 +406,5 @@ class Client:
 
 
 DOMAIN = "virtx.brekkylab.com"
-"""Where virtx cloud's cells are, by default: ``<cell>.api.<DOMAIN>``."""
-
-
-def nearest_endpoint(domain: str | None = None) -> str:
-    """The endpoint of the nearest cell of virtx cloud offered under ``domain`` (``DOMAIN``
-    without): the one this machine reaches fastest, a few round trips to each timed at once."""
-    lib = library()
-    out = _Bytes()
-    status = lib.virtx_nearest_endpoint((domain or DOMAIN).encode(), ctypes.byref(out))
-    return lib.take(status, out)
-
-
-def endpoint_of(key: str, domain: str | None = None) -> str | None:
-    """The cell endpoint an API key of virtx cloud names (``vx_sk_<cell>_...``), under
-    ``domain`` (``DOMAIN`` without): ``None`` for a key that is no such key, as a key made
-    since 2026-10-30 is not (``vx_sk_<hex>``): it is every cell's, and the client finds the
-    nearest."""
-    if not key.startswith("vx_sk_"):
-        return None
-    cell, _, rest = key[len("vx_sk_"):].partition("_")
-    if not rest:
-        return None
-    if not cell or not all(c.isdigit() or ("a" <= c <= "z") for c in cell):
-        return None
-    return f"https://{cell}.api.{domain or DOMAIN}"
+"""Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and
+``<cell>.api.<DOMAIN>`` for one."""

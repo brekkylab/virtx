@@ -466,59 +466,6 @@ unsafe fn opened(
     }
 }
 
-/// The endpoint of the nearest cell of virtx cloud offered under `domain` ([`DOMAIN`]
-/// without): the one this machine reaches fastest, a few round trips to each timed at once.
-/// Blocks.
-pub fn nearest_endpoint(domain: Option<&str>) -> Result<String, Error> {
-    let api = api()?;
-    let domain = CString::new(domain.unwrap_or(DOMAIN))
-        .map_err(|e| Error::Call(format!("the domain: {e}")))?;
-    let mut out = VirtxBytes::empty();
-    let status = unsafe { (api.virtx_nearest_endpoint)(domain.as_ptr(), &mut out) };
-    unsafe { take(api, status, out) }
-}
-
-/// Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`.
+/// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
+/// for one.
 pub const DOMAIN: &str = "virtx.brekkylab.com";
-
-/// The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
-/// ([`DOMAIN`] without): `None` for a key that is no such key, as a key made since
-/// 2026-10-30 is not (`vx_sk_<hex>`): it is every cell's, and the client finds the nearest.
-pub fn endpoint_of(key: &str, domain: Option<&str>) -> Option<String> {
-    let (cell, _) = key.strip_prefix("vx_sk_")?.split_once('_')?;
-    if cell.is_empty()
-        || !cell
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-    {
-        return None;
-    }
-    Some(format!("https://{cell}.api.{}", domain.unwrap_or(DOMAIN)))
-}
-
-#[cfg(test)]
-mod endpoint_tests {
-    use super::endpoint_of;
-
-    #[test]
-    fn a_key_names_its_cell() {
-        assert_eq!(
-            endpoint_of("vx_sk_apne2_0a38", None).as_deref(),
-            Some("https://apne2.api.virtx.brekkylab.com")
-        );
-        assert_eq!(
-            endpoint_of("vx_sk_apne2_0a38", Some("dev.virtx.brekkylab.com")).as_deref(),
-            Some("https://apne2.api.dev.virtx.brekkylab.com")
-        );
-        for key in [
-            "sk_apne2_x",
-            "vx_sk__x",
-            "vx_sk_ap.ne2_x",
-            "a-user-token",
-            // Every cell's.
-            "vx_sk_0a38b9c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
-        ] {
-            assert_eq!(endpoint_of(key, None), None, "{key}");
-        }
-    }
-}

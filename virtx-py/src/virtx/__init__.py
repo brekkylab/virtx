@@ -15,7 +15,7 @@ the sandbox answered for it: an address on this machine's loopback.
 """
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
-from .client import DOMAIN, Client, Event, Output, Progress, endpoint_of, nearest_endpoint
+from .client import DOMAIN, Client, Event, Output, Progress
 from .image import (
     BasicAuth,
     BearerAuth,
@@ -73,8 +73,6 @@ __all__ = [
     "Recipe",
     "RegistryAuth",
     "VirtxError",
-    "endpoint_of",
-    "nearest_endpoint",
     "VolumeCreateOutput",
     "VolumeListOutputItem",
     "VolumeMountListOutputItem",

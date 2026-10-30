@@ -6,16 +6,8 @@ export const LIBRARY_ENV: 'VIRTX_CORE_LIB'
 /** A request failed: the server's error, the transport's, or the library's. */
 export class VirtxError extends Error {}
 
-/** Where virtx cloud's cells are, by default: `<cell>.api.<DOMAIN>`. */
+/** Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>` for one. */
 export const DOMAIN: string
-
-/**
- * The cell endpoint an API key of virtx cloud names (`vx_sk_<cell>_...`), under `domain`
- * (`DOMAIN` without): null for a key that is no such key.
- */
-export function endpointOf(key: string, domain?: string | null): string | null
-/** The endpoint of the nearest cell of virtx cloud offered under `domain` (`DOMAIN` without): the one this machine reaches fastest. Blocks. */
-export function nearestEndpoint(domain?: string | null): string
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
 export function load(file: string): void

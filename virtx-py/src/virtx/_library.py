@@ -100,6 +100,8 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_connect": (
         [
             ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
             ctypes.POINTER(ctypes.c_char_p),
             ctypes.c_size_t,
             ctypes.POINTER(_HANDLE),
@@ -107,6 +109,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         ],
         ctypes.c_int,
     ),
+    "virtx_client_set_auth": ([_HANDLE, ctypes.c_char_p, ctypes.c_size_t, _OUT], ctypes.c_int),
     "virtx_client_set_headers": (
         [_HANDLE, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t, _OUT],
         ctypes.c_int,

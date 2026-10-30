@@ -13,7 +13,7 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
 use self::{stdio::Stdio, tcp::Tcp};
-use crate::Error;
+use crate::{Auth, Error};
 
 /// A request's or a response's body, as either transport carries it.
 pub(crate) type Body = BoxBody<Bytes, io::Error>;
@@ -71,17 +71,29 @@ impl TransportClient {
         Stdio::spawn(command).map(|stdio| Self::new(Connection::Stdio(stdio)))
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL, sending `headers` with every
-    /// request: what the server asks of each, such as the `Authorization` its credentials go
-    /// in. Nothing is sent until the first request.
-    pub fn connect(url: &str, headers: HeaderMap) -> anyhow::Result<Self> {
-        Tcp::connect(url, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
+    /// credentials it wants, and `headers`, whatever else it asks of each request, with every
+    /// request. `Authorization` is `auth`'s, over one given as a header. Nothing is sent until
+    /// the first request. Refused when a token would go in the clear: over `http` to any host
+    /// but this machine.
+    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Self> {
+        Tcp::connect(url, auth, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
+    }
+
+    /// Send `auth` with every request from now on, in place of what was given at
+    /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
+    /// already open sends it with its next connection. Over stdio, where none is sent, nothing
+    /// changes. Refused as at `connect`, the auth unchanged.
+    pub fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+        match &self.connection {
+            Connection::Tcp(tcp) => tcp.set_auth(auth),
+            Connection::Stdio(_) => Ok(()),
+        }
     }
 
     /// Send `headers` with every request from now on, in place of those given at
-    /// [`connect`](Self::connect): new credentials, when the server's are short-lived. A
-    /// forwarder already open sends them with its next connection. Over stdio, where none
-    /// are sent, nothing changes.
+    /// [`connect`](Self::connect). A forwarder already open sends them with its next
+    /// connection. Over stdio, where none are sent, nothing changes.
     pub fn set_headers(&self, headers: HeaderMap) {
         if let Connection::Tcp(tcp) = &self.connection {
             tcp.set_headers(headers);

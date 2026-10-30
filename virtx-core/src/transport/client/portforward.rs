@@ -14,9 +14,9 @@ use std::{
 
 use super::{
     Connection, TransportClient,
-    tcp::{Headers, current},
+    tcp::{Shared, authorized, current},
 };
-use crate::Error;
+use crate::{Auth, Error};
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, StatusCode, header};
 use tokio::{
@@ -60,7 +60,13 @@ impl PortForwarder {
             Connection::Stdio(_) => PortForwarder::direct(url).await,
             Connection::Tcp(tcp) => match tcp.base.join(url) {
                 Ok(url) => {
-                    PortForwarder::tunnel(tcp.http.clone(), Arc::clone(&tcp.headers), url).await
+                    PortForwarder::tunnel(
+                        tcp.http.clone(),
+                        Arc::clone(&tcp.auth),
+                        Arc::clone(&tcp.headers),
+                        url,
+                    )
+                    .await
                 }
                 Err(e) => Err(format!("{url}: {e}")),
             },
@@ -91,10 +97,11 @@ impl PortForwarder {
     }
 
     /// A loopback port of this client's own, each connection to it carried to `url` in a
-    /// WebSocket that `http` opens with the `headers` current then.
+    /// WebSocket that `http` opens with the `auth` and `headers` current then.
     async fn tunnel(
         http: reqwest::Client,
-        headers: Headers,
+        auth: Shared<Auth>,
+        headers: Shared<HeaderMap>,
         url: reqwest::Url,
     ) -> Result<PortForwarder, String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -107,10 +114,11 @@ impl PortForwarder {
         forwarding.spawn(async move {
             let mut connections = JoinSet::new();
             while let Ok((accepted, _)) = listener.accept().await {
-                let (http, headers, url) = (http.clone(), current(&headers), url.clone());
+                let (http, url) = (http.clone(), url.clone());
+                let (auth, headers) = (current(&auth), current(&headers));
                 connections.spawn(async move {
                     // Refused, the connection closes: as a port nothing listens on does.
-                    if let Ok(socket) = open(&http, headers, url).await {
+                    if let Ok(socket) = open(&http, &auth, headers, url).await {
                         carry(accepted, socket).await;
                     }
                 });
@@ -124,16 +132,15 @@ impl PortForwarder {
 }
 
 /// A WebSocket of `virtx.tcp` to `url`, its handshake an HTTP/1.1 upgrade `http` sends with
-/// `headers`.
+/// `auth` and `headers`.
 async fn open(
     http: &reqwest::Client,
+    auth: &Auth,
     headers: HeaderMap,
     url: reqwest::Url,
 ) -> Result<WebSocketStream<reqwest::Upgraded>, String> {
     let key = generate_key();
-    let response = http
-        .get(url)
-        .headers(headers)
+    let response = authorized(http.get(url), headers, auth)
         .header(header::CONNECTION, "Upgrade")
         .header(header::UPGRADE, "websocket")
         .header(header::SEC_WEBSOCKET_VERSION, "13")
@@ -244,7 +251,8 @@ mod tests {
 
     #[tokio::test]
     async fn each_connection_is_carried_in_a_websocket_to_the_url_under_the_base() {
-        let client = TransportClient::connect(&serve(None).await, HeaderMap::new()).unwrap();
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
         let forward = PortForwarder::open(&client, "ports/open").await.unwrap();
         assert!(forward.address().ip().is_loopback());
 
@@ -267,7 +275,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_the_server_refuses_is_closed() {
-        let client = TransportClient::connect(&serve(None).await, HeaderMap::new()).unwrap();
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
         let forward = PortForwarder::open(&client, "ports/shut").await.unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
@@ -275,17 +284,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_connection_goes_with_the_headers_current_when_it_is_made() {
+    async fn a_connection_goes_with_the_auth_current_when_it_is_made() {
         let client =
-            TransportClient::connect(&serve(Some("later")).await, HeaderMap::new()).unwrap();
+            TransportClient::connect(&serve(Some("later")).await, Auth::None, HeaderMap::new())
+                .unwrap();
         let forward = PortForwarder::open(&client, "ports/open").await.unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
         assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0, "refused");
 
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer later".parse().unwrap());
-        client.set_headers(headers);
+        client
+            .set_auth(Auth::Bearer {
+                token: "later".into(),
+            })
+            .unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         stream.write_all(b"now").await.unwrap();
         let mut echoed = [0u8; 3];
@@ -402,7 +414,15 @@ mod ffi {
             // Nothing listens there: each connection to the forwarder is closed.
             let url = c"http://127.0.0.1:9/";
             let status = unsafe {
-                virtx_client_connect(url.as_ptr(), std::ptr::null(), 0, &mut client, &mut out)
+                virtx_client_connect(
+                    url.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut client,
+                    &mut out,
+                )
             };
             assert_eq!(status, crate::ffi::VIRTX_OK);
 

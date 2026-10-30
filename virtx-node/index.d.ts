@@ -66,6 +66,9 @@ export type RegistryAuth =
   | { type: 'basic'; username: string; password: string }
   | { type: 'bearer'; token: string }
 
+/** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
+export type Auth = { type: 'bearer'; token: string }
+
 export interface ImagePullOutput {
   /** The digest of the image's manifest, as `algorithm:hex`. */
   digest: string
@@ -197,15 +200,22 @@ export class Client {
   static spawn(program: string, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-   * `headers` with every request: what the server asks of each, such as the `Authorization` its
-   * credentials go in.
+   * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
+   * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
+   * would go in the clear: over `http` to any host but this machine.
    */
-  static connect(url: string, headers?: Record<string, string>): Client
+  static connect(url: string, auth?: Auth | null, headers?: Record<string, string>): Client
   /**
-   * Send `headers` with every request from now on, in place of those given at `connect`: new
-   * credentials, when the server's are short-lived. A forwarder already open sends them with its
-   * next connection. Over stdio, where none are sent, nothing changes. A header that cannot be
-   * sent throws, the headers unchanged.
+   * Send `auth` with every request from now on, in place of what was given at `connect`: a new
+   * token, when the server's are short-lived. A forwarder already open sends it with its next
+   * connection. Over stdio, where none is sent, nothing changes. Refused as at `connect`, the
+   * auth unchanged.
+   */
+  setAuth(auth: Auth | null): void
+  /**
+   * Send `headers` with every request from now on, in place of those given at `connect`. A
+   * forwarder already open sends them with its next connection. Over stdio, where none are
+   * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
    */
   setHeaders(headers: Record<string, string>): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */

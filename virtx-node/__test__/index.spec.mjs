@@ -53,7 +53,16 @@ function read(host, port) {
 }
 
 test('a header that cannot be sent is refused at connect', () => {
-  assert.throws(() => Client.connect('http://127.0.0.1:9/', { 'not a name': 'x' }), /not a name/)
+  assert.throws(() => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }), /not a name/)
+})
+
+test('a token does not go in the clear to another machine', async () => {
+  const token = { type: 'bearer', token: 't' }
+  assert.throws(() => Client.connect('http://example.com/', token), /in the clear/)
+  const client = Client.connect('http://127.0.0.1:9/', token)
+  client.setAuth(null)
+  client.setAuth(token)
+  await client.close()
 })
 
 test('a header that cannot be sent is refused when set', async () => {

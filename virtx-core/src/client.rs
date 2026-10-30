@@ -8,7 +8,7 @@ use http::HeaderMap;
 use tokio::process::Command;
 
 use crate::{
-    Error,
+    Auth, Error,
     image::{
         ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem,
         ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull, ImagePullArgs, ImagePullOutput,
@@ -47,18 +47,26 @@ impl Client {
         Ok(Client { inner })
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL, sending `headers` with every
-    /// request: what the server asks of each, such as the `Authorization` its credentials go
-    /// in.
-    pub fn connect(url: &str, headers: HeaderMap) -> anyhow::Result<Client> {
-        let inner = TransportClient::connect(url, headers)?;
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
+    /// credentials it wants, and `headers`, whatever else it asks of each request, with every
+    /// request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
+    /// would go in the clear: over `http` to any host but this machine.
+    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Client> {
+        let inner = TransportClient::connect(url, auth, headers)?;
         Ok(Client { inner })
     }
 
+    /// Send `auth` with every request from now on, in place of what was given at
+    /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
+    /// already open sends it with its next connection. Over stdio, where none is sent, nothing
+    /// changes. Refused as at `connect`, the auth unchanged.
+    pub fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+        self.inner.set_auth(auth)
+    }
+
     /// Send `headers` with every request from now on, in place of those given at
-    /// [`connect`](Self::connect): new credentials, when the server's are short-lived. A
-    /// forwarder already open sends them with its next connection. Over stdio, where none
-    /// are sent, nothing changes.
+    /// [`connect`](Self::connect). A forwarder already open sends them with its next
+    /// connection. Over stdio, where none are sent, nothing changes.
     pub fn set_headers(&self, headers: HeaderMap) {
         self.inner.set_headers(headers);
     }
@@ -483,6 +491,7 @@ pub(crate) mod ffi {
 
     use super::Client;
     use crate::{
+        Auth,
         ffi::{
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
@@ -568,19 +577,36 @@ pub(crate) mod ffi {
         Ok(map)
     }
 
+    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, or null for none.
+    ///
+    /// # Safety
+    ///
+    /// `auth` is null, or `auth_len` readable bytes.
+    unsafe fn auth(auth: *const u8, auth_len: usize) -> Result<Auth, String> {
+        if auth.is_null() || auth_len == 0 {
+            return Ok(Auth::None);
+        }
+        unsafe { json(auth, auth_len) }
+    }
+
     /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-    /// the `headers_len` headers in `headers` -- each its name then its value, so `2 *
-    /// headers_len` strings -- with every request, and write the client, held once, to
-    /// `client`. The headers are what the server asks of each request, such as the
-    /// `Authorization` its credentials go in.
+    /// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
+    /// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+    /// then its value, so `2 * headers_len` strings -- with every request, and write the
+    /// client, held once, to `client`. The headers are whatever else the server asks of each
+    /// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
+    /// `http` to any host but this machine.
     ///
     /// # Safety
     ///
     /// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
-    /// `client` is writable. `error` is null or writable.
+    /// `auth` is null or `auth_len` readable bytes. `client` is writable. `error` is null or
+    /// writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_connect(
         url: *const c_char,
+        auth: *const u8,
+        auth_len: usize,
         headers: *const *const c_char,
         headers_len: usize,
         client: *mut *mut VirtxClient,
@@ -588,17 +614,51 @@ pub(crate) mod ffi {
     ) -> c_int {
         let opened = (|| {
             let url = unsafe { utf8(url) }?;
+            let auth = unsafe { self::auth(auth, auth_len) }?;
             let map = unsafe { header_map(headers, headers_len) }?;
-            Runtime::open(|| Client::connect(url, map).map_err(|e| format!("{e:#}")))
+            Runtime::open(|| Client::connect(url, auth, map).map_err(|e| format!("{e:#}")))
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
+    /// Send `auth`, as `virtx_client_connect` takes it, with every request from now on, in
+    /// place of what was sent until now: a new token, when the server's are short-lived. A
+    /// forwarder already open sends it with its next connection. Over stdio, where none is
+    /// sent, nothing changes. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused
+    /// written to `error`, the auth unchanged.
+    ///
+    /// # Safety
+    ///
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `auth`
+    /// is null or `auth_len` readable bytes. `error` is null or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_auth(
+        client: *mut VirtxClient,
+        auth: *const u8,
+        auth_len: usize,
+        error: *mut VirtxBytes,
+    ) -> c_int {
+        let set = unsafe { self::auth(auth, auth_len) }.and_then(|auth| {
+            unsafe { &(*client).0 }
+                .value()
+                .set_auth(auth)
+                .map_err(|e| format!("{e:#}"))
+        });
+        match set {
+            Ok(()) => VIRTX_OK,
+            Err(message) => {
+                let (status, message) = failure(message);
+                unsafe { write(error, message) };
+                status
+            }
+        }
+    }
+
     /// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
-    /// every request from now on, in place of those sent until now: new credentials, when the
-    /// server's are short-lived. A forwarder already open sends them with its next connection.
-    /// Over stdio, where none are sent, nothing changes. Answers `VIRTX_OK`, or `VIRTX_ERROR`
-    /// with why a header cannot be sent written to `error`, the headers unchanged.
+    /// every request from now on, in place of those sent until now. A forwarder already open
+    /// sends them with its next connection. Over stdio, where none are sent, nothing changes.
+    /// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why a header cannot be sent written to
+    /// `error`, the headers unchanged.
     ///
     /// # Safety
     ///
@@ -1214,7 +1274,15 @@ pub(crate) mod ffi {
             let mut client = ptr::null_mut();
             let url = c"http://127.0.0.1:9/";
             let status = unsafe {
-                virtx_client_connect(url.as_ptr(), ptr::null(), 0, &mut client, ptr::null_mut())
+                virtx_client_connect(
+                    url.as_ptr(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    &mut client,
+                    ptr::null_mut(),
+                )
             };
             assert_eq!(status, VIRTX_OK);
             let mut error = VirtxBytes {
@@ -1229,6 +1297,58 @@ pub(crate) mod ffi {
             assert!(String::from_utf8_lossy(message).contains("not a name"));
             unsafe { virtx_bytes_free(error) };
             unsafe { virtx_client_release(client) };
+        }
+
+        #[test]
+        fn an_auth_is_taken_as_json_and_refused_as_at_connect() {
+            let mut client = ptr::null_mut();
+            let url = c"http://127.0.0.1:9/";
+            let bearer = br#"{"type": "bearer", "token": "t"}"#;
+            let status = unsafe {
+                virtx_client_connect(
+                    url.as_ptr(),
+                    bearer.as_ptr(),
+                    bearer.len(),
+                    ptr::null(),
+                    0,
+                    &mut client,
+                    ptr::null_mut(),
+                )
+            };
+            assert_eq!(status, VIRTX_OK);
+            let mut error = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            let basic = br#"{"type": "basic", "username": "u", "password": "p"}"#;
+            let status =
+                unsafe { virtx_client_set_auth(client, basic.as_ptr(), basic.len(), &mut error) };
+            assert_eq!(status, crate::ffi::VIRTX_ERROR);
+            let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
+            assert!(String::from_utf8_lossy(message).contains("basic"));
+            unsafe { virtx_bytes_free(error) };
+            unsafe { virtx_client_release(client) };
+
+            let url = c"http://example.com/";
+            let mut error = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            let status = unsafe {
+                virtx_client_connect(
+                    url.as_ptr(),
+                    bearer.as_ptr(),
+                    bearer.len(),
+                    ptr::null(),
+                    0,
+                    &mut client,
+                    &mut error,
+                )
+            };
+            assert_eq!(status, crate::ffi::VIRTX_ERROR);
+            let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
+            assert!(String::from_utf8_lossy(message).contains("in the clear"));
+            unsafe { virtx_bytes_free(error) };
         }
     }
 }

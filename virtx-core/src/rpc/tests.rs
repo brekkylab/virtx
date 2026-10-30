@@ -19,7 +19,7 @@ use tokio::{net::TcpListener, sync::mpsc, task::JoinSet};
 
 use super::{CancelScope, Dispatcher, ErrorObject, Methods, Notifier, Server};
 use crate::{
-    Error,
+    Auth, Error,
     image::{
         ImageBuild, ImageBuildOutput, ImagePrune, ImagePruneOutput, ImagePull, ImagePullOutput,
         ImagePush, ImagePushOutput, RegistryAuth,
@@ -258,7 +258,7 @@ async fn serve_at(path: &str, methods: Methods, tokens: Option<Tokens>) -> Strin
 async fn clients() -> [TransportClient; 2] {
     let url = serve(methods(), None).await;
     [
-        TransportClient::connect(&url, HeaderMap::new()).unwrap(),
+        TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap(),
         piped(methods()),
     ]
 }
@@ -347,7 +347,7 @@ async fn dropping_a_call_cancels_it_on_the_server() {
     let (piped_methods, mut piped_dropped) = hanging();
     let cases = [
         (
-            TransportClient::connect(&url, HeaderMap::new()).unwrap(),
+            TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap(),
             &mut http_dropped,
         ),
         (piped(piped_methods), &mut piped_dropped),
@@ -366,7 +366,7 @@ async fn a_failed_post_fails_its_call() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     drop(listener);
-    let client = TransportClient::connect(&url, HeaderMap::new()).unwrap();
+    let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
     for _ in 0..2 {
         assert!(client.request::<String>("echo", ["hi"]).await.is_err());
     }
@@ -375,62 +375,108 @@ async fn a_failed_post_fails_its_call() {
 #[tokio::test]
 async fn an_http_error_fails_its_call_with_the_status() {
     let url = serve(methods(), Some(Tokens { users: vec![] })).await;
-    let client = TransportClient::connect(&url, HeaderMap::new()).unwrap();
+    let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
     let error = client.request::<String>("echo", ["hi"]).await.unwrap_err();
     assert!(matches!(error, Error::Status(401, _)), "{error:?}");
     assert!(error.to_string().contains("401"), "{error}");
 }
 
 /// `WhoAmI` behind `users`, and a client with `token`.
-async fn as_user(users: Vec<&'static str>, token: &str) -> TransportClient {
+/// `user`, answering whom the request's token names, served behind `users`' tokens.
+async fn serve_users(users: Vec<&'static str>) -> String {
     let mut methods = methods();
     methods.add::<WhoAmI, _, _>(|_, extensions| async move {
         Ok(extensions.get::<User>().expect("a user").0.clone())
     });
-    let url = serve(methods, Some(Tokens { users })).await;
-    TransportClient::connect(&url, bearer_token(token)).unwrap()
+    serve(methods, Some(Tokens { users })).await
 }
 
-/// `Authorization: Bearer {token}`.
-fn bearer_token(token: &str) -> HeaderMap {
+fn token(token: &str) -> Auth {
+    Auth::Bearer {
+        token: token.into(),
+    }
+}
+
+/// `Authorization: Bearer {token}`, as a header of the caller's own.
+fn authorization(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
     headers
 }
 
+async fn user(client: &TransportClient) -> Result<String, Error> {
+    client.request("user", [(); 0]).await
+}
+
 #[tokio::test]
-async fn the_headers_given_at_connect_go_with_every_request() {
-    let client = as_user(vec!["alice"], "alice").await;
+async fn the_auth_given_at_connect_goes_with_every_request() {
+    let url = serve_users(vec!["alice"]).await;
+    let client = TransportClient::connect(&url, token("alice"), HeaderMap::new()).unwrap();
     for _ in 0..2 {
-        let user: String = client.request("user", [(); 0]).await.unwrap();
-        assert_eq!(user, "alice");
+        assert_eq!(user(&client).await.unwrap(), "alice");
     }
 }
 
 #[tokio::test]
-async fn the_headers_set_later_go_with_the_requests_after() {
-    let client = as_user(vec!["alice", "bob"], "alice").await;
-    let user: String = client.request("user", [(); 0]).await.unwrap();
-    assert_eq!(user, "alice");
+async fn the_auth_set_later_goes_with_the_requests_after() {
+    let url = serve_users(vec!["alice", "bob"]).await;
+    let client = TransportClient::connect(&url, token("alice"), HeaderMap::new()).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "alice");
 
-    client.set_headers(bearer_token("bob"));
-    let user: String = client.request("user", [(); 0]).await.unwrap();
-    assert_eq!(user, "bob");
+    client.set_auth(token("bob")).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "bob");
 
-    // The old ones are gone with the new, not kept under them.
-    client.set_headers(HeaderMap::new());
-    let error = client.request::<String>("user", [(); 0]).await.unwrap_err();
+    // The old one is gone with the new, not kept under it.
+    client.set_auth(Auth::None).unwrap();
+    let error = user(&client).await.unwrap_err();
     assert!(matches!(error, Error::Status(401, _)), "{error:?}");
-    client.set_headers(bearer_token("carol"));
-    let error = client.request::<String>("user", [(); 0]).await.unwrap_err();
+    client.set_auth(token("carol")).unwrap();
+    let error = user(&client).await.unwrap_err();
     assert!(matches!(error, Error::Status(403, _)), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_headers_given_at_connect_and_set_later_go_with_the_requests_after() {
+    // The token in a header of the caller's own, as to a server that reads it from one.
+    let url = serve_users(vec!["alice", "bob"]).await;
+    let client = TransportClient::connect(&url, Auth::None, authorization("alice")).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "alice");
+
+    client.set_headers(authorization("bob"));
+    assert_eq!(user(&client).await.unwrap(), "bob");
+    client.set_headers(HeaderMap::new());
+    let error = user(&client).await.unwrap_err();
+    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_auth_goes_over_an_authorization_header() {
+    let url = serve_users(vec!["alice", "bob"]).await;
+    let client = TransportClient::connect(&url, token("alice"), authorization("bob")).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "alice");
+}
+
+#[test]
+fn a_token_does_not_go_in_the_clear_to_another_machine() {
+    let with_token = |url| TransportClient::connect(url, token("t"), HeaderMap::new());
+    assert!(with_token("http://example.com/").is_err());
+    for url in [
+        "https://example.com/",
+        "http://127.0.0.1:9/",
+        "http://localhost:9/",
+        "http://[::1]:9/",
+    ] {
+        assert!(with_token(url).is_ok(), "{url}");
+    }
+    let client = TransportClient::connect("http://example.com/", Auth::None, HeaderMap::new());
+    assert!(client.unwrap().set_auth(token("t")).is_err());
 }
 
 #[test]
 fn connect_refuses_anything_but_an_http_url() {
     for url in ["not a url", "file:///tmp/x"] {
         assert!(
-            TransportClient::connect(url, HeaderMap::new()).is_err(),
+            TransportClient::connect(url, Auth::None, HeaderMap::new()).is_err(),
             "{url}"
         );
     }
@@ -440,7 +486,7 @@ fn connect_refuses_anything_but_an_http_url() {
 async fn rpc_is_under_the_base_url_with_or_without_its_slash() {
     let url = serve_at("/base/rpc", methods(), None).await;
     for base in [format!("{url}base"), format!("{url}base/")] {
-        let client = TransportClient::connect(&base, HeaderMap::new()).unwrap();
+        let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
         let answer: String = client.request("echo", ["hi"]).await.unwrap();
         assert_eq!(answer, "hi");
     }

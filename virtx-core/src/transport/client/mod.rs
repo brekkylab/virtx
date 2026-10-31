@@ -8,11 +8,12 @@ mod tcp;
 use std::io;
 
 use bytes::Bytes;
+use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
 use self::{stdio::Stdio, tcp::Tcp};
-use crate::Error;
+use crate::{Auth, Error};
 
 /// A request's or a response's body, as either transport carries it.
 pub(crate) type Body = BoxBody<Bytes, io::Error>;
@@ -20,6 +21,18 @@ pub(crate) type Body = BoxBody<Bytes, io::Error>;
 /// `bytes`, as a whole [`Body`].
 pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|e| match e {}).boxed()
+}
+
+/// `response`, a refusal, as the [`Error::Status`] it is: its body read, for a person.
+pub(crate) async fn refused(response: http::Response<Body>) -> Error {
+    let status = response.status().as_u16();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map(|body| body.to_bytes())
+        .unwrap_or_default();
+    Error::Status(status, String::from_utf8_lossy(&body).trim().to_owned())
 }
 
 /// How a client reaches the server's endpoints.
@@ -58,10 +71,33 @@ impl TransportClient {
         Stdio::spawn(command).map(|stdio| Self::new(Connection::Stdio(stdio)))
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL. Nothing is sent until the
-    /// first request.
-    pub fn connect(url: &str) -> anyhow::Result<Self> {
-        Tcp::connect(url).map(|tcp| Self::new(Connection::Tcp(tcp)))
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
+    /// credentials it wants, and `headers`, whatever else it asks of each request, with every
+    /// request. `Authorization` is `auth`'s, over one given as a header. Nothing is sent until
+    /// the first request. Refused when a token would go in the clear: over `http` to any host
+    /// but this machine.
+    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Self> {
+        Tcp::connect(url, auth, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
+    }
+
+    /// Send `auth` with every request from now on, in place of what was given at
+    /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
+    /// already open sends it with its next connection. Over stdio, where none is sent, nothing
+    /// changes. Refused as at `connect`, the auth unchanged.
+    pub fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+        match &self.connection {
+            Connection::Tcp(tcp) => tcp.set_auth(auth),
+            Connection::Stdio(_) => Ok(()),
+        }
+    }
+
+    /// Send `headers` with every request from now on, in place of those given at
+    /// [`connect`](Self::connect). A forwarder already open sends them with its next
+    /// connection. Over stdio, where none are sent, nothing changes.
+    pub fn set_headers(&self, headers: HeaderMap) {
+        if let Connection::Tcp(tcp) = &self.connection {
+            tcp.set_headers(headers);
+        }
     }
 
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.
@@ -74,15 +110,22 @@ impl TransportClient {
     }
 
     /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/rpc`, names. An `Err` says why no response came.
+    /// `/rpc`, names. An `Err` says why no response came, or that the server refused the
+    /// headers with a `401` or a `403`, which every endpoint's are alike.
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
     ) -> Result<http::Response<Body>, Error> {
-        self.connection
+        let response = self
+            .connection
             .send(request)
             .await
-            .map_err(Error::Transport)
+            .map_err(Error::Transport)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(refused(response).await);
+        }
+        Ok(response)
     }
 
     /// End the session. Over stdio, close the server's stdin and kill it if it has not exited

@@ -45,6 +45,11 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         })
     }
 
+    /// The value, for what needs no runtime.
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
+
     /// What `make` makes of the value, run to its end on the runtime, whose tasks what it starts
     /// stay on.
     ///

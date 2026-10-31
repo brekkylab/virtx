@@ -10,7 +10,7 @@ use std::{
 
 use std::{io::Read, net::TcpStream};
 
-use virtx_rs::{Client, Error, PortForwarder};
+use virtx_rs::{Auth, Client, Error, PortForwarder};
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
 /// one in `deps`: that is the dependency's, built without the C ABI.
@@ -58,9 +58,48 @@ fn a_second_library_is_refused() {
     virtx_rs::load(library()).unwrap();
 }
 
+fn a_header_that_cannot_be_sent_is_refused_at_connect() {
+    let Err(error) = Client::connect("http://127.0.0.1:9/", Auth::None, [("not a name", "x")])
+    else {
+        panic!("connected");
+    };
+    assert!(error.to_string().contains("not a name"), "{error}");
+}
+
+fn a_token_does_not_go_in_the_clear_to_another_machine() {
+    let token = Auth::Bearer { token: "t".into() };
+    let Err(error) = Client::connect(
+        "http://example.com/",
+        token.clone(),
+        [] as [(&str, &str); 0],
+    ) else {
+        panic!("connected");
+    };
+    assert!(error.to_string().contains("in the clear"), "{error}");
+    let client = Client::connect(
+        "http://127.0.0.1:9/",
+        token.clone(),
+        [] as [(&str, &str); 0],
+    )
+    .unwrap();
+    assert!(client.set_auth(Auth::None).is_ok());
+    assert!(client.set_auth(token).is_ok());
+}
+
+fn a_header_that_cannot_be_sent_is_refused_when_set() {
+    let client =
+        Client::connect("http://127.0.0.1:9/", Auth::None, [] as [(&str, &str); 0]).unwrap();
+    assert!(client.set_headers([("authorization", "Bearer x")]).is_ok());
+    let Err(error) = client.set_headers([("not a name", "x")]) else {
+        panic!("set");
+    };
+    assert!(error.to_string().contains("not a name"), "{error}");
+}
+
 fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
     // Nothing listens there: each connection to the forwarder is closed.
-    let client = Client::connect("http://127.0.0.1:9/").unwrap();
+    let client =
+        Client::connect("http://127.0.0.1:9/", Auth::None, [] as [(&str, &str); 0]).unwrap();
     let forwarder = PortForwarder::open(&client, "ports/abc").unwrap();
     let address = forwarder.address();
     assert!(address.ip().is_loopback());
@@ -83,6 +122,9 @@ fn main() -> ExitCode {
     }
     let tests = tests![
         spawning_nothing_fails_with_a_message,
+        a_header_that_cannot_be_sent_is_refused_at_connect,
+        a_header_that_cannot_be_sent_is_refused_when_set,
+        a_token_does_not_go_in_the_clear_to_another_machine,
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
     ];

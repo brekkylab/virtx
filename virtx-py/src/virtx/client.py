@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from .image import (
+    BearerAuth,
     ImageBuildOutput,
     ImageDownloadOutput,
     ImageListOutputItem,
@@ -74,6 +75,17 @@ def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]
 
 # Every client not yet closed, closed at exit: a hold left to the interpreter's teardown would
 # end its session after the waker's callbacks can still run.
+def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_char_p]:
+    """``headers`` as ``virtx_client_connect`` takes them: each name then its value."""
+    strings = [s.encode() for name, value in (headers or {}).items() for s in (name, value)]
+    return (ctypes.c_char_p * len(strings))(*strings)
+
+
+def _auth_bytes(auth: BearerAuth | None) -> bytes:
+    """``auth`` as ``virtx_client_connect`` takes it: JSON, or nothing for none."""
+    return b"" if auth is None else json.dumps(auth.to_dict()).encode()
+
+
 _open: weakref.WeakSet[Client] = weakref.WeakSet()
 
 
@@ -111,14 +123,58 @@ class Client:
         return cls._opened(lib, status, raw, error)
 
     @classmethod
-    def connect(cls, url: str) -> Client:
+    def connect(
+        cls,
+        url: str,
+        auth: BearerAuth | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
-        it)."""
+        it), sending ``auth``, the credentials it wants, and ``headers``, whatever else it asks
+        of each request, with every request. ``Authorization`` is ``auth``'s, over one given as
+        a header. Refused when a token would go in the clear: over ``http`` to any host but
+        this machine."""
         lib = library()
+        auth_json = _auth_bytes(auth)
+        array = _header_array(headers)
         raw = ctypes.c_void_p()
         error = _Bytes()
-        status = lib.virtx_client_connect(url.encode(), ctypes.byref(raw), ctypes.byref(error))
+        status = lib.virtx_client_connect(
+            url.encode(),
+            auth_json,
+            len(auth_json),
+            array,
+            len(array) // 2,
+            ctypes.byref(raw),
+            ctypes.byref(error),
+        )
         return cls._opened(lib, status, raw, error)
+
+    def set_auth(self, auth: BearerAuth | None) -> None:
+        """Send ``auth`` with every request from now on, in place of what was given at
+        ``connect``: a new token, when the server's are short-lived. A forwarder already open
+        sends it with its next connection. Over stdio, where none is sent, nothing changes.
+        Refused as at ``connect``, the auth unchanged."""
+        auth_json = _auth_bytes(auth)
+        error = _Bytes()
+        status = self._lib.virtx_client_set_auth(
+            self._held(), auth_json, len(auth_json), ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
+
+    def set_headers(self, headers: Mapping[str, str]) -> None:
+        """Send ``headers`` with every request from now on, in place of those given at
+        ``connect``. A forwarder already open sends them with its next connection. Over stdio,
+        where none are sent, nothing changes. A header that cannot be sent raises, the headers
+        unchanged."""
+        array = _header_array(headers)
+        error = _Bytes()
+        status = self._lib.virtx_client_set_headers(
+            self._held(), array, len(array) // 2, ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:

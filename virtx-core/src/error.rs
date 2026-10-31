@@ -10,8 +10,12 @@ pub enum Error {
     /// The server answered with an error.
     Call(ErrorObject),
     /// The request did not reach the server, or its response did not come back: the
-    /// connection failed, the server answered an HTTP error, or the session ended.
+    /// connection failed or the session ended.
     Transport(String),
+    /// The server refused the request with an HTTP status: the status, and the body, for a
+    /// person. A `401` or a `403` from any endpoint says the headers are not what it wants: a
+    /// client may set new ones and send the request again.
+    Status(u16, String),
     /// The params did not encode, or the result did not read as the type asked for.
     Json(String),
     /// The server's image registry answered with an error, or with what is not an image.
@@ -28,6 +32,17 @@ impl fmt::Display for Error {
             Error::Json(reason) => f.write_str(reason),
             Error::Registry(reason) => f.write_str(reason),
             Error::File(reason) => f.write_str(reason),
+            Error::Status(status, body) => {
+                let reason = http::StatusCode::from_u16(*status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or("");
+                write!(f, "the server answered {status} {reason}")?;
+                if !body.is_empty() {
+                    write!(f, ": {body}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

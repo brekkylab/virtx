@@ -8,14 +8,14 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use virtx_core::{
-    ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput, ImageListOutputItem,
-    ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs, ImagePushOutput,
-    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, MountSource,
-    Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs, SandboxExecOutput, SandboxInitArgs,
-    SandboxInitOutput, SandboxListOutputItem, SnapshotCreateArgs, SnapshotCreateOutput,
-    SnapshotListOutputItem, SnapshotRemoveArgs, VolumeCreateArgs, VolumeCreateOutput,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListArgs, VolumeMountListOutputItem,
-    VolumeMountRemoveArgs, VolumeRemoveArgs,
+    Auth, ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput,
+    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs,
+    ImagePushOutput, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+    ImageUploadOutput, MountSource, Recipe, RegistryAuth, SandboxCloseArgs, SandboxExecArgs,
+    SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
+    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
+    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
 };
 
 use crate::{
@@ -66,15 +66,76 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it). Blocks
-    /// until the client is made.
-    pub fn connect(url: impl AsRef<str>) -> Result<Client, Error> {
+    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+    /// `auth`, the credentials it wants, and `headers`, each a name and a value, whatever else
+    /// it asks of each request, with every request. `Authorization` is `auth`'s, over one given
+    /// as a header. Refused when a token would go in the clear: over `http` to any host but
+    /// this machine. Blocks until the client is made.
+    pub fn connect(
+        url: impl AsRef<str>,
+        auth: Auth,
+        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
+        let auth = serde_json::to_vec(&auth).expect("an auth encodes");
+        let strings = header_strings(headers)?;
+        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
-        let status = unsafe { (api.virtx_client_connect)(url.as_ptr(), &mut raw, &mut error) };
+        let status = unsafe {
+            (api.virtx_client_connect)(
+                url.as_ptr(),
+                auth.as_ptr(),
+                auth.len(),
+                pointers.as_ptr(),
+                strings.len() / 2,
+                &mut raw,
+                &mut error,
+            )
+        };
         unsafe { opened(api, status, raw, error) }
+    }
+
+    /// Send `auth` with every request from now on, in place of what was given at
+    /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
+    /// already open sends it with its next connection. Over stdio, where none is sent, nothing
+    /// changes. Refused as at `connect`, the auth unchanged.
+    pub fn set_auth(&self, auth: Auth) -> Result<(), Error> {
+        let auth = serde_json::to_vec(&auth).expect("an auth encodes");
+        let mut error = VirtxBytes::empty();
+        let status = unsafe {
+            (self.api.virtx_client_set_auth)(self.raw, auth.as_ptr(), auth.len(), &mut error)
+        };
+        if status == VIRTX_OK {
+            return Ok(());
+        }
+        unsafe { take(self.api, status, error) }
+    }
+
+    /// Send `headers` with every request from now on, in place of those given at
+    /// [`connect`](Self::connect). A forwarder already open sends them with its next
+    /// connection. Over stdio, where none are sent, nothing changes. A header that cannot be
+    /// sent is refused, the headers unchanged.
+    pub fn set_headers(
+        &self,
+        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Result<(), Error> {
+        let strings = header_strings(headers)?;
+        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
+        let mut error = VirtxBytes::empty();
+        let status = unsafe {
+            (self.api.virtx_client_set_headers)(
+                self.raw,
+                pointers.as_ptr(),
+                strings.len() / 2,
+                &mut error,
+            )
+        };
+        if status == VIRTX_OK {
+            return Ok(());
+        }
+        unsafe { take(self.api, status, error) }
     }
 
     /// The `VirtxClient*` this holds, still held by it: for another module over the same
@@ -386,6 +447,18 @@ impl Drop for Client {
     fn drop(&mut self) {
         unsafe { (self.api.virtx_client_release)(self.raw) };
     }
+}
+
+/// `headers`, each name then its value, as `virtx_client_connect` takes them.
+fn header_strings(
+    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+) -> Result<Vec<CString>, Error> {
+    let mut strings = Vec::new();
+    for (name, value) in headers {
+        strings.push(c_string(name.as_ref())?);
+        strings.push(c_string(value.as_ref())?);
+    }
+    Ok(strings)
 }
 
 fn c_string(s: &str) -> Result<CString, Error> {

@@ -10,6 +10,7 @@
 //! ABI over a client the `ffi` feature, on by default with `client`. A crate that reaches the library through the C ABI
 //! takes the types alone, with `default-features = false`; a server takes `server`.
 
+mod auth;
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
@@ -26,6 +27,7 @@ mod snapshot;
 mod transport;
 mod volume;
 
+pub use auth::Auth;
 #[cfg(feature = "client")]
 pub use client::Client;
 #[cfg(feature = "client")]

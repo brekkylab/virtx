@@ -10,7 +10,7 @@ mod client;
 mod server;
 
 #[cfg(feature = "client")]
-pub(crate) use client::{Body, full};
+pub(crate) use client::{Body, full, refused};
 #[cfg(feature = "client")]
 pub use client::{PortForwarder, TransportClient};
 #[cfg(feature = "server")]

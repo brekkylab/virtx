@@ -81,13 +81,57 @@ int virtx_client_spawn(const char *program,
                        struct VirtxClient **client,
                        struct VirtxBytes *error);
 
-// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), and write
-// the client, held once, to `client`.
+// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
+// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+// then its value, so `2 * headers_len` strings -- with every request, and write the
+// client, held once, to `client`. The headers are whatever else the server asks of each
+// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
+// `http` to any host but this machine.
 //
 // # Safety
 //
-// `url` is NUL-terminated UTF-8. `client` is writable. `error` is null or writable.
-int virtx_client_connect(const char *url, struct VirtxClient **client, struct VirtxBytes *error);
+// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
+// `auth` is null or `auth_len` readable bytes. `client` is writable. `error` is null or
+// writable.
+int virtx_client_connect(const char *url,
+                         const uint8_t *auth,
+                         size_t auth_len,
+                         const char *const *headers,
+                         size_t headers_len,
+                         struct VirtxClient **client,
+                         struct VirtxBytes *error);
+
+// Send `auth`, as `virtx_client_connect` takes it, with every request from now on, in
+// place of what was sent until now: a new token, when the server's are short-lived. A
+// forwarder already open sends it with its next connection. Over stdio, where none is
+// sent, nothing changes. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused
+// written to `error`, the auth unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `auth`
+// is null or `auth_len` readable bytes. `error` is null or writable.
+int virtx_client_set_auth(struct VirtxClient *client,
+                          const uint8_t *auth,
+                          size_t auth_len,
+                          struct VirtxBytes *error);
+
+// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
+// every request from now on, in place of those sent until now. A forwarder already open
+// sends them with its next connection. Over stdio, where none are sent, nothing changes.
+// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why a header cannot be sent written to
+// `error`, the headers unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. Each
+// of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8. `error` is null
+// or writable.
+int virtx_client_set_headers(struct VirtxClient *client,
+                             const char *const *headers,
+                             size_t headers_len,
+                             struct VirtxBytes *error);
 
 // Hold `client` once more, for another holder to release.
 //

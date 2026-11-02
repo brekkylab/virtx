@@ -65,6 +65,14 @@ test('a token does not go in the clear to another machine', async () => {
   await client.close()
 })
 
+test('a command is run for the token before a request is sent', async () => {
+  const failing = { type: 'command', program: 'sh', args: ['-c', "echo 'not signed in' >&2; exit 1"] }
+  assert.throws(() => Client.connect('http://example.com/', failing), /in the clear/)
+  const client = Client.connect('http://127.0.0.1:9/', failing)
+  await assert.rejects(client.listSandbox(), /not signed in/)
+  await client.close()
+})
+
 test('a header that cannot be sent is refused when set', async () => {
   const client = Client.connect('http://127.0.0.1:9/')
   client.setHeaders({ authorization: 'Bearer x' })

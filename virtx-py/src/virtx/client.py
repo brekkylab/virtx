@@ -81,7 +81,26 @@ def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_ch
     return (ctypes.c_char_p * len(strings))(*strings)
 
 
-def _auth_bytes(auth: BearerAuth | None) -> bytes:
+@dataclass(frozen=True)
+class CommandAuth:
+    """The token ``program`` with ``args`` prints, sent as ``Authorization: Bearer <token>``:
+    a token alone, or ``{"token": ..., "expires_in": <seconds>}``. It is run for the first
+    request, and again when its token is a minute from running out or the server refuses it:
+    a person's short-lived token, as ``virtx token --json`` prints it."""
+
+    program: str
+    args: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"type": "command", "program": self.program, "args": list(self.args)}
+
+
+Auth = BearerAuth | CommandAuth
+"""The credentials a server wants with every request: a token, or a command that prints one."""
+
+
+def _auth_bytes(auth: Auth | None) -> bytes:
     """``auth`` as ``virtx_client_connect`` takes it: JSON, or nothing for none."""
     return b"" if auth is None else json.dumps(auth.to_dict()).encode()
 
@@ -126,7 +145,7 @@ class Client:
     def connect(
         cls,
         url: str,
-        auth: BearerAuth | None = None,
+        auth: Auth | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL (``/rpc`` is under
@@ -150,7 +169,7 @@ class Client:
         )
         return cls._opened(lib, status, raw, error)
 
-    def set_auth(self, auth: BearerAuth | None) -> None:
+    def set_auth(self, auth: Auth | None) -> None:
         """Send ``auth`` with every request from now on, in place of what was given at
         ``connect``: a new token, when the server's are short-lived. A forwarder already open
         sends it with its next connection. Over stdio, where none is sent, nothing changes.
@@ -178,7 +197,9 @@ class Client:
 
     @classmethod
     def from_env(cls) -> Client:
-        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set.
+        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set:
+        with ``VIRTX_ORG`` and no key, as the person signed in with ``virtx login``, whose token
+        ``virtx token --json`` prints, again as it runs out.
 
         Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
         cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
@@ -195,7 +216,11 @@ class Client:
             url = f"https://run.{domain or DOMAIN}"
         if not url:
             raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
-        auth = BearerAuth(key) if key else None
+        auth: Auth | None = None
+        if key:
+            auth = BearerAuth(key)
+        elif org:
+            auth = CommandAuth(*SIGNED_IN)
         return cls.connect(url, auth, {ORG_HEADER: org} if org else None)
 
     @classmethod
@@ -483,3 +508,7 @@ DOMAIN = "virtx.brekkylab.com"
 ORG_HEADER = "virtx-org"
 """The header a request names its organization in, on a server that keeps organizations apart
 (PROTOCOL.md, Authentication)."""
+
+SIGNED_IN = ("virtx", ("token", "--json"))
+"""The command that prints the token of the person signed in with ``virtx login``, and its
+arguments."""

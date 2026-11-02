@@ -83,7 +83,9 @@ int virtx_client_spawn(const char *program,
 
 // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` -- the token the
+// command prints, printed again as it runs out -- or null for none, and the `headers_len`
+// headers in `headers` -- each its name
 // then its value, so `2 * headers_len` strings -- with every request, and write the
 // client, held once, to `client`. The headers are whatever else the server asks of each
 // request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over

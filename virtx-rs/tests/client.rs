@@ -86,6 +86,18 @@ fn a_token_does_not_go_in_the_clear_to_another_machine() {
     assert!(client.set_auth(token).is_ok());
 }
 
+fn a_command_is_run_for_the_token_before_a_request_is_sent() {
+    let failing = Auth::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "echo 'not signed in' >&2; exit 1".into()],
+    };
+    let client = Client::connect("http://127.0.0.1:9/", failing, [] as [(&str, &str); 0]).unwrap();
+    let Err(error) = client.list_sandbox().wait() else {
+        panic!("listed");
+    };
+    assert!(error.to_string().contains("not signed in"), "{error}");
+}
+
 fn a_header_that_cannot_be_sent_is_refused_when_set() {
     let client =
         Client::connect("http://127.0.0.1:9/", Auth::None, [] as [(&str, &str); 0]).unwrap();
@@ -125,6 +137,7 @@ fn main() -> ExitCode {
         a_header_that_cannot_be_sent_is_refused_at_connect,
         a_header_that_cannot_be_sent_is_refused_when_set,
         a_token_does_not_go_in_the_clear_to_another_machine,
+        a_command_is_run_for_the_token_before_a_request_is_sent,
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
     ];

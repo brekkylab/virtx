@@ -399,14 +399,17 @@ let client = Client::connect("https://apne2.api.example.com", auth, [] as [(&str
 let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
-A person signs in from a terminal with `virtx login` (the `virtx-cli` crate). `virtx token`
-prints an access token for their session, refreshed. Unlike an API key, it names no
-organization and no cell, so `VIRTX_ORG` (the organization's UUID) and `VIRTX_URL` go with it:
+A person signs in from a terminal with `virtx login` (the `virtx-cli` crate). Unlike an API
+key, their session names no organization, so `VIRTX_ORG` (the organization's UUID) goes with
+it; given it and no key, `from_env` sends the session's access token, which `virtx token --json`
+prints, and runs it again as each token runs out (in 15 minutes) or is refused:
 
 ```sh
 virtx login
-VIRTX_API_KEY=$(virtx token) VIRTX_ORG=<org uuid> VIRTX_URL=https://apne2.api.virtx.brekkylab.com python agent.py
+VIRTX_ORG=<org uuid> python agent.py
 ```
+
+`virtx token` prints the token alone, for whatever else wants one.
 
 ## Cache
 

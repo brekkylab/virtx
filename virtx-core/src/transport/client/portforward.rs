@@ -14,9 +14,10 @@ use std::{
 
 use super::{
     Connection, TransportClient,
+    credentials::Credentials,
     tcp::{Shared, authorized, current},
 };
-use crate::{Auth, Error};
+use crate::Error;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, StatusCode, header};
 use tokio::{
@@ -62,7 +63,7 @@ impl PortForwarder {
                 Ok(url) => {
                     PortForwarder::tunnel(
                         tcp.http.clone(),
-                        Arc::clone(&tcp.auth),
+                        Arc::clone(&tcp.credentials),
                         Arc::clone(&tcp.headers),
                         url,
                     )
@@ -97,10 +98,10 @@ impl PortForwarder {
     }
 
     /// A loopback port of this client's own, each connection to it carried to `url` in a
-    /// WebSocket that `http` opens with the `auth` and `headers` current then.
+    /// WebSocket that `http` opens with the token and `headers` current then.
     async fn tunnel(
         http: reqwest::Client,
-        auth: Shared<Auth>,
+        credentials: Arc<Credentials>,
         headers: Shared<HeaderMap>,
         url: reqwest::Url,
     ) -> Result<PortForwarder, String> {
@@ -115,11 +116,16 @@ impl PortForwarder {
             let mut connections = JoinSet::new();
             while let Ok((accepted, _)) = listener.accept().await {
                 let (http, url) = (http.clone(), url.clone());
-                let (auth, headers) = (current(&auth), current(&headers));
+                let (credentials, headers) = (Arc::clone(&credentials), current(&headers));
                 connections.spawn(async move {
                     // Refused, the connection closes: as a port nothing listens on does.
-                    if let Ok(socket) = open(&http, &auth, headers, url).await {
-                        carry(accepted, socket).await;
+                    let Ok(token) = credentials.token().await else {
+                        return;
+                    };
+                    match open(&http, token.as_deref(), headers, url).await {
+                        Ok(socket) => carry(accepted, socket).await,
+                        Err(Some(StatusCode::UNAUTHORIZED)) => credentials.refused(),
+                        Err(_) => {}
                     }
                 });
             }
@@ -132,15 +138,15 @@ impl PortForwarder {
 }
 
 /// A WebSocket of `virtx.tcp` to `url`, its handshake an HTTP/1.1 upgrade `http` sends with
-/// `auth` and `headers`.
+/// `token` and `headers`. Refused, the status the server answered, if it answered.
 async fn open(
     http: &reqwest::Client,
-    auth: &Auth,
+    token: Option<&str>,
     headers: HeaderMap,
     url: reqwest::Url,
-) -> Result<WebSocketStream<reqwest::Upgraded>, String> {
+) -> Result<WebSocketStream<reqwest::Upgraded>, Option<StatusCode>> {
     let key = generate_key();
-    let response = authorized(http.get(url), headers, auth)
+    let response = authorized(http.get(url), headers, token)
         .header(header::CONNECTION, "Upgrade")
         .header(header::UPGRADE, "websocket")
         .header(header::SEC_WEBSOCKET_VERSION, "13")
@@ -148,18 +154,18 @@ async fn open(
         .header(header::SEC_WEBSOCKET_PROTOCOL, TCP_SUBPROTOCOL)
         .send()
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|_| None)?;
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return Err(format!("the server answered {}", response.status()));
+        return Err(Some(response.status()));
     }
     let accepted = response
         .headers()
         .get(header::SEC_WEBSOCKET_ACCEPT)
         .is_some_and(|accept| accept.as_bytes() == derive_accept_key(key.as_bytes()).as_bytes());
     if !accepted {
-        return Err("the server did not accept the WebSocket".into());
+        return Err(None);
     }
-    let upgraded = response.upgrade().await.map_err(|e| format!("{e:#}"))?;
+    let upgraded = response.upgrade().await.map_err(|_| None)?;
     Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
 }
 
@@ -200,6 +206,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::Auth;
     use axum::{
         extract::{
             Path,

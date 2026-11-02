@@ -69,8 +69,13 @@ export type RegistryAuth =
   | { type: 'basic'; username: string; password: string }
   | { type: 'bearer'; token: string }
 
-/** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
-export type Auth = { type: 'bearer'; token: string }
+/**
+ * The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`,
+ * or the token `program` with `args` prints -- a token alone, or `{"token": ..., "expires_in": <seconds>}` --
+ * run for the first request, and again when its token is a minute from running out or the server refuses
+ * it: a person's short-lived token, as `virtx token --json` prints it.
+ */
+export type Auth = { type: 'bearer'; token: string } | { type: 'command'; program: string; args?: string[] }
 
 export interface ImagePullOutput {
   /** The digest of the image's manifest, as `algorithm:hex`. */
@@ -228,8 +233,9 @@ export class Client {
    */
   setHeaders(headers: Record<string, string>): void
   /**
-   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set. Without
-   * `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+   * `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+   * `virtx token --json` prints, again as it runs out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
    * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
    * nearest this machine.
    */

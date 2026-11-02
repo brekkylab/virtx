@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! virtx login     sign in: approve the code it shows in the console, in a browser
-//! virtx token     print an access token, refreshed as needed (VIRTX_API_KEY takes it)
+//! virtx token     print an access token, refreshed as needed (VIRTX_API_KEY takes it);
+//!                 --json, with how long it lasts, as the SDKs run it for a token
 //! virtx whoami    who is signed in
 //! virtx logout    sign out: the session ends
 //! ```
@@ -44,7 +45,11 @@ enum Command {
     /// Sign in, approving the code shown in the console.
     Login,
     /// Print an access token, refreshed.
-    Token,
+    Token {
+        /// Print `{"token": ..., "expires_in": <seconds>}`, as the SDKs read it.
+        #[arg(long)]
+        json: bool,
+    },
     /// Say who is signed in.
     Whoami,
     /// Sign out, ending the session.
@@ -65,6 +70,8 @@ struct Tokens {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 struct Cloud {
@@ -85,12 +92,21 @@ fn main() -> anyhow::Result<()> {
     };
     match cli.command {
         Command::Login => cloud.login(),
-        Command::Token => {
-            println!("{}", cloud.token()?);
+        Command::Token { json } => {
+            let tokens = cloud.token()?;
+            if json {
+                let printed = json!({
+                    "token": tokens.access_token,
+                    "expires_in": tokens.expires_in,
+                });
+                println!("{printed}");
+            } else {
+                println!("{}", tokens.access_token);
+            }
             Ok(())
         }
         Command::Whoami => {
-            let me = cloud.me(&cloud.token()?)?;
+            let me = cloud.me(&cloud.token()?.access_token)?;
             println!("{}", me["user"]["email"].as_str().unwrap_or("?"));
             Ok(())
         }
@@ -149,7 +165,7 @@ impl Cloud {
     }
 
     /// An access token, from the session kept: refreshed, and the refresh token replaced.
-    fn token(&self) -> anyhow::Result<String> {
+    fn token(&self) -> anyhow::Result<Tokens> {
         let refresh = self.kept()?.context("not signed in; run virtx login")?;
         let answer = self
             .http
@@ -164,7 +180,7 @@ impl Cloud {
         if let Some(refresh) = &tokens.refresh_token {
             self.keep(refresh)?;
         }
-        Ok(tokens.access_token)
+        Ok(tokens)
     }
 
     fn me(&self, access: &str) -> anyhow::Result<Value> {

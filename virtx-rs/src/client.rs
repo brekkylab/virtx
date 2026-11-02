@@ -98,7 +98,9 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
+    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+    /// `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+    /// `virtx token --json` prints, again as it runs out ([`Auth::Command`]).
     ///
     /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
     /// `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS
@@ -124,7 +126,14 @@ impl Client {
         let url = url.ok_or_else(|| {
             Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())
         })?;
-        let auth = key.map_or(Auth::None, |token| Auth::Bearer { token });
+        let auth = match (key, &org) {
+            (Some(token), _) => Auth::Bearer { token },
+            (None, Some(_)) => Auth::Command {
+                program: "virtx".into(),
+                args: vec!["token".into(), "--json".into()],
+            },
+            (None, None) => Auth::None,
+        };
         Client::connect(url, auth, org.map(|org| (ORG_HEADER, org)))
     }
 

@@ -319,7 +319,8 @@ class Client {
   }
 
   // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
+  // `auth`, the credentials it wants as `{ type: 'bearer', token }`, `{ type: 'command',
+  // program, args }` (the token it prints, printed again as it runs out) or null for none, and
   // `headers`, a name to a value, whatever else it asks of each request, with every request.
   // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
   // the clear: over `http` to any host but this machine.
@@ -341,7 +342,9 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set.
+  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+  // `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+  // `virtx token --json` prints, again as it runs out.
   // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
   // `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers
   // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
@@ -354,7 +357,8 @@ class Client {
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
     if (!url && (key || org)) url = `https://run.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
-    return Client.connect(url, key && { type: 'bearer', token: key }, org ? { [ORG_HEADER]: org } : {})
+    const auth = key ? { type: 'bearer', token: key } : org ? SIGNED_IN : null
+    return Client.connect(url, auth, org ? { [ORG_HEADER]: org } : {})
   }
 
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
@@ -611,6 +615,9 @@ const DOMAIN = 'virtx.brekkylab.com'
 // The header a request names its organization in, on a server that keeps organizations apart
 // (PROTOCOL.md, Authentication).
 const ORG_HEADER = 'virtx-org'
+
+// The token of the person signed in with `virtx login`, as `virtx token --json` prints it.
+const SIGNED_IN = { type: 'command', program: 'virtx', args: ['token', '--json'] }
 
 module.exports = {
   Client,

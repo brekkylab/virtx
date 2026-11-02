@@ -15,7 +15,7 @@ the sandbox answered for it: an address on this machine's loopback.
 """
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
-from .client import DOMAIN, Client, Event, Output, Progress
+from .client import DOMAIN, Auth, Client, CommandAuth, Event, Output, Progress
 from .image import (
     BasicAuth,
     BearerAuth,
@@ -48,9 +48,11 @@ from .volume import (
 __all__ = [
     "DOMAIN",
     "LIBRARY_ENV",
+    "Auth",
     "BasicAuth",
     "BearerAuth",
     "Client",
+    "CommandAuth",
     "Event",
     "GdriveSource",
     "ImageBuildOutput",

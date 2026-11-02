@@ -200,7 +200,8 @@ fn hanging() -> (Methods, mpsc::UnboundedReceiver<()>) {
 struct User(String);
 
 /// Lets in a request whose bearer token names one of `users`, as that [`User`] and in that
-/// user's [`CancelScope`]. Middleware in front of a [`Server`], as a mounting server's would be.
+/// user's [`CancelScope`]; a token `expired-...` is refused as one that ran out. Middleware in
+/// front of a [`Server`], as a mounting server's would be.
 #[derive(Clone)]
 struct Tokens {
     users: Vec<&'static str>,
@@ -222,6 +223,9 @@ async fn tokens(
     let Some(user) = bearer(request.headers()).map(str::to_owned) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    if user.starts_with("expired-") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     if !tokens.users.contains(&user.as_str()) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -454,6 +458,88 @@ async fn the_auth_goes_over_an_authorization_header() {
     let url = serve_users(vec!["alice", "bob"]).await;
     let client = TransportClient::connect(&url, token("alice"), authorization("bob")).unwrap();
     assert_eq!(user(&client).await.unwrap(), "alice");
+}
+
+/// An [`Auth::Command`] printing `lines` one a run, the last again after; and how many times
+/// it has run.
+fn printer(lines: &[&str]) -> (Auth, impl Fn() -> usize) {
+    let count = std::env::temp_dir().join(format!("virtx-printer-{}", uuid::Uuid::new_v4()));
+    let mut script = String::from(
+        r#"n=$(($(cat "$1" 2>/dev/null || echo 0) + 1)); echo $n > "$1"; case $n in "#,
+    );
+    for (i, line) in lines.iter().enumerate() {
+        let n = if i + 1 == lines.len() {
+            "*".to_owned()
+        } else {
+            (i + 1).to_string()
+        };
+        script.push_str(&format!("{n}) printf '%s\\n' '{line}';; "));
+    }
+    script.push_str("esac");
+    let auth = Auth::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            script,
+            "sh".into(),
+            count.display().to_string(),
+        ],
+    };
+    let runs = move || {
+        std::fs::read_to_string(&count)
+            .map(|n| n.trim().parse().unwrap())
+            .unwrap_or(0)
+    };
+    (auth, runs)
+}
+
+#[tokio::test]
+async fn the_token_a_command_prints_goes_with_every_request_and_is_kept() {
+    let url = serve_users(vec!["alice"]).await;
+    let (auth, runs) = printer(&["alice"]);
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    for _ in 0..2 {
+        assert_eq!(user(&client).await.unwrap(), "alice");
+    }
+    assert_eq!(runs(), 1);
+}
+
+#[tokio::test]
+async fn a_commands_token_is_printed_again_as_it_runs_out() {
+    let url = serve_users(vec!["alice", "bob"]).await;
+    // Thirty seconds is inside the minute before it runs out: each request runs it again.
+    let (auth, runs) = printer(&[
+        r#"{"token": "alice", "expires_in": 30}"#,
+        r#"{"token": "bob", "expires_in": 3600}"#,
+    ]);
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "alice");
+    assert_eq!(user(&client).await.unwrap(), "bob");
+    assert_eq!(user(&client).await.unwrap(), "bob");
+    assert_eq!(runs(), 2);
+}
+
+#[tokio::test]
+async fn a_token_the_server_refuses_is_printed_anew_for_the_next_request() {
+    let url = serve_users(vec!["alice"]).await;
+    let (auth, runs) = printer(&["expired-alice", "alice"]);
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    let error = user(&client).await.unwrap_err();
+    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+    assert_eq!(user(&client).await.unwrap(), "alice");
+    assert_eq!(runs(), 2);
+}
+
+#[tokio::test]
+async fn a_command_that_prints_no_token_fails_the_request() {
+    let url = serve_users(vec!["alice"]).await;
+    let auth = Auth::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "echo 'not signed in' >&2; exit 1".into()],
+    };
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    let error = user(&client).await.unwrap_err();
+    assert!(error.to_string().contains("not signed in"), "{error}");
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! The client's end: the server's endpoints over either transport, which only opening and
 //! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`].
 
+mod credentials;
 mod portforward;
 mod stdio;
 mod tcp;

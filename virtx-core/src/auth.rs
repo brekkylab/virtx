@@ -4,10 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 /// The credentials sent with every request: none, or a token sent as `Authorization: Bearer
-/// <token>`. `Debug` leaves the token out.
+/// <token>`, given or printed by a command. `Debug` leaves the token out.
 ///
-/// As JSON, `{"type": "none"}` or `{"type": "bearer", "token": "..."}`, as a
-/// [`RegistryAuth`](crate::RegistryAuth) is spelled.
+/// As JSON, `{"type": "none"}`, `{"type": "bearer", "token": "..."}` or `{"type": "command",
+/// "program": "...", "args": [...]}`, as a [`RegistryAuth`](crate::RegistryAuth) is spelled.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Auth {
@@ -16,6 +16,15 @@ pub enum Auth {
     Bearer {
         token: String,
     },
+    /// The token `program` with `args` prints: a token alone, or `{"token": "...",
+    /// "expires_in": <seconds>}`. It is run for the first request, and again when its token
+    /// is a minute from running out or the server refuses it: a person's short-lived token,
+    /// such as `virtx token --json` prints.
+    Command {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 impl std::fmt::Debug for Auth {
@@ -23,6 +32,11 @@ impl std::fmt::Debug for Auth {
         match self {
             Self::None => f.write_str("None"),
             Self::Bearer { .. } => f.debug_struct("Bearer").finish_non_exhaustive(),
+            Self::Command { program, args } => f
+                .debug_struct("Command")
+                .field("program", program)
+                .field("args", args)
+                .finish(),
         }
     }
 }
@@ -40,6 +54,20 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&bearer).unwrap(),
             serde_json::json!({"type": "bearer", "token": "secret"})
+        );
+    }
+
+    #[test]
+    fn a_command_reads_without_its_args() {
+        let command: Auth =
+            serde_json::from_value(serde_json::json!({"type": "command", "program": "virtx"}))
+                .unwrap();
+        assert_eq!(
+            command,
+            Auth::Command {
+                program: "virtx".into(),
+                args: vec![]
+            }
         );
     }
 }

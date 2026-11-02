@@ -28,7 +28,7 @@ from .image import (
     image_job_entry,
     image_name,
 )
-from .job import LogEntry
+from .job import LogEntry, StartedJob
 from .sandbox import Sandbox, SandboxJob, SandboxJobEntry, SandboxVolume, sandbox_job_entry
 from .snapshot import SnapshotListOutputItem
 from .volume import MountSource, VolumeListOutputItem, VolumeMountListOutputItem
@@ -98,7 +98,8 @@ class Client:
     """A client of one server, over stdio or HTTP, made by ``libvirtx_core``.
 
     Each method is a coroutine, or an async iterator for a request that streams: a job's log,
-    or the progress of a download or upload.
+    or the progress of a download or upload. One that starts a job answers a ``StartedJob``,
+    both.
     Holds of one session are counted: ``clone`` takes another, ``close`` lets this one go, and
     the session ends with the last, which answers every request still waiting with an error.
     """
@@ -255,30 +256,41 @@ class Client:
         async for item in self._items(name, args):
             yield _event(item, output)
 
-    async def build_image(self, recipe: Recipe | Mapping[str, Any], reference: str) -> ImageJob:
-        """Start building ``recipe``, to point ``reference`` at what it builds. Its log is
-        ``image_job_log``'s."""
+    def _image_job(self, name: str, args: bytes) -> StartedJob[ImageJob, ImageJobEntry]:
+        async def start() -> ImageJob:
+            return ImageJob.from_dict(await self._call(name, args))
+
+        return StartedJob(start, lambda job: self.image_job_log(job.id))
+
+    def build_image(
+        self, recipe: Recipe | Mapping[str, Any], reference: str
+    ) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Build ``recipe``, to point ``reference`` at what it builds: awaited, the job;
+        iterated, its log, as ``image_job_log``'s. Sent when first awaited or iterated."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
-        output = await self._call(
+        return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
         )
-        return ImageJob.from_dict(output)
 
-    async def pull_image(self, reference: str, auth: RegistryAuth | None = None) -> ImageJob:
-        """Start pulling ``reference`` from its registry, to point it at what it pulls; without
-        ``auth`` the server pulls anonymously. Its log is ``image_job_log``'s."""
-        output = await self._call(
+    def pull_image(
+        self, reference: str, auth: RegistryAuth | None = None
+    ) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
+        the server pulls anonymously. Awaited, the job; iterated, its log, as
+        ``image_job_log``'s. Sent when first awaited or iterated."""
+        return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
-        return ImageJob.from_dict(output)
 
-    async def push_image(self, reference: str, auth: RegistryAuth | None = None) -> ImageJob:
-        """Start pushing the image ``reference`` points at to the registry ``reference`` names;
-        without ``auth`` the server pushes anonymously. Its log is ``image_job_log``'s."""
-        output = await self._call(
+    def push_image(
+        self, reference: str, auth: RegistryAuth | None = None
+    ) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Push the image ``reference`` points at to the registry ``reference`` names; without
+        ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
+        ``image_job_log``'s. Sent when first awaited or iterated."""
+        return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
-        return ImageJob.from_dict(output)
 
     async def list_image_job(self) -> list[ImageJob]:
         """Every image job the server holds."""
@@ -554,22 +566,24 @@ class Client:
         items = await self._call("virtx_client_list_sandbox_job", _args(sandbox=sandbox))
         return [SandboxJob.from_dict(item) for item in items]
 
-    async def exec_sandbox(
+    def exec_sandbox(
         self,
         sandbox: str,
         cmd: Iterable[str],
         *,
         stdin: bool = False,
         timeout_ms: int | None = None,
-    ) -> SandboxJob:
-        """Start ``cmd`` in ``sandbox``, its stdin open for ``write_sandbox_job_stdin`` if
-        ``stdin``, killed after ``timeout_ms`` if one is given. Its output and how it ended are
-        ``sandbox_job_log``'s."""
-        output = await self._call(
-            "virtx_client_exec_sandbox",
-            _args(sandbox=sandbox, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms),
-        )
-        return SandboxJob.from_dict(output)
+    ) -> StartedJob[SandboxJob, SandboxJobEntry]:
+        """Run ``cmd`` in ``sandbox``, its stdin open for ``write_sandbox_job_stdin`` if
+        ``stdin``, killed after ``timeout_ms`` if one is given. Awaited, the job; iterated, its
+        output and how it ended, as ``sandbox_job_log``'s. Sent when first awaited or
+        iterated."""
+        args = _args(sandbox=sandbox, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
+
+        async def start() -> SandboxJob:
+            return SandboxJob.from_dict(await self._call("virtx_client_exec_sandbox", args))
+
+        return StartedJob(start, lambda job: self.sandbox_job_log(sandbox, job.id))
 
     async def get_sandbox_job(self, sandbox: str, job: str) -> SandboxJob:
         """The job ``job`` in ``sandbox``."""

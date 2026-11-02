@@ -11,9 +11,10 @@ Requests take and answer the types of ``virtx.image``, ``virtx.snapshot``, ``vir
 ``dict``.
 
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
-the request that started it: the request answers the job, an ``ImageJob`` or a ``SandboxJob``, and
-``image_job_log`` or ``sandbox_job_log`` yields its log, each a ``LogEntry`` numbered for
-``after`` to resume from, until its end entry. A download or upload of an image yields its
+the request that started it. The method that starts one answers a ``StartedJob``, sent when first
+awaited or iterated: awaited, it is the job, an ``ImageJob`` or a ``SandboxJob``; iterated, it
+yields the job's log, as ``image_job_log`` or ``sandbox_job_log`` does, each a ``LogEntry``
+numbered for ``after`` to resume from, until its end entry. A download or upload of an image yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
 The files of a volume or a snapshot are read and written through the client too, each request
@@ -45,7 +46,7 @@ from .image import (
     RegistryAuth,
     image_name,
 )
-from .job import LogEntry, Truncated
+from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .sandbox import (
     Sandbox,
@@ -110,6 +111,7 @@ __all__ = [
     "SandboxVolume",
     "Snapshot",
     "SnapshotListOutputItem",
+    "StartedJob",
     "Stderr",
     "Stdout",
     "Truncated",

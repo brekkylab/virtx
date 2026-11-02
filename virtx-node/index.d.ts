@@ -239,6 +239,16 @@ export type SandboxJobEntry = { id: number } & (
 )
 
 /**
+ * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
+ * read until its `end` entry. The job starts at the call, as a promise's work does, and once
+ * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
+ * leaving one leaves the job running, which `removeImageJob` or `removeSandboxJob` cancels.
+ */
+export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
+  [Symbol.asyncIterator](): AsyncGenerator<E>
+}
+
+/**
  * A client of one server, over stdio or HTTP, made by `libvirtx_core`. Holds of one
  * session are counted: `clone` takes another, `close` lets this one go, and the session ends with
  * the last.
@@ -279,11 +289,11 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): Promise<ImageJob>
+  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
-  pullImage(reference: string, auth?: RegistryAuth): Promise<ImageJob>
+  pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
-  pushImage(reference: string, auth?: RegistryAuth): Promise<ImageJob>
+  pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   listImageJob(): Promise<ImageJob[]>
   getImageJob(id: string): Promise<ImageJob>
   /** Cancel the job if it runs, and forget it. */
@@ -349,7 +359,7 @@ export class Client {
   removeSandbox(id: string): Promise<void>
   listSandboxJob(sandbox: string): Promise<SandboxJob[]>
   /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */
-  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): Promise<SandboxJob>
+  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   getSandboxJob(sandbox: string, job: string): Promise<SandboxJob>
   /** Cancel the job if it runs, killing its process, and forget it. */
   removeSandboxJob(sandbox: string, job: string): Promise<void>

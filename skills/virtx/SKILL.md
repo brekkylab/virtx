@@ -1,80 +1,84 @@
 ---
 name: virtx
-description: Run a task in a disposable Linux micro-VM from Python, Node.js or Rust with virtx, with no Docker and no daemon. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or a filesystem composed for a task from host folders, in-memory files and remote stores. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package, never a checkout of virtx.
+description: Run a task in a disposable Linux micro-VM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx.
 ---
 
 # virtx
 
-A **console** is a Linux micro-VM booted from an image you declare, in which you run commands and read what they wrote. What the VM sees is a filesystem you compose: host directories, files held only in memory, remote stores such as S3, mounted read-write or read-only at the paths you choose. The VM is gone when the console is, and nothing it did outlives it except what landed in a writable mount. So "run this somewhere disposable" is a builder call, not an environment you set up.
+A **sandbox** is a Linux micro-VM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot, **snapshots** that carry a root filesystem's changes from one sandbox to the next, and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox is gone when you remove it, and nothing it did outlives it but what it wrote to a snapshot or a volume. So "run this somewhere disposable" is a few requests, not an environment you set up.
 
-virtx works under any AI agent: a console is a tool like any other, and the steps below are the same whether a program or a model drives it. For an agent, the best choice is [Ailoy](https://github.com/brekkylab/ailoy), which is built on virtx: each agent gets a console of its own, and its skill covers the rest.
+virtx works under any AI agent: a sandbox is a tool like any other, and the steps below are the same whether a program or a model drives it. For an agent, the best choice is [Ailoy](https://github.com/brekkylab/ailoy), which is built on virtx: each agent gets a sandbox of its own, and its skill covers the rest.
 
 Work the steps below in order. Step 2 is the one that gets skipped: a command that needs a tool the image lacks fails inside the VM, not on the host.
 
-## 1. Install, in the user's language
+## 1. Install, in the user's language, and reach a server
 
 | Language | Install | Import |
 |---|---|---|
-| Python | `pip install virtx` | `from virtx import ConsoleClient, Recipe, ensure_virtx` |
-| Node.js | `npm install @brekkylab/virtx` | `import { ConsoleClient, Recipe, ensureVirtx } from '@brekkylab/virtx'` |
-| Rust | `cargo add virtx` | `use virtx::{console::ConsoleClient, image::Recipe, ensure_virtx};` |
+| Python | `pip install virtx` | `from virtx import Client, Recipe` |
+| Node.js | `npm install @brekkylab/virtx` | `const { Client, Recipe } = require('@brekkylab/virtx')` |
+| Rust | `virtx-rs = { git = "https://github.com/brekkylab/virtx" }` | `use virtx_rs::{Client, Recipe};` |
 
-Call `ensure_virtx()` (`ensureVirtx()` in Node) before the first console: it fetches the console server into virtx's cache the first time and is a no-op after. A host directory passed to `.mount(host_path, …)` needs nothing on the host. Only `HostMount`, which serves a `Directory` or a remote store as a tree on the host, needs a FUSE provider: `fusermount3` on Linux, FUSE-T 1.2.9 or later on macOS (`brew install --cask fuse-t`), Dokany on Windows. A host without one still builds and runs commands; only a `HostMount` fails, with an error that names what to install.
+A client reaches one server: `Client.spawn("virtx-server")` starts it on this machine as a child process, and `Client.connect(url, auth)` reaches one over HTTP, with a bearer token if it wants one. The Python and Node packages carry the library; the Rust crate opens `libvirtx_core` at run time, from `virtx_rs::load(path)` or `$VIRTX_CORE_LIB`.
 
-## 2. Declare the image
+Every Python request is a coroutine and every log an async iterator. In Node they are promises and async iterables, with names in camelCase. In Rust each is a `Future` or a `Stream`, or blocks with `wait()` and `wait_next()`; a started job's log is its `.log()`.
+
+## 2. Have the image
 
 ```python
-console = await (
-    ConsoleClient.builder()
-    .image(Recipe("alpine:latest").step("apk add --no-cache jq"))
-    .build()
-)
+async for entry in client.build_image(Recipe("alpine:latest").run("apk add --no-cache jq"), "jq:latest"):
+    print(entry.entry)  # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
 ```
 
-- A `Recipe` is a base image plus steps, as a Dockerfile is. It is built on first use and cached by content, so put what the task needs in steps rather than installing it in every session.
+- A `Recipe` is a base image plus steps, as a Dockerfile is. A build stores what it builds under its tag; build once and boot many sandboxes from it, rather than installing in each.
+- `pull_image("python:3.12-slim-trixie")` takes an image from a registry as it is.
+- A build or a pull is a job. Iterating what it answers reads its log; it is done at the `end` entry, whose `error` says it failed. Read it to the end before booting from the tag. Awaiting it instead gives the job, whose log `image_job_log(job.id)` reads later.
 - Pick the base by what the task needs: `alpine:latest` boots fastest, `python:3.12-slim-trixie` or `debian:trixie-slim` when the task wants glibc or pip wheels.
-- To build once and start many VMs on it, `ImageClient` builds a recipe under a name, and `.image(ImageSource.reference("name:tag"))` boots from it. [`README.md`](../../README.md) has it under Images.
 
-## 3. Give it what it may see
+## 3. Make the sandbox, with what it may keep
 
 ```python
-console = await (
-    ConsoleClient.builder()
-    .image(Recipe("alpine:latest"))
-    .mount(".", "/project")               # the host's current directory, read-write
-    .mount_readonly("/etc/ssl", "/certs")  # read-only
-    .build()
-)
+sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume="data", path="/data")])
 ```
 
-| The task needs | Builder call |
+| The task needs | At `create_sandbox` |
 |---|---|
-| a host directory, writable | `.mount(host_path, "/guest/path")` |
-| a host directory it must not change | `.mount_readonly(host_path, "/guest/path")` |
-| files that exist only for this task | `Directory().with_file("notes/today.md", "...")`, mounted through `HostMount(directory, tempdir)` and then `.mount(mount, "/data")` |
-| a remote store as ordinary files | an `S3Fs`, Google Drive or Notion filesystem through `HostMount` (Rust only, behind a feature) |
-| no network | `.network(False)`; on unless turned off |
-| the host's GPU | `.gpu(True)` and a Vulkan loader plus the venus driver in the image; `build()` fails if the host cannot give one |
-| more CPUs, memory or disk | `.vcpus(n)`, `.memory_mib(n)`, `.disk_gib(n)` |
+| files it shares with the host or later sandboxes | a volume, made with `create_volume`, in `volumes` as `SandboxVolume(volume, path, readonly)` |
+| files it must not change | the same, with `readonly=True` |
+| what it installs kept for the next sandbox | a snapshot, made with `create_snapshot`, as `snapshot=` |
+| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)` |
+| no network | `network=False`; on unless turned off |
+| the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
+| more CPUs or memory | `vcpus=`, `memory_mib=` |
 
-Mount what the task must read or write, and nothing more. Guest paths are absolute. A file the task writes reaches the host only through a writable mount or `read`; everything else comes back as the command's output.
+Give it what the task must read or keep, and nothing more. Put input files in a volume first, from the host, with `write_file(Volume("data"), "in/a.txt", content)`. Guest paths are absolute.
 
 ## 4. Run commands, and read what came back
 
 ```python
-async with console:
-    result = await console.exec(["sh", "-c", "jq --version"], timeout_ms=10_000)
-print(result.code, result.stdout.decode(), result.stderr.decode())
+async for entry in client.exec_sandbox(sandbox.id, ["sh", "-c", "jq --version"], timeout_ms=10_000):
+    match entry.entry:
+        case Stdout(line) | Stderr(line):
+            print(line)
+        case SandboxJobEnd(code):
+            print("exited", code)
 ```
 
-`exec` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. The result carries the exit code and both output streams as bytes. `read` and `write` move a file between the host and a mounted path without a command. In Python the console is an async context manager; in Node call `close()` in a `finally`; in Rust dropping the client ends the session. A server that refuses the session, such as a missing image or a mount the host cannot make, fails at `build()` with a coded error, not at the first command.
+`exec_sandbox` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. What it answers is a job: iterated, the command's output, a line per entry, then its exit code as the last entry; awaited, the job, for the requests below. A sandbox runs many commands at once, each its own job, and leaving the loop leaves the command running.
 
-## 5. Check the result where it landed
+- A command that cannot start, such as one not found, is refused at `exec_sandbox`, and makes no job.
+- `stdin=True` keeps its stdin open for `write_sandbox_job_stdin`, each write awaited before the next, until one closes it with `eof=True`.
+- `signal_sandbox_job(..., "SIGTERM")` signals it; `remove_sandbox_job` kills it and forgets it.
+- A log that drops is read again `after` the last entry's `id`. A long one is cut at the server's limit, with one `truncated` entry, and still ends with `end`.
 
-Look at the writable mount on the host, or at `result.stdout`, rather than at the command's exit code alone: a session that printed "done" into a mount the task never declared has written nothing the host can see. If a file is missing, the usual causes are a path outside the mounts, a read-only mount, or a step the image needed and lacked.
+## 5. Check the result where it landed, and remove the sandbox
+
+Look at the volume, with `read_file` or `read_dir`, or at the log's lines, rather than at the exit code alone: a command that printed "done" but wrote outside every volume has written nothing that outlives the sandbox. If a file is missing, the usual causes are a path outside the volumes, a read-only volume, or a step the image needed and lacked.
+
+Remove the sandbox with `remove_sandbox` when the task is done, in a `finally`: it stays until removed, holding its snapshot, whose files are refused until then.
 
 ## Where to read more
 
-- [`README.md`](../../README.md): the three Quickstarts, the GPU, the filesystem and the images in full.
-- [`bindings/python/README.md`](../../bindings/python/README.md) and [`bindings/node/README.md`](../../bindings/node/README.md): each binding's API and its errors.
-- [`examples/`](../../examples/): a whole program per file, and `cargo run --example <name>` runs one.
+- [`README.md`](../../README.md): the three Quickstarts, jobs, snapshots and volumes, ports, images and the GPU.
+- [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
+- [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.

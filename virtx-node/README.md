@@ -6,20 +6,21 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 const client = Client.spawn('virtx-server')
-const build = await client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')
-for await (const entry of client.imageJobLog(build.id)) {
+for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
   if ('log' in entry) console.log(entry.log)
   else if ('end' in entry) console.log('ended', entry.end)
 }
 await client.close()
 ```
 
-A build, pull or push is a job the server runs: its request answers with the job at once, and its log is read with `imageJobLog`, entry by entry until its `end`, or from after an entry's `id` to pick it up again. A command in a sandbox is a job of the sandbox's, its output read the same way with `sandboxJobLog`.
+A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives the job, whose log `imageJobLog` reads again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; `removeImageJob` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way, or with `sandboxJobLog`.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
-const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])
-for await (const entry of client.sandboxJobLog(sandbox.id, job.id)) {
+const run = client.execSandbox(sandbox.id, ['echo', 'hi'])
+const job = await run
+console.log('started', job.id)
+for await (const entry of run) {
   if ('stdout' in entry) console.log(entry.stdout)
   else if ('end' in entry) console.log('exited', entry.end.code)
 }

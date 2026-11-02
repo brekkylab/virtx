@@ -3,11 +3,17 @@
 
 use std::{
     env,
+    future::{self, Future},
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
+    pin::{Pin, pin},
     process::{Command, ExitCode},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll, Wake},
+    thread::{self, Thread},
 };
+
+use futures_core::Stream;
 
 use std::{io::Read, net::TcpStream};
 
@@ -272,6 +278,92 @@ fn an_image_build_is_a_job_with_a_log() {
     assert!(client.get_image_job(&job.id).wait().is_err());
 }
 
+fn a_started_job_is_read_as_its_log() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let mut log = client
+        .build_image(Recipe::new("alpine:3.20"), "t:latest")
+        .log();
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            ImageJobEntry::Log("pulling alpine:3.20".into()),
+            ImageJobEntry::End(ImageJobEnd {
+                digest: Some("sha256:0".into()),
+                error: None,
+            }),
+        ]
+    );
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .wait()
+        .unwrap();
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+        .log();
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            SandboxJobEntry::Stdout("hi".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
+    // Polled, as a runtime would.
+    let job =
+        block_on(client.exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "a"]))).unwrap();
+    assert_eq!(job.cmd, ["echo", "a"]);
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "b"]))
+        .log();
+    let mut entries = Vec::new();
+    while let Some(entry) = block_on(future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx))) {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            SandboxJobEntry::Stdout("b".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
+    // A start refused is the log's one item.
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
+        .log();
+    let refused = log.wait_next().unwrap().unwrap_err();
+    assert!(refused.to_string().contains("422"), "{refused}");
+    assert!(log.wait_next().is_none());
+}
+
+/// Polls `future` on this thread until it is ready, parking between wakes.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Arc::new(Unpark(thread::current())).into();
+    let mut cx = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => thread::park(),
+        }
+    }
+}
+
 /// Waits on a call that answers nothing, panicking on an error.
 trait UnwrapWait {
     fn unwrap_wait(self);
@@ -372,6 +464,7 @@ fn main() -> ExitCode {
         a_snapshot_is_created_got_and_removed,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
+        a_started_job_is_read_as_its_log,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

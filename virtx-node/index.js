@@ -309,6 +309,30 @@ class Recipe {
   }
 }
 
+// A job as it starts: a promise of the job, and an async iterable of its log's entries, read once
+// the job has started, until its `end` entry. The job starts when it is made, once however it is
+// used; leaving the loop leaves the job running.
+class StartedJob extends Promise {
+  // `then` and the rest answer plain promises.
+  static get [Symbol.species]() {
+    return Promise
+  }
+
+  constructor(executor, log) {
+    super(executor)
+    this._log = log
+  }
+
+  // `started`, a promise of the job; `log`, its log by the job.
+  static of(started, log) {
+    return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
+  }
+
+  async *[Symbol.asyncIterator]() {
+    yield* this._log(await this)
+  }
+}
+
 // Each hold not let go of, released when its client is collected.
 const holds = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_client_release.async(raw, () => {})
@@ -328,7 +352,7 @@ function opening(lib, status, raw, error) {
 // A client of one server, over stdio or HTTP, made by `libvirtx_core`.
 //
 // Each method returns a promise, or an async iterable for a request that streams: a job's log,
-// or a download's or upload's progress.
+// or a download's or upload's progress. One that starts a job returns a `StartedJob`, both.
 // Holds of one session are counted: `clone` takes another, `close` lets this one go, and the
 // session ends with the last, which answers every request still waiting with an error.
 class Client {
@@ -460,18 +484,22 @@ class Client {
     for await (const item of this._lib.items(handle)) yield rekey(item, camel)
   }
 
-  // Starts the build; it answers with the job, whose log is `imageJobLog`'s.
+  _imageJob(name, args) {
+    return StartedJob.of(this._call(name, args), (job) => this.imageJobLog(job.id))
+  }
+
+  // Starts the build: the job, and its log as `imageJobLog`'s.
   buildImage(recipe, reference) {
     const declared = recipe instanceof Recipe ? recipe.toJSON() : recipe
-    return this._call('virtx_client_build_image', { recipe: declared, reference })
+    return this._imageJob('virtx_client_build_image', { recipe: declared, reference })
   }
 
   pullImage(reference, auth) {
-    return this._call('virtx_client_pull_image', { reference, auth })
+    return this._imageJob('virtx_client_pull_image', { reference, auth })
   }
 
   pushImage(reference, auth) {
-    return this._call('virtx_client_push_image', { reference, auth })
+    return this._imageJob('virtx_client_push_image', { reference, auth })
   }
 
   listImageJob() {
@@ -657,9 +685,12 @@ class Client {
   }
 
   // Starts `cmd` in the sandbox, its stdin open for `writeSandboxJobStdin` if `stdin`, killed
-  // after `timeoutMs` if given. It answers with the job, whose output is `sandboxJobLog`'s.
+  // after `timeoutMs` if given: the job, and its output as `sandboxJobLog`'s.
   execSandbox(sandbox, cmd, options = {}) {
-    return this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd })
+    return StartedJob.of(
+      this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd }),
+      (job) => this.sandboxJobLog(sandbox, job.id),
+    )
   }
 
   getSandboxJob(sandbox, job) {
@@ -750,6 +781,7 @@ module.exports = {
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
+  StartedJob,
   VirtxError,
   imageName,
   libraryPath,

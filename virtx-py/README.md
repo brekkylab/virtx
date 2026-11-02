@@ -2,7 +2,7 @@
 
 A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with `ctypes`: the package has no extension module of its own, and a wheel carries the library for its platform beside its Python files.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it: the request answers the job, and its log is read after, each entry numbered so a reader can resume `after` one, until its end entry.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `remove_image_job` or `remove_sandbox_job` cancels it.
 
 ```python
 import asyncio
@@ -10,8 +10,8 @@ from virtx import Client, ImageJobEnd, Log, Recipe
 
 async def main():
     with Client.spawn("virtx-server") as client:
-        job = await client.build_image(Recipe("alpine:3.20").run("apk add jq"), "jq:latest")
-        async for entry in client.image_job_log(job.id):
+        recipe = Recipe("alpine:3.20").run("apk add jq")
+        async for entry in client.build_image(recipe, "jq:latest"):
             match entry.entry:
                 case Log(line):
                     print(line)
@@ -23,14 +23,24 @@ async def main():
 asyncio.run(main())
 ```
 
-A sandbox runs commands as jobs the same way: `exec_sandbox` starts one, and `sandbox_job_log` yields its output, a line as it is written, then how it ended.
+Awaited, the same call answers the job, an `ImageJob`, and its log is read after with `image_job_log`, from its start or `after` an entry: by another reader, or after a reconnect.
+
+```python
+job = await client.pull_image("alpine:3.20")
+async for entry in client.image_job_log(job.id, after=1):  # from its second entry
+    ...
+```
+
+A sandbox runs commands as jobs the same way: `exec_sandbox` starts one, a `SandboxJob`, and iterated it yields its output, a line as it is written, then how it ended. One value awaited and then iterated reads the log of the one job it started.
 
 ```python
 from virtx import SandboxJobEnd, Stderr, Stdout
 
 sandbox = await client.create_sandbox("alpine:3.20")
-job = await client.exec_sandbox(sandbox.id, ["echo", "hi"])
-async for entry in client.sandbox_job_log(sandbox.id, job.id):
+run = client.exec_sandbox(sandbox.id, ["echo", "hi"])
+job = await run
+print("started", job.id)
+async for entry in run:
     match entry.entry:
         case Stdout(line) | Stderr(line):
             print(line)

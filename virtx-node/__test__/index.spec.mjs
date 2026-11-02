@@ -242,6 +242,50 @@ test('an image build is a job whose log ends with its digest', async () => {
   }
 })
 
+test('a started build is iterated to its end', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const log = await entries(client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
+test('a started command is iterated to its end', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const { id: sandbox } = await client.createSandbox('alpine:3.20')
+    const log = await entries(client.execSandbox(sandbox, ['echo', 'hi']))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ stdout: 'hi' }, { end: { code: 0 } }],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
+test('a started job awaited and iterated is one job', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const before = (await client.listImageJob()).length
+    const build = client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'once:latest')
+    const job = await build
+    assert.equal(job.kind, 'build')
+    const log = await entries(build)
+    assert.deepEqual(log.at(-1).end, { digest: 'sha256:0' })
+    const jobs = await client.listImageJob()
+    assert.equal(jobs.length, before + 1)
+    assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
+  } finally {
+    await client.close()
+  }
+})
+
 test('a forwarder is on the loopback until it is closed', async () => {
   // Nothing listens there: each connection to the forwarder is closed.
   const client = Client.connect('http://127.0.0.1:9/')

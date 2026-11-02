@@ -125,3 +125,32 @@ async def test_a_failed_pull_ends_its_log_with_its_error(test_server: str) -> No
         end = log[-1]
         assert isinstance(end, ImageJobEnd) and end.digest is None and end.error
         assert (await client.get_image_job(job.id)).error == end.error
+
+
+async def test_a_build_iterated_yields_its_log_to_its_end(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        log = [entry async for entry in client.build_image(Recipe("alpine:3.20"), "it:latest")]
+        assert log == [
+            LogEntry(1, Log("pulling alpine:3.20")),
+            LogEntry(2, ImageJobEnd("sha256:0")),
+        ]
+
+
+async def test_an_exec_iterated_yields_its_output_and_how_it_ended(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20")
+        log = [entry async for entry in client.exec_sandbox(sandbox.id, ["echo", "hi"])]
+        assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
+
+
+async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        before = len(await client.list_image_job())
+        build = client.build_image(Recipe("alpine:3.20"), "once:latest")
+        assert len(await client.list_image_job()) == before
+        job = await build
+        assert await build == job
+        log = [entry.entry async for entry in build]
+        assert log[-1] == ImageJobEnd(digest="sha256:0")
+        assert (await client.get_image_job(job.id)).digest == "sha256:0"
+        assert len(await client.list_image_job()) == before + 1

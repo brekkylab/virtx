@@ -21,6 +21,7 @@ use virtx_core::{
 use crate::{
     Error,
     call::{Call, Events, take},
+    job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
 };
 
@@ -166,42 +167,47 @@ impl Client {
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s.
-    pub fn build_image(&self, recipe: Recipe, reference: impl Into<String>) -> Call<ImageJob> {
+    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
+    pub fn build_image(
+        &self,
+        recipe: Recipe,
+        reference: impl Into<String>,
+    ) -> StartedJob<ImageJob, ImageJobEntry> {
         let args = ImageBuildArgs {
             recipe,
             reference: reference.into(),
         };
-        self.call(self.api.virtx_client_build_image, args)
+        self.image_job(self.call(self.api.virtx_client_build_image, args))
     }
 
     /// Start pulling `reference` from its registry, to point it at what it pulls; without
-    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s.
+    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s,
+    /// or [`StartedJob::log`].
     pub fn pull_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> Call<ImageJob> {
+    ) -> StartedJob<ImageJob, ImageJobEntry> {
         let args = ImagePullArgs {
             reference: reference.into(),
             auth,
         };
-        self.call(self.api.virtx_client_pull_image, args)
+        self.image_job(self.call(self.api.virtx_client_pull_image, args))
     }
 
     /// Start pushing the image `reference` points at to the registry `reference` names;
     /// without `auth` the server pushes anonymously. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s.
+    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
     pub fn push_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> Call<ImageJob> {
+    ) -> StartedJob<ImageJob, ImageJobEntry> {
         let args = ImagePushArgs {
             reference: reference.into(),
             auth,
         };
-        self.call(self.api.virtx_client_push_image, args)
+        self.image_job(self.call(self.api.virtx_client_push_image, args))
     }
 
     /// Every image job the server holds.
@@ -573,15 +579,25 @@ impl Client {
     }
 
     /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
-    /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s.
-    pub fn exec_sandbox(&self, id: impl AsRef<str>, args: &SandboxExecArgs) -> Call<SandboxJob> {
+    /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s, or
+    /// [`StartedJob::log`].
+    pub fn exec_sandbox(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> StartedJob<SandboxJob, SandboxJobEntry> {
+        let sandbox = id.as_ref().to_owned();
         let args = json!({
             "sandbox": id.as_ref(),
             "cmd": args.cmd,
             "stdin": args.stdin,
             "timeout_ms": args.timeout_ms,
         });
-        self.call(self.api.virtx_client_exec_sandbox, args)
+        let client = self.clone();
+        StartedJob::new(
+            self.call(self.api.virtx_client_exec_sandbox, args),
+            Box::new(move |job: &SandboxJob| client.sandbox_job_log(&sandbox, &job.id, None)),
+        )
     }
 
     /// The job `job` in the sandbox `id`.
@@ -640,6 +656,15 @@ impl Client {
         Events::new(
             self.api,
             self.start(self.api.virtx_client_sandbox_job_log, args),
+        )
+    }
+
+    /// The image job `call` starts, its log read with a clone of this client.
+    fn image_job(&self, call: Call<ImageJob>) -> StartedJob<ImageJob, ImageJobEntry> {
+        let client = self.clone();
+        StartedJob::new(
+            call,
+            Box::new(move |job: &ImageJob| client.image_job_log(&job.id, None)),
         )
     }
 

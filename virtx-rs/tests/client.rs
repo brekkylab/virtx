@@ -1,4 +1,5 @@
-//! The client over `libvirtx_core`, where no server is needed.
+//! The client over `libvirtx_core`: where no server is needed, and against `virtx-core`'s
+//! `files_server` example over stdio for the files.
 
 use std::{
     env,
@@ -10,7 +11,7 @@ use std::{
 
 use std::{io::Read, net::TcpStream};
 
-use virtx_rs::{Auth, Client, Error, PortForwarder};
+use virtx_rs::{Auth, Client, Error, FileRoot, PortForwarder};
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
 /// one in `deps`: that is the dependency's, built without the C ABI.
@@ -40,6 +41,136 @@ fn library() -> PathBuf {
             profile.join(name)
         })
         .clone()
+}
+
+/// `virtx-core`'s `files_server` example, built now.
+fn files_server() -> PathBuf {
+    static SERVER: OnceLock<PathBuf> = OnceLock::new();
+    SERVER
+        .get_or_init(|| {
+            let exe = env::current_exe().unwrap();
+            let profile = exe.parent().unwrap().parent().unwrap();
+            let mut build = Command::new(env!("CARGO"));
+            build.args([
+                "build",
+                "-p",
+                "virtx-core",
+                "--features",
+                "testing",
+                "--example",
+                "files_server",
+            ]);
+            if profile.ends_with("release") {
+                build.arg("--release");
+            }
+            assert!(build.status().unwrap().success(), "building files_server");
+            profile
+                .join("examples")
+                .join(format!("files_server{}", env::consts::EXE_SUFFIX))
+        })
+        .clone()
+}
+
+fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
+    let client = Client::spawn(files_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let volume = FileRoot::Volume("v".into());
+    client.create_dir(&volume, "dir").unwrap_wait();
+    client
+        .write_file(&volume, "dir/a.txt", "hello world", None)
+        .unwrap_wait();
+    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
+    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
+    assert!(
+        client
+            .stat_file(&volume, "deep/er/dir")
+            .wait()
+            .unwrap()
+            .is_dir
+    );
+
+    let metadata = client.stat_file(&volume, "dir/a.txt").wait().unwrap();
+    assert!(!metadata.is_dir && metadata.size == 11, "{metadata:?}");
+    let entries = client.read_dir(&volume, "dir").wait().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "a.txt");
+    assert_eq!(entries[0].metadata, metadata);
+
+    let read = client
+        .read_file(&volume, "dir/a.txt", 0, None)
+        .wait()
+        .unwrap();
+    assert_eq!(read, b"hello world");
+    let read = client
+        .read_file(&volume, "dir/a.txt", 6, Some(3))
+        .wait()
+        .unwrap();
+    assert_eq!(read, b"wor");
+
+    // Text, an etag to write over, and what is there, told without an error.
+    client
+        .write_file(&volume, "dir/t.txt", "텍스트", None)
+        .unwrap_wait();
+    assert_eq!(
+        client.read_text(&volume, "dir/t.txt").wait().unwrap(),
+        "텍스트"
+    );
+    let etag = client
+        .stat_file(&volume, "dir/t.txt")
+        .wait()
+        .unwrap()
+        .etag
+        .unwrap();
+    client
+        .write_file(&volume, "dir/t.txt", "text 2", Some(&etag))
+        .unwrap_wait();
+    let stale = client
+        .write_file(&volume, "dir/t.txt", "text 3", Some(&etag))
+        .wait()
+        .unwrap_err();
+    assert!(stale.to_string().contains("412"), "{stale}");
+    assert!(client.exists(&volume, "dir/t.txt").wait().unwrap());
+    assert!(client.is_file(&volume, "dir/t.txt").wait().unwrap());
+    assert!(!client.is_dir(&volume, "dir/t.txt").wait().unwrap());
+    assert!(client.is_dir(&volume, "dir").wait().unwrap());
+    client
+        .remove_file(&volume, "dir/t.txt", false)
+        .unwrap_wait();
+    assert!(!client.exists(&volume, "dir/t.txt").wait().unwrap());
+    client.remove_file(&volume, "dir/t.txt", true).unwrap_wait();
+
+    client
+        .rename_file(&volume, "dir/a.txt", "b.txt", false)
+        .unwrap_wait();
+    client
+        .copy_file(&volume, "b.txt", "c.txt", false)
+        .unwrap_wait();
+    let refused = client
+        .copy_file(&volume, "b.txt", "c.txt", false)
+        .wait()
+        .unwrap_err();
+    assert!(refused.to_string().contains("412"), "{refused}");
+    client.remove_file(&volume, "dir", false).unwrap_wait();
+    let gone = client.stat_file(&volume, "dir").wait().unwrap_err();
+    assert!(gone.to_string().contains("404"), "{gone}");
+    assert_eq!(
+        client.read_file(&volume, "c.txt", 0, None).wait().unwrap(),
+        b"hello world"
+    );
+
+    let locked = FileRoot::Snapshot("locked".into());
+    let refused = client.read_dir(&locked, "").wait().unwrap_err();
+    assert!(refused.to_string().contains("423"), "{refused}");
+}
+
+/// Waits on a call that answers nothing, panicking on an error.
+trait UnwrapWait {
+    fn unwrap_wait(self);
+}
+
+impl UnwrapWait for virtx_rs::Call<()> {
+    fn unwrap_wait(self) {
+        self.wait().unwrap();
+    }
 }
 
 fn spawning_nothing_fails_with_a_message() {
@@ -127,6 +258,7 @@ fn main() -> ExitCode {
         a_token_does_not_go_in_the_clear_to_another_machine,
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
+        the_files_of_a_volume_are_written_listed_moved_and_read_back,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

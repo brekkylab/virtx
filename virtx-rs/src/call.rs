@@ -27,6 +27,8 @@ use crate::{
 pub struct Call<T> {
     api: &'static Api,
     future: *mut Opaque,
+    /// What the library writes, read as a `T`.
+    decode: fn(&[u8]) -> Result<T, Error>,
     output: PhantomData<fn() -> T>,
 }
 
@@ -37,23 +39,39 @@ unsafe impl<T> Sync for Call<T> {}
 impl<T> Unpin for Call<T> {}
 
 impl<T: DeserializeOwned> Call<T> {
+    /// A call answered with JSON, read as a `T`.
     pub(crate) fn new(api: &'static Api, future: *mut Opaque) -> Call<T> {
         Call {
             api,
             future,
+            decode: json,
             output: PhantomData,
         }
     }
+}
 
+impl Call<Vec<u8>> {
+    /// A call answered with bytes as they are.
+    pub(crate) fn raw(api: &'static Api, future: *mut Opaque) -> Call<Vec<u8>> {
+        Call {
+            api,
+            future,
+            decode: |bytes| Ok(bytes.to_vec()),
+            output: PhantomData,
+        }
+    }
+}
+
+impl<T> Call<T> {
     /// Block this thread until the call answers, for a caller without an async runtime.
     pub fn wait(self) -> Result<T, Error> {
         let mut out = VirtxBytes::empty();
         let status = unsafe { (self.api.virtx_future_wait)(self.future, &mut out) };
-        unsafe { take(self.api, status, out) }
+        unsafe { take_with(self.api, status, out, self.decode) }
     }
 }
 
-impl<T: DeserializeOwned> Future for Call<T> {
+impl<T> Future for Call<T> {
     type Output = Result<T, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -61,7 +79,7 @@ impl<T: DeserializeOwned> Future for Call<T> {
         let status = unsafe { (self.api.virtx_future_poll)(self.future, waker(cx), &mut out) };
         match status {
             VIRTX_PENDING => Poll::Pending,
-            status => Poll::Ready(unsafe { take(self.api, status, out) }),
+            status => Poll::Ready(unsafe { take_with(self.api, status, out, self.decode) }),
         }
     }
 }
@@ -144,7 +162,13 @@ fn waker(cx: &Context<'_>) -> VirtxWaker {
     }
 }
 
-/// What the library wrote for `status`, read as a `T` or as the error's message, and freed.
+/// `bytes` as JSON, read as a `T`.
+fn json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+    serde_json::from_slice(bytes).map_err(|e| Error::Json(e.to_string()))
+}
+
+/// What the library wrote for `status`, read as a `T` from JSON or as the error's message,
+/// and freed.
 ///
 /// # Safety
 ///
@@ -154,12 +178,27 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
     status: c_int,
     out: VirtxBytes,
 ) -> Result<T, Error> {
+    unsafe { take_with(api, status, out, json) }
+}
+
+/// What the library wrote for `status`, read with `decode` or as the error's message, and
+/// freed.
+///
+/// # Safety
+///
+/// As `take`.
+unsafe fn take_with<T>(
+    api: &Api,
+    status: c_int,
+    out: VirtxBytes,
+    decode: fn(&[u8]) -> Result<T, Error>,
+) -> Result<T, Error> {
     let read = if out.data.is_null() {
         Err(Error::Json("the library wrote nothing".into()))
     } else {
         let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
         match status {
-            VIRTX_OK => serde_json::from_slice(bytes).map_err(|e| Error::Json(e.to_string())),
+            VIRTX_OK => decode(bytes),
             VIRTX_ERROR => Err(match serde_json::from_slice::<String>(bytes) {
                 Ok(message) => Error::Call(message),
                 Err(e) => Error::Json(e.to_string()),

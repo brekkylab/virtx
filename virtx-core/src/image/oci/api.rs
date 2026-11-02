@@ -1,5 +1,5 @@
 //! The registry's requests, one function each, as the OCI Distribution Specification names
-//! them under `/images/v2/`.
+//! them under `/images/oci/v2/`.
 
 use bytes::Bytes;
 use http::{Method, Response, StatusCode, header};
@@ -28,7 +28,7 @@ impl<'a> Registry<'a> {
         Registry { client }
     }
 
-    /// Send `method` to `path`, under `images/v2/`, and answer its response if it is a success.
+    /// Send `method` to `path`, under `images/oci/v2/`, and answer its response if it is a success.
     async fn send(
         &self,
         method: Method,
@@ -38,7 +38,7 @@ impl<'a> Registry<'a> {
     ) -> Result<Response<Body>, Error> {
         let mut request = http::Request::builder()
             .method(method.clone())
-            .uri(format!("/images/v2/{path}"));
+            .uri(format!("/images/oci/v2/{path}"));
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -166,7 +166,7 @@ impl<'a> Registry<'a> {
 
     /// Whether `name` has the blob `digest`.
     pub(crate) async fn has_blob(&self, name: &str, digest: &str) -> Result<bool, Error> {
-        let request = http::Request::head(format!("/images/v2/{name}/blobs/{digest}"))
+        let request = http::Request::head(format!("/images/oci/v2/{name}/blobs/{digest}"))
             .body(full(Bytes::new()))
             .expect("a valid request");
         let response = self.client.send(request).await?;
@@ -235,7 +235,7 @@ impl<'a> Registry<'a> {
     }
 }
 
-/// An upload a registry started: where to send the blob, under `images/v2/`.
+/// An upload a registry started: where to send the blob, under `images/oci/v2/`.
 pub(crate) struct Upload {
     path: String,
 }

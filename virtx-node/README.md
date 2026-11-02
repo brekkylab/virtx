@@ -6,11 +6,24 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 const client = Client.spawn('virtx-server')
-for await (const event of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
-  if ('progress' in event) console.log(event.progress.content)
-  else console.log('built', event.output.digest)
+const build = await client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')
+for await (const entry of client.imageJobLog(build.id)) {
+  if ('log' in entry) console.log(entry.log)
+  else if ('end' in entry) console.log('ended', entry.end)
 }
 await client.close()
+```
+
+A build, pull or push is a job the server runs: its request answers with the job at once, and its log is read with `imageJobLog`, entry by entry until its `end`, or from after an entry's `id` to pick it up again. A command in a sandbox is a job of the sandbox's, its output read the same way with `sandboxJobLog`.
+
+```js
+const sandbox = await client.createSandbox('alpine:3.20')
+const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])
+for await (const entry of client.sandboxJobLog(sandbox.id, job.id)) {
+  if ('stdout' in entry) console.log(entry.stdout)
+  else if ('end' in entry) console.log('exited', entry.end.code)
+}
+await client.removeSandbox(sandbox.id)
 ```
 
 A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
@@ -18,7 +31,7 @@ A sandbox's port is reached through a `PortForwarder`, opened over the client wi
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
 
-const sandbox = await client.initSandbox('alpine:3.20', { ports: [8000] })
+const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000] })
 const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
 console.log('reach it at', forwarder.address)
 forwarder.close()
@@ -42,4 +55,4 @@ The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or the copy 
 npm install && npm test
 ```
 
-The tests build `libvirtx_core` with cargo first.
+The tests build `libvirtx_core` and `virtx-core`'s `test_server` example with cargo first, and run against that server over stdio.

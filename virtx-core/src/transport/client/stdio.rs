@@ -78,7 +78,7 @@ impl Stdio {
         }
     }
 
-    /// Send `request`, whose URI is a path such as `/rpc`.
+    /// Send `request`, whose URI is a path such as `/snapshots/`.
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,

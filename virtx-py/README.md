@@ -2,29 +2,50 @@
 
 A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with `ctypes`: the package has no extension module of its own, and a wheel carries the library for its platform beside its Python files.
 
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it: the request answers the job, and its log is read after, each entry numbered so a reader can resume `after` one, until its end entry.
+
 ```python
 import asyncio
-from virtx import Client, Output, Progress, Recipe
+from virtx import Client, ImageJobEnd, Log, Recipe
 
 async def main():
     with Client.spawn("virtx-server") as client:
-        async for event in client.build_image(Recipe("alpine:3.20").run("apk add jq"), "jq:latest"):
-            match event:
-                case Progress(content=line):
+        job = await client.build_image(Recipe("alpine:3.20").run("apk add jq"), "jq:latest")
+        async for entry in client.image_job_log(job.id):
+            match entry.entry:
+                case Log(line):
                     print(line)
-                case Output(built):
-                    print("built", built.digest)
+                case ImageJobEnd(error=None, digest=digest):
+                    print("built", digest)
+                case ImageJobEnd(error=error):
+                    print("failed", error)
 
 asyncio.run(main())
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox runs commands as jobs the same way: `exec_sandbox` starts one, and `sandbox_job_log` yields its output, a line as it is written, then how it ended.
+
+```python
+from virtx import SandboxJobEnd, Stderr, Stdout
+
+sandbox = await client.create_sandbox("alpine:3.20")
+job = await client.exec_sandbox(sandbox.id, ["echo", "hi"])
+async for entry in client.sandbox_job_log(sandbox.id, job.id):
+    match entry.entry:
+        case Stdout(line) | Stderr(line):
+            print(line)
+        case SandboxJobEnd(code):
+            print("exited", code)
+await client.remove_sandbox(sandbox.id)
+```
+
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```python
 from virtx import PortForwarder
 
-sandbox = await client.init_sandbox("alpine:3.20", ports=[8000])
-with PortForwarder.open(client, sandbox["ports"][0]["url"]) as forwarder:
+sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
+with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
@@ -49,4 +70,4 @@ The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the
 uv run pytest
 ```
 
-The tests build `libvirtx_core` with cargo first.
+The tests build `libvirtx_core`, and `virtx-core`'s `test_server` example they spawn, with cargo first.

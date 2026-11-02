@@ -56,10 +56,30 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-export interface ImageBuildOutput {
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
+export type ImageJobKind = 'pull' | 'push' | 'build'
+
+/** A build, pull or push the server runs. */
+export interface ImageJob {
+  id: string
+  kind: ImageJobKind
+  /** The tag it points, or the image it pushes. */
+  reference: string
+  running: boolean
+  /** The digest of the manifest, as `algorithm:hex`, once it has succeeded. */
+  digest?: string
+  /** Why it failed, once it has. */
+  error?: string
 }
+
+/** How an image job ended. */
+export type ImageJobEnd = { digest: string } | { error: string }
+
+/** An entry of an image job's log, numbered by `id`; `end` is the last. */
+export type ImageJobEntry = { id: number } & (
+  | { log: string }
+  | { truncated: Record<string, never> }
+  | { end: ImageJobEnd }
+)
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
@@ -68,16 +88,6 @@ export type RegistryAuth =
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
 export type Auth = { type: 'bearer'; token: string }
-
-export interface ImagePullOutput {
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
-}
-
-export interface ImagePushOutput {
-  /** The digest of the manifest pushed, as `algorithm:hex`. */
-  digest: string
-}
 
 export interface ImageListItem {
   /** The tag, as `name:tag`. */
@@ -103,10 +113,10 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-export interface SnapshotListItem {
+export interface SnapshotListOutputItem {
   name: string
   size: number
-  /** Whether a sandbox holds it now, from its `initSandbox` until its `closeSandbox`. */
+  /** Whether a sandbox holds it now, from its `createSandbox` until its `removeSandbox`. */
   inUse: boolean
 }
 
@@ -114,11 +124,6 @@ export interface VolumeListOutputItem {
   name: string
   /** The bytes the volume's files take on the server. */
   size: number
-}
-
-export interface VolumeCreateOutput {
-  /** The one asked for, or the one the server picked. */
-  name: string
 }
 
 /** A mount source's type, without its credentials. */
@@ -177,13 +182,14 @@ export interface DirEntry {
   metadata: Metadata
 }
 
-export interface SandboxListItem {
+export interface Sandbox {
   id: string
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
   /** Whether its VM is up now. */
   running: boolean
+  /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
 }
 
@@ -194,7 +200,7 @@ export interface SandboxPort {
 }
 
 /** Whatever is left out the server picks. */
-export interface SandboxInitOptions {
+export interface SandboxCreateOptions {
   snapshot?: string
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
@@ -206,13 +212,34 @@ export interface SandboxInitOptions {
   volumes?: { volume: string; path: string; readonly?: boolean }[]
 }
 
-export interface SandboxInitOutput {
-  id: string
-  ports?: SandboxPort[]
+export interface SandboxExecOptions {
+  /** Keep its stdin open for `writeSandboxJobStdin`. */
+  stdin?: boolean
+  /** Kill it after this long. */
+  timeoutMs?: number
 }
 
+/** A process started in a sandbox. */
+export interface SandboxJob {
+  id: string
+  kind: 'exec'
+  pid: number
+  cmd: string[]
+  running: boolean
+  /** Its exit code, once it has ended. */
+  code?: number
+}
+
+/** An entry of a sandbox job's log, numbered by `id`; `end` is the last. */
+export type SandboxJobEntry = { id: number } & (
+  | { stdout: string }
+  | { stderr: string }
+  | { truncated: Record<string, never> }
+  | { end: { code: number } }
+)
+
 /**
- * A client of one server, over stdio or Streamable HTTP, made by `libvirtx_core`. Holds of one
+ * A client of one server, over stdio or HTTP, made by `libvirtx_core`. Holds of one
  * session are counted: `clone` takes another, `close` lets this one go, and the session ends with
  * the last.
  */
@@ -220,7 +247,7 @@ export class Client {
   /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
   static spawn(program: string, args?: string[]): Client
   /**
-   * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+   * Reach the server at `url`, its base `http` or `https` URL, sending
    * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
    * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
    * would go in the clear: over `http` to any host but this machine.
@@ -251,11 +278,18 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput, string>>
-  /** Pull `reference` from its registry, and point it at what it pulls; without `auth` the server pulls anonymously. */
-  pullImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePullOutput, string>>
-  /** Push the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
-  pushImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePushOutput, string>>
+  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
+  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): Promise<ImageJob>
+  /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
+  pullImage(reference: string, auth?: RegistryAuth): Promise<ImageJob>
+  /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
+  pushImage(reference: string, auth?: RegistryAuth): Promise<ImageJob>
+  listImageJob(): Promise<ImageJob[]>
+  getImageJob(id: string): Promise<ImageJob>
+  /** Cancel the job if it runs, and forget it. */
+  removeImageJob(id: string): Promise<void>
+  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  imageJobLog(id: string, after?: number): AsyncGenerator<ImageJobEntry>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
   listImage(): Promise<ImageListItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
@@ -270,14 +304,18 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<SnapshotListItem[]>
-  createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
+  listSnapshot(): Promise<SnapshotListOutputItem[]>
+  /** The server picks a name or size not given. */
+  createSnapshot(name?: string, diskGib?: number): Promise<SnapshotListOutputItem>
+  getSnapshot(name: string): Promise<SnapshotListOutputItem>
   removeSnapshot(name: string): Promise<void>
   listVolume(): Promise<VolumeListOutputItem[]>
-  createVolume(name?: string): Promise<VolumeCreateOutput>
+  /** The server picks a name if none is given. */
+  createVolume(name?: string): Promise<VolumeListOutputItem>
+  getVolume(name: string): Promise<VolumeListOutputItem>
   removeVolume(name: string): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
-  createVolumeMount(volume: string, path: string, source: MountSource): Promise<void>
+  createVolumeMount(volume: string, path: string, source: MountSource): Promise<VolumeMountListOutputItem>
   removeVolumeMount(volume: string, path: string): Promise<void>
   /** A path is relative to its root, as `dir/file.txt`; the empty path is the root. */
   statFile(root: FileRoot, path: string): Promise<Metadata>
@@ -304,11 +342,23 @@ export class Client {
   renameFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
   /** A directory with everything in it; `overwrite` as in `renameFile`. */
   copyFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
-  listSandbox(): Promise<SandboxListItem[]>
-  initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
-  /** Killed after `timeoutMs` if one is given. */
-  execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }, string>>
-  closeSandbox(sandbox: string): Promise<void>
+  listSandbox(): Promise<Sandbox[]>
+  createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
+  getSandbox(id: string): Promise<Sandbox>
+  /** Stop the sandbox, end its jobs and forget it. */
+  removeSandbox(id: string): Promise<void>
+  listSandboxJob(sandbox: string): Promise<SandboxJob[]>
+  /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */
+  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): Promise<SandboxJob>
+  getSandboxJob(sandbox: string, job: string): Promise<SandboxJob>
+  /** Cancel the job if it runs, killing its process, and forget it. */
+  removeSandboxJob(sandbox: string, job: string): Promise<void>
+  /** Send `signal`, a name such as `'SIGTERM'`, to the job's process and every one it started. */
+  signalSandboxJob(sandbox: string, job: string, signal: string): Promise<void>
+  /** Write `data` to the job's stdin, then close it if `eof`; resolves once it is written. */
+  writeSandboxJobStdin(sandbox: string, job: string, data?: string, eof?: boolean): Promise<void>
+  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  sandboxJobLog(sandbox: string, job: string, after?: number): AsyncGenerator<SandboxJobEntry>
 }
 
 /**

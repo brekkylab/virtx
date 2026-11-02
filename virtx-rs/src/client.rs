@@ -7,16 +7,15 @@ use std::{
 };
 
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::json;
 use virtx_core::{
-    Auth, DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageBuildOutput, ImageDownloadArgs, ImageDownloadOutput,
-    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePullOutput, ImagePushArgs,
-    ImagePushOutput, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, Metadata, MountSource, Recipe, RegistryAuth, SandboxCloseArgs,
-    SandboxExecArgs, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SnapshotCreateArgs, SnapshotCreateOutput, SnapshotListOutputItem, SnapshotRemoveArgs,
-    VolumeCreateArgs, VolumeCreateOutput, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListArgs, VolumeMountListOutputItem, VolumeMountRemoveArgs, VolumeRemoveArgs,
+    Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
+    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
+    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
+    ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
+    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
+    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -25,7 +24,7 @@ use crate::{
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
 };
 
-/// A client of one server, over stdio or Streamable HTTP, made by `libvirtx_core`.
+/// A client of one server, over stdio or HTTP, made by `libvirtx_core`.
 ///
 /// Cloning holds the same session once more; it ends when the last clone is dropped, which
 /// answers every request not yet answered with an error. Each method starts its request at
@@ -67,7 +66,7 @@ impl Client {
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+    /// Reach the server at `url`, its base `http` or `https` URL sending
     /// `auth`, the credentials it wants, and `headers`, each a name and a value, whatever else
     /// it asks of each request, with every request. `Authorization` is `auth`'s, over one given
     /// as a header. Refused when a token would go in the clear: over `http` to any host but
@@ -166,49 +165,76 @@ impl Client {
         })
     }
 
-    /// Build `recipe`, and point `reference` at it. Its events are the build's log, then what
-    /// it built.
-    pub fn build_image(
-        &self,
-        recipe: Recipe,
-        reference: impl Into<String>,
-    ) -> Events<ImageBuildOutput, String> {
+    /// Start building `recipe`, to point `reference` at what it builds. Its log is
+    /// [`image_job_log`](Self::image_job_log)'s.
+    pub fn build_image(&self, recipe: Recipe, reference: impl Into<String>) -> Call<ImageJob> {
         let args = ImageBuildArgs {
             recipe,
             reference: reference.into(),
         };
-        Events::new(
-            self.api,
-            self.start(self.api.virtx_client_build_image, args),
-        )
+        self.call(self.api.virtx_client_build_image, args)
     }
 
-    /// Pull `reference` from its registry, and point it at what it pulls; without `auth` the
-    /// server pulls anonymously. Its events are the pull's log, then what it pulled.
+    /// Start pulling `reference` from its registry, to point it at what it pulls; without
+    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s.
     pub fn pull_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> Events<ImagePullOutput, String> {
+    ) -> Call<ImageJob> {
         let args = ImagePullArgs {
             reference: reference.into(),
             auth,
         };
-        Events::new(self.api, self.start(self.api.virtx_client_pull_image, args))
+        self.call(self.api.virtx_client_pull_image, args)
     }
 
-    /// Push the image `reference` points at to the registry `reference` names; without `auth`
-    /// the server pushes anonymously. Its events are the push's log, then what it pushed.
+    /// Start pushing the image `reference` points at to the registry `reference` names;
+    /// without `auth` the server pushes anonymously. Its log is
+    /// [`image_job_log`](Self::image_job_log)'s.
     pub fn push_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> Events<ImagePushOutput, String> {
+    ) -> Call<ImageJob> {
         let args = ImagePushArgs {
             reference: reference.into(),
             auth,
         };
-        Events::new(self.api, self.start(self.api.virtx_client_push_image, args))
+        self.call(self.api.virtx_client_push_image, args)
+    }
+
+    /// Every image job the server holds.
+    pub fn list_image_job(&self) -> Call<Vec<ImageJob>> {
+        Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_image_job)(self.raw)
+        })
+    }
+
+    /// The image job `id`.
+    pub fn get_image_job(&self, id: impl AsRef<str>) -> Call<ImageJob> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_get_image_job, args)
+    }
+
+    /// Cancel the image job `id` if it runs, and forget it.
+    pub fn remove_image_job(&self, id: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_remove_image_job, args)
+    }
+
+    /// The log of the image job `id`, from its start or after its `after`th entry, until its
+    /// `end` entry. Dropping it leaves the job as it is.
+    pub fn image_job_log(
+        &self,
+        id: impl AsRef<str>,
+        after: Option<u64>,
+    ) -> Events<LogEntry<ImageJobEntry>> {
+        let args = json!({ "id": id.as_ref(), "after": after });
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_image_job_log, args),
+        )
     }
 
     /// Every tag on the server's images, as `name:tag`, with the digest it points at.
@@ -252,7 +278,7 @@ impl Client {
         &self,
         reference: impl Into<String>,
         path: impl Into<PathBuf>,
-    ) -> Events<ImageDownloadOutput, String> {
+    ) -> Events<Event<ImageDownloadOutput, String>> {
         let args = ImageDownloadArgs {
             reference: reference.into(),
             path: path.into(),
@@ -270,7 +296,7 @@ impl Client {
         &self,
         path: impl Into<PathBuf>,
         reference: impl Into<String>,
-    ) -> Events<ImageUploadOutput, String> {
+    ) -> Events<Event<ImageUploadOutput, String>> {
         let args = ImageUploadArgs {
             path: path.into(),
             reference: reference.into(),
@@ -301,7 +327,7 @@ impl Client {
         &self,
         name: Option<impl Into<String>>,
         disk_gib: Option<u32>,
-    ) -> Call<SnapshotCreateOutput> {
+    ) -> Call<SnapshotListOutputItem> {
         let args = SnapshotCreateArgs {
             name: name.map(Into::into),
             disk_gib,
@@ -309,9 +335,15 @@ impl Client {
         self.call(self.api.virtx_client_create_snapshot, args)
     }
 
+    /// The snapshot `name`.
+    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<SnapshotListOutputItem> {
+        let args = json!({ "name": name.as_ref() });
+        self.call(self.api.virtx_client_get_snapshot, args)
+    }
+
     /// Delete the snapshot `name` and its upper layer.
-    pub fn remove_snapshot(&self, name: impl Into<String>) -> Call<()> {
-        let args = SnapshotRemoveArgs { name: name.into() };
+    pub fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
@@ -323,55 +355,48 @@ impl Client {
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
-    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<VolumeCreateOutput> {
+    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<VolumeListOutputItem> {
         let args = VolumeCreateArgs {
             name: name.map(Into::into),
         };
         self.call(self.api.virtx_client_create_volume, args)
     }
 
+    /// The volume `name`.
+    pub fn get_volume(&self, name: impl AsRef<str>) -> Call<VolumeListOutputItem> {
+        let args = json!({ "name": name.as_ref() });
+        self.call(self.api.virtx_client_get_volume, args)
+    }
+
     /// Delete the volume `name` and everything in it.
-    pub fn remove_volume(&self, name: impl Into<String>) -> Call<()> {
-        let args = VolumeRemoveArgs { name: name.into() };
+    pub fn remove_volume(&self, name: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_volume, args)
     }
 
     /// The mounts in `volume`, without their credentials.
     pub fn list_volume_mount(
         &self,
-        volume: impl Into<String>,
+        volume: impl AsRef<str>,
     ) -> Call<Vec<VolumeMountListOutputItem>> {
-        let args = VolumeMountListArgs {
-            volume: volume.into(),
-        };
+        let args = json!({ "volume": volume.as_ref() });
         self.call(self.api.virtx_client_list_volume_mount, args)
     }
 
     /// Mount `source` at `path` in `volume`, a directory the mount creates.
     pub fn create_volume_mount(
         &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
+        volume: impl AsRef<str>,
+        path: impl AsRef<str>,
         source: MountSource,
-    ) -> Call<()> {
-        let args = VolumeMountCreateArgs {
-            volume: volume.into(),
-            path: path.into(),
-            source,
-        };
+    ) -> Call<VolumeMountListOutputItem> {
+        let args = json!({ "volume": volume.as_ref(), "path": path.as_ref(), "source": source });
         self.call(self.api.virtx_client_create_volume_mount, args)
     }
 
     /// Take away the mount at `path` in `volume`, leaving its source as it is.
-    pub fn remove_volume_mount(
-        &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
-    ) -> Call<()> {
-        let args = VolumeMountRemoveArgs {
-            volume: volume.into(),
-            path: path.into(),
-        };
+    pub fn remove_volume_mount(&self, volume: impl AsRef<str>, path: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "volume": volume.as_ref(), "path": path.as_ref() });
         self.call(self.api.virtx_client_remove_volume_mount, args)
     }
 
@@ -380,7 +405,6 @@ impl Client {
         self.call(self.api.virtx_client_stat_file, self.at(root, path))
     }
 
-    /// The entries of the directory at `path` in `root`.
     /// Whether anything is at `path` in `root`.
     pub fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_file_exists, self.at(root, path))
@@ -396,6 +420,7 @@ impl Client {
         self.call(self.api.virtx_client_is_dir, self.at(root, path))
     }
 
+    /// The entries of the directory at `path` in `root`.
     pub fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
         self.call(self.api.virtx_client_read_dir, self.at(root, path))
     }
@@ -517,42 +542,105 @@ impl Client {
     }
 
     /// Every sandbox the server holds.
-    pub fn list_sandbox(&self) -> Call<Vec<SandboxListOutputItem>> {
+    pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_list_sandbox)(self.raw)
         })
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxInitArgs::new`].
-    pub fn init_sandbox(&self, args: SandboxInitArgs) -> Call<SandboxInitOutput> {
-        self.call(self.api.virtx_client_init_sandbox, args)
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
+    /// here only.
+    pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
+        self.call(self.api.virtx_client_create_sandbox, args)
     }
 
-    /// Run `cmd` in `sandbox` to its end, killed after `timeout_ms` if one is given. Its events
-    /// are its output, a line as it is written, then how it ended.
-    pub fn exec_sandbox(
+    /// The sandbox `id`, without its ports.
+    pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_get_sandbox, args)
+    }
+
+    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    pub fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_remove_sandbox, args)
+    }
+
+    /// Every job in the sandbox `id`.
+    pub fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
+        let args = json!({ "sandbox": id.as_ref() });
+        self.call(self.api.virtx_client_list_sandbox_job, args)
+    }
+
+    /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
+    /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s.
+    pub fn exec_sandbox(&self, id: impl AsRef<str>, args: &SandboxExecArgs) -> Call<SandboxJob> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "cmd": args.cmd,
+            "stdin": args.stdin,
+            "timeout_ms": args.timeout_ms,
+        });
+        self.call(self.api.virtx_client_exec_sandbox, args)
+    }
+
+    /// The job `job` in the sandbox `id`.
+    pub fn get_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<SandboxJob> {
+        let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
+        self.call(self.api.virtx_client_get_sandbox_job, args)
+    }
+
+    /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
+    pub fn remove_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
+        self.call(self.api.virtx_client_remove_sandbox_job, args)
+    }
+
+    /// Send `signal`, such as `SIGTERM`, to the process of the job `job` in the sandbox `id`
+    /// and every process it started.
+    pub fn signal_sandbox_job(
         &self,
-        sandbox: impl Into<String>,
-        cmd: impl IntoIterator<Item = impl Into<String>>,
-        timeout_ms: Option<u64>,
-    ) -> Events<SandboxExecOutput, String> {
-        let args = SandboxExecArgs {
-            sandbox: sandbox.into(),
-            cmd: cmd.into_iter().map(Into::into).collect(),
-            timeout_ms,
-        };
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+        signal: impl AsRef<str>,
+    ) -> Call<()> {
+        let args =
+            json!({ "sandbox": id.as_ref(), "job": job.as_ref(), "signal": signal.as_ref() });
+        self.call(self.api.virtx_client_signal_sandbox_job, args)
+    }
+
+    /// Write `data` to the stdin of the process of the job `job` in the sandbox `id`, then
+    /// close it if `eof`. Answers once it is written: a caller writes again only then, so the
+    /// writes land in order.
+    pub fn write_sandbox_job_stdin(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+        data: Option<impl Into<String>>,
+        eof: bool,
+    ) -> Call<()> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "job": job.as_ref(),
+            "data": data.map(Into::into),
+            "eof": eof,
+        });
+        self.call(self.api.virtx_client_write_sandbox_job_stdin, args)
+    }
+
+    /// The log of the job `job` in the sandbox `id`, its process's output, from its start or
+    /// after its `after`th entry, until its `end` entry. Dropping it leaves the job as it is.
+    pub fn sandbox_job_log(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+        after: Option<u64>,
+    ) -> Events<LogEntry<SandboxJobEntry>> {
+        let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref(), "after": after });
         Events::new(
             self.api,
-            self.start(self.api.virtx_client_exec_sandbox, args),
+            self.start(self.api.virtx_client_sandbox_job_log, args),
         )
-    }
-
-    /// Stop `sandbox` and forget its id, keeping its snapshot and volumes.
-    pub fn close_sandbox(&self, sandbox: impl Into<String>) -> Call<()> {
-        let args = SandboxCloseArgs {
-            sandbox: sandbox.into(),
-        };
-        self.call(self.api.virtx_client_close_sandbox, args)
     }
 
     /// `path` in `root`, as a files request names it.

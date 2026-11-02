@@ -1,8 +1,6 @@
 //! The client's end: the server's endpoints over either transport, which only opening and
-//! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`],
-//! the files endpoint's WebDAV requests in [`files`].
+//! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`].
 
-mod files;
 mod portforward;
 mod stdio;
 mod tcp;
@@ -15,6 +13,7 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
 use self::{stdio::Stdio, tcp::Tcp};
+use super::http::refused;
 use crate::{Auth, Error};
 
 /// A request's or a response's body, as either transport carries it.
@@ -25,18 +24,6 @@ pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|e| match e {}).boxed()
 }
 
-/// `response`, a refusal, as the [`Error::Status`] it is: its body read, for a person.
-pub(crate) async fn refused(response: http::Response<Body>) -> Error {
-    let status = response.status().as_u16();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .map(|body| body.to_bytes())
-        .unwrap_or_default();
-    Error::Status(status, String::from_utf8_lossy(&body).trim().to_owned())
-}
-
 /// How a client reaches the server's endpoints.
 enum Connection {
     Tcp(Tcp),
@@ -44,7 +31,7 @@ enum Connection {
 }
 
 impl Connection {
-    /// Send `request`, whose URI is a path under the server's base, such as `/rpc`. An
+    /// Send `request`, whose URI is a path under the server's base, such as `/snapshots/`. An
     /// `Err` says why no response came.
     async fn send(&self, request: http::Request<Body>) -> Result<http::Response<Body>, String> {
         match self {
@@ -112,7 +99,7 @@ impl TransportClient {
     }
 
     /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/rpc`, names. An `Err` says why no response came, or that the server refused the
+    /// `/snapshots/`, names. An `Err` says why no response came, or that the server refused the
     /// headers with a `401` or a `403`, which every endpoint's are alike.
     pub(crate) async fn send(
         &self,

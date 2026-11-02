@@ -7,10 +7,7 @@
   "types": "index.d.ts",
   "files": [
     "index.js",
-    "index.d.ts",
-    "libvirtx_core.dylib",
-    "libvirtx_core.so",
-    "virtx_core.dll"
+    "index.d.ts"
   ],
   "engines": {
     "node": ">= 18"

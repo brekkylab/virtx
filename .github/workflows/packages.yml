@@ -319,12 +319,16 @@ jobs:
       # A registry on localhost holding only what `assemble` packed. Published with an
       # explicit --registry and a config of its own: the packages' publishConfig names
       # npmjs, and nothing here may reach it.
+      # Installed first and on its own: on Windows the install alone can outlast the wait for
+      # the registry to answer.
       - name: Install from a local registry
         shell: bash
         run: |
+          npm install --global --silent verdaccio@6
           cd scripts/packages
-          npx -y verdaccio@6 --config ./verdaccio.yaml --listen 4873 > "$RUNNER_TEMP/verdaccio.log" 2>&1 &
-          for _ in $(seq 60); do curl -sf http://localhost:4873/-/ping >/dev/null && break; sleep 1; done
+          verdaccio --config ./verdaccio.yaml --listen 4873 > "$RUNNER_TEMP/verdaccio.log" 2>&1 &
+          for _ in $(seq 120); do curl -sf http://localhost:4873/-/ping >/dev/null && break; sleep 1; done
+          curl -sf http://localhost:4873/-/ping >/dev/null || { echo "::error::the local registry did not start"; exit 1; }
           token=$(curl -sf -X PUT -H 'content-type: application/json' \
             -d '{"name":"ci","password":"ci-local-only"}' \
             http://localhost:4873/-/user/org.couchdb.user:ci | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')

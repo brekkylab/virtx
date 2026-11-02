@@ -33,23 +33,16 @@ Both [transports](#transport) carry HTTP, and every endpoint is reached the same
 
 ## Transport
 
-### HTTP
+### TCP
 
-The server listens on TCP and is reached at a base URL, such as `https://host/`.
+The server listens on TCP and is reached over HTTP at a base URL, such as `https://host/`.
 Endpoints are paths under it.
 The server SHOULD offer HTTP/2, and MAY also offer HTTP/1.1 and HTTP/3.
 Over HTTP/1.1 every event stream read at once holds a connection of its own, so a client reading many SHOULD reach the server over HTTP/2.
 
 The server keeps nothing between requests for the transport's sake.
 
-#### Authentication
-
-A server reachable from other machines SHOULD require credentials on every request, to every endpoint.
-A server on the local machine MAY take none.
-The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bearer <token>`.
-How the client obtains the token is outside this protocol.
-
-A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
+A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface.
 
 #### Origin
 
@@ -57,19 +50,24 @@ A web page could reach a server through DNS rebinding, so the server MUST check 
 It MUST answer `403 Forbidden` to a request whose `Origin` names an origin it does not allow.
 A request with no `Origin`, from any non-browser client, is not refused for that.
 
-#### Local servers
-
-A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface.
-
-### Standard IO (stdio)
+### Stdio
 
 The client starts the server as a child process, and the server's stdin and stdout together carry one HTTP/2 connection (RFC 9113), with the client as its client.
 
 - The connection starts with prior knowledge (RFC 9113, section 3.3): the client sends the connection preface first, with no TLS and no upgrade. Requests use the `http` scheme. The authority is not checked.
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
-- The connection has one client. The server takes no credentials and checks no `Origin`.
+- The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin).
 - The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then delete every sandbox and cancel every job, as `DELETE` does, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
+
+## Authentication
+
+Over [TCP](#tcp), a server reachable from other machines SHOULD require credentials on every request, to every endpoint.
+A server on the local machine MAY take none, and a server over [stdio](#stdio) takes none.
+The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bearer <token>`.
+How the client obtains the token is outside this protocol.
+
+A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
 ## Resources
 

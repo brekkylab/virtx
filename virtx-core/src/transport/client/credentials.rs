@@ -11,6 +11,14 @@ use crate::Auth;
 /// one that runs out on its way.
 const MARGIN: Duration = Duration::from_secs(60);
 
+/// How long a command has to print a token: one waiting on a person -- a keychain's prompt no
+/// one sees, from a process with no terminal -- is killed, and the request fails saying so.
+const PRINTS_WITHIN: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(60)
+};
+
 /// The client's [`Auth`], and what its command last printed.
 pub(super) struct Credentials {
     auth: RwLock<Auth>,
@@ -106,13 +114,22 @@ async fn run(
     refused: bool,
 ) -> Result<(String, Option<Duration>), String> {
     let mut command = tokio::process::Command::new(program);
-    command.args(args).stdin(std::process::Stdio::null());
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     if refused {
         command.env("VIRTX_TOKEN_REFUSED", "1");
     }
-    let output = command
-        .output()
+    let output = tokio::time::timeout(PRINTS_WITHIN, command.output())
         .await
+        .map_err(|_| {
+            format!(
+                "{program} printed no token in {}s: waiting on something, such as the \
+                 OS asking whether it may read the keychain",
+                PRINTS_WITHIN.as_secs()
+            )
+        })?
         .map_err(|e| format!("running {program} for a token: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -615,6 +615,20 @@ async fn a_call_waits_as_long_as_the_server_asks() {
 }
 
 #[tokio::test]
+async fn a_command_that_waits_on_someone_fails_the_request_in_time() {
+    let url = serve_users(vec!["alice"]).await;
+    let auth = Auth::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "sleep 30; echo alice".into()],
+    };
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    let started = std::time::Instant::now();
+    let error = user(&client).await.unwrap_err();
+    assert!(error.to_string().contains("printed no token in"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
 async fn a_command_that_prints_no_token_fails_the_request() {
     let url = serve_users(vec!["alice"]).await;
     let auth = Auth::Command {

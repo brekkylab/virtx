@@ -12,23 +12,36 @@
 //! `<domain>` being `--domain`, `VIRTX_DOMAIN`, or [`DOMAIN`]. The session's refresh token is
 //! kept in the OS's keychain, under the domain; where the OS has none, in
 //! `~/.config/virtx/<domain>.token`, readable by its owner alone. An access token lasts 15
-//! minutes, and `virtx token` gives a fresh one each time.
+//! minutes.
+//!
+//! Many processes may ask for a token at once -- an SDK runs `virtx token --json` in each, as
+//! an agent's workers start together -- and each refresh replaces the refresh token: two at
+//! once would present one already replaced, which the control plane takes for a stolen token
+//! and ends the session over. So `virtx token` holds `~/.config/virtx/<domain>.lock` while it
+//! reads, refreshes and keeps, and gives the access token it last got
+//! (`~/.config/virtx/<domain>.access`, its owner's alone) for as long as it has more than
+//! [`FRESH_FOR`] left: one refresh serves them all. Run with `VIRTX_TOKEN_REFUSED` set, as an
+//! SDK runs it once a server refused the token it had, it refreshes whatever it has.
 //!
 //! With an access token, a client names its organization as well -- `VIRTX_ORG`, its UUID --
 //! and its cell's endpoint, `VIRTX_URL`: unlike an API key, a person's token names neither.
 
+use std::fs::File;
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, bail};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Where virtx cloud is, by default, as the SDKs have it.
 const DOMAIN: &str = "virtx.brekkylab.com";
 const KEYCHAIN: &str = "virtx";
+/// How long an access token kept has to have left to be given again: more than the minute
+/// before it runs out in which an SDK asks for another.
+const FRESH_FOR: Duration = Duration::from_secs(120);
 
 #[derive(Parser)]
 #[command(name = "virtx", version, about = "virtx cloud from a terminal")]
@@ -65,13 +78,28 @@ struct Codes {
     interval: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Tokens {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
+}
+
+/// An access token kept between runs of `virtx token`.
+#[derive(Deserialize, Serialize)]
+struct Access {
+    token: String,
+    /// Seconds since the epoch.
+    expires_at: u64,
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 struct Cloud {
@@ -143,8 +171,13 @@ impl Cloud {
                 .send()?;
             if answer.status().is_success() {
                 let tokens: Tokens = answer.json()?;
-                let refresh = tokens.refresh_token.context("no refresh token answered")?;
-                self.keep(&refresh)?;
+                let refresh = tokens
+                    .refresh_token
+                    .as_deref()
+                    .context("no refresh token answered")?;
+                let _lock = self.lock()?;
+                self.keep(refresh)?;
+                self.keep_access(&tokens)?;
                 let me = self.me(&tokens.access_token)?;
                 eprintln!(
                     "Signed in as {}.",
@@ -164,8 +197,21 @@ impl Cloud {
         bail!("the code expired; run virtx login again")
     }
 
-    /// An access token, from the session kept: refreshed, and the refresh token replaced.
+    /// An access token: the one kept while it has more than [`FRESH_FOR`] left, or else one
+    /// refreshed from the session kept, the refresh token replaced. All under the lock.
     fn token(&self) -> anyhow::Result<Tokens> {
+        let _lock = self.lock()?;
+        let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
+        if !refused && let Some(access) = self.kept_access() {
+            let left = access.expires_at.saturating_sub(now());
+            if left > FRESH_FOR.as_secs() {
+                return Ok(Tokens {
+                    access_token: access.token,
+                    refresh_token: None,
+                    expires_in: Some(left),
+                });
+            }
+        }
         let refresh = self.kept()?.context("not signed in; run virtx login")?;
         let answer = self
             .http
@@ -173,13 +219,16 @@ impl Cloud {
             .json(&json!({ "refresh_token": refresh }))
             .send()?;
         if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let _ = self.forget();
+            // Kept as it is: under the lock no other run of this replaced it, so the session
+            // has ended, and `virtx login` puts a new one in its place.
+            let _ = self.forget_access();
             bail!("the session has ended; run virtx login");
         }
         let tokens: Tokens = answer.error_for_status()?.json()?;
         if let Some(refresh) = &tokens.refresh_token {
             self.keep(refresh)?;
         }
+        self.keep_access(&tokens)?;
         Ok(tokens)
     }
 
@@ -202,21 +251,66 @@ impl Cloud {
                 .error_for_status()?;
         }
         self.forget()?;
+        self.forget_access()?;
         eprintln!("Signed out.");
         Ok(())
     }
 
     // ---- Where the refresh token is kept ----
 
+    /// `~/.config/virtx/<domain>.<extension>`.
+    fn config(&self, extension: &str) -> anyhow::Result<PathBuf> {
+        let home = std::env::var_os("HOME").context("no HOME to keep the session under")?;
+        Ok(PathBuf::from(home)
+            .join(".config/virtx")
+            .join(format!("{}.{extension}", self.domain)))
+    }
+
+    /// Held until dropped: no other run of `virtx token` reads or replaces the session meanwhile.
+    fn lock(&self) -> anyhow::Result<File> {
+        let path = self.config("lock")?;
+        std::fs::create_dir_all(path.parent().expect("a directory"))?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
+    fn kept_access(&self) -> Option<Access> {
+        let path = self.config("access").ok()?;
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    fn keep_access(&self, tokens: &Tokens) -> anyhow::Result<()> {
+        let Some(lasts) = tokens.expires_in else {
+            return self.forget_access();
+        };
+        let access = Access {
+            token: tokens.access_token.clone(),
+            expires_at: now() + lasts,
+        };
+        write_private(&self.config("access")?, &serde_json::to_vec(&access)?)
+    }
+
+    fn forget_access(&self) -> anyhow::Result<()> {
+        match std::fs::remove_file(self.config("access")?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn entry(&self) -> Option<keyring::Entry> {
         keyring::Entry::new(KEYCHAIN, &self.domain).ok()
     }
 
     fn file(&self) -> anyhow::Result<PathBuf> {
-        let home = std::env::var_os("HOME").context("no HOME to keep the session under")?;
-        Ok(PathBuf::from(home)
-            .join(".config/virtx")
-            .join(format!("{}.token", self.domain)))
+        self.config("token")
     }
 
     fn keep(&self, refresh: &str) -> anyhow::Result<()> {
@@ -225,14 +319,7 @@ impl Cloud {
         {
             return Ok(());
         }
-        let path = self.file()?;
-        std::fs::create_dir_all(path.parent().expect("a directory"))?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        std::io::Write::write_all(&mut options.open(&path)?, refresh.as_bytes())
-            .with_context(|| format!("writing {}", path.display()))
+        write_private(&self.file()?, refresh.as_bytes())
     }
 
     fn kept(&self) -> anyhow::Result<Option<String>> {
@@ -258,6 +345,17 @@ impl Cloud {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Write `bytes` to `path`, readable by its owner alone.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path.parent().expect("a directory"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(path)?, bytes)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Open `url` in the person's browser, if there is one to open it in: the page is printed

@@ -18,8 +18,9 @@ pub enum Auth {
     },
     /// The token `program` with `args` prints: a token alone, or `{"token": "...",
     /// "expires_in": <seconds>}`. It is run for the first request, and again when its token
-    /// is a minute from running out or the server refuses it: a person's short-lived token,
-    /// such as `virtx token --json` prints.
+    /// is a minute from running out or the server refuses it -- then with `VIRTX_TOKEN_REFUSED`
+    /// set, for one that keeps its tokens to give a new one: a person's short-lived token, such
+    /// as `virtx token --json` prints.
     Command {
         program: String,
         #[serde(default)]

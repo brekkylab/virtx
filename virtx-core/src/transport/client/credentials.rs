@@ -16,6 +16,8 @@ pub(super) struct Credentials {
     auth: RwLock<Auth>,
     /// Moves on with each new auth and each refusal: a token issued before is not sent again.
     generation: AtomicU64,
+    /// Moves on with each refusal alone.
+    refusals: AtomicU64,
     /// Held while the command runs, so that requests sent together run it once.
     issued: tokio::sync::Mutex<Option<Issued>>,
 }
@@ -23,6 +25,7 @@ pub(super) struct Credentials {
 struct Issued {
     token: String,
     generation: u64,
+    refusals: u64,
     /// When it is run again; never, for a token printed bare, until the server refuses it.
     until: Option<Instant>,
 }
@@ -32,6 +35,7 @@ impl Credentials {
         Credentials {
             auth: RwLock::new(auth),
             generation: AtomicU64::new(0),
+            refusals: AtomicU64::new(0),
             issued: tokio::sync::Mutex::new(None),
         }
     }
@@ -42,8 +46,17 @@ impl Credentials {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Whether a token refused is printed anew: an [`Auth::Command`]'s.
+    pub(super) fn renews(&self) -> bool {
+        matches!(
+            *self.auth.read().unwrap_or_else(PoisonError::into_inner),
+            Auth::Command { .. }
+        )
+    }
+
     /// The server refused the token sent: a command prints a new one for the next request.
     pub(super) fn refused(&self) {
+        self.refusals.fetch_add(1, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -62,16 +75,23 @@ impl Credentials {
         };
         let mut issued = self.issued.lock().await;
         let generation = self.generation.load(Ordering::SeqCst);
+        let refusals = self.refusals.load(Ordering::SeqCst);
         if let Some(issued) = issued.as_ref()
             && issued.generation == generation
             && issued.until.is_none_or(|until| Instant::now() < until)
         {
             return Ok(Some(issued.token.clone()));
         }
-        let (token, expires_in) = run(&program, &args).await?;
+        // Refused since it last ran, it is told so: a command that keeps its tokens, such as
+        // `virtx token`, gets a new one rather than the one refused.
+        let refused = issued
+            .as_ref()
+            .is_some_and(|issued| issued.refusals != refusals);
+        let (token, expires_in) = run(&program, &args, refused).await?;
         *issued = Some(Issued {
             token: token.clone(),
             generation,
+            refusals,
             until: expires_in.map(|lasts| Instant::now() + lasts.saturating_sub(MARGIN)),
         });
         Ok(Some(token))
@@ -79,10 +99,18 @@ impl Credentials {
 }
 
 /// What `program` with `args` prints: a token alone, or `{"token": ..., "expires_in": <seconds>}`.
-async fn run(program: &str, args: &[String]) -> Result<(String, Option<Duration>), String> {
-    let output = tokio::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
+/// Run with `VIRTX_TOKEN_REFUSED=1` in its environment once the server `refused` its last.
+async fn run(
+    program: &str,
+    args: &[String],
+    refused: bool,
+) -> Result<(String, Option<Duration>), String> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).stdin(std::process::Stdio::null());
+    if refused {
+        command.env("VIRTX_TOKEN_REFUSED", "1");
+    }
+    let output = command
         .output()
         .await
         .map_err(|e| format!("running {program} for a token: {e}"))?;

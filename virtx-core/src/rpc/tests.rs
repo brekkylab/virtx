@@ -520,14 +520,98 @@ async fn a_commands_token_is_printed_again_as_it_runs_out() {
 }
 
 #[tokio::test]
-async fn a_token_the_server_refuses_is_printed_anew_for_the_next_request() {
+async fn a_token_the_server_refuses_is_printed_anew_and_the_request_sent_again() {
     let url = serve_users(vec!["alice"]).await;
     let (auth, runs) = printer(&["expired-alice", "alice"]);
     let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
-    let error = user(&client).await.unwrap_err();
-    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
     assert_eq!(user(&client).await.unwrap(), "alice");
     assert_eq!(runs(), 2);
+}
+
+#[tokio::test]
+async fn a_token_refused_twice_fails_the_request() {
+    let url = serve_users(vec!["alice"]).await;
+    let (auth, runs) = printer(&["expired-alice"]);
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    let error = user(&client).await.unwrap_err();
+    assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+    assert_eq!(runs(), 2);
+}
+
+#[tokio::test]
+async fn a_command_run_again_after_a_refusal_is_told_so() {
+    let url = serve_users(vec!["alice"]).await;
+    // Prints the token it keeps unless told the server refused it.
+    let auth = Auth::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            r#"if [ -n "$VIRTX_TOKEN_REFUSED" ]; then echo alice; else echo expired-alice; fi"#
+                .into(),
+        ],
+    };
+    let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+    assert_eq!(user(&client).await.unwrap(), "alice");
+}
+
+/// A server answering `/rpc` with `status` (and `Retry-After: 1` with a `429`) for the first
+/// `turned` requests, then echoing; and how many it was sent.
+async fn turning_away(
+    turned: usize,
+    status: StatusCode,
+) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let sent = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&sent);
+    let router = axum::Router::new().route(
+        "/rpc",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let n = counted.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < turned {
+                    let wait = (status == StatusCode::TOO_MANY_REQUESTS).then_some("1");
+                    let mut response = status.into_response();
+                    if let Some(wait) = wait {
+                        response
+                            .headers_mut()
+                            .insert(http::header::RETRY_AFTER, wait.parse().unwrap());
+                    }
+                    return response;
+                }
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                (
+                    [("content-type", "application/json")],
+                    json!({"jsonrpc": "2.0", "id": request["id"], "result": request["params"][0]})
+                        .to_string(),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    (url, sent)
+}
+
+#[tokio::test]
+async fn a_call_turned_away_for_now_is_sent_again() {
+    let (url, sent) = turning_away(2, StatusCode::SERVICE_UNAVAILABLE).await;
+    let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+    let answer: String = client.request("echo", ["hi"]).await.unwrap();
+    assert_eq!(answer, "hi");
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn a_call_waits_as_long_as_the_server_asks() {
+    let (url, sent) = turning_away(1, StatusCode::TOO_MANY_REQUESTS).await;
+    let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+    let started = std::time::Instant::now();
+    let answer: String = client.request("echo", ["hi"]).await.unwrap();
+    assert_eq!(answer, "hi");
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

@@ -24,9 +24,10 @@ pub use error::Error;
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;
 pub use virtx_core::{
-    Event, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem, ImageName, ImagePruneOutput,
-    ImagePullOutput, ImagePushOutput, ImageUploadOutput, MountSource, MountType, Progress, Recipe,
-    RegistryAuth, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput, SandboxListOutputItem,
-    SandboxPort, SandboxVolume, SnapshotCreateOutput, SnapshotListOutputItem, Step,
-    VolumeCreateOutput, VolumeListOutputItem, VolumeMountListOutputItem,
+    Auth, Event, ImageBuildOutput, ImageDownloadOutput, ImageListOutputItem, ImageName,
+    ImagePruneOutput, ImagePullOutput, ImagePushOutput, ImageUploadOutput, MountSource, MountType,
+    Progress, Recipe, RegistryAuth, SandboxExecOutput, SandboxInitArgs, SandboxInitOutput,
+    SandboxListOutputItem, SandboxPort, SandboxVolume, SnapshotCreateOutput,
+    SnapshotListOutputItem, Step, VolumeCreateOutput, VolumeListOutputItem,
+    VolumeMountListOutputItem,
 };

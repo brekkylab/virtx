@@ -44,7 +44,7 @@ pub(crate) fn encode<T: Serialize>(output: Result<T, String>) -> (c_int, Vec<u8>
 }
 
 /// `VIRTX_ERROR`, and `message` as a JSON string.
-pub(super) fn failure(message: impl Into<String>) -> (c_int, Vec<u8>) {
+pub(crate) fn failure(message: impl Into<String>) -> (c_int, Vec<u8>) {
     let bytes = serde_json::to_vec(&message.into()).expect("a string encodes");
     (VIRTX_ERROR, bytes)
 }

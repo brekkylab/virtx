@@ -94,7 +94,8 @@ class BasicAuth:
 
 @dataclass(frozen=True)
 class BearerAuth:
-    """A token the registry takes as is."""
+    """A token taken as it is, sent as ``Authorization: Bearer <token>``: a registry's, or the
+    server's own, as :meth:`Client.connect` takes it."""
 
     token: str = field(repr=False)
 

@@ -56,11 +56,20 @@ const SIGNATURES = {
     'int',
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
-  virtx_client_connect: ['int', ['const char *', koffi.out(koffi.pointer('uintptr_t')), Out]],
-  virtx_client_connect_with: [
+  virtx_client_connect: [
     'int',
-    ['const char *', 'const char *', 'const char *', koffi.out(koffi.pointer('uintptr_t')), Out],
+    [
+      'const char *',
+      'uint8_t *',
+      'size_t',
+      'const char **',
+      'size_t',
+      koffi.out(koffi.pointer('uintptr_t')),
+      Out,
+    ],
   ],
+  virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
+  virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['void', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -276,6 +285,11 @@ const holds = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_client_release.async(raw, () => {})
 })
 
+// `auth` as `virtx_client_connect` takes it: JSON, or nothing for none.
+function authBytes(auth) {
+  return auth ? Buffer.from(JSON.stringify(auth)) : Buffer.alloc(0)
+}
+
 function opening(lib, status, raw, error) {
   if (status === OK) return new Client(raw[0], lib)
   lib.take(status, error)
@@ -305,13 +319,25 @@ class Client {
   }
 
   // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-  // `token` as `Authorization: Bearer` and `org` as `virtx-org` with every request when given:
-  // an API key of virtx cloud, say, or a user's access token and the organization it is for.
-  static connect(url, { token = null, org = null } = {}) {
+  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
+  // `headers`, a name to a value, whatever else it asks of each request, with every request.
+  // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
+  // the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, headers = {}) {
     const lib = library()
+    const bytes = authBytes(auth)
+    const strings = Object.entries(headers).flat()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect_with(url, token, org, raw, error)
+    const status = lib.virtx_client_connect(
+      url,
+      bytes,
+      bytes.length,
+      strings,
+      strings.length / 2,
+      raw,
+      error,
+    )
     return opening(lib, status, raw, error)
   }
 
@@ -328,7 +354,29 @@ class Client {
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
     if (!url && (key || org)) url = `https://run.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
-    return Client.connect(url, { token: key, org })
+    return Client.connect(url, key && { type: 'bearer', token: key }, org ? { [ORG_HEADER]: org } : {})
+  }
+
+  // Send `auth` with every request from now on, in place of what was given at `connect`: a
+  // new token, when the server's are short-lived. A forwarder already open sends it with its
+  // next connection. Over stdio, where none is sent, nothing changes. Refused as at `connect`,
+  // the auth unchanged.
+  setAuth(auth) {
+    const bytes = authBytes(auth)
+    const error = {}
+    const status = this._lib.virtx_client_set_auth(this._held(), bytes, bytes.length, error)
+    if (status !== OK) this._lib.take(status, error)
+  }
+
+  // Send `headers`, a name to a value, with every request from now on, in place of those given
+  // at `connect`. A forwarder already open sends them with its next connection. Over stdio,
+  // where none are sent, nothing changes. A header that cannot be sent throws, the headers
+  // unchanged.
+  setHeaders(headers) {
+    const strings = Object.entries(headers).flat()
+    const error = {}
+    const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
+    if (status !== OK) this._lib.take(status, error)
   }
 
   // Take over one hold of the `VirtxClient*` `raw`, as `intoRaw` or C's `virtx_client_retain`
@@ -559,6 +607,10 @@ if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prot
 // Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
 // for one.
 const DOMAIN = 'virtx.brekkylab.com'
+
+// The header a request names its organization in, on a server that keeps organizations apart
+// (PROTOCOL.md, Authentication).
+const ORG_HEADER = 'virtx-org'
 
 module.exports = {
   Client,

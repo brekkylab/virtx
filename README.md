@@ -384,17 +384,18 @@ prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.brekkylab.c
 `VIRTX_DOMAIN` when that is set.
 
 ```python
-client = virtx.Client.connect("https://apne2.api.example.com", token=api_key)
+client = virtx.Client.connect("https://apne2.api.example.com", virtx.BearerAuth(api_key))
 client = virtx.Client.from_env()  # VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
 ```js
-const client = Client.connect('https://apne2.api.example.com', { token: apiKey })
+const client = Client.connect('https://apne2.api.example.com', { type: 'bearer', token: apiKey })
 const fromEnv = Client.fromEnv() // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 
 ```rust
-let client = Client::connect_with("https://apne2.api.example.com", Some(&api_key), None)?;
+let auth = Auth::Bearer { token: api_key };
+let client = Client::connect("https://apne2.api.example.com", auth, [] as [(&str, &str); 0])?;
 let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
 ```
 

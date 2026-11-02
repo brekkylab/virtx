@@ -87,13 +87,25 @@ api! {
         client: *mut *mut Opaque,
         error: *mut VirtxBytes,
     ) -> c_int,
-    virtx_client_connect:
-        unsafe extern "C" fn(url: *const c_char, client: *mut *mut Opaque, error: *mut VirtxBytes) -> c_int,
-    virtx_client_connect_with: unsafe extern "C" fn(
+    virtx_client_connect: unsafe extern "C" fn(
         url: *const c_char,
-        token: *const c_char,
-        org: *const c_char,
+        auth: *const u8,
+        auth_len: usize,
+        headers: *const *const c_char,
+        headers_len: usize,
         client: *mut *mut Opaque,
+        error: *mut VirtxBytes,
+    ) -> c_int,
+    virtx_client_set_auth: unsafe extern "C" fn(
+        client: *mut Opaque,
+        auth: *const u8,
+        auth_len: usize,
+        error: *mut VirtxBytes,
+    ) -> c_int,
+    virtx_client_set_headers: unsafe extern "C" fn(
+        client: *mut Opaque,
+        headers: *const *const c_char,
+        headers_len: usize,
         error: *mut VirtxBytes,
     ) -> c_int,
     virtx_client_retain: unsafe extern "C" fn(client: *mut Opaque),

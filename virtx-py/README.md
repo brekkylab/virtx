@@ -28,6 +28,19 @@ with PortForwarder.open(client, sandbox["ports"][0]["url"]) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
+The files of a volume or a snapshot are read and written through the client, each request naming its root as a `Volume` or a `Snapshot`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+
+```python
+from virtx import Volume
+
+volume = Volume("data")
+await client.create_dir(volume, "in")
+await client.write_file(volume, "in/notes.txt", b"hello")
+for entry in await client.read_dir(volume, "in"):
+    print(entry.name, entry.metadata.size)
+print(await client.read_file(volume, "in/notes.txt"))
+```
+
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 
 ## Tests

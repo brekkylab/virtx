@@ -354,6 +354,152 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
                                                      const uint8_t *args,
                                                      size_t args_len);
 
+// The files of a volume or a snapshot: what is at `path`, given
+// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+// relative to its root as `dir/file.txt`. Answers with
+// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
+// the Unix epoch and `etag` as the server spells it, each only if the server says.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_stat_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// Whether anything is at `path`, given as `virtx_client_stat_file` takes it. Answers
+// with `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_file_exists(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Whether a file is at `path`, given as `virtx_client_stat_file` takes it. Answers with
+// `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_is_file(struct VirtxClient *client,
+                                         const uint8_t *args,
+                                         size_t args_len);
+
+// Whether a directory is at `path`, given as `virtx_client_stat_file` takes it. Answers
+// with `true` or `false`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_is_dir(struct VirtxClient *client,
+                                        const uint8_t *args,
+                                        size_t args_len);
+
+// The entries of the directory at `path`, given as `virtx_client_stat_file` takes it.
+// Answers with `[{"name": "...", "metadata": {...}}, ...]`, each metadata as
+// `virtx_client_stat_file` answers it.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_dir(struct VirtxClient *client,
+                                          const uint8_t *args,
+                                          size_t args_len);
+
+// The file at `path`, given `{"volume": "...", "path": "...", "offset": n, "length": n}`,
+// `offset` and `length` optional: from `offset`, `length` bytes of it or all that is
+// left. Answers with the bytes read as they are, not as JSON.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// The whole file at `path`, given as `virtx_client_stat_file` takes it, as text: refused
+// unless it is UTF-8. Answers with the text as a JSON string.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_read_text(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
+// Writes the `data_len` bytes at `data` as the whole file at `path`, given
+// `{"volume": "...", "path": "...", "if_match": "..."}`, `if_match` optional: the `etag`
+// `virtx_client_stat_file` gave, which the file has to have still, or the write is refused
+// with a `412`. The file is created if it does not exist; its parent directory must exist.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`; `data` is `data_len` readable bytes, not read after this
+// returns.
+struct VirtxFuture *virtx_client_write_file(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len,
+                                            const uint8_t *data,
+                                            size_t data_len);
+
+// Creates the directory at `path`, given as `virtx_client_stat_file` takes it, whose
+// parent must exist. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_dir(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
+// Has the directory at `path`, given as `virtx_client_stat_file` takes it, as `mkdir -p`:
+// its parents are created as needed, and one there already is left as it is. Refused with
+// a `405` when a file is at `path`. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_dir_all(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Removes what is at `path`, given `{"volume": "...", "path": "...", "missing_ok": bool}`,
+// `missing_ok` optional and false without it: a directory with everything in it. With
+// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`. Answers with
+// `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_file(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Moves what is at `from` to `to` in the same volume or snapshot, given
+// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
+// and false without it: whether to replace what is at `to`, which is otherwise refused.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_rename_file(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Copies what is at `from` to `to`, a directory with everything in it, given as
+// `virtx_client_rename_file` takes it. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
+                                           const uint8_t *args,
+                                           size_t args_len);
+
 // `sandbox.list`: answers with the sandboxes, as
 // `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool,
 // "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and

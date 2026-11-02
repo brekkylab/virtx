@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use virtx_core::*;
 use virtx_uvm::{
-    BuildError, Digest, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, Machine,
+    BuildError, Digest, Files, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, Machine,
     MachineError, MachineReport, MachineSpec, Network, Os, Ports, Reference, RegistryClient,
     RegistryError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore,
     build_step,
@@ -41,11 +41,12 @@ const DEFAULT_MEMORY_MIB: u32 = 4096;
 pub const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// What one project's requests reach: the stores, and the sandboxes its members made from
-/// them, which are theirs together.
+/// them, which are theirs together. The files endpoints are over the same stores.
 pub struct Home {
     images: ImageStore,
     pub snapshots: SnapshotStore,
     volumes: VolumeStore,
+    pub files: Files,
     /// This binary, which each machine is spawned as.
     exe: PathBuf,
     /// The sandboxes, by id, from `sandbox.init` to `sandbox.close` or until they idle.
@@ -56,12 +57,26 @@ impl Home {
     /// The images in `images`, shared with every other project, and the snapshots and volumes
     /// under `root`.
     pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
+        let snapshots = SnapshotStore::new(root)?;
+        let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
-            snapshots: SnapshotStore::new(root)?,
-            volumes: VolumeStore::new(root)?,
+            files: Files::new(snapshots.clone(), volumes.clone()),
+            snapshots,
+            volumes,
             exe: std::env::current_exe()?,
             sandboxes: Mutex::default(),
+        })
+    }
+
+    /// Whether a sandbox here was made over the snapshot `name`, and so holds it.
+    pub fn holds_snapshot(&self, name: &str) -> bool {
+        self.sandboxes.lock().unwrap().values().any(|sandbox| {
+            sandbox
+                .machine
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.name == name)
         })
     }
 

@@ -83,6 +83,9 @@ pub enum Entry<D = Vec<u8>> {
     Whiteout,
 }
 
+/// What a directory holds, each entry by its name there.
+pub type Entries<'a, D = Vec<u8>> = Vec<(&'a [u8], &'a Entry<D>)>;
+
 /// An inode of a tree, which is what a path names. Every path has its own, except the
 /// paths [linked](FsTree::link) to one another, which share one. Only a tree hands these
 /// out.
@@ -414,6 +417,78 @@ impl<D> FsTree<D> {
         self.root.stack(upper.root, base, &mut self.inodes);
     }
 
+    /// What is at `path`, if anything.
+    pub fn entry(&self, path: &[u8]) -> Result<Option<&Entry<D>>> {
+        Ok(self
+            .get(path)?
+            .map(|node| &self.inodes[node.inode.0 as usize]))
+    }
+
+    /// What is in the directory at `path`, by name: `None` if nothing is there, or
+    /// something that is not a directory.
+    pub fn entries(&self, path: &[u8]) -> Result<Option<Entries<'_, D>>> {
+        let Some(node) = self.get(path)? else {
+            return Ok(None);
+        };
+        if !matches!(self.inodes[node.inode.0 as usize], Entry::Directory { .. }) {
+            return Ok(None);
+        }
+        Ok(Some(
+            node.children
+                .iter()
+                .map(|(name, child)| (name.as_slice(), &self.inodes[child.inode.0 as usize]))
+                .collect(),
+        ))
+    }
+
+    /// Move what is at `from`, and everything under it, to `to`, replacing what is there.
+    /// Whether anything was at `from`. Refused when `to`'s parent is not a directory that
+    /// is there, or `to` is in `from`.
+    pub fn rename(&mut self, from: &[u8], to: &[u8]) -> Result<bool> {
+        let from_names = components(from)?;
+        let mut to_names = components(to)?;
+        let Some(to_name) = to_names.pop() else {
+            return Err(Error::Path("the root cannot be moved onto".to_string()));
+        };
+        if from_names.is_empty() {
+            return Err(Error::Path("the root cannot be moved".to_string()));
+        }
+        if to_names.len() >= from_names.len() && to_names[..from_names.len()] == from_names[..] {
+            return Err(Error::Path(format!(
+                "{} is inside {}",
+                String::from_utf8_lossy(to),
+                String::from_utf8_lossy(from)
+            )));
+        }
+        let parent = self.get(&to_names.join(&b'/'))?.map(|node| node.inode);
+        match parent {
+            Some(inode) if matches!(self.inodes[inode.0 as usize], Entry::Directory { .. }) => {}
+            _ => {
+                return Err(Error::Path(format!(
+                    "{} is not in a directory",
+                    String::from_utf8_lossy(to)
+                )));
+            }
+        }
+        let (last, dirs) = from_names.split_last().expect("not empty");
+        let mut dir = &mut self.root;
+        for name in dirs {
+            match dir.children.get_mut(*name) {
+                Some(child) => dir = child,
+                None => return Ok(false),
+            }
+        }
+        let Some(moved) = dir.children.remove(*last) else {
+            return Ok(false);
+        };
+        let mut dir = &mut self.root;
+        for name in to_names {
+            dir = dir.children.get_mut(name).expect("checked above");
+        }
+        dir.children.insert(to_name.to_vec(), moved);
+        Ok(true)
+    }
+
     fn get(&self, path: &[u8]) -> Result<Option<&Node>> {
         let mut node = &self.root;
         for name in components(path)? {
@@ -583,6 +658,55 @@ mod tests {
         tree.insert(b"var/cache/old", file(b"old")).unwrap();
         tree.insert(b"bin", file(b"not a directory yet")).unwrap();
         tree
+    }
+
+    #[test]
+    fn a_path_is_looked_up_and_a_directory_listed() {
+        let tree = lower();
+        assert_eq!(tree.entry(b"etc/passwd").unwrap(), Some(&file(b"root")));
+        assert_eq!(tree.entry(b"etc/none").unwrap(), None);
+        assert!(matches!(
+            tree.entry(b"").unwrap(),
+            Some(Entry::Directory { .. })
+        ));
+        assert!(tree.entry(b"../x").is_err());
+
+        let listed: Vec<_> = tree
+            .entries(b"etc")
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name.to_vec())
+            .collect();
+        assert_eq!(listed, [b"hostname".to_vec(), b"passwd".to_vec()]);
+        assert!(tree.entries(b"bin").unwrap().is_none());
+        assert!(tree.entries(b"none").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_rename_moves_a_tree_and_replaces_what_was_there() {
+        let mut tree = lower();
+        assert!(tree.rename(b"var", b"etc/var").unwrap());
+        assert!(tree.rename(b"etc/hostname", b"bin").unwrap());
+        assert_eq!(
+            paths(&tree),
+            [
+                "",
+                "bin",
+                "etc",
+                "etc/passwd",
+                "etc/var",
+                "etc/var/cache",
+                "etc/var/cache/old"
+            ]
+        );
+        assert_eq!(at(&tree, "bin"), &file(b"lower"));
+
+        assert!(!tree.rename(b"none", b"x").unwrap());
+        assert!(tree.rename(b"etc", b"etc/var/inside").is_err());
+        assert!(tree.rename(b"etc", b"none/x").is_err());
+        assert!(tree.rename(b"etc", b"bin/x").is_err());
+        assert!(tree.rename(b"", b"x").is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! `virtx-http-server` -- a virtx server over HTTP, to the users and projects its config names
 //! (see [`config`]): each request carries a user's token and names a project, and its methods
-//! are in that project's home.
+//! are in that project's home. So are the files endpoints, `/volumes/` and `/snapshots/`,
+//! which a request reaches with the same token and project.
 //!
 //! The images every project shares are at `/images/v2/`, as an OCI registry (see
 //! [`virtx_uvm::RegistryServer`]), to any user.
@@ -27,8 +28,9 @@ use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::{IntoResponse as _, Response};
 use clap::Parser;
-use http::{HeaderMap, StatusCode, header};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tower_http::cors::CorsLayer;
 use virtx_core::{CancelScope, Dispatcher, Server};
 use virtx_uvm::RegistryServer;
 
@@ -140,7 +142,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                     async move { port(&access, &capability, &headers, upgrade) }
                 },
             ),
-        );
+        )
+        .route("/volumes/{*path}", files(&access))
+        .route("/snapshots/{*path}", files(&access))
+        .layer(cors(&config.origins));
 
     let reaping = Arc::clone(&access);
     tokio::spawn(async move {
@@ -179,6 +184,67 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+/// What a browser at one of the config's `origins` may do here: every method the endpoints
+/// take, with the headers they read and the ones a client reads back. A preflight is answered
+/// here, before any check, as a browser sends it without the token; the request it clears is
+/// checked as any other.
+fn cors(origins: &[String]) -> CorsLayer {
+    let origins: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
+        .collect();
+    let method = |name| Method::from_bytes(name).expect("a method name");
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+            method(b"PROPFIND"),
+            method(b"MKCOL"),
+            method(b"MOVE"),
+            method(b"COPY"),
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::IF_MATCH,
+            header::RANGE,
+            HeaderName::from_static(access::PROJECT_HEADER),
+            HeaderName::from_static("depth"),
+            HeaderName::from_static("destination"),
+            HeaderName::from_static("overwrite"),
+        ])
+        .expose_headers([
+            header::ETAG,
+            header::CONTENT_RANGE,
+            header::LOCATION,
+            HeaderName::from_static("dav"),
+        ])
+        .max_age(Duration::from_secs(3600))
+}
+
+/// The files endpoints, each request answered from the home it reaches.
+fn files(access: &Arc<Access>) -> axum::routing::MethodRouter {
+    let access = Arc::clone(access);
+    axum::routing::any(move |request: axum::extract::Request| {
+        let home = access.home(request.headers());
+        async move {
+            match home {
+                Ok((_, home)) => {
+                    home.files
+                        .handle(request, &|name| home.holds_snapshot(name))
+                        .await
+                }
+                Err(status) => status.into_response(),
+            }
+        }
+    })
 }
 
 /// A request to the port `capability` opens: `426` unless it opens a WebSocket, `400` unless of

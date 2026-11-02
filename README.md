@@ -1105,10 +1105,13 @@ reserved: a client that asks for a tree there is refused.
 ```
 virtx-uvm/                  the machinery: images, the root filesystems made of them,
                             machines and booting them
-virtx-stdio-server/         the one binary, `virtx-uvm`: the console server a user runs
-                            over stdio, and -- as `virtx-uvm boot`, spawned by itself --
-                            the process that becomes a VM; signed on macOS
-virtx-http-server/          the same server over Streamable HTTP; empty for now
+virtx-stdio-server/         the one binary, `virtx-uvm`: the server a user runs over
+                            stdio -- the RPC at `/rpc`, and the files of its volumes and
+                            snapshots at `/volumes/` and `/snapshots/` beside it -- and,
+                            as `virtx-uvm vm`, spawned by itself, the process that
+                            becomes a VM; signed on macOS
+virtx-http-server/          the same server over HTTP, to the users and projects its
+                            config names
 virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
                             beside them and not on it -- and a SKILLS.md each, saying what one
                             is; its own workspace, built for musl

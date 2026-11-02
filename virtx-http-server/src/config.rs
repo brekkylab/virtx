@@ -30,7 +30,8 @@ pub struct Config {
     pub listen: SocketAddr,
     #[serde(default)]
     home: Option<PathBuf>,
-    /// The `Origin`s a browser may call from.
+    /// The `Origin`s a browser may call from: each is answered its preflights, and let
+    /// through with the token and the project as any other caller.
     #[serde(default)]
     pub origins: Vec<String>,
     users: HashMap<String, User>,

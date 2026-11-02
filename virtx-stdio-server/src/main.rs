@@ -1,6 +1,7 @@
 //! `virtx-uvm` -- a virtx server over stdio: the RPC `virtx-core` names at `/rpc`, and the
-//! images as an OCI registry at `/images/v2/` (see [`virtx_uvm::RegistryServer`]), answered on
-//! stdin and stdout to the client that spawned it, until it closes stdin. Everything this host
+//! images as an OCI registry at `/images/v2/` (see [`virtx_uvm::RegistryServer`]) and the
+//! files of its snapshots and volumes at `/volumes/` and `/snapshots/`, answered on stdin
+//! and stdout to the client that spawned it, until it closes stdin. Everything this host
 //! keeps is that one client's.
 //!
 //! `virtx-uvm vm …` is this binary spawned by itself to be a machine; see
@@ -8,12 +9,11 @@
 
 mod rpc;
 
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
-use http::{Response, StatusCode};
-use http_body_util::{BodyExt as _, Empty};
+use http_body_util::BodyExt as _;
 use virtx_core::{Dispatcher, Server, serve_stdio};
-use virtx_uvm::{ImageStore, RegistryBody, RegistryServer};
+use virtx_uvm::{ImageStore, RegistryServer};
 
 use crate::rpc::Home;
 
@@ -39,7 +39,7 @@ async fn serve() -> anyhow::Result<()> {
     let rpc = Server::new(Dispatcher::new(rpc::methods(&home)));
     let registry = Arc::new(RegistryServer::new(images, "/images")?);
     let handle = move |request: http::Request<_>| {
-        let (rpc, registry) = (rpc.clone(), Arc::clone(&registry));
+        let (rpc, registry, home) = (rpc.clone(), Arc::clone(&registry), Arc::clone(&home));
         async move {
             let path = request.uri().path();
             if path == "/rpc" {
@@ -49,10 +49,11 @@ async fn serve() -> anyhow::Result<()> {
             } else if path == "/images/v2" || path.starts_with("/images/v2/") {
                 registry.handle(request).await
             } else {
-                let mut response: Response<RegistryBody> =
-                    Response::new(Empty::new().map_err(|never| match never {}).boxed_unsync());
-                *response.status_mut() = StatusCode::NOT_FOUND;
-                response
+                let request = request.map(axum::body::Body::new);
+                home.files
+                    .handle(request, &|name| home.holds_snapshot(name))
+                    .await
+                    .map(|body| body.map_err(io::Error::other).boxed_unsync())
             }
         }
     };

@@ -21,6 +21,8 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread"] }
 # The stdio transport this binary serves the methods over.
 virtx-core = { workspace = true, features = ["server"] }
+# A request as the files endpoints take one.
+axum = { version = "0.8", default-features = false }
 # The methods, and the machines they start.
 virtx-uvm = { workspace = true }
 # Which endpoint a request is for, and one body for what each answers.

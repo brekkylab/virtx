@@ -1,5 +1,6 @@
 //! The built binary, called as a client calls it: spawned, and spoken to on its stdin and
-//! stdout, over a `VIRTX_HOME` of its own.
+//! stdout, over a `VIRTX_HOME` of its own -- the RPC, and the files of its volumes and
+//! snapshots beside it.
 
 use std::path::PathBuf;
 use std::pin::pin;
@@ -9,15 +10,16 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
-    Error, Event, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName, ImagePrune,
-    ImagePruneArgs, MountSource, MountType, Recipe, Request, SandboxClose, SandboxCloseArgs,
-    SandboxExec, SandboxExecArgs, SandboxInit, SandboxInitArgs, SandboxList, SandboxListArgs,
-    SandboxVolume, SnapshotCreate, SnapshotCreateArgs, SnapshotList, SnapshotListArgs,
-    SnapshotRemove, SnapshotRemoveArgs, Step, TransportClient, VolumeCreate, VolumeCreateArgs,
-    VolumeList, VolumeListArgs, VolumeMountCreate, VolumeMountCreateArgs, VolumeMountList,
-    VolumeMountListArgs, VolumeMountRemove, VolumeMountRemoveArgs, VolumeRemove, VolumeRemoveArgs,
+    DirEntry, Error, Event, FileRoot, ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageName,
+    ImagePrune, ImagePruneArgs, MountSource, MountType, Recipe, Request, SandboxClose,
+    SandboxCloseArgs, SandboxExec, SandboxExecArgs, SandboxInit, SandboxInitArgs, SandboxList,
+    SandboxListArgs, SandboxVolume, SnapshotCreate, SnapshotCreateArgs, SnapshotList,
+    SnapshotListArgs, SnapshotRemove, SnapshotRemoveArgs, Step, TransportClient, VolumeCreate,
+    VolumeCreateArgs, VolumeList, VolumeListArgs, VolumeMountCreate, VolumeMountCreateArgs,
+    VolumeMountList, VolumeMountListArgs, VolumeMountRemove, VolumeMountRemoveArgs, VolumeRemove,
+    VolumeRemoveArgs,
 };
-use virtx_uvm::{FsTree, ImageStore, RegistryClient};
+use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -149,6 +151,26 @@ fn code<T: std::fmt::Debug>(answered: Result<T, Error>) -> i64 {
         Err(Error::Call(error)) => error.code,
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+/// The HTTP status a files request was refused with.
+fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
+    match answered {
+        Err(Error::Status(status, _)) => status,
+        other => panic!("expected a status, got {other:?}"),
+    }
+}
+
+fn names(entries: Vec<DirEntry>) -> Vec<String> {
+    entries.into_iter().map(|entry| entry.name).collect()
+}
+
+/// A snapshot held by this process, as a machine over it would hold it.
+fn hold(server: &Server, snapshot: &str) -> std::fs::File {
+    let lock =
+        std::fs::File::create(server.home.join(format!("snapshot/{snapshot}.ext4.lock"))).unwrap();
+    lock.try_lock().unwrap();
+    lock
 }
 
 #[tokio::test]
@@ -364,6 +386,184 @@ async fn a_mount_is_kept_at_a_path_until_it_is_removed() {
     assert_eq!(code(answered), NOT_FOUND);
 }
 
+#[tokio::test]
+async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
+    let server = Server::spawn("volume-files");
+    server
+        .call::<VolumeCreate>(VolumeCreateArgs {
+            name: Some("data".into()),
+        })
+        .await
+        .unwrap();
+    let client = &server.client;
+    let volume = FileRoot::Volume("data".into());
+
+    client.create_dir(&volume, "dir").await.unwrap();
+    client
+        .write(&volume, "dir/a.txt", "hello world", None)
+        .await
+        .unwrap();
+    assert!(server.home.join("volume/data/files/dir/a.txt").is_file());
+
+    let metadata = client.stat(&volume, "dir/a.txt").await.unwrap();
+    assert!(!metadata.is_dir && metadata.size == 11, "{metadata:?}");
+    assert!(metadata.modified.is_some());
+    let entries = client.read_dir(&volume, "dir").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "a.txt");
+    assert_eq!(entries[0].metadata, metadata);
+    assert_eq!(names(client.read_dir(&volume, "").await.unwrap()), ["dir"]);
+
+    let read = client.read(&volume, "dir/a.txt", 0, None).await.unwrap();
+    assert_eq!(&read[..], b"hello world");
+    let read = client.read(&volume, "dir/a.txt", 6, Some(3)).await.unwrap();
+    assert_eq!(&read[..], b"wor");
+
+    client
+        .rename(&volume, "dir/a.txt", "b.txt", false)
+        .await
+        .unwrap();
+    client.copy(&volume, "b.txt", "c.txt", false).await.unwrap();
+    assert_eq!(
+        status(client.copy(&volume, "b.txt", "c.txt", false).await),
+        412
+    );
+    client.copy(&volume, "b.txt", "c.txt", true).await.unwrap();
+    client.copy(&volume, "dir", "copied", false).await.unwrap();
+    client.remove(&volume, "dir", false).await.unwrap();
+    assert_eq!(status(client.stat(&volume, "dir").await), 404);
+    assert!(client.stat(&volume, "copied").await.unwrap().is_dir);
+    let read = client.read(&volume, "c.txt", 0, None).await.unwrap();
+    assert_eq!(&read[..], b"hello world");
+
+    // What RFC 4918 refuses, with its status.
+    assert_eq!(
+        status(client.write(&volume, "no/file", "x", None).await),
+        409
+    );
+    assert_eq!(status(client.create_dir(&volume, "no/dir").await), 409);
+    assert_eq!(status(client.create_dir(&volume, "copied").await), 405);
+    assert_eq!(status(client.read(&volume, "missing", 0, None).await), 404);
+    assert_eq!(status(client.remove(&volume, "missing", false).await), 404);
+    let nobody = FileRoot::Volume("nobody".into());
+    assert_eq!(status(client.stat(&nobody, "").await), 404);
+
+    // A link in the volume, which a machine may have made, points at nothing here.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/", server.home.join("volume/data/files/out")).unwrap();
+        assert_eq!(status(client.stat(&volume, "out").await), 404);
+        assert_eq!(status(client.read_dir(&volume, "out").await), 404);
+        assert!(!names(client.read_dir(&volume, "").await.unwrap()).contains(&"out".to_owned()));
+    }
+}
+
+#[tokio::test]
+async fn the_files_of_a_snapshot_are_kept_in_its_image() {
+    let server = Server::spawn("snapshot-files");
+    server
+        .call::<SnapshotCreate>(SnapshotCreateArgs {
+            name: Some("work".into()),
+            disk_gib: Some(1),
+        })
+        .await
+        .unwrap();
+    let client = &server.client;
+    let snapshot = FileRoot::Snapshot("work".into());
+
+    // What the format made, and nothing else.
+    assert_eq!(
+        names(client.read_dir(&snapshot, "").await.unwrap()),
+        [] as [&str; 0]
+    );
+
+    client.create_dir(&snapshot, "etc").await.unwrap();
+    client
+        .write(&snapshot, "etc/hostname", "guest\n", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(client.write(&snapshot, "no/file", "x", None).await),
+        409
+    );
+    assert_eq!(status(client.create_dir(&snapshot, "etc").await), 405);
+    let read = client
+        .read(&snapshot, "etc/hostname", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(&read[..], b"guest\n");
+    let read = client
+        .read(&snapshot, "etc/hostname", 1, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(&read[..], b"ue");
+    let metadata = client.stat(&snapshot, "etc/hostname").await.unwrap();
+    assert_eq!((metadata.is_dir, metadata.size), (false, 6));
+    assert!(metadata.modified.is_some());
+    assert_eq!(
+        names(client.read_dir(&snapshot, "etc").await.unwrap()),
+        ["hostname"]
+    );
+
+    client
+        .rename(&snapshot, "etc/hostname", "hostname", false)
+        .await
+        .unwrap();
+    client
+        .copy(&snapshot, "hostname", "etc/copy", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(client.copy(&snapshot, "hostname", "etc/copy", false).await),
+        412
+    );
+    client.remove(&snapshot, "hostname", false).await.unwrap();
+    assert_eq!(status(client.stat(&snapshot, "hostname").await), 404);
+
+    // In the image, as the next machine over it finds it.
+    let image = std::fs::File::open(server.home.join("snapshot/work.ext4")).unwrap();
+    let tree = FsTree::from_ext4(image).unwrap();
+    let paths: Vec<_> = tree
+        .walk()
+        .into_iter()
+        .map(|(path, ..)| String::from_utf8(path).unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        ["", "lost+found", "upper", "upper/etc", "upper/etc/copy"]
+    );
+    assert!(matches!(
+        tree.entry(b"upper/etc/copy").unwrap(),
+        Some(Entry::File { data, .. }) if data == b"guest\n"
+    ));
+
+    // At once: each request reads and writes the image whole, one after another.
+    let paths = ["etc/0", "etc/1", "etc/2", "etc/3"];
+    let writes = paths
+        .iter()
+        .map(|path| client.write(&snapshot, path, "x", None));
+    for written in futures_util::future::join_all(writes).await {
+        written.unwrap();
+    }
+    assert_eq!(
+        names(client.read_dir(&snapshot, "etc").await.unwrap()),
+        ["0", "1", "2", "3", "copy"]
+    );
+
+    // Held by a machine: nothing is read or written until it is let go.
+    let held = hold(&server, "work");
+    assert_eq!(status(client.read_dir(&snapshot, "").await), 423);
+    assert_eq!(status(client.write(&snapshot, "x", "y", None).await), 423);
+    drop(held);
+    client.remove(&snapshot, "etc", false).await.unwrap();
+    assert_eq!(
+        names(client.read_dir(&snapshot, "").await.unwrap()),
+        [] as [&str; 0]
+    );
+    let nobody = FileRoot::Snapshot("nobody".into());
+    assert_eq!(status(client.read_dir(&nobody, "").await), 404);
+}
+
 /// What a port's URL names, as `host:port`.
 fn address(url: &str) -> &str {
     url.strip_prefix("http://")
@@ -502,8 +702,14 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
     let close = |id: String| server.call::<SandboxClose>(SandboxCloseArgs { sandbox: id });
 
     let id = init().await.unwrap().id;
-    // One sandbox at a time on a snapshot.
+    // One sandbox at a time on a snapshot, and its files are its alone meanwhile.
     assert_eq!(code(init().await), IN_USE);
+    let snapshot = FileRoot::Snapshot("work".into());
+    assert_eq!(status(server.client.read_dir(&snapshot, "").await), 423);
+    assert_eq!(
+        status(server.client.write(&snapshot, "x", "y", None).await),
+        423
+    );
     let listed = server
         .call::<SandboxList>(SandboxListArgs {})
         .await
@@ -577,10 +783,27 @@ async fn a_sandbox_runs_commands_on_its_snapshot_and_volumes() {
     close(id.clone()).await.unwrap();
     assert_eq!(code(close(id).await), NOT_FOUND);
 
-    // What it wrote to its snapshot is there for the next one.
+    // What it wrote to its snapshot reads back over the files endpoint, and what is put there
+    // is in the snapshot for the next one, beside it.
+    let read = server
+        .client
+        .read(&snapshot, "root/kept", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(&read[..], b"kept\n");
+    server
+        .client
+        .write(&snapshot, "root/put", "put\n", None)
+        .await
+        .unwrap();
     let id = init().await.unwrap().id;
-    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
-    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+    let (lines, ended) = server
+        .exec(&id, &["cat", "/root/kept", "/root/put"], None)
+        .await;
+    assert_eq!(
+        (lines, ended.unwrap()),
+        (vec!["kept".into(), "put".into()], 0)
+    );
     close(id).await.unwrap();
     server
         .call::<SnapshotRemove>(SnapshotRemoveArgs {

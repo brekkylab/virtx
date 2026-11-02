@@ -18,6 +18,8 @@ serde = { workspace = true }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
+# What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 # A token's randomness.
 uuid = { version = "1", features = ["v4"] }
 # The server end of `/rpc`.
@@ -26,8 +28,10 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
-# The wire, spoken by hand: virtx-core's client sends no token and names no project.
+# The wire, spoken by hand, and by virtx-core's client with the token and the project given
+# at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+virtx-core = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["io-util", "process"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"

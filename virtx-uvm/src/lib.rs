@@ -1,12 +1,15 @@
 //! Images, the machines provisioned from them, and the snapshots and registries around
-//! them, and the volumes mounted into them.
+//! them, and the volumes mounted into them -- and the files of a snapshot or a volume, served
+//! to a client.
 
+mod files;
 mod fstree;
 mod image;
 mod machine;
 mod snapshot;
 mod volume;
 
+pub use files::Files;
 pub use fstree::*;
 pub use image::{
     image_build::{Error as BuildError, build_step},

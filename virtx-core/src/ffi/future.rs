@@ -7,7 +7,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use serde::Serialize;
 use tokio::{
     runtime::Handle,
     task::{AbortHandle, JoinSet},
@@ -15,7 +14,7 @@ use tokio::{
 
 use super::{
     VIRTX_PENDING,
-    bytes::{VirtxBytes, encode, failure, write},
+    bytes::{VirtxBytes, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
 
@@ -70,11 +69,12 @@ impl Drop for Completion {
     }
 }
 
-/// Run `future` on `runtime`, tracked in `tasks`, and hand C the future.
-pub(super) fn start<T: Serialize>(
+/// Run `future`, which answers a status and the bytes to write with it, on `runtime`, tracked
+/// in `tasks`, and hand C the future.
+pub(super) fn start(
     runtime: &Handle,
     tasks: &Mutex<JoinSet<()>>,
-    future: impl Future<Output = Result<T, String>> + Send + 'static,
+    future: impl Future<Output = (c_int, Vec<u8>)> + Send + 'static,
 ) -> *mut VirtxFuture {
     let state = Arc::new(Mutex::new(State::Pending(None)));
     let completion = Completion(Arc::clone(&state));
@@ -83,7 +83,7 @@ pub(super) fn start<T: Serialize>(
     while tasks.try_join_next().is_some() {}
     let task = tasks.spawn_on(
         async move {
-            completion.finish(encode(future.await));
+            completion.finish(future.await);
         },
         runtime,
     );
@@ -162,6 +162,7 @@ mod tests {
     use super::{
         super::{
             VIRTX_ERROR,
+            bytes::encode,
             waker::testing::{Counts, empty, taken, waker},
         },
         *,
@@ -180,7 +181,7 @@ mod tests {
     ) -> (*mut VirtxFuture, oneshot::Sender<u32>) {
         let (send, receive) = oneshot::channel();
         let future = start(runtime.handle(), tasks, async move {
-            receive.await.map_err(|e| e.to_string())
+            encode(receive.await.map_err(|e| e.to_string()))
         });
         (future, send)
     }

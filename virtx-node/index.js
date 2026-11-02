@@ -247,9 +247,7 @@ const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/
 // string a tag. An object is taken as already named.
 function imageName(image) {
   if (typeof image !== 'string') return image
-  return DIGEST.test(image)
-    ? { type: 'digest', digest: image }
-    : { type: 'tag', tag: image }
+  return DIGEST.test(image) ? { type: 'digest', digest: image } : { type: 'tag', tag: image }
 }
 
 // A base and the steps over it, which the server builds: `new Recipe('alpine:3.20').run('apk add
@@ -379,7 +377,12 @@ class Client {
   setHeaders(headers) {
     const strings = Object.entries(headers).flat()
     const error = {}
-    const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
+    const status = this._lib.virtx_client_set_headers(
+      this._held(),
+      strings,
+      strings.length / 2,
+      error,
+    )
     if (status !== OK) this._lib.take(status, error)
   }
 

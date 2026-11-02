@@ -53,7 +53,10 @@ function read(host, port) {
 }
 
 test('a header that cannot be sent is refused at connect', () => {
-  assert.throws(() => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }), /not a name/)
+  assert.throws(
+    () => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }),
+    /not a name/,
+  )
 })
 
 test('a token does not go in the clear to another machine', async () => {
@@ -66,7 +69,11 @@ test('a token does not go in the clear to another machine', async () => {
 })
 
 test('a command is run for the token before a request is sent', async () => {
-  const failing = { type: 'command', program: 'sh', args: ['-c', "echo 'not signed in' >&2; exit 1"] }
+  const failing = {
+    type: 'command',
+    program: 'sh',
+    args: ['-c', "echo 'not signed in' >&2; exit 1"],
+  }
   assert.throws(() => Client.connect('http://example.com/', failing), /in the clear/)
   const client = Client.connect('http://127.0.0.1:9/', failing)
   await assert.rejects(client.listSandbox(), /not signed in/)

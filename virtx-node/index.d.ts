@@ -66,8 +66,7 @@ export interface ImageBuildOutput {
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
-  | { type: 'basic'; username: string; password: string }
-  | { type: 'bearer'; token: string }
+  { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string }
 
 /**
  * The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`,
@@ -75,7 +74,8 @@ export type RegistryAuth =
  * run for the first request, and again when its token is a minute from running out or the server refuses
  * it: a person's short-lived token, as `virtx token --json` prints it.
  */
-export type Auth = { type: 'bearer'; token: string } | { type: 'command'; program: string; args?: string[] }
+export type Auth =
+  { type: 'bearer'; token: string } | { type: 'command'; program: string; args?: string[] }
 
 export interface ImagePullOutput {
   /** The digest of the image's manifest, as `algorithm:hex`. */
@@ -252,7 +252,10 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): AsyncGenerator<Event<ImageBuildOutput, string>>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): AsyncGenerator<Event<ImageBuildOutput, string>>
   /** Pull `reference` from its registry, and point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePullOutput, string>>
   /** Push the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
@@ -286,7 +289,11 @@ export class Client {
   listSandbox(): Promise<SandboxListItem[]>
   initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
   /** Killed after `timeoutMs` if one is given. */
-  execSandbox(sandbox: string, cmd: string[], timeoutMs?: number): AsyncGenerator<Event<{ code: number }, string>>
+  execSandbox(
+    sandbox: string,
+    cmd: string[],
+    timeoutMs?: number,
+  ): AsyncGenerator<Event<{ code: number }, string>>
   /** Make the sandbox's ports `ports`: answered with where each is reached from, in the order given. A port kept keeps its URL, one left out is closed, one added gets a URL of its own. A machine running keeps the ports it started with; the next one opens these. */
   portsSandbox(sandbox: string, ports: number[]): Promise<SandboxPort[]>
   closeSandbox(sandbox: string): Promise<void>

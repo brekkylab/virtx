@@ -17,7 +17,16 @@ TARGET = ROOT / "target" / "debug"
 def pytest_configure(config: pytest.Config) -> None:
     subprocess.run(["cargo", "build", "-p", "virtx-core", "--lib"], cwd=ROOT, check=True)
     subprocess.run(
-        ["cargo", "build", "-p", "virtx-core", "--features", "testing", "--example", "files_server"],
+        [
+            "cargo",
+            "build",
+            "-p",
+            "virtx-core",
+            "--features",
+            "testing",
+            "--example",
+            "files_server",
+        ],
         cwd=ROOT,
         check=True,
     )

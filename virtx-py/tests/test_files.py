@@ -64,5 +64,7 @@ def test_a_root_and_metadata_read_as_the_wire_has_them() -> None:
     assert Volume("v").to_dict() == {"volume": "v"}
     assert Snapshot("s").to_dict() == {"snapshot": "s"}
     assert Metadata.from_dict({"is_dir": True, "size": 0}) == Metadata(True, 0)
-    entry = DirEntry.from_dict({"name": "a", "metadata": {"is_dir": False, "size": 1, "modified": 2}})
+    entry = DirEntry.from_dict(
+        {"name": "a", "metadata": {"is_dir": False, "size": 1, "modified": 2}}
+    )
     assert entry == DirEntry("a", Metadata(False, 1, 2))

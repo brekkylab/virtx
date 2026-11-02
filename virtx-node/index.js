@@ -591,7 +591,13 @@ class Client {
   async writeFile(root, at, content, ifMatch) {
     const bytes = encode({ ...root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
+    const handle = this._lib.virtx_client_write_file(
+      this._held(),
+      bytes,
+      bytes.length,
+      data,
+      data.length,
+    )
     await this._lib.answer(handle)
   }
 
@@ -606,7 +612,11 @@ class Client {
   // Removes what is at `path`: a directory with everything in it.
   // With `missingOk`, nothing being there is fine, as `rm -f`; without it, a `404`.
   async removeFile(root, at, missingOk = false) {
-    await this._call('virtx_client_remove_file', { ...root, path: at, missingOk: missingOk || undefined })
+    await this._call('virtx_client_remove_file', {
+      ...root,
+      path: at,
+      missingOk: missingOk || undefined,
+    })
   }
 
   // Moves what is at `from` to `to` in the same root, replacing what is at `to` if `overwrite`,

@@ -22,7 +22,11 @@ const library =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-const filesServer = path.join(target, 'examples', process.platform === 'win32' ? 'files_server.exe' : 'files_server')
+const filesServer = path.join(
+  target,
+  'examples',
+  process.platform === 'win32' ? 'files_server.exe' : 'files_server',
+)
 
 before(() => {
   execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })

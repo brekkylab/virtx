@@ -21,10 +21,11 @@
 //!
 //! # `NO_VIRGL`
 //!
-//! Without it libkrun asks rutabaga for the virgl/virgl2 capsets, which makes
-//! virglrenderer bring up an OpenGL context -- there is no EGL on macOS and it segfaults
-//! in `create_gl_context`. venus needs none of it. libkrun does not expose the bit in its
-//! own flag set, hence `from_bits_retain`.
+//! Without it libkrun advertises the virgl/virgl2 capsets, which the build has no vrend
+//! behind (`-Dvrend=false`), and rutabaga leaves 2D resources and global fences to a
+//! virglrenderer that does nothing with them; with it rutabaga handles both itself. venus
+//! needs none of the GL side. libkrun does not expose the bit in its own flag set, hence
+//! `from_bits_retain`.
 //!
 //! # `RENDER_SERVER`, everywhere but Windows
 //!
@@ -50,7 +51,7 @@
 //!
 //! The device the guest enumerates reports the same size: venus caps every heap, and
 //! `VK_EXT_memory_budget`'s budgets, at `VKR_HEAP_SIZE_MAX` (see
-//! `3rdparty/_patches/virglrenderer-8167744-heap-limit.patch`), which is set here from the
+//! `3rdparty/_patches/virglrenderer/heap-limit.patch`), which is set here from the
 //! window. Otherwise the guest sees the host device's whole heap -- 19 GB on an 18 GB Mac
 //! -- sizes itself to that, and learns the truth from a mapping that fails; ncnn copies
 //! out of the null pointer it gets back.

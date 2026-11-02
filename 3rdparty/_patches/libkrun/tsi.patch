@@ -1,10 +1,11 @@
 diff --git a/init/init-binary/src/env.rs b/init/init-binary/src/env.rs
+index 6863267..028d8ea 100644
 --- a/init/init-binary/src/env.rs
 +++ b/init/init-binary/src/env.rs
-@@ -34,6 +34,22 @@ pub fn setup_network(iface: &str) {
+@@ -34,6 +34,22 @@ pub fn setup_network(iface: &str, dhcp: bool, dhcp_renew: bool) {
      }
  
-     setup_dhcp(iface, sock.as_raw_fd());
+     setup_dhcp(iface, sock.as_raw_fd(), dhcp, dhcp_renew);
 +    setup_nameserver();
 +}
 +
@@ -24,7 +25,29 @@ diff --git a/init/init-binary/src/env.rs b/init/init-binary/src/env.rs
  }
  
  #[cfg(target_os = "freebsd")]
+diff --git a/src/devices/src/virtio/linux_errno.rs b/src/devices/src/virtio/linux_errno.rs
+index bc081cd..f494463 100644
+--- a/src/devices/src/virtio/linux_errno.rs
++++ b/src/devices/src/virtio/linux_errno.rs
+@@ -1,6 +1,6 @@
+ #![allow(unused)]
+ 
+-const LINUX_EPERM: i32 = 1;
++pub const LINUX_EPERM: i32 = 1;
+ const LINUX_ENOENT: i32 = 2;
+ const LINUX_ESRCH: i32 = 3;
+ const LINUX_EINTR: i32 = 4;
+@@ -75,7 +75,7 @@ const LINUX_ENOTCONN: i32 = 107;
+ const LINUX_ESHUTDOWN: i32 = 108;
+ const LINUX_ETOOMANYREFS: i32 = 109;
+ const LINUX_ETIMEDOUT: i32 = 110;
+-const LINUX_ECONNREFUSED: i32 = 111;
++pub const LINUX_ECONNREFUSED: i32 = 111;
+ const LINUX_EHOSTDOWN: i32 = 112;
+ const LINUX_EHOSTUNREACH: i32 = 113;
+ const LINUX_EALREADY: i32 = 114;
 diff --git a/src/devices/src/virtio/vsock/device.rs b/src/devices/src/virtio/vsock/device.rs
+index 49582f8..8801a6e 100644
 --- a/src/devices/src/virtio/vsock/device.rs
 +++ b/src/devices/src/virtio/vsock/device.rs
 @@ -55,10 +55,11 @@ impl Vsock {
@@ -41,6 +64,7 @@ diff --git a/src/devices/src/virtio/vsock/device.rs b/src/devices/src/virtio/vso
              queue_tx: None,
              queue_events: Vec::new(),
 diff --git a/src/devices/src/virtio/vsock/mod.rs b/src/devices/src/virtio/vsock/mod.rs
+index 292d219..8c24abb 100644
 --- a/src/devices/src/virtio/vsock/mod.rs
 +++ b/src/devices/src/virtio/vsock/mod.rs
 @@ -12,6 +12,7 @@ mod muxer_rxq;
@@ -60,26 +84,28 @@ diff --git a/src/devices/src/virtio/vsock/mod.rs b/src/devices/src/virtio/vsock/
  use bitflags::bitflags;
  use vm_memory::GuestMemoryError;
 diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsock/muxer.rs
+index abf7f66..5c4b709 100644
 --- a/src/devices/src/virtio/vsock/muxer.rs
 +++ b/src/devices/src/virtio/vsock/muxer.rs
 @@ -14,6 +14,7 @@ use super::defs::uapi;
  use super::muxer_rxq::{MuxerRxQ, rx_to_pkt};
  use super::muxer_thread::MuxerThread;
  use super::packet::{TsiConnectReq, TsiGetnameRsp, VsockPacket};
-+use super::policy::{LINUX_ECONNREFUSED, LINUX_EPERM, TsiPolicy};
++use super::policy::TsiPolicy;
  use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
  use super::reaper::ReaperThread;
  #[cfg(target_os = "macos")]
-@@ -26,7 +27,7 @@ use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+@@ -26,7 +27,8 @@ use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
  use vm_memory::GuestMemoryMmap;
  
  use crate::virtio::InterruptTransport;
 -use std::net::{Ipv4Addr, SocketAddrV4};
++use crate::virtio::linux_errno::{LINUX_ECONNREFUSED, LINUX_EPERM};
 +use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
  
  #[cfg(windows)]
  use defs::{LINUX_AF_INET as AF_INET, LINUX_AF_INET6 as AF_INET6, LINUX_AF_UNIX as AF_UNIX};
-@@ -116,6 +117,7 @@ pub struct VsockMuxer {
+@@ -116,6 +118,7 @@ pub struct VsockMuxer {
      reaper_sender: Option<Sender<u64>>,
      unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
      tsi_flags: TsiFlags,
@@ -87,7 +113,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
  }
  
  impl VsockMuxer {
-@@ -124,6 +126,7 @@ impl VsockMuxer {
+@@ -124,6 +127,7 @@ impl VsockMuxer {
          host_port_map: Option<HashMap<u16, u16>>,
          unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
          tsi_flags: TsiFlags,
@@ -95,7 +121,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
      ) -> Self {
          VsockMuxer {
              cid,
-@@ -137,6 +140,7 @@ impl VsockMuxer {
+@@ -137,6 +141,7 @@ impl VsockMuxer {
              reaper_sender: None,
              unix_ipc_port_map,
              tsi_flags,
@@ -103,7 +129,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
          }
      }
  
-@@ -378,9 +382,25 @@ impl VsockMuxer {
+@@ -382,9 +387,25 @@ impl VsockMuxer {
  
      fn process_connect(&self, pkt: &VsockPacket) {
          debug!("proxy connect request");
@@ -130,7 +156,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
              match self.proxy_map.read().unwrap().get(&id) {
                  Some(proxy) => {
                      self.process_proxy_update(id, proxy.lock().unwrap().connect(pkt, req));
-@@ -420,9 +440,23 @@ impl VsockMuxer {
+@@ -424,9 +445,23 @@ impl VsockMuxer {
  
      fn process_sendto_addr(&self, pkt: &VsockPacket) {
          debug!("new DGRAM sendto addr: src={}", pkt.src_port());
@@ -155,7 +181,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
              let update = self
                  .proxy_map
                  .read()
-@@ -446,9 +480,25 @@ impl VsockMuxer {
+@@ -450,9 +485,25 @@ impl VsockMuxer {
  
      fn process_listen_request(&self, pkt: &VsockPacket) {
          debug!("DGRAM listen request: src={}", pkt.src_port());
@@ -182,7 +208,7 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
              match self.proxy_map.read().unwrap().get(&id) {
                  Some(proxy) => self.process_proxy_update(
                      id,
-@@ -743,3 +793,34 @@ impl VsockMuxer {
+@@ -751,3 +802,34 @@ impl VsockMuxer {
          Ok(())
      }
  }
@@ -217,103 +243,12 @@ diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsoc
 +use super::windows::sockaddr_storage::SockaddrStorage as Storage;
 +#[cfg(unix)]
 +use nix::sys::socket::SockaddrStorage as Storage;
-diff --git a/src/devices/src/virtio/vsock/proxy.rs b/src/devices/src/virtio/vsock/proxy.rs
---- a/src/devices/src/virtio/vsock/proxy.rs
-+++ b/src/devices/src/virtio/vsock/proxy.rs
-@@ -95,6 +95,9 @@ pub trait Proxy: Send + AsRawFd {
-     fn getpeername(&mut self, pkt: &VsockPacket);
-     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate;
-     fn sendto_addr(&mut self, req: TsiSendtoAddr) -> ProxyUpdate;
-+    /// Forget where datagrams were going, so that data following a destination a policy
-+    /// refused is dropped rather than sent wherever the one before it went.
-+    fn refuse_sendto(&mut self) {}
-     fn sendto_data(&mut self, _pkt: &VsockPacket) {}
-     fn listen(
-         &mut self,
-diff --git a/src/devices/src/virtio/vsock/tsi_dgram/mod.rs b/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
---- a/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
-+++ b/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
-@@ -132,6 +132,10 @@ impl Proxy for TsiDgramProxy {
-         sys::do_sendto_addr(self, req)
-     }
- 
-+    fn refuse_sendto(&mut self) {
-+        self.sendto_addr = None;
-+    }
-+
-     fn sendto_data(&mut self, pkt: &VsockPacket) {
-         sys::sendto_data(self, pkt)
-     }
-diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
---- a/src/libkrun/src/api/device_builders.rs
-+++ b/src/libkrun/src/api/device_builders.rs
-@@ -1177,6 +1177,7 @@ pub struct VsockDevice {
-     tsi_flags: devices::virtio::TsiFlags,
-     host_port_map: HashMap<u16, u16>,
-     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
-+    policy: Option<Arc<dyn devices::virtio::TsiPolicy>>,
- }
- 
- #[cfg_attr(feature = "ffi", ffier::export)]
-@@ -1191,6 +1192,7 @@ impl VsockDevice {
-             tsi_flags,
-             host_port_map: HashMap::new(),
-             unix_ipc_port_map: HashMap::new(),
-+            policy: None,
-         })
-     }
- 
-@@ -1212,6 +1214,16 @@ impl VsockDevice {
-     }
- }
- 
-+impl VsockDevice {
-+    /// Decide where the guest's impersonated sockets may go -- see [`TsiPolicy`]. Without
-+    /// one, every request goes where the guest asked.
-+    ///
-+    /// [`TsiPolicy`]: devices::virtio::TsiPolicy
-+    pub fn set_policy(&mut self, policy: Arc<dyn devices::virtio::TsiPolicy>) {
-+        self.policy = Some(policy);
-+    }
-+}
-+
- #[cfg_attr(feature = "ffi", ffier::export)]
- impl<'a> AttachDevice<'a> for VsockDevice {
-     #[cfg_attr(feature = "ffi", ffier(skip))]
-@@ -1220,9 +1232,14 @@ impl<'a> AttachDevice<'a> for VsockDevice {
-         let unix_ipc_port_map =
-             (!self.unix_ipc_port_map.is_empty()).then_some(self.unix_ipc_port_map);
- 
--        let vsock =
--            devices::virtio::Vsock::new(self.cid, host_port_map, unix_ipc_port_map, self.tsi_flags)
--                .map_err(|e| VmmError::Internal(format!("vsock: {e:?}")))?;
-+        let vsock = devices::virtio::Vsock::new(
-+            self.cid,
-+            host_port_map,
-+            unix_ipc_port_map,
-+            self.tsi_flags,
-+            self.policy,
-+        )
-+        .map_err(|e| VmmError::Internal(format!("vsock: {e:?}")))?;
- 
-         let inner = Arc::new(Mutex::new(vsock));
-         ctx.subscribe_events(inner.clone())?;
-diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
---- a/src/libkrun/src/api/mod.rs
-+++ b/src/libkrun/src/api/mod.rs
-@@ -48,6 +48,7 @@ pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
- #[cfg(feature = "gpu")]
- pub use device_builders::{GpuDevice, VirglRendererFlags};
-+pub use devices::virtio::TsiPolicy;
- #[cfg(feature = "blk")]
- pub use devices::virtio::block::{DiskFormat, SyncMode};
- pub use error::VmmError;
- pub use logging::{LogLevel, LogOptions, LogStyle, init_log};
 diff --git a/src/devices/src/virtio/vsock/policy.rs b/src/devices/src/virtio/vsock/policy.rs
 new file mode 100644
+index 0000000..758e85e
 --- /dev/null
 +++ b/src/devices/src/virtio/vsock/policy.rs
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,30 @@
 +//! Where a guest's impersonated socket may go, decided by whoever made the device.
 +//!
 +//! Every TSI request that would put a host socket somewhere -- a `connect`, a datagram's
@@ -344,15 +279,40 @@ new file mode 100644
 +    /// cannot reach it.
 +    fn listen(&self, at: SocketAddr) -> Option<SocketAddr>;
 +}
+diff --git a/src/devices/src/virtio/vsock/proxy.rs b/src/devices/src/virtio/vsock/proxy.rs
+index f535f39..9044f99 100644
+--- a/src/devices/src/virtio/vsock/proxy.rs
++++ b/src/devices/src/virtio/vsock/proxy.rs
+@@ -95,6 +95,9 @@ pub trait Proxy: Send + AsRawFd {
+     fn getpeername(&mut self, pkt: &VsockPacket);
+     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate;
+     fn sendto_addr(&mut self, req: TsiSendtoAddr) -> ProxyUpdate;
++    /// Forget where datagrams were going, so that data following a destination a policy
++    /// refused is dropped rather than sent wherever the one before it went.
++    fn refuse_sendto(&mut self) {}
+     fn sendto_data(&mut self, _pkt: &VsockPacket) {}
+     fn listen(
+         &mut self,
+diff --git a/src/devices/src/virtio/vsock/tsi_dgram/mod.rs b/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
+index 60dc07c..0ece3eb 100644
+--- a/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
++++ b/src/devices/src/virtio/vsock/tsi_dgram/mod.rs
+@@ -132,6 +132,10 @@ impl Proxy for TsiDgramProxy {
+         sys::do_sendto_addr(self, req)
+     }
+ 
++    fn refuse_sendto(&mut self) {
++        self.sendto_addr = None;
++    }
 +
-+/// The guest is Linux whatever the host is, so what it is told is a Linux errno.
-+pub(crate) const LINUX_EPERM: i32 = 1;
-+pub(crate) const LINUX_ECONNREFUSED: i32 = 111;
+     fn sendto_data(&mut self, pkt: &VsockPacket) {
+         sys::sendto_data(self, pkt)
+     }
 diff --git a/src/devices/src/virtio/vsock/tsi_stream/unix.rs b/src/devices/src/virtio/vsock/tsi_stream/unix.rs
-index 9f792ea..11171c1 100644
+index 514434d..24c52ef 100644
 --- a/src/devices/src/virtio/vsock/tsi_stream/unix.rs
 +++ b/src/devices/src/virtio/vsock/tsi_stream/unix.rs
-@@ -444,11 +444,19 @@ pub(crate) fn do_accept(proxy: &mut super::TsiStreamProxy, req: TsiAcceptReq) ->
+@@ -446,11 +446,19 @@ pub(crate) fn do_accept(proxy: &mut super::TsiStreamProxy, req: TsiAcceptReq) ->
  
      let mut update = ProxyUpdate::default();
  
@@ -373,8 +333,8 @@ index 9f792ea..11171c1 100644
          proxy.push_accept_rsp(-libc::EWOULDBLOCK);
          update.signal_queue = true;
      } else {
-@@ -525,6 +533,9 @@ pub(crate) fn process_event(proxy: &mut super::TsiStreamProxy, evset: EventSet)
-     if evset.contains(EventSet::HANG_UP) {
+@@ -547,6 +555,9 @@ pub(crate) fn process_event(proxy: &mut super::TsiStreamProxy, evset: EventSet)
+     {
          debug!("process_event: HANG_UP");
          if proxy.status == ProxyStatus::Connecting {
 +            #[cfg(target_os = "macos")]
@@ -383,3 +343,70 @@ index 9f792ea..11171c1 100644
              proxy.push_connect_rsp(-libc::ECONNREFUSED);
          } else {
              proxy.push_reset();
+diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
+index 3233e4e..b926250 100644
+--- a/src/libkrun/src/api/device_builders.rs
++++ b/src/libkrun/src/api/device_builders.rs
+@@ -1354,6 +1354,7 @@ pub struct VsockDevice {
+     tsi_flags: devices::virtio::TsiFlags,
+     host_port_map: HashMap<u16, u16>,
+     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
++    policy: Option<Arc<dyn devices::virtio::TsiPolicy>>,
+ }
+ 
+ #[cfg_attr(feature = "ffi", ffier::export)]
+@@ -1368,6 +1369,7 @@ impl VsockDevice {
+             tsi_flags,
+             host_port_map: HashMap::new(),
+             unix_ipc_port_map: HashMap::new(),
++            policy: None,
+         })
+     }
+ 
+@@ -1389,6 +1391,16 @@ impl VsockDevice {
+     }
+ }
+ 
++impl VsockDevice {
++    /// Decide where the guest's impersonated sockets may go -- see [`TsiPolicy`]. Without
++    /// one, every request goes where the guest asked.
++    ///
++    /// [`TsiPolicy`]: devices::virtio::TsiPolicy
++    pub fn set_policy(&mut self, policy: Arc<dyn devices::virtio::TsiPolicy>) {
++        self.policy = Some(policy);
++    }
++}
++
+ #[cfg_attr(feature = "ffi", ffier::export)]
+ impl<'a> AttachDevice<'a> for VsockDevice {
+     #[cfg_attr(feature = "ffi", ffier(skip))]
+@@ -1397,9 +1409,14 @@ impl<'a> AttachDevice<'a> for VsockDevice {
+         let unix_ipc_port_map =
+             (!self.unix_ipc_port_map.is_empty()).then_some(self.unix_ipc_port_map);
+ 
+-        let vsock =
+-            devices::virtio::Vsock::new(self.cid, host_port_map, unix_ipc_port_map, self.tsi_flags)
+-                .map_err(|e| VmmError::Internal(format!("vsock: {e:?}")))?;
++        let vsock = devices::virtio::Vsock::new(
++            self.cid,
++            host_port_map,
++            unix_ipc_port_map,
++            self.tsi_flags,
++            self.policy,
++        )
++        .map_err(|e| VmmError::Internal(format!("vsock: {e:?}")))?;
+ 
+         let inner = Arc::new(Mutex::new(vsock));
+         ctx.subscribe_events(inner.clone())?;
+diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
+index 0ed07dc..d8160ab 100644
+--- a/src/libkrun/src/api/mod.rs
++++ b/src/libkrun/src/api/mod.rs
+@@ -52,6 +52,7 @@ pub use device_builders::{ConsoleBuilder, ConsoleDevice};
+ pub use device_builders::{DisplayBackend, DisplayInfoBuilder};
+ #[cfg(feature = "gpu")]
+ pub use device_builders::{GpuDevice, VirglRendererFlags};
++pub use devices::virtio::TsiPolicy;
+ #[cfg(not(feature = "tee"))]
+ pub use devices::virtio::balloon::FreePageReportingMode;
+ #[cfg(feature = "blk")]

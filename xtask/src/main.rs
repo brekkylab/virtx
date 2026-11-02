@@ -270,27 +270,34 @@ fn run(mut command: Command, what: &str) -> anyhow::Result<()> {
 
 fn init(force: bool) -> anyhow::Result<()> {
     let root = root_path();
+    // 3rdparty/_patches/<submodule>/<what>.patch, applied submodule by submodule in name order.
     let patches = root.join("3rdparty/_patches");
-    let mut files: Vec<PathBuf> = fs::read_dir(&patches)
-        .with_context(|| format!("reading {}", patches.display()))?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<Result<_, _>>()?;
-    files.retain(|path| path.extension().is_some_and(|ext| ext == "patch"));
-    files.sort();
+    let list = |dir: &Path| -> anyhow::Result<Vec<PathBuf>> {
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()?;
+        paths.sort();
+        Ok(paths)
+    };
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for dir in list(&patches)? {
+        if !dir.is_dir() {
+            continue;
+        }
+        let submodule = dir.file_name().unwrap().to_string_lossy().into_owned();
+        for patch in list(&dir)? {
+            if patch.extension().is_some_and(|ext| ext == "patch") {
+                files.push((submodule.clone(), patch));
+            }
+        }
+    }
 
     eprintln!("Applying patches");
     let mut reset: Vec<String> = Vec::new();
-    for patch in &files {
+    for (submodule, patch) in &files {
+        let submodule = submodule.as_str();
         let name = patch.file_name().unwrap().to_string_lossy();
-        let submodule = name
-            .match_indices('-')
-            .find_map(|(at, _)| {
-                let rest = &name[at + 1..];
-                let commit = &rest[..rest.find('-')?];
-                ((7..=40).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit()))
-                    .then(|| &name[..at])
-            })
-            .with_context(|| format!("{name} is not <submodule>-<commit>-<what>.patch"))?;
         let dir = root.join("3rdparty").join(submodule);
         if force && !reset.iter().any(|done| done == submodule) {
             eprintln!("  {submodule}: resetting to its pinned commit");

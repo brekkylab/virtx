@@ -52,8 +52,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use krun::{
-    BalloonDevice, BlockDevice, ConsoleDevice, DiskFormat, FsDevice, FsOverlay, MmioDeviceManager,
-    Payload, RngDevice, VmmBuilder,
+    BalloonDevice, BlockDevice, ConsoleDevice, DiskFormat, FreePageReportingMode, FsDevice,
+    FsOverlay, MmioDeviceManager, Payload, RngDevice, VmmBuilder,
 };
 use oci_spec::image::Config;
 
@@ -273,7 +273,10 @@ pub(super) fn boot(machine: Machine, cmd: &[String]) -> Result<Infallible> {
             .map_err(|e| Error::vmm("building the guest console", e))?,
     );
     devices.add(RngDevice::new().map_err(|e| Error::vmm("attaching an entropy source", e))?);
-    devices.add(BalloonDevice::new().map_err(|e| Error::vmm("attaching a balloon", e))?);
+    let mut balloon = BalloonDevice::new().map_err(|e| Error::vmm("attaching a balloon", e))?;
+    // macOS gives back reported pages only by replacing them; elsewhere this does nothing.
+    balloon.set_free_page_reporting_mode(FreePageReportingMode::Replace);
+    devices.add(balloon);
 
     #[cfg(feature = "gpu")]
     if machine.spec.gpu {

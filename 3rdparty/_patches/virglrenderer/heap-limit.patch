@@ -1,5 +1,5 @@
 diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
-index bc38754..9c355ab 100644
+index 0d63a0b..9ee94b1 100644
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
 @@ -5,6 +5,8 @@
@@ -58,13 +58,12 @@ index bc38754..9c355ab 100644
     vk->GetPhysicalDeviceMemoryProperties(handle, &physical_dev->memory_properties);
 +   vkr_clamp_memory_heaps(&physical_dev->memory_properties);
  
-    /* XXX When a VkMemoryType has VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, we
-     * assume any VkDeviceMemory with the memory type can be made external and
-@@ -725,6 +762,19 @@ vkr_dispatch_vkGetPhysicalDeviceMemoryProperties2(
+    if (!VKR_DEBUG(NO_MEM_TYPE_SPOOF)) {
+       VkPhysicalDeviceMemoryProperties *p = &physical_dev->memory_properties;
+@@ -755,6 +792,18 @@ vkr_dispatch_vkGetPhysicalDeviceMemoryProperties2(
        vn_replace_vkGetPhysicalDeviceMemoryProperties2_args_handle(args);
        vk->GetPhysicalDeviceMemoryProperties2(args->physicalDevice,
                                               args->pMemoryProperties);
-+      vkr_clamp_memory_heaps(&args->pMemoryProperties->memoryProperties);
 +
 +      /* A budget is at most the heap it is of. */
 +      const VkDeviceSize max = vkr_heap_size_max();
@@ -78,5 +77,5 @@ index bc38754..9c355ab 100644
 +         }
 +      }
     }
- }
  
+    /* VkPhysicalDeviceMemoryProperties is invariant. Always return the cached

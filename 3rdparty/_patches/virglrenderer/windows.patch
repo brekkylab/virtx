@@ -229,7 +229,7 @@ index 47ec240..54ed754 100644
  #include "util/list.h"
  #include "util/macros.h"
 diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
-index b97e5ea..3788790 100644
+index cc82c42..d6e89b0 100644
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
 @@ -5,9 +5,15 @@
@@ -301,7 +301,7 @@ index b97e5ea..3788790 100644
  static bool
  vkr_context_import_resource_from_shm(struct vkr_context *ctx,
                                       uint32_t res_id,
-@@ -313,6 +365,7 @@ vkr_context_create_resource_from_shm(struct vkr_context *ctx,
+@@ -314,6 +366,7 @@ vkr_context_create_resource_from_shm(struct vkr_context *ctx,
  
     return true;
  }
@@ -310,7 +310,7 @@ index b97e5ea..3788790 100644
  static bool
  vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index 1abc23a..5417aea 100644
+index be09086..aede609 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
 @@ -7,6 +7,10 @@
@@ -324,7 +324,7 @@ index 1abc23a..5417aea 100644
  #include "vn_protocol_renderer_transport.h"
  
  #include "vkr_device_memory_gen.h"
-@@ -433,6 +437,12 @@ vkr_dispatch_vkFreeMemory(struct vn_dispatch_context *dispatch,
+@@ -554,6 +558,12 @@ vkr_dispatch_vkFreeMemory(struct vn_dispatch_context *dispatch,
     if (!mem)
        return;
  
@@ -337,7 +337,7 @@ index 1abc23a..5417aea 100644
     vkr_device_memory_release(mem);
     vkr_device_memory_destroy_and_remove(dispatch->data, args);
  }
-@@ -608,8 +618,34 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
+@@ -740,8 +750,34 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
        vulkan_info.allocation_size = mem->allocation_size;
        vulkan_info.memory_type_index = mem->memory_type_index;
     } else {
@@ -405,7 +405,7 @@ index d75a229..fdf0cab 100644
  
  #include "vkr_context.h"
 diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
-index 8aae924..e849a6a 100644
+index d04f11b..73a0669 100644
 --- a/src/venus/vkr_renderer.c
 +++ b/src/venus/vkr_renderer.c
 @@ -180,6 +180,7 @@ vkr_renderer_create_resource(uint32_t ctx_id,
@@ -1478,7 +1478,7 @@ index eed56e4..a29661b 100644
  };
  #pragma pack(pop)
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 5e153cd..e0e0928 100644
+index 682db39..b908777 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -25,7 +25,11 @@

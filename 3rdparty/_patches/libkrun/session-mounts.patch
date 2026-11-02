@@ -1,11 +1,11 @@
 diff --git a/init/init-binary/src/config.rs b/init/init-binary/src/config.rs
-index 4797798..fa6265f 100644
+index 0c744b9..7ba01c8 100644
 --- a/init/init-binary/src/config.rs
 +++ b/init/init-binary/src/config.rs
-@@ -55,6 +55,10 @@ pub struct Config {
-     pub workdir: Option<String>,
+@@ -63,6 +63,10 @@ pub struct Config {
+     pub dhcp: bool,
      #[cfg(target_os = "linux")]
-     pub tmpfs: Option<String>,
+     pub dhcp_renew: bool,
 +    /// Everything else the config's `mounts` asked for, in the order it asked. Mounted
 +    /// after the root is in place -- see [`crate::mounts`].
 +    #[cfg(target_os = "linux")]
@@ -13,7 +13,7 @@ index 4797798..fa6265f 100644
  }
  
  pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -> Config {
-@@ -104,24 +108,47 @@ pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -
+@@ -117,18 +121,39 @@ pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -
      };
      let workdir = process.cwd;
  
@@ -63,16 +63,17 @@ index 4797798..fa6265f 100644
  
      Config {
          argv,
-         workdir,
+@@ -139,6 +164,8 @@ pub fn load(#[cfg(target_os = "linux")] is_mount_point: impl Fn(&str) -> bool) -
+         dhcp,
          #[cfg(target_os = "linux")]
-         tmpfs,
+         dhcp_renew,
 +        #[cfg(target_os = "linux")]
 +        mounts,
      }
  }
  
 diff --git a/init/init-binary/src/main.rs b/init/init-binary/src/main.rs
-index b7075cf..3bb1eef 100644
+index 952fafe..07c572b 100644
 --- a/init/init-binary/src/main.rs
 +++ b/init/init-binary/src/main.rs
 @@ -7,6 +7,8 @@ mod exec;
@@ -84,7 +85,7 @@ index b7075cf..3bb1eef 100644
  #[cfg(feature = "timesync")]
  mod timesync;
  
-@@ -114,6 +116,11 @@ fn main() -> anyhow::Result<()> {
+@@ -118,6 +120,11 @@ fn main() -> anyhow::Result<()> {
          fs::mount_tmpfs(path)?;
      }
  

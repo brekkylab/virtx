@@ -1,5 +1,5 @@
 diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
-index 2780a54..f6bd11e 100644
+index 4f87d5a..11aa4e9 100644
 --- a/src/proxy/proxy_context.c
 +++ b/src/proxy/proxy_context.c
 @@ -8,6 +8,9 @@
@@ -119,19 +119,6 @@ index ce29eca..fe08dcb 100644
  
        /* when VIRGL_RENDERER_ASYNC_FENCE_CB is also set */
        thrd_t thread;
-diff --git a/src/venus/vkr_metal_helpers.m b/src/venus/vkr_metal_helpers.m
-index f0373ed..d40ae70 100644
---- a/src/venus/vkr_metal_helpers.m
-+++ b/src/venus/vkr_metal_helpers.m
-@@ -13,7 +13,7 @@
- #include <unistd.h>
- 
- #include "util/anon_file.h"
--#include "venus-protocol/vulkan_metal.h"
-+#include "vulkan/vulkan_metal.h"
- 
- #include "vkr_metal_helpers.h"
- 
 diff --git a/src/virglrenderer.c b/src/virglrenderer.c
 index ce2b03d..cca83a2 100644
 --- a/src/virglrenderer.c

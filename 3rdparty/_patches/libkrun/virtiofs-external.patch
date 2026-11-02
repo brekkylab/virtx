@@ -1,8 +1,8 @@
 diff --git a/src/devices/src/virtio/fs/device.rs b/src/devices/src/virtio/fs/device.rs
-index 27aacee..b8ad020 100644
+index 1be01ea..0ebf333 100644
 --- a/src/devices/src/virtio/fs/device.rs
 +++ b/src/devices/src/virtio/fs/device.rs
-@@ -18,6 +18,7 @@ use super::super::{
+@@ -19,6 +19,7 @@ use super::super::{
      VirtioShmRegion,
  };
  use super::ExportTable;
@@ -10,7 +10,7 @@ index 27aacee..b8ad020 100644
  use super::passthrough;
  use super::virtual_entry::VirtualDirEntry;
  use super::worker::FsWorker;
-@@ -53,6 +54,7 @@ pub struct Fs {
+@@ -54,6 +55,7 @@ pub struct Fs {
      passthrough_cfg: Option<passthrough::Config>,
      read_only: bool,
      virtual_entries: Vec<VirtualDirEntry<'static>>,
@@ -18,7 +18,7 @@ index 27aacee..b8ad020 100644
      worker_thread: Option<JoinHandle<()>>,
      worker_stopfd: EventFd,
      exit_code: Arc<AtomicI32>,
-@@ -103,6 +105,7 @@ impl Fs {
+@@ -104,6 +106,7 @@ impl Fs {
              passthrough_cfg: fs_cfg,
              read_only,
              virtual_entries,
@@ -26,7 +26,7 @@ index 27aacee..b8ad020 100644
              worker_thread: None,
              worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
              exit_code,
-@@ -134,6 +137,11 @@ impl Fs {
+@@ -135,6 +138,11 @@ impl Fs {
          cfg.export_fsid
      }
  
@@ -38,7 +38,7 @@ index 27aacee..b8ad020 100644
      pub fn add_virtual_entry(&mut self, entry: VirtualDirEntry<'static>) {
          self.virtual_entries.push(entry);
      }
-@@ -224,6 +232,7 @@ impl VirtioDevice for Fs {
+@@ -229,6 +237,7 @@ impl VirtioDevice for Fs {
              self.passthrough_cfg.clone(),
              self.read_only,
              virtual_entries,
@@ -462,10 +462,10 @@ index efdb464..ba15fca 100644
                  &inode_alloc,
                  virtual_entries,
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
-index 2b9401b..49a30c6 100644
+index b926250..d5f98a8 100644
 --- a/src/libkrun/src/api/device_builders.rs
 +++ b/src/libkrun/src/api/device_builders.rs
-@@ -26,6 +26,8 @@ use devices::legacy::IrqChip;
+@@ -33,6 +33,8 @@ use devices::virtio::balloon::FreePageReportingMode;
  #[cfg(feature = "blk")]
  use devices::virtio::block::{DiskFormat, SyncMode};
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
@@ -474,7 +474,7 @@ index 2b9401b..49a30c6 100644
  use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
  use devices::virtio::passthrough::PermissionSemantics;
-@@ -512,6 +514,13 @@ impl<'a> FsDevice<'a> {
+@@ -662,6 +664,13 @@ impl<'a> FsDevice<'a> {
  
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
  impl<'a> FsDevice<'a> {
@@ -489,11 +489,11 @@ index 2b9401b..49a30c6 100644
          let exit_code = Arc::new(AtomicI32::new(i32::MAX));
          let fs = devices::virtio::Fs::new(
 diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
-index ae56cc2..caf56df 100644
+index d8160ab..b161832 100644
 --- a/src/libkrun/src/api/mod.rs
 +++ b/src/libkrun/src/api/mod.rs
-@@ -50,6 +50,8 @@ pub use device_builders::{GpuDevice, VirglRendererFlags};
- pub use devices::virtio::TsiPolicy;
+@@ -57,6 +57,8 @@ pub use devices::virtio::TsiPolicy;
+ pub use devices::virtio::balloon::FreePageReportingMode;
  #[cfg(feature = "blk")]
  pub use devices::virtio::block::{DiskFormat, SyncMode};
 +#[cfg(not(any(feature = "tee", feature = "aws-nitro")))]

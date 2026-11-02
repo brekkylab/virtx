@@ -1,6 +1,6 @@
 diff --git a/include/libkrun_display.h b/include/libkrun_display.h
 deleted file mode 120000
-index 7a415917..00000000
+index 7a41591..0000000
 --- a/include/libkrun_display.h
 +++ /dev/null
 @@ -1 +0,0 @@
@@ -8,7 +8,7 @@ index 7a415917..00000000
 \ No newline at end of file
 diff --git a/include/libkrun_display.h b/include/libkrun_display.h
 new file mode 100644
-index 00000000..7a415917
+index 0000000..7a41591
 --- /dev/null
 +++ b/include/libkrun_display.h
 @@ -0,0 +1 @@
@@ -16,7 +16,7 @@ index 00000000..7a415917
 \ No newline at end of file
 diff --git a/include/libkrun_input.h b/include/libkrun_input.h
 deleted file mode 120000
-index dd9d61c8..00000000
+index dd9d61c..0000000
 --- a/include/libkrun_input.h
 +++ /dev/null
 @@ -1 +0,0 @@
@@ -24,25 +24,26 @@ index dd9d61c8..00000000
 \ No newline at end of file
 diff --git a/include/libkrun_input.h b/include/libkrun_input.h
 new file mode 100644
-index 00000000..dd9d61c8
+index 0000000..dd9d61c
 --- /dev/null
 +++ b/include/libkrun_input.h
 @@ -0,0 +1 @@
 +../src/input/libkrun_input.h
 \ No newline at end of file
 diff --git a/src/devices/src/virtio/gpu/device.rs b/src/devices/src/virtio/gpu/device.rs
-index c0626a5a..622266c8 100644
+index 2444347..2a278e8 100644
 --- a/src/devices/src/virtio/gpu/device.rs
 +++ b/src/devices/src/virtio/gpu/device.rs
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,7 @@
  use std::io::Write;
+ use std::mem::size_of;
  
 -#[cfg(target_os = "macos")]
 +#[cfg(any(target_os = "macos", target_os = "windows"))]
  use crossbeam_channel::Sender;
  use vm_memory::{ByteValued, GuestMemoryMmap};
  
-@@ -16,7 +16,7 @@ use super::worker::Worker;
+@@ -17,7 +17,7 @@ use super::worker::Worker;
  use crate::display::DisplayInfo;
  use crate::virtio::InterruptTransport;
  use krun_display::DisplayBackend;
@@ -51,7 +52,7 @@ index c0626a5a..622266c8 100644
  use utils::worker_message::WorkerMessage;
  
  // Supported features.
-@@ -37,7 +37,7 @@ pub struct Gpu {
+@@ -39,7 +39,7 @@ pub struct Gpu {
      pub(crate) device_state: DeviceState,
      shm_region: Option<VirtioShmRegion>,
      virgl_flags: u32,
@@ -60,7 +61,7 @@ index c0626a5a..622266c8 100644
      map_sender: Sender<WorkerMessage>,
      export_table: Option<ExportTable>,
      displays: Box<[DisplayInfo]>,
-@@ -49,7 +49,7 @@ impl Gpu {
+@@ -52,7 +52,7 @@ impl Gpu {
          virgl_flags: u32,
          displays: Box<[DisplayInfo]>,
          display_backend: DisplayBackend<'static>,
@@ -69,7 +70,7 @@ index c0626a5a..622266c8 100644
      ) -> super::Result<Gpu> {
          Ok(Gpu {
              avail_features: AVAIL_FEATURES,
-@@ -57,7 +57,7 @@ impl Gpu {
+@@ -60,14 +60,17 @@ impl Gpu {
              device_state: DeviceState::Inactive,
              shm_region: None,
              virgl_flags,
@@ -78,7 +79,18 @@ index c0626a5a..622266c8 100644
              map_sender,
              export_table: None,
              displays,
-@@ -214,7 +214,7 @@ impl VirtioDevice for Gpu {
+             display_backend,
+             // Blobs are mapped into the guest in host pages, which can be
+-            // larger than the guest's (16 KiB on Apple silicon).
++            // larger than the guest's (16 KiB on Apple silicon). WHP maps in 4 KiB.
++            #[cfg(unix)]
+             blob_alignment: unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u32,
++            #[cfg(windows)]
++            blob_alignment: 4096,
+         })
+     }
+ 
+@@ -225,7 +228,7 @@ impl VirtioDevice for Gpu {
              interrupt.clone(),
              shm_region,
              self.virgl_flags,
@@ -87,8 +99,28 @@ index c0626a5a..622266c8 100644
              self.map_sender.clone(),
              self.export_table.take(),
              self.displays.clone(),
+@@ -260,7 +263,7 @@ mod tests {
+             0,
+             Box::new([]),
+             NoopDisplayBackend::into_display_backend(None),
+-            #[cfg(target_os = "macos")]
++            #[cfg(any(target_os = "macos", target_os = "windows"))]
+             crossbeam_channel::unbounded().0,
+         )
+         .unwrap();
+@@ -270,7 +273,10 @@ mod tests {
+         );
+         let mut data = [0u8; 4];
+         gpu.read_config(16, &mut data);
++        #[cfg(unix)]
+         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u32;
++        #[cfg(windows)]
++        let page_size = 4096;
+         assert_eq!(u32::from_le_bytes(data), page_size);
+     }
+ }
 diff --git a/src/devices/src/virtio/gpu/virtio_gpu.rs b/src/devices/src/virtio/gpu/virtio_gpu.rs
-index fa09f59b..13dd7bd3 100644
+index fa09f59..ea6734c 100644
 --- a/src/devices/src/virtio/gpu/virtio_gpu.rs
 +++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
 @@ -12,16 +12,13 @@ use super::protocol::{
@@ -211,7 +243,7 @@ index fa09f59b..13dd7bd3 100644
      pub fn resource_map_blob(
          &mut self,
          resource_id: u32,
-@@ -943,45 +975,58 @@ impl VirtioGpu {
+@@ -943,45 +975,61 @@ impl VirtioGpu {
              .get_mut(&resource_id)
              .ok_or(ErrInvalidResourceId)?;
  
@@ -281,15 +313,18 @@ index fa09f59b..13dd7bd3 100644
 -            }
 -        } else {
 +        let (reply_sender, reply_receiver) = unbounded();
-+        self.map_sender
++        // The worker is gone once the VMM is, and the guest cannot be given the blob then.
++        let mapped = self
++            .map_sender
 +            .send(WorkerMessage::GpuAddMapping(
 +                reply_sender,
 +                map_ptr,
 +                guest_addr,
 +                resource.size,
 +            ))
-+            .unwrap();
-+        if !reply_receiver.recv().unwrap() {
++            .is_ok()
++            && reply_receiver.recv().unwrap_or(false);
++        if !mapped {
 +            // Nothing aliases the host mapping, so it goes now rather than at unref.
 +            let _ = self.rutabaga.unmap(resource_id);
              return Err(ErrUnspec);
@@ -304,7 +339,7 @@ index fa09f59b..13dd7bd3 100644
          // Access flags not a part of the virtio-gpu spec.
          Ok(OkMapInfo {
              map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
-@@ -1023,7 +1068,7 @@ impl VirtioGpu {
+@@ -1023,7 +1071,7 @@ impl VirtioGpu {
  
          Ok(OkNoData)
      }
@@ -313,7 +348,23 @@ index fa09f59b..13dd7bd3 100644
      pub fn resource_unmap_blob(
          &mut self,
          resource_id: u32,
-@@ -1055,6 +1100,13 @@ impl VirtioGpu {
+@@ -1044,17 +1092,26 @@ impl VirtioGpu {
+         );
+ 
+         let (reply_sender, reply_receiver) = unbounded();
+-        self.map_sender
++        let unmapped = self
++            .map_sender
+             .send(WorkerMessage::GpuRemoveMapping(
+                 reply_sender,
+                 guest_addr,
+                 resource.size,
+             ))
+-            .unwrap();
+-        if !reply_receiver.recv().unwrap() {
++            .is_ok()
++            && reply_receiver.recv().unwrap_or(false);
++        if !unmapped {
              return Err(ErrUnspec);
          }
  
@@ -328,7 +379,7 @@ index fa09f59b..13dd7bd3 100644
  
          Ok(OkNoData)
 diff --git a/src/devices/src/virtio/gpu/worker.rs b/src/devices/src/virtio/gpu/worker.rs
-index 9d19c103..34b19359 100644
+index 9d19c10..34b1935 100644
 --- a/src/devices/src/virtio/gpu/worker.rs
 +++ b/src/devices/src/virtio/gpu/worker.rs
 @@ -1,18 +1,20 @@
@@ -425,10 +476,10 @@ index 9d19c103..34b19359 100644
                  info.scanout_id,
                  info.resource_id,
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
-index f7447382..67f29b53 100644
+index 117cd7c..3233e4e 100644
 --- a/src/libkrun/src/api/device_builders.rs
 +++ b/src/libkrun/src/api/device_builders.rs
-@@ -73,7 +73,7 @@ pub struct AttachContext<'a> {
+@@ -80,7 +80,7 @@ pub struct AttachContext<'a> {
          dyn Fn(&mut Vmm, String, IrqChip, Arc<Mutex<dyn VirtioDevice>>) -> Result<(), VmmError>
              + 'a,
      >,
@@ -437,7 +488,7 @@ index f7447382..67f29b53 100644
      map_sender: Option<crossbeam_channel::Sender<utils::worker_message::WorkerMessage>>,
  }
  
-@@ -84,7 +84,7 @@ impl<'a> AttachContext<'a> {
+@@ -91,7 +91,7 @@ impl<'a> AttachContext<'a> {
          shm_manager: &'a ShmManager,
          intc: IrqChip,
          device_index: usize,
@@ -446,7 +497,7 @@ index f7447382..67f29b53 100644
              crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
          >,
      ) -> Self {
-@@ -99,7 +99,7 @@ impl<'a> AttachContext<'a> {
+@@ -106,7 +106,7 @@ impl<'a> AttachContext<'a> {
                      .map_err(|e| VmmError::Internal(format!("{e:?}")))?;
                  Ok(())
              }),
@@ -455,7 +506,16 @@ index f7447382..67f29b53 100644
              map_sender,
          }
      }
-@@ -202,9 +202,12 @@ impl<'a> AttachContext<'a> {
+@@ -133,7 +133,7 @@ impl<'a> AttachContext<'a> {
+                     .map_err(|e| VmmError::Internal(format!("{e:?}")))?;
+                 Ok(())
+             }),
+-            #[cfg(target_os = "macos")]
++            #[cfg(any(target_os = "macos", target_os = "windows"))]
+             map_sender: None,
+         }
+     }
+@@ -236,9 +236,12 @@ impl<'a> AttachContext<'a> {
          setup_terminal_raw_mode(self.vmm, Some(handle), false);
      }
  
@@ -471,16 +531,16 @@ index f7447382..67f29b53 100644
      pub fn map_sender(
          &self,
      ) -> Option<crossbeam_channel::Sender<utils::worker_message::WorkerMessage>> {
-@@ -289,7 +292,7 @@ pub trait DeviceManager<'a>: sealed::Sealed + Send + 'a {
-         event_manager: &mut EventManager,
-         shm_manager: &ShmManager,
-         intc: IrqChip,
--        #[cfg(target_os = "macos")] map_sender: Option<
-+        #[cfg(any(target_os = "macos", target_os = "windows"))] map_sender: Option<
-             crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
-         >,
-     ) -> Result<(), VmmError>;
-@@ -335,7 +338,7 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
+@@ -320,7 +323,7 @@ mod sealed {
+             event_manager: &mut EventManager,
+             shm_manager: &ShmManager,
+             intc: IrqChip,
+-            #[cfg(target_os = "macos")] map_sender: Option<
++            #[cfg(any(target_os = "macos", target_os = "windows"))] map_sender: Option<
+                 crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
+             >,
+         ) -> Result<(), VmmError>;
+@@ -401,7 +404,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
          event_manager: &mut EventManager,
          shm_manager: &ShmManager,
          intc: IrqChip,
@@ -489,7 +549,7 @@ index f7447382..67f29b53 100644
              crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
          >,
      ) -> Result<(), VmmError> {
-@@ -346,7 +349,7 @@ impl<'a> DeviceManager<'a> for MmioDeviceManager<'a> {
+@@ -412,7 +415,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
                  shm_manager,
                  intc.clone(),
                  i,
@@ -498,7 +558,16 @@ index f7447382..67f29b53 100644
                  map_sender.clone(),
              );
              device.attach(&mut ctx)?;
-@@ -1667,8 +1670,9 @@ impl<'a> AttachDevice<'a> for GpuDevice {
+@@ -492,7 +495,7 @@ impl sealed::Sealed for PciDeviceManager<'_> {
+         event_manager: &mut EventManager,
+         shm_manager: &ShmManager,
+         intc: IrqChip,
+-        #[cfg(target_os = "macos")] _map_sender: Option<
++        #[cfg(any(target_os = "macos", target_os = "windows"))] _map_sender: Option<
+             crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
+         >,
+     ) -> Result<(), VmmError> {
+@@ -1844,8 +1847,9 @@ impl<'a> AttachDevice<'a> for GpuDevice {
              self.virgl_flags,
              displays,
              self.backend.inner,
@@ -511,45 +580,26 @@ index f7447382..67f29b53 100644
          .map_err(|e| VmmError::Internal(format!("gpu: {e:?}")))?;
  
 diff --git a/src/libkrun/src/api/vmm_builder.rs b/src/libkrun/src/api/vmm_builder.rs
-index 7a111cc8..a0145db2 100644
+index 38fb0ad..6af1cee 100644
 --- a/src/libkrun/src/api/vmm_builder.rs
 +++ b/src/libkrun/src/api/vmm_builder.rs
-@@ -452,11 +452,28 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
+@@ -463,9 +463,10 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
          }
          #[cfg(not(any(feature = "amd-sev", feature = "tdx")))]
          {
-+            // The GPU device hands blob mappings to the worker thread
-+            // (WorkerMessage::GpuAddMapping) because only it can call into the
-+            // hypervisor. Without the thread the receiver is dropped and the
-+            // send panics the gpu worker. On x86_64 that is a second reason to
-+            // start it, next to split_irqchip.
++            // On Windows the GPU device maps blobs into the guest through the worker, as on macOS.
              #[cfg(target_arch = "x86_64")]
              {
 -                builder_cfg.split_irqchip
-+                #[cfg(all(feature = "gpu", target_os = "windows"))]
-+                {
-+                    let _ = builder_cfg.split_irqchip;
-+                    true
-+                }
-+                #[cfg(not(all(feature = "gpu", target_os = "windows")))]
-+                {
-+                    builder_cfg.split_irqchip
-+                }
-+            }
-+            #[cfg(all(not(target_arch = "x86_64"), target_os = "macos"))]
-+            {
-+                true
++                builder_cfg.split_irqchip || cfg!(all(feature = "gpu", target_os = "windows"))
              }
--            #[cfg(not(target_arch = "x86_64"))]
-+            #[cfg(all(not(target_arch = "x86_64"), not(target_os = "macos")))]
-             {
-                 false
-             }
+             // On macOS, devices change the guest's memory map through the worker.
+             #[cfg(not(target_arch = "x86_64"))]
 diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
-index 988a5d88..cce54e3c 100644
+index 7141beb..d24d2af 100644
 --- a/src/libkrun/src/vmm/builder.rs
 +++ b/src/libkrun/src/vmm/builder.rs
-@@ -1267,7 +1267,7 @@ pub fn build_microvm(
+@@ -1388,7 +1388,7 @@ pub fn build_microvm(
              event_manager,
              &_shm_manager,
              intc.clone(),
@@ -559,7 +609,7 @@ index 988a5d88..cce54e3c 100644
          )
          .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
 diff --git a/src/libkrun/src/vmm/macos/vstate.rs b/src/libkrun/src/vmm/macos/vstate.rs
-index eeaacb80..8a57fefc 100644
+index 5f5ee21..1232646 100644
 --- a/src/libkrun/src/vmm/macos/vstate.rs
 +++ b/src/libkrun/src/vmm/macos/vstate.rs
 @@ -137,9 +137,13 @@ impl Vm {
@@ -588,7 +638,7 @@ index eeaacb80..8a57fefc 100644
          debug!("remove_mapping: guest_addr={guest_addr:x}, len={len}");
          if let Err(e) = self.hvf_vm.unmap_memory(guest_addr, len) {
              error!("Error removing memory map: {e:?}");
-@@ -161,6 +169,15 @@ impl Vm {
+@@ -214,6 +222,15 @@ impl Vm {
      }
  }
  
@@ -605,11 +655,11 @@ index eeaacb80..8a57fefc 100644
  #[derive(Debug, Eq, PartialEq)]
  pub struct VcpuConfig {
 diff --git a/src/libkrun/src/vmm/mod.rs b/src/libkrun/src/vmm/mod.rs
-index 86bbe613..85b76b45 100644
+index 784a144..a709147 100644
 --- a/src/libkrun/src/vmm/mod.rs
 +++ b/src/libkrun/src/vmm/mod.rs
-@@ -55,7 +55,7 @@ use crate::vmm::vstate::VcpuEvent;
- use crate::vmm::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
+@@ -62,7 +62,7 @@ use crate::vmm::vstate::Vm;
+ use crate::vmm::vstate::{Vcpu, VcpuHandle, VcpuResponse};
  
  use arch::{ArchMemoryInfo, InitrdConfig};
 -#[cfg(target_os = "macos")]
@@ -617,7 +667,7 @@ index 86bbe613..85b76b45 100644
  use crossbeam_channel::Sender;
  #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
  use devices::fdt;
-@@ -413,7 +413,7 @@ impl Vmm {
+@@ -435,7 +435,7 @@ impl Vmm {
          &self.vm
      }
  
@@ -626,7 +676,7 @@ index 86bbe613..85b76b45 100644
      pub fn add_mapping(
          &self,
          reply_sender: Sender<bool>,
-@@ -425,7 +425,7 @@ impl Vmm {
+@@ -447,7 +447,7 @@ impl Vmm {
              .add_mapping(reply_sender, host_addr, guest_addr, len);
      }
  
@@ -636,7 +686,7 @@ index 86bbe613..85b76b45 100644
          self.vm.remove_mapping(reply_sender, guest_addr, len);
      }
 diff --git a/src/libkrun/src/vmm/windows/vstate.rs b/src/libkrun/src/vmm/windows/vstate.rs
-index 5c4d36ea..66acdecb 100644
+index 6eb45f7..208728d 100644
 --- a/src/libkrun/src/vmm/windows/vstate.rs
 +++ b/src/libkrun/src/vmm/windows/vstate.rs
 @@ -8,12 +8,13 @@
@@ -802,22 +852,12 @@ index 5c4d36ea..66acdecb 100644
  
  #[derive(Debug, Eq, PartialEq)]
 diff --git a/src/libkrun/src/vmm/worker.rs b/src/libkrun/src/vmm/worker.rs
-index 11297ab3..00a4d5c9 100644
+index 88d771c..fe4a7a9 100644
 --- a/src/libkrun/src/vmm/worker.rs
 +++ b/src/libkrun/src/vmm/worker.rs
-@@ -31,9 +31,6 @@ pub fn start_worker_thread(
-                 let received = receiver.recv();
-                 match received {
-                     Err(e) => error!("error receiving message from vmm worker thread: {e:?}"),
--                    #[cfg(target_os = "macos")]
--                    Ok(message) => vmm.lock().unwrap().match_worker_message(message),
--                    #[cfg(target_os = "linux")]
-                     Ok(message) => vmm.lock().unwrap().match_worker_message(message),
-                 }
-             }
-@@ -45,9 +42,9 @@ impl super::Vmm {
+@@ -43,9 +43,9 @@ impl super::Vmm {
      #[allow(dead_code)]
-     fn match_worker_message(&self, msg: WorkerMessage) {
+     fn match_worker_message(&mut self, msg: WorkerMessage) {
          match msg {
 -            #[cfg(target_os = "macos")]
 +            #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -825,10 +865,10 @@ index 11297ab3..00a4d5c9 100644
 -            #[cfg(target_os = "macos")]
 +            #[cfg(any(target_os = "macos", target_os = "windows"))]
              WorkerMessage::GpuRemoveMapping(s, g, l) => self.remove_mapping(s, g, l),
-             #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-             WorkerMessage::GsiRoute(sender, entries) => {
+             #[cfg(target_os = "macos")]
+             WorkerMessage::ReclaimMemory(s, g, l) => self.reclaim_memory(s, g, l),
 diff --git a/src/utils/Cargo.toml b/src/utils/Cargo.toml
-index 347c4c08..8d191439 100644
+index 347c4c0..8d19143 100644
 --- a/src/utils/Cargo.toml
 +++ b/src/utils/Cargo.toml
 @@ -10,12 +10,14 @@ repository = "https://github.com/containers/libkrun"
@@ -848,7 +888,7 @@ index 347c4c08..8d191439 100644
  [target.'cfg(target_os = "linux")'.dependencies]
  kvm-bindings = { version = "0.14.1", features = ["fam-wrappers"] }
 diff --git a/src/utils/src/windows/eventfd.rs b/src/utils/src/windows/eventfd.rs
-index ce302126..a5a36141 100644
+index ce30212..a5a3614 100644
 --- a/src/utils/src/windows/eventfd.rs
 +++ b/src/utils/src/windows/eventfd.rs
 @@ -1,5 +1,6 @@
@@ -905,7 +945,7 @@ index ce302126..a5a36141 100644
          Ok(EventFd {
              inner: Arc::clone(&self.inner),
 diff --git a/src/utils/src/worker_message.rs b/src/utils/src/worker_message.rs
-index 202ea8bb..62ff5133 100644
+index 45fd6ec..793923d 100644
 --- a/src/utils/src/worker_message.rs
 +++ b/src/utils/src/worker_message.rs
 @@ -14,9 +14,9 @@ pub enum WorkerMessage {
@@ -918,18 +958,18 @@ index 202ea8bb..62ff5133 100644
 -    #[cfg(target_os = "macos")]
 +    #[cfg(any(target_os = "macos", target_os = "windows"))]
      GpuRemoveMapping(crossbeam_channel::Sender<bool>, u64, u64),
-     #[cfg(not(target_os = "windows"))]
-     ConvertMemory(crossbeam_channel::Sender<bool>, MemoryProperties),
+     /// Gives the host pages backing a range of guest RAM back to the system; the range reads
+     /// as zeroes afterwards. Replies whether they were given back.
 diff --git a/src/whp/src/lib.rs b/src/whp/src/lib.rs
-index 2fa2e6dd..7ce5beca 100644
+index 626ddb9..833e4d8 100644
 --- a/src/whp/src/lib.rs
 +++ b/src/whp/src/lib.rs
 @@ -30,7 +30,7 @@ use windows_sys::Win32::System::Hypervisor::{
-     WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
-     WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
-     WHvRunVpExitReasonX64MsrAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
--    WHvSetupPartition, WHvX64LocalApicEmulationModeXApic,
-+    WHvSetupPartition, WHvUnmapGpaRange, WHvX64LocalApicEmulationModeXApic,
+     WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64ApicEoi, WHvRunVpExitReasonX64Cpuid,
+     WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64InterruptWindow,
+     WHvRunVpExitReasonX64IoPortAccess, WHvRunVpExitReasonX64MsrAccess, WHvSetPartitionProperty,
+-    WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvX64LocalApicEmulationModeXApic,
++    WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvUnmapGpaRange, WHvX64LocalApicEmulationModeXApic,
      WHvX64RegisterDeliverabilityNotifications, WHvX64RegisterRax, WHvX64RegisterRbx,
      WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
  };

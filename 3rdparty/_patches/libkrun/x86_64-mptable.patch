@@ -1,5 +1,5 @@
 diff --git a/src/arch/src/x86_64/mptable.rs b/src/arch/src/x86_64/mptable.rs
-index 6f332941..4724bc0a 100644
+index 6f33294..4724bc0 100644
 --- a/src/arch/src/x86_64/mptable.rs
 +++ b/src/arch/src/x86_64/mptable.rs
 @@ -14,6 +14,8 @@ use libc::c_char;

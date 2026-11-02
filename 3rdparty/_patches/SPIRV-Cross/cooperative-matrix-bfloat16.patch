@@ -1,8 +1,8 @@
 diff --git a/spirv_glsl.cpp b/spirv_glsl.cpp
-index cbd135d0..33c30c25 100644
+index c8284a21..ded67ee1 100644
 --- a/spirv_glsl.cpp
 +++ b/spirv_glsl.cpp
-@@ -6671,7 +6671,13 @@ string CompilerGLSL::convert_float_to_string(const SPIRConstant &c, uint32_t col
+@@ -6759,7 +6759,13 @@ string CompilerGLSL::convert_float_to_string(const SPIRConstant &c, uint32_t col
  	}
  
  	if (is_bfloat16)
@@ -18,7 +18,7 @@ index cbd135d0..33c30c25 100644
  	return res;
  }
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index c5a9d433..15237763 100644
+index 21232ee8..6d89acad 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
 @@ -1676,6 +1676,20 @@ string CompilerMSL::compile()
@@ -42,7 +42,15 @@ index c5a9d433..15237763 100644
  	// Do not deal with GLES-isms like precision, older extensions and such.
  	options.vulkan_semantics = true;
  	options.es = false;
-@@ -5857,6 +5871,135 @@ void CompilerMSL::emit_custom_templates()
+@@ -1953,6 +1967,7 @@ void CompilerMSL::preprocess_op_codes()
+ 			SPIRV_CROSS_THROW("Cooperative matrices require MSL 3.1 or later.");
+ 		add_header_line("#include <metal_simdgroup_matrix>");
+ 		validate_cooperative_matrix_types();
++		spv_function_implementations.insert(SPVFuncImplCooperativeMatrix);
+ 	}
+ }
+ 
+@@ -5899,6 +5914,91 @@ void CompilerMSL::emit_custom_templates()
  	{
  		switch (spv_func)
  		{
@@ -129,56 +137,153 @@ index c5a9d433..15237763 100644
 +			statement("    }");
 +			end_scope();
 +			statement("");
-+			for (const char *op : { "+", "-", "*", "/" })
-+			{
-+				statement("template<typename T, uint R, uint C>");
-+				statement("inline spvCoopMatrix<T, R, C> operator", op, "(spvCoopMatrix<T, R, C> a, spvCoopMatrix<T, R, C> b)");
-+				begin_scope();
-+				statement("for (uint i = 0; i < spvCoopMatrix<T, R, C>::tiles * 2; i++)");
-+				statement("    a.e[i] = a.e[i] ", op, " b.e[i];");
-+				statement("return a;");
-+				end_scope();
-+				statement("");
-+			}
-+			statement("template<typename T, uint R, uint C, typename S>");
-+			statement("inline spvCoopMatrix<T, R, C> operator*(spvCoopMatrix<T, R, C> a, S s)");
-+			begin_scope();
-+			statement("for (uint i = 0; i < spvCoopMatrix<T, R, C>::tiles * 2; i++)");
-+			statement("    a.e[i] = a.e[i] * T(s);");
-+			statement("return a;");
-+			end_scope();
-+			statement("");
-+			// What the GLSL backend makes of `a = a op b` when it folds it into a compound assignment.
-+			for (const char *op : { "+", "-", "*", "/" })
-+			{
-+				statement("template<typename T, uint R, uint C>");
-+				statement("inline thread spvCoopMatrix<T, R, C> &operator", op,
-+				          "=(thread spvCoopMatrix<T, R, C> &a, spvCoopMatrix<T, R, C> b)");
-+				begin_scope();
-+				statement("return a = a ", op, " b;");
-+				end_scope();
-+				statement("");
-+			}
-+			statement("template<typename T, uint R, uint C, typename S>");
-+			statement("inline thread spvCoopMatrix<T, R, C> &operator*=(thread spvCoopMatrix<T, R, C> &a, S s)");
-+			begin_scope();
-+			statement("return a = a * s;");
-+			end_scope();
-+			statement("");
-+			statement("template<typename T, uint R, uint C>");
-+			statement("inline spvCoopMatrix<T, R, C> operator-(spvCoopMatrix<T, R, C> a)");
-+			begin_scope();
-+			statement("for (uint i = 0; i < spvCoopMatrix<T, R, C>::tiles * 2; i++)");
-+			statement("    a.e[i] = -a.e[i];");
-+			statement("return a;");
-+			end_scope();
-+			statement("");
 +			break;
 +
  		case SPVFuncImplUnsafeArray:
  			statement("template<typename T, size_t Num>");
  			statement("struct spvUnsafeArray");
-@@ -10793,12 +10936,8 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -9534,7 +9634,7 @@ bool CompilerMSL::check_physical_type_cast(std::string &expr, const SPIRType *ty
+ 	return false;
+ }
+ 
+-// Metal only implements Subgroup scoped 8x8 matrices with floating-point components.
++// A cooperative matrix is a grid of Metal's Subgroup scoped 8x8 matrices with floating-point components.
+ void CompilerMSL::validate_cooperative_matrix_type(const SPIRType &type)
+ {
+ 	// Only the component types which have a simdgroup_*8x8 equivalent.
+@@ -9549,13 +9649,14 @@ void CompilerMSL::validate_cooperative_matrix_type(const SPIRType &type)
+ 	if (scope.scalar() != ScopeSubgroup)
+ 		SPIRV_CROSS_THROW("MSL cooperative matrices only support Subgroup scope.");
+ 
+-	// Only 8x8.
+-	auto &rows = get<SPIRConstant>(type.ext.cooperative.rows_id);
+-	auto &columns = get<SPIRConstant>(type.ext.cooperative.columns_id);
+-	if (rows.specialization || columns.specialization)
+-		SPIRV_CROSS_THROW("MSL does not support spec-constant dimensions for cooperative matrices.");
+-	if (rows.scalar() != 8 || columns.scalar() != 8)
+-		SPIRV_CROSS_THROW("MSL cooperative matrices only support 8x8 dimensions.");
++	// Only whole 8x8 tiles. A specialization constant cannot be checked here, and is not by
++	// spvCoopMatrix either: see the note on its storage.
++	for (uint32_t id : { uint32_t(type.ext.cooperative.rows_id), uint32_t(type.ext.cooperative.columns_id) })
++	{
++		auto *c = maybe_get<SPIRConstant>(id);
++		if (c && !c->specialization && (c->scalar() == 0 || c->scalar() % 8 != 0))
++			SPIRV_CROSS_THROW("MSL cooperative matrix dimensions must be multiples of 8.");
++	}
+ }
+ 
+ // Validates all cooperative matrix types up-front, rather than failing partway through a function.
+@@ -9567,30 +9668,31 @@ void CompilerMSL::validate_cooperative_matrix_types()
+ 	});
+ }
+ 
+-// 8x8 matrix over a 32-wide SIMD-group: every invocation holds two components.
+-static const uint32_t k_cooperative_matrix_components_per_thread = (8 * 8) / 32;
+-
+ // Non-matrix operands, e.g. the scalar in OpMatrixTimesScalar, are broadcast to every component.
+ string CompilerMSL::to_cooperative_matrix_component(uint32_t id, const string &index)
+ {
+ 	if (expression_type(id).op != OpTypeCooperativeMatrixKHR)
+ 		return to_enclosed_unpacked_expression(id);
+ 
+-	return join(to_enclosed_unpacked_expression(id), ".thread_elements()[", index, "]");
++	return join(to_enclosed_unpacked_expression(id), "[", index, "]");
+ }
+ 
++// Every 8x8 tile over a 32-wide SIMD-group gives each invocation two components, and how many tiles
++// there are is spvCoopMatrix's to say, as the dimensions may be specialized. So each emitter below is
++// a loop over them, with its operands evaluated first so that nothing they emit lands inside it.
++
+ // op is prefixed to every component, so an empty op copies or broadcasts op0 instead.
+ void CompilerMSL::emit_cooperative_matrix_unary_op(uint32_t result_type, uint32_t result_id, uint32_t op0,
+                                                    const char *op)
+ {
++	auto a = to_cooperative_matrix_component(op0, "spvCoopI");
+ 	emit_uninitialized_temporary_expression(result_type, result_id);
+ 
+-	for (uint32_t i = 0; i < k_cooperative_matrix_components_per_thread; i++)
+-	{
+-		auto index = join(i, "u");
+-		statement(to_cooperative_matrix_component(result_id, index), " = ", op,
+-		          to_cooperative_matrix_component(op0, index), ";");
+-	}
++	statement("for (uint spvCoopI = 0; spvCoopI < ", type_to_glsl(get<SPIRType>(result_type)),
++	          "::tiles * 2; spvCoopI++)");
++	begin_scope();
++	statement(to_cooperative_matrix_component(result_id, "spvCoopI"), " = ", op, a, ";");
++	end_scope();
+ 
+ 	inherit_expression_dependencies(result_id, op0);
+ }
+@@ -9598,15 +9700,15 @@ void CompilerMSL::emit_cooperative_matrix_unary_op(uint32_t result_type, uint32_
+ void CompilerMSL::emit_cooperative_matrix_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0,
+                                                     uint32_t op1, const char *op)
+ {
++	auto a = to_cooperative_matrix_component(op0, "spvCoopI");
++	auto b = to_cooperative_matrix_component(op1, "spvCoopI");
+ 	emit_uninitialized_temporary_expression(result_type, result_id);
+ 
+-	for (uint32_t i = 0; i < k_cooperative_matrix_components_per_thread; i++)
+-	{
+-		auto index = join(i, "u");
+-		statement(to_cooperative_matrix_component(result_id, index), " = ",
+-		          to_cooperative_matrix_component(op0, index), " ", op, " ",
+-		          to_cooperative_matrix_component(op1, index), ";");
+-	}
++	statement("for (uint spvCoopI = 0; spvCoopI < ", type_to_glsl(get<SPIRType>(result_type)),
++	          "::tiles * 2; spvCoopI++)");
++	begin_scope();
++	statement(to_cooperative_matrix_component(result_id, "spvCoopI"), " = ", a, " ", op, " ", b, ";");
++	end_scope();
+ 
+ 	inherit_expression_dependencies(result_id, op0);
+ 	inherit_expression_dependencies(result_id, op1);
+@@ -9615,14 +9717,14 @@ void CompilerMSL::emit_cooperative_matrix_binary_op(uint32_t result_type, uint32
+ void CompilerMSL::emit_cooperative_matrix_unary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0,
+                                                         const char *op)
+ {
++	auto a = to_cooperative_matrix_component(op0, "spvCoopI");
+ 	emit_uninitialized_temporary_expression(result_type, result_id);
+ 
+-	for (uint32_t i = 0; i < k_cooperative_matrix_components_per_thread; i++)
+-	{
+-		auto index = join(i, "u");
+-		statement(to_cooperative_matrix_component(result_id, index), " = ", op, "(",
+-		          to_cooperative_matrix_component(op0, index), ");");
+-	}
++	statement("for (uint spvCoopI = 0; spvCoopI < ", type_to_glsl(get<SPIRType>(result_type)),
++	          "::tiles * 2; spvCoopI++)");
++	begin_scope();
++	statement(to_cooperative_matrix_component(result_id, "spvCoopI"), " = ", op, "(", a, ");");
++	end_scope();
+ 
+ 	inherit_expression_dependencies(result_id, op0);
+ }
+@@ -9630,15 +9732,16 @@ void CompilerMSL::emit_cooperative_matrix_unary_func_op(uint32_t result_type, ui
+ void CompilerMSL::emit_cooperative_matrix_select_op(uint32_t result_type, uint32_t result_id, uint32_t cond,
+                                                     uint32_t op0, uint32_t op1)
+ {
++	auto c = to_enclosed_unpacked_expression(cond);
++	auto a = to_cooperative_matrix_component(op0, "spvCoopI");
++	auto b = to_cooperative_matrix_component(op1, "spvCoopI");
+ 	emit_uninitialized_temporary_expression(result_type, result_id);
+ 
+-	for (uint32_t i = 0; i < k_cooperative_matrix_components_per_thread; i++)
+-	{
+-		auto index = join(i, "u");
+-		statement(to_cooperative_matrix_component(result_id, index), " = ", to_enclosed_unpacked_expression(cond),
+-		          " ? ", to_cooperative_matrix_component(op0, index), " : ",
+-		          to_cooperative_matrix_component(op1, index), ";");
+-	}
++	statement("for (uint spvCoopI = 0; spvCoopI < ", type_to_glsl(get<SPIRType>(result_type)),
++	          "::tiles * 2; spvCoopI++)");
++	begin_scope();
++	statement(to_cooperative_matrix_component(result_id, "spvCoopI"), " = ", c, " ? ", a, " : ", b, ";");
++	end_scope();
+ 
+ 	inherit_expression_dependencies(result_id, cond);
+ 	inherit_expression_dependencies(result_id, op0);
+@@ -11105,12 +11208,8 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  			}
  		}
  
@@ -193,7 +298,7 @@ index c5a9d433..15237763 100644
  
  		register_read(id, ptr, false);
  		break;
-@@ -10870,12 +11009,8 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -11182,12 +11281,8 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  			}
  		}
  
@@ -208,8 +313,8 @@ index c5a9d433..15237763 100644
  
  		register_write(ptr);
  		break;
-@@ -10892,7 +11027,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
- 			SPIRV_CROSS_THROW("MSL cooperative matrix muladd does not support setting matrix operands flags.");
+@@ -11202,7 +11297,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		// Matrix operand flags only affect integer components, which are not supported here.
  
  		emit_uninitialized_temporary_expression(result_type, id);
 -		statement("simdgroup_multiply_accumulate(", to_expression(id), ", ",
@@ -217,7 +322,7 @@ index c5a9d433..15237763 100644
  		          to_unpacked_expression(A), ", ",
  		          to_unpacked_expression(B), ", ",
  		          to_unpacked_expression(C), ");");
-@@ -10903,6 +11038,24 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -11213,6 +11308,24 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		break;
  	}
  
@@ -242,7 +347,7 @@ index c5a9d433..15237763 100644
  	case OpCooperativeMatrixLengthKHR:
  	{
  		uint32_t result_type = ops[0];
-@@ -10912,21 +11065,14 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -11222,12 +11335,8 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		if (coop_type.op != OpTypeCooperativeMatrixKHR)
  			SPIRV_CROSS_THROW("OpCooperativeMatrixLengthKHR requires cooperative matrix type.");
  
@@ -257,66 +362,7 @@ index c5a9d433..15237763 100644
  		emit_op(result_type, id, expr, true);
  		break;
  	}
- 
- 	default:
- 	{
--		// Prevent GLSL cooperative matrix code from leaking into MSL output.
--		// Element-wise arithmetic on cooperative matrices is not supported in Metal.
--		// Should cover any reasonable situation we come across.
- 		if (instruction.length >= 2)
- 		{
- 			bool has_result = false, has_result_type = false;
-@@ -10938,24 +11084,31 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
- 				while (type && (is_pointer(*type) || is_array(*type)))
- 					type = this->maybe_get<SPIRType>(type->parent_type);
- 				if (type->op == OpTypeCooperativeMatrixKHR)
--					SPIRV_CROSS_THROW("Unsupported operation on cooperative matrix in MSL backend.");
--			}
--
--			auto is_cooperative_matrix_typed_id = [&](uint32_t id) -> bool {
--				auto &type = expression_type(id);
--				return type.op == OpTypeCooperativeMatrixKHR;
--			};
--
--			if (opcode == OpCompositeExtract || opcode == OpVectorExtractDynamic)
--			{
--				if (instruction.length >= 3 && is_cooperative_matrix_typed_id(ops[2]))
--					SPIRV_CROSS_THROW("Unsupported extraction from cooperative matrix in MSL backend.");
--			}
--			else if (opcode == OpCompositeInsert || opcode == OpVectorInsertDynamic)
--			{
--				if ((instruction.length >= 3 && is_cooperative_matrix_typed_id(ops[2])) ||
--				    (instruction.length >= 4 && is_cooperative_matrix_typed_id(ops[3])))
--					SPIRV_CROSS_THROW("Unsupported operation on cooperative matrix in MSL backend.");
-+				{
-+					switch (opcode)
-+					{
-+					case OpLoad:
-+					case OpCopyObject:
-+					case OpSelect:
-+					case OpUndef:
-+					case OpFunctionCall:
-+					case OpCompositeConstruct:
-+					case OpCompositeInsert:
-+					case OpFAdd:
-+					case OpFSub:
-+					case OpFMul:
-+					case OpFDiv:
-+					case OpFNegate:
-+					case OpMatrixTimesScalar:
-+					case OpFConvert:
-+					case OpAccessChain:
-+					case OpInBoundsAccessChain:
-+					case OpVariable:
-+						break;
-+					default:
-+						SPIRV_CROSS_THROW("Unsupported operation on cooperative matrix in MSL backend.");
-+					}
-+				}
- 			}
- 		}
- 		CompilerGLSL::emit_instruction(instruction);
-@@ -17033,7 +17186,7 @@ string CompilerMSL::type_to_glsl(const SPIRType &type, uint32_t id, bool member)
+@@ -17407,7 +17516,7 @@ string CompilerMSL::type_to_glsl(const SPIRType &type, uint32_t id, bool member)
  	// Cooperative matrix -> Metal simdgroup matrix type
  	{
  		const SPIRType *coop_type = &type;
@@ -325,34 +371,26 @@ index c5a9d433..15237763 100644
  			coop_type = maybe_get<SPIRType>(coop_type->parent_type);
  
  		if (coop_type && coop_type->op == OpTypeCooperativeMatrixKHR)
-@@ -17048,27 +17201,52 @@ string CompilerMSL::type_to_glsl(const SPIRType &type, uint32_t id, bool member)
- 			if (scope_c.scalar() != ScopeSubgroup)
- 				SPIRV_CROSS_THROW("MSL cooperative matrices only support Subgroup scope.");
+@@ -17415,22 +17524,50 @@ string CompilerMSL::type_to_glsl(const SPIRType &type, uint32_t id, bool member)
+ 			if (!msl_options.supports_msl_version(3, 1))
+ 				SPIRV_CROSS_THROW("Cooperative matrices require MSL 3.1 or later.");
  
--			// Only 8x8
--			auto &rows_c = get<SPIRConstant>(coop_type->ext.cooperative.rows_id);
--			auto &cols_c = get<SPIRConstant>(coop_type->ext.cooperative.columns_id);
--			if (rows_c.specialization || cols_c.specialization)
--				SPIRV_CROSS_THROW("MSL does not support spec-constant dimensions for cooperative matrices.");
--			if (rows_c.scalar() != 8 || cols_c.scalar() != 8)
--				SPIRV_CROSS_THROW("MSL cooperative matrices only support 8x8 dimensions.");
-+			// A literal is checked here; a specialization constant, or an expression of them, is
-+			// declared from a macro (see compile()) and named, and spvCoopMatrix checks it.
+-			// Only Subgroup scoped 8x8 matrices can be expressed.
++			// Only Subgroup scope, and literal dimensions that are multiples of 8.
+ 			validate_cooperative_matrix_type(*coop_type);
+ 
+-			// Map component type to simdgroup_*8x8
++			// A specialization constant, or an expression of them, is declared from a macro
++			// (see compile()) and named.
 +			auto dim = [&](uint32_t id) -> string {
 +				auto *c = maybe_get<SPIRConstant>(id);
 +				if (c && !c->specialization)
-+				{
-+					uint32_t n = c->scalar();
-+					if (n == 0 || n % 8 != 0)
-+						SPIRV_CROSS_THROW("MSL cooperative matrix dimensions must be multiples of 8.");
-+					return convert_to_string(n);
-+				}
++					return convert_to_string(c->scalar());
 +				return to_expression(id);
 +			};
 +			auto rows = dim(coop_type->ext.cooperative.rows_id);
 +			auto cols = dim(coop_type->ext.cooperative.columns_id);
- 
--			// Map component type to simdgroup_*8x8
++
 +			const char *comp_name;
  			auto &comp = get<SPIRType>(coop_type->parent_type);
  			switch (comp.basetype)
@@ -389,23 +427,11 @@ index c5a9d433..15237763 100644
  		}
  	}
  
-@@ -19360,6 +19538,11 @@ CompilerMSL::SPVFuncImpl CompilerMSL::OpCodePreprocessor::get_spv_func_impl(Op o
- 		return SPVFuncImplUnsafeArray;
- 	}
- 
-+	case OpCooperativeMatrixLoadKHR:
-+	case OpCooperativeMatrixStoreKHR:
-+	case OpCooperativeMatrixMulAddKHR:
-+		return SPVFuncImplCooperativeMatrix;
-+
- 	// Emulate texture2D atomic operations
- 	case OpAtomicExchange:
- 	case OpAtomicCompareExchange:
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
-index de8608f6..e550a1ef 100644
+index 913cb740..0b84bb0d 100644
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -818,6 +818,7 @@ protected:
+@@ -832,6 +832,7 @@ protected:
  		SPVFuncImplQuantizeToF16,
  		SPVFuncImplCubemapTo2DArrayFace,
  		SPVFuncImplUnsafeArray, // Allow Metal to use the array<T> template to make arrays a value type

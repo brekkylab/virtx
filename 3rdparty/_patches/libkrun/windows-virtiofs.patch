@@ -1,5 +1,5 @@
 diff --git a/src/devices/src/virtio/fs/multikey.rs b/src/devices/src/virtio/fs/multikey.rs
-index e6d0bdaf..558b5f48 100644
+index e6d0bda..558b5f4 100644
 --- a/src/devices/src/virtio/fs/multikey.rs
 +++ b/src/devices/src/virtio/fs/multikey.rs
 @@ -35,6 +35,11 @@ where
@@ -15,7 +15,7 @@ index e6d0bdaf..558b5f48 100644
      ///
      /// The key may be any borrowed form of `K1``, but the ordering on the borrowed form must match
 diff --git a/src/devices/src/virtio/fs/windows/passthrough.rs b/src/devices/src/virtio/fs/windows/passthrough.rs
-index 17687d12..762fde07 100644
+index 52ed721..c8c6346 100644
 --- a/src/devices/src/virtio/fs/windows/passthrough.rs
 +++ b/src/devices/src/virtio/fs/windows/passthrough.rs
 @@ -39,7 +39,7 @@ use windows_sys::Win32::Storage::FileSystem::{
@@ -69,7 +69,7 @@ index 17687d12..762fde07 100644
  
      // Already has \\?\ prefix convert to \??\
      if path_wide.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
-@@ -524,15 +538,91 @@ fn read_lx_symlink_by_handle(handle: HANDLE) -> io::Result<Vec<u8>> {
+@@ -520,15 +534,91 @@ fn read_lx_symlink_by_handle(handle: HANDLE) -> io::Result<Vec<u8>> {
      }
  
      let data_len = u16::from_le_bytes(buffer[4..6].try_into().unwrap()) as usize;
@@ -164,7 +164,7 @@ index 17687d12..762fde07 100644
  }
  
  // ADS-backed override_stat helpers  (uid:gid:0mode)
-@@ -565,10 +655,13 @@ fn parse_override_stat(buf: &[u8]) -> io::Result<(Option<u32>, Option<u32>, Opti
+@@ -561,10 +651,13 @@ fn parse_override_stat(buf: &[u8]) -> io::Result<(Option<u32>, Option<u32>, Opti
      Ok((uid, gid, mode))
  }
  
@@ -176,9 +176,9 @@ index 17687d12..762fde07 100644
      mode: Option<u32>,
 +    symlink: bool,
  ) -> io::Result<()> {
-     let buf = if is_valid_owner(owner) && mode.is_some() {
-         let (uid, gid) = owner.unwrap();
-@@ -603,7 +696,11 @@ fn write_override_stat(
+     let buf = if is_valid_owner(owner)
+         && let Some(m) = mode
+@@ -601,7 +694,11 @@ fn write_override_stat(
      };
  
      let ads = ads_stream_path(path, OVERRIDE_STAT_STREAM);
@@ -191,7 +191,7 @@ index 17687d12..762fde07 100644
  }
  
  fn is_valid_owner(owner: Option<(u32, u32)>) -> bool {
-@@ -695,6 +792,46 @@ fn write_ads_by_handle(file_handle: HANDLE, stream_suffix: &str, data: &[u8]) ->
+@@ -693,6 +790,46 @@ fn write_ads_by_handle(file_handle: HANDLE, stream_suffix: &str, data: &[u8]) ->
      }
  }
  
@@ -238,7 +238,7 @@ index 17687d12..762fde07 100644
  /// Store a security context as an ADS named after `secctx.name`.
  /// When `symlink` is true, opens with `FILE_OPEN_REPARSE_POINT` so the
  /// ADS is placed on the symlink itself rather than following to the target.
-@@ -703,37 +840,7 @@ fn write_secctx(path: &Path, secctx: SecContext, symlink: bool) -> io::Result<()
+@@ -701,37 +838,7 @@ fn write_secctx(path: &Path, secctx: SecContext, symlink: bool) -> io::Result<()
      let ads = ads_stream_path(path, &stream_name);
  
      if symlink {
@@ -277,7 +277,7 @@ index 17687d12..762fde07 100644
      } else {
          fs::write(&ads, &secctx.secctx).map_err(win_err_to_linux)
      }
-@@ -1039,30 +1146,31 @@ fn set_delete_disposition(handle: HANDLE) -> io::Result<()> {
+@@ -1035,29 +1142,31 @@ fn set_delete_disposition(handle: HANDLE) -> io::Result<()> {
  }
  
  /// Validate that a path is not a reparse point (symlink / junction) before use.
@@ -317,8 +317,7 @@ index 17687d12..762fde07 100644
 -        }
 -        if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
 -            CloseHandle(h);
--            return Err(linux_error(io::Error::new(
--                io::ErrorKind::Other,
+-            return Err(linux_error(io::Error::other(
 -                "Reparse point detected — path is not safe",
 -            )));
 -        }
@@ -328,7 +327,7 @@ index 17687d12..762fde07 100644
  }
  
  fn set_file_times(path: &Path, atime: Option<u64>, mtime: Option<u64>) -> io::Result<()> {
-@@ -1189,6 +1297,31 @@ impl PassthroughFs {
+@@ -1184,6 +1293,31 @@ impl PassthroughFs {
          Ok(self.inode_data(inode)?.get_path())
      }
  
@@ -360,16 +359,16 @@ index 17687d12..762fde07 100644
      fn do_lookup(&self, ctx: &Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
          let name_bytes = name.to_bytes();
          if name_bytes == b"." {
-@@ -1387,7 +1520,7 @@ impl PassthroughFs {
+@@ -1380,7 +1514,7 @@ impl PassthroughFs {
              if let Ok((_, _, Some(mode))) = read_override_stat(&path) {
                  let new_mode = clear_suid_sgid(mode);
-                 if new_mode != mode {
--                    if let Err(e) = write_override_stat(&path, None, Some(new_mode)) {
-+                    if let Err(e) = write_override_stat(&path, None, Some(new_mode), false) {
-                         error!("clear suid/sgid for inode {inode}: {e}");
-                     }
+                 if new_mode != mode
+-                    && let Err(e) = write_override_stat(&path, None, Some(new_mode))
++                    && let Err(e) = write_override_stat(&path, None, Some(new_mode), false)
+                 {
+                     error!("clear suid/sgid for inode {inode}: {e}");
                  }
-@@ -1981,7 +2114,7 @@ impl FileSystem for PassthroughFs {
+@@ -1974,7 +2108,7 @@ impl FileSystem for PassthroughFs {
                              (Some(u), Some(g)) => Some((u, g)),
                              _ => None,
                          };
@@ -378,7 +377,7 @@ index 17687d12..762fde07 100644
                      }
                  }
              }
-@@ -2112,14 +2245,11 @@ impl FileSystem for PassthroughFs {
+@@ -2105,14 +2239,11 @@ impl FileSystem for PassthroughFs {
  
          let parent_path = self.inode_path(parent)?;
          let link_path = parent_path.join(cstr_to_path(name));
@@ -397,7 +396,7 @@ index 17687d12..762fde07 100644
  
          if matches!(self.cfg.semantics, PermissionSemantics::LinuxComplete) {
              if let Some(secctx) = extensions.secctx {
-@@ -2130,6 +2260,7 @@ impl FileSystem for PassthroughFs {
+@@ -2123,6 +2254,7 @@ impl FileSystem for PassthroughFs {
                  &link_path,
                  Some((ctx.uid, ctx.gid)),
                  Some(S_IFLNK as u32 | 0o777),
@@ -405,7 +404,7 @@ index 17687d12..762fde07 100644
              )?;
          }
  
-@@ -2261,6 +2392,9 @@ impl FileSystem for PassthroughFs {
+@@ -2254,6 +2386,9 @@ impl FileSystem for PassthroughFs {
                  return Err(win_err_to_linux(e));
              }
              fs::rename(&tmp, &old_path).map_err(win_err_to_linux)?;
@@ -415,7 +414,7 @@ index 17687d12..762fde07 100644
              return Ok(());
          }
  
-@@ -2276,10 +2410,13 @@ impl FileSystem for PassthroughFs {
+@@ -2269,10 +2404,13 @@ impl FileSystem for PassthroughFs {
              if res == 0 {
                  return Err(win_err_to_linux(io::Error::last_os_error()));
              }
@@ -430,7 +429,7 @@ index 17687d12..762fde07 100644
      }
  
      fn link(
-@@ -2466,7 +2603,7 @@ impl FileSystem for PassthroughFs {
+@@ -2459,7 +2597,7 @@ impl FileSystem for PassthroughFs {
                  let new_mode = clear_suid_sgid(mode);
                  if new_mode != mode {
                      // Update mode in xattr (ADS)
@@ -439,7 +438,7 @@ index 17687d12..762fde07 100644
                          error!("Couldn't clear suid/sgid for inode {inode}: {err}");
                      }
                  }
-@@ -2618,10 +2755,12 @@ impl FileSystem for PassthroughFs {
+@@ -2611,10 +2749,12 @@ impl FileSystem for PassthroughFs {
              return Err(enosys());
          }
  

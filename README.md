@@ -97,7 +97,7 @@ whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask
 is not on that path, so the binary that calls `hv_vm_create` has to come out of
 the build already entitled. A plain `cargo build` leaves it unsigned.
 
-## Sessions — `3rdparty/_patches/libkrun-85bed71-overlay-root.patch`
+## Sessions — `3rdparty/_patches/libkrun/overlay-root.patch`
 
 [`rootfs`](virtx-uvm/src/rootfs.rs) makes an image's layers into a disk: one
 read-only EROFS filesystem -- the layers merged into a metadata image that points into
@@ -137,7 +137,7 @@ dropped and the host always saw 0. The init now holds a descriptor on the
 virtiofs root across the pivot and sends the ioctl to that, which is what makes
 `cargo xtask run --example run -- alpine:3.21 'exit 42'` exit 42.
 
-## Mounts — `3rdparty/_patches/libkrun-85bed71-session-mounts.patch`
+## Mounts — `3rdparty/_patches/libkrun/session-mounts.patch`
 
 A session can see host directories, each one a virtio-fs share:
 
@@ -181,7 +181,7 @@ share offers no protection against a guest reaching other directories on the sam
 host filesystem, and `read_only` bounds what a guest may write, not what it may
 read.
 
-## The network — `3rdparty/_patches/libkrun-85bed71-tsi.patch`
+## The network — `3rdparty/_patches/libkrun/tsi.patch`
 
 A session's network is on or off, and on is libkrun's Transparent Socket
 Impersonation: the guest kernel hands every socket its own stack cannot answer
@@ -292,15 +292,16 @@ branch and lift the cap to 1.3. Nothing here needs it so far.
 ### bfloat16 and cooperative matrices
 
 `VK_KHR_shader_bfloat16` is an extension that depends only on Vulkan 1.1, so
-the version cap above is irrelevant to it. Upstream **MoltenVK does not implement
-it**, and neither does SPIRV-Cross, which would have to translate the SPIR-V
-types to MSL first. Metal itself has had bfloat since MSL 3.1. Both upstream
-issues ([MoltenVK#2507](https://github.com/KhronosGroup/MoltenVK/issues/2507),
-[SPIRV-Cross#2478](https://github.com/KhronosGroup/SPIRV-Cross/issues/2478))
-have been idle since May 2025. `VK_KHR_cooperative_matrix` is missing for the
-same reason; `VK_KHR_shader_float16_int8` (fp16) is available. Both are patched
-in here (`MoltenVK-0566aa3-cooperative-matrix-bfloat16.patch`,
-`SPIRV-Cross-6c09849-cooperative-matrix-bfloat16.patch`), on Apple7 and later.
+the version cap above is irrelevant to it. Upstream **MoltenVK does not expose
+it**, nor `VK_KHR_cooperative_matrix`; `VK_KHR_shader_float16_int8` (fp16) is
+available. Metal itself has had bfloat since MSL 3.1. Upstream SPIRV-Cross now
+translates bfloat16 and cooperative matrices, element-wise operations included,
+but only as a single 8x8 `simdgroup_matrix` with literal dimensions. Both are
+patched in here (`MoltenVK/cooperative-matrix-bfloat16.patch`,
+`SPIRV-Cross/cooperative-matrix-bfloat16.patch`), on Apple7 and later: MoltenVK
+reports the extensions and 8x8 and 16x16 shapes, and SPIRV-Cross emits a matrix
+as `spvCoopMatrix<T, R, C>`, a grid of 8x8 tiles, keeping upstream's
+element-wise emission but looping it over every tile.
 
 **The guest needs Mesa 26.0 or later.** Venus passes neither extension through
 before that: Debian trixie's 25.0 shows the device without them, and
@@ -322,9 +323,9 @@ Nothing upstream supports this combination yet, so three dependencies are
 patched. Each patch is small and self-contained; the reasoning is worth keeping
 because none of it is obvious from the symptoms.
 
-### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-macos.patch`
+### virglrenderer — `3rdparty/_patches/virglrenderer/macos.patch`
 
-The submodule is pinned to upstream main (`8167744`), not to a release. 1.3.0 —
+The submodule is pinned to upstream main (`e0a1caf`), not to a release. 1.3.0 —
 the minimum rutabaga_gfx accepts — forced the render server on with venus and
 that server was Linux-only, so macOS needed an in-process venus context and a
 host-pointer blob API carried out of tree. Since then upstream grew both halves
@@ -341,13 +342,9 @@ of a real macOS path:
 
 Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so the
 session asks for it wherever the render server is built -- macOS and Linux, not
-Windows (see `virtx-uvm/src/session/gpu.rs`). The patch carries what
+Windows (see `virtx-uvm/src/machine/gpu.rs`). The patch carries what
 upstream main still gets wrong there:
 
-- **`vkr_metal_helpers.m` includes `venus-protocol/vulkan_metal.h`**, a path
-  that went away when venus-protocol moved out to a subproject. Upstream CI
-  builds no macOS, so main does not compile on it. It is `vulkan/vulkan_metal.h`
-  now, as `vkr_common.h` already has it.
 - **`VIRGL_RENDERER_THREAD_SYNC` is dropped on any host without eventfd**, and
   with it the proxy context's sync thread — so `ASYNC_FENCE_CB`, which rutabaga
   always sets, delivered no fence until someone called `virgl_renderer_poll`,
@@ -364,7 +361,7 @@ name, and Homebrew's `lib` is not on its default search path. Linux does the
 opposite: `-Dvulkan-dload=true`, so `virtx-uvm` starts on a host with no
 Vulkan loader, and offers a GPU only where it finds one.
 
-### virglrenderer on Linux — `3rdparty/_patches/virglrenderer-8167744-linux-host-memory.patch`
+### virglrenderer on Linux — `3rdparty/_patches/virglrenderer/linux-host-memory.patch`
 
 A guest maps host-visible memory through the fd its `VkDeviceMemory` exports:
 the host `mmap`s it into the guest's window. A dma_buf or a shm fd can be
@@ -388,18 +385,18 @@ Every patch here is applied on every host, so this one leaves the hunks of the
 others alone: `cargo xtask init` recognises an applied patch by reversing it
 against the whole stack.
 
-`xtask/scripts/build-deps.sh` handles all of it. It exports the pinned
-submodule tree with `git archive` and patches the copy under `data/`, so the
-`virglrenderer` submodule stays pristine. venus-protocol is a meson subproject
+`xtask/scripts/build-deps.sh` handles all of it. It builds the submodule, as
+`cargo xtask init` patched it, into `build/virglrenderer-build/` and installs
+to `build/virglrenderer/`. venus-protocol is a meson subproject
 that is not in that tree; meson clones it at configure time, so the first build
 needs the network, and its codegen needs Mako alongside the PyYAML gallium
 wants. It also synthesises a `vulkan.pc`
 pointing at MoltenVK, which ships none, and installs it next to the built
 library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
-environment wins — if you set one, add `data/virglrenderer/lib/pkgconfig` to it.
+environment wins — if you set one, add `build/virglrenderer/lib/pkgconfig` to it.
 
-### rutabaga_gfx — `3rdparty/_patches/rutabaga_gfx-8cb133e-virgl-renderer.patch`
+### rutabaga_gfx — `3rdparty/_patches/rutabaga_gfx/virgl-renderer.patch`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
 soon as anything asks for a descriptor. A Darwin backend built on Mach ports
@@ -407,25 +404,19 @@ landed upstream on 2026-09-02 but has not been released, so `[patch.crates-io]`
 points at the submodule instead.
 
 That backend widened `RawDescriptor` to `i64`, and `virgl_renderer.rs` was not
-updated with it — it is behind an optional feature that the new macOS CI does
-not build. The patch fixes those three type errors, and that is all macOS needs:
-an exported blob is an shm fd, which the Darwin backend wraps as
+updated with it at first; upstream fixed it in `c9bae3a`, and macOS needs
+nothing more: an exported blob is an shm fd, which the Darwin backend wraps as
 `OwnedDescriptor::Fd`, and `map()` gets its pointer from
 `virgl_renderer_resource_map`.
 
-The same file needs work for Windows too, and it belongs in this patch rather
-than a second one: two patches on one file break `cargo xtask init`'s "already
-patched" check, because the first one's context stops matching once the second
-is in. `virgl_renderer.rs` opens a DRM render node, folds stderr into stdout
-with `dup2`, and turns exported `int` fds into descriptors — none of which exist
-on Windows. On Windows `export_blob` has to report `Unsupported`, since a
+The patch is Windows-only. `virgl_renderer.rs` opens a DRM render node, folds
+stderr into stdout with `dup2`, and turns exported `int` fds into descriptors —
+none of which exist on Windows. On Windows `export_blob` has to report `Unsupported`, since a
 `RawDescriptor` is a `HANDLE` that does not fit in the `int` virglrenderer
 exports blobs through, and `map()` has to fall back to
-`virgl_renderer_resource_get_map_ptr()`. **That half is not in the patch at the
-moment**: it was dropped when the patches moved under `3rdparty/` (`938bb44`),
-and has to come back before a Windows `gpu` build links.
+`virgl_renderer_resource_get_map_ptr()`.
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-gpu.patch`
+### libkrun — `3rdparty/_patches/libkrun/gpu.patch`
 
 One patch for both hosts, because they share the files. The macOS half:
 
@@ -435,18 +426,15 @@ One patch for both hosts, because they share the files. The macOS half:
   reasoning as [libkrun#740](https://github.com/libkrun/libkrun/pull/740),
   rewritten against the current rutabaga API — that PR predates the migration to
   the upstream crate and no longer applies.
-- `needs_worker` was unconditionally false on aarch64, so the VMM worker thread
-  never started and its receiver was dropped. The GPU device sends
-  `WorkerMessage::GpuAddMapping` to that thread because only it can call into
-  the hypervisor, so the send panicked the gpu worker.
 - Hypervisor.framework maps in host pages, 16 KiB on Apple Silicon, while blob
   resources are sized in 4 KiB guest pages. A 132 KiB blob was rejected outright.
   Lengths are now rounded up, symmetrically in `add_mapping` and
-  `remove_mapping`.
+  `remove_mapping`. Upstream offers `VIRTIO_GPU_F_BLOB_ALIGNMENT` (`51367cf`)
+  instead, but a guest only honours it from Linux 7.2, and libkrunfw is 6.12.
 
 The Windows half is mostly the same code, reached: upstream gates the whole
 blob-mapping path on `target_os = "macos"` — `map_sender`, the `WorkerMessage`
-variants, the `Vmm::add_mapping` wrappers, `resource_map_blob` and
+variants and their arms in `vmm/worker.rs`, the `Vmm::add_mapping` wrappers, `resource_map_blob` and
 `resource_unmap_blob`, and the `AttachContext` that carries the channel — and
 every one of those is about handing the hypervisor a host pointer, not about
 macOS. They now read `any(target_os = "macos", target_os = "windows")`. What
@@ -457,9 +445,12 @@ had to be written rather than widened:
 - **`Vm::add_mapping`/`remove_mapping` on WHP**, the counterparts of the macOS
   ones. No rounding: WHP asks for 4 KiB, which is what a blob is already sized
   in, so the host-page arithmetic Apple Silicon needs has no equivalent here.
+  For the same reason the `VIRTIO_GPU_F_BLOB_ALIGNMENT` upstream offers
+  (`51367cf`) is 4096 there: upstream reads it from `sysconf`, which Windows
+  does not have.
 - **`needs_worker`** on x86_64 followed `split_irqchip` alone, so the thread the
-  GPU device sends its mappings to never started. This is the same bug the
-  macOS half fixed on aarch64, in the other arm of the same expression.
+  GPU device sends its mappings to never started. Upstream fixed the macOS arm
+  of the same expression (`221a028`); this is the x86_64 one.
 - `gpu/worker.rs` cleared `O_NONBLOCK` off the control eventfd with `nix`,
   which is not a dependency on Windows. It still has to be cleared, though:
   that `read()` is what parks the worker between kicks, and the Windows
@@ -660,7 +651,7 @@ to 4 KiB rather than 64 KiB to match WHP's page granularity.
 Expect 10–20 minutes on the first run; it is a full kernel build. `LIBKRUNFW_REBUILD=1`
 builds again over what is already there.
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-macos-krunfw-path.patch`
+### libkrun — `3rdparty/_patches/libkrun/macos-krunfw-path.patch`
 
 One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
 beside the binary that opens it.**
@@ -683,7 +674,7 @@ What this replaces is an environment variable that whoever runs the binary had t
 which a wrapper can do for `cargo xtask run` and nothing can do for an installed binary
 someone runs by hand.
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-virtiofs.patch`
+### libkrun — `3rdparty/_patches/libkrun/windows-virtiofs.patch`
 
 Four bugs in the Windows virtio-fs passthrough, all invisible to a CI job that
 never boots a guest. The first two are on the path every `execve` takes.
@@ -769,10 +760,10 @@ with a message and no errno — reached the log as `ERROR_ACCESS_DENIED`, and th
 message it was carrying was dropped on the way.
 
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-vsock.patch`
+### libkrun — `3rdparty/_patches/libkrun/windows-vsock.patch`
 
 Three stalls in TSI, which is the whole of a session's network — see
-[The network](#the-network--3rdparty_patcheslibkrun-85bed71-tsipatch).
+[The network](#the-network--3rdparty_patcheslibkruntsipatch).
 All of them are credit mistaken for something else, and all of them are made
 permanent by the same property of this epoll: it is
 `WSAEventSelect`-backed, so re-arming interest does not re-announce bytes that
@@ -905,32 +896,7 @@ follow from that: meson resolves `python3` off `PATH` — a native-file
 `[binaries] python3` entry does *not* steer the python module — and a Windows
 venv never creates that name, so the script makes one.
 
-### libkrun — `3rdparty/_patches/libkrun-85bed71-windows-console.patch`
-
-One read, on the path every console session takes, and the machine it breaks looks
-like one that booted fine.
-
-A port's rx thread fills a guest descriptor by reading into it until it is full:
-`read_to_desc` calls `read_volatile` again with whatever is left and stops only on
-a short read or on `WouldBlock`. The unix side gets that for free, because its
-descriptor is non-blocking and the second read answers `EWOULDBLOCK`. The Windows
-side hands it a synchronous handle, so the second read *blocks* — with the bytes
-already in the descriptor and never handed over. On a port carrying a
-request/response protocol that is every message smaller than one descriptor: the
-host writes 68 bytes, the guest's rx thread waits for the other 4028, and neither
-end moves again. It is invisible to a console on a terminal, where the next
-keystroke eventually arrives.
-
-So `read_volatile` now reads no more than is already there — `PeekNamedPipe`, and
-`WouldBlock` when that is nothing — which is the contract the rx loop was written
-against. `wait_until_readable` then has to answer for the waiting, and it cannot do
-it the way it did: `WaitForSingleObject` on a file handle reports that an
-*overlapped* operation on it completed, and these handles are synchronous, so
-waiting on one says nothing about whether anything arrived. A pipe is polled, with
-the stop event's own timed wait as the pause between two asks; a console handle is
-a synchronization object and is still waited on as before.
-
-### libkrun — `3rdparty/_patches/libkrun-85bed71-x86_64-mptable.patch`
+### libkrun — `3rdparty/_patches/libkrun/x86_64-mptable.patch`
 
 The twelfth virtio-mmio device on an x86_64 guest got an interrupt line nothing
 had told the kernel about, and the machine stopped there without saying so.
@@ -969,10 +935,10 @@ the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
 ceiling. macOS is aarch64, where the interrupt controller is a GIC and
 `IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
 
-### virglrenderer — `3rdparty/_patches/virglrenderer-8167744-windows.patch`
+### virglrenderer — `3rdparty/_patches/virglrenderer/windows.patch`
 
-Rebased onto `8167744`, and since built on a Windows host with no further
-fixes: `xtask/scripts/build-deps.ps1` compiles and installs it, a `--features gpu` build
+Built on a Windows host at `8167744` with no further fixes, and carried to
+`e0a1caf` unchanged: `xtask/scripts/build-deps.ps1` compiles and installs it, a `--features gpu` build
 links against it, and the guest enumerates the device — `/dev/dri/card0`,
 `renderD128`, `card0-Virtual-1`. What that does not say is that anything has
 been *rendered* through it there; the image has to carry the guest half for
@@ -1117,7 +1083,7 @@ virtx-abins/                the programs in the guest's /abin -- index and mem, 
                             is; its own workspace, built for musl
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
-3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at 8167744
+3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at e0a1caf
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
 3rdparty/_patches/           applied to the submodules above by `cargo xtask init`;
                             see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"

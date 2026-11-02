@@ -285,7 +285,7 @@ jobs:
         with:
           path: |
             virtx-uvm/3rdparty/MoltenVK/Package
-          key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK-*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
+          key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK/*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
 
       - uses: actions/cache/restore@v4
         with:

@@ -1,5 +1,5 @@
 diff --git a/src/devices/src/virtio/vsock/tsi_dgram/windows.rs b/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
-index 3922fd26..01a1a269 100644
+index f2da10b..f83d5c8 100644
 --- a/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
 +++ b/src/devices/src/virtio/vsock/tsi_dgram/windows.rs
 @@ -94,11 +94,12 @@ pub(crate) fn init_pkt(proxy: &super::TsiDgramProxy, pkt: &mut VsockPacket) {
@@ -44,12 +44,12 @@ index 3922fd26..01a1a269 100644
      } else {
          RecvPkt::Error
 diff --git a/src/devices/src/virtio/vsock/tsi_stream/windows.rs b/src/devices/src/virtio/vsock/tsi_stream/windows.rs
-index be3c7dc8..b1e72847 100644
+index a2e4a87..85c0dbb 100644
 --- a/src/devices/src/virtio/vsock/tsi_stream/windows.rs
 +++ b/src/devices/src/virtio/vsock/tsi_stream/windows.rs
-@@ -287,35 +287,41 @@ pub(crate) fn update_peer_credit(
-     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
-     let mut update = ProxyUpdate::default();
+@@ -302,46 +302,48 @@ pub(crate) fn update_peer_credit(
+         return update;
+     }
  
 -    // If we were deadlocked waiting for credit, and credit is now restored:
 -    if proxy.status == ProxyStatus::WaitingCreditUpdate && proxy.peer_avail_credit() > 0 {
@@ -72,8 +72,17 @@ index be3c7dc8..b1e72847 100644
 -        // Proactively pull data to bypass the missed Windows edge-trigger
 -        let (signal_queue, wait_credit) = proxy.recv_pkt();
 -        update.signal_queue = signal_queue;
--
--        if wait_credit {
++    let (signal_queue, wait_credit) = proxy.recv_pkt();
++    update.signal_queue = signal_queue;
+ 
+-        if proxy.status == ProxyStatus::Closed {
+-            proxy.push_reset();
+-            update.signal_queue = true;
+-            update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+-            update.remove_proxy = ProxyRemoval::Deferred;
+-        } else if proxy.host_read_closed {
+-            update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+-        } else if wait_credit {
 -            // We immediately ran out of credit again. Suspend again and ask for more.
 -            proxy.status = ProxyStatus::WaitingCreditUpdate;
 -            let rx = MuxerRx::CreditRequest {
@@ -89,12 +98,20 @@ index be3c7dc8..b1e72847 100644
 -            ));
 -        } else {
 -            // Successfully drained, safe to listen for the next edge
--            update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
+-            update.polling = Some((
+-                proxy.id,
+-                proxy.fd.as_raw_socket() as RawFd,
+-                EventSet::IN | EventSet::READ_HANG_UP,
+-            ));
 -        }
-+    let (signal_queue, wait_credit) = proxy.recv_pkt();
-+    update.signal_queue = signal_queue;
-+
-+    if wait_credit {
++    if proxy.status == ProxyStatus::Closed {
++        proxy.push_reset();
++        update.signal_queue = true;
++        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
++        update.remove_proxy = ProxyRemoval::Deferred;
++    } else if proxy.host_read_closed {
++        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
++    } else if wait_credit {
 +        // Still nothing to write into. Park again and ask for more; the next
 +        // update comes back through here and pulls again.
 +        proxy.status = ProxyStatus::WaitingCreditUpdate;
@@ -113,6 +130,6 @@ index be3c7dc8..b1e72847 100644
 -        // Normal update (wasn't suspended)
 -        proxy.status = ProxyStatus::Connected;
 +        // Drained, so the next edge is one this registration will see.
-         update.polling = Some((proxy.id, proxy.fd.as_raw_socket() as RawFd, EventSet::IN));
-     }
- 
+         update.polling = Some((
+             proxy.id,
+             proxy.fd.as_raw_socket() as RawFd,

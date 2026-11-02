@@ -53,9 +53,10 @@ impl TransportClient {
     }
 
     /// Start `command`, a [`std::process::Command`] or a tokio one, as the server, and talk to
-    /// it over its stdin and stdout: whatever `command` set for those two is replaced. The rest
-    /// of it (arguments, environment, directory, stderr) is the caller's. Must be called inside
-    /// a tokio runtime.
+    /// it over its stdin and stdout: whatever `command` set for those two is replaced, and it
+    /// runs in a process group of its own, out of reach of the terminal's Ctrl-C. The rest of it
+    /// (arguments, environment, directory, stderr) is the caller's. Must be called inside a
+    /// tokio runtime.
     pub fn spawn(command: impl Into<tokio::process::Command>) -> io::Result<Self> {
         Stdio::spawn(command).map(|stdio| Self::new(Connection::Stdio(stdio)))
     }

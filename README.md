@@ -147,19 +147,19 @@ claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@bre
 codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 ```
 
-## What a server holds
+## Resources
 
 | | What it is | Made and read with |
 |---|---|---|
-| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | Build, pull and push jobs; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
-| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox` |
-| **Job** | Something the server does for a while: a build, pull or push, or a process in a sandbox | Started by `build_image`, `pull_image`, `push_image` or `exec_sandbox`, its log read by iterating what they answer; read with `get_*_job`, cancelled with `remove_*_job` |
+| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
+| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox` |
 | **Snapshot** | The writable layer of a sandbox's root filesystem, kept under a name | `create_snapshot`, `get_snapshot`, `list_snapshot`, `remove_snapshot`; its files over WebDAV |
 | **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
 
 Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
+Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
 
-### Jobs and their logs
+## Jobs and their logs
 
 A build, pull or push, and every command in a sandbox, is a job the server runs apart from the request that started it.
 `build_image`, `pull_image`, `push_image` and `exec_sandbox` answer a started job, which is two things at once:
@@ -185,7 +185,7 @@ async for entry in run:
     print(entry)
 ```
 
-### Snapshots and volumes
+## Snapshots and volumes
 
 A sandbox made on a snapshot starts with the changes in it and writes into it, so what one sandbox installed the next one finds.
 While a sandbox holds it, its files are the sandbox's: reading them, and removing the snapshot, are refused until the sandbox is removed.
@@ -221,7 +221,7 @@ print(await client.read_text(volume, "in/notes.txt"))
 
 A write can name the `etag` a read gave, so it goes only over the file it read. Files move with `rename_file` and `copy_file`, and go with `remove_file`.
 
-### Ports
+## Ports
 
 `ports` at making a sandbox open TCP ports in it, each answered with a URL, there only. A `PortForwarder` opened over the client with that URL puts the port at an address on this machine's loopback, for any TCP client:
 
@@ -235,7 +235,7 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
 
 Ports are the way in. `network=False` takes away the way out.
 
-### Images
+## Images
 
 A recipe is a base image and the steps over it, as a Dockerfile is; in Rust, `Recipe::from_dockerfile` reads one.
 A build stores what it builds under its tag, and `create_sandbox` boots it by that tag, or by its digest for exactly that build.
@@ -243,7 +243,7 @@ A build stores what it builds under its tag, and `create_sandbox` boots it by th
 
 Everything else is the server's OCI registry: `list_image`, `tag_image`, `untag_image` and `remove_image`, and `download_image` and `upload_image` to move an image to and from an OCI archive on this machine. `prune_image` deletes what no tag points at and no sandbox uses.
 
-### GPU
+## GPU
 
 The VM gets a GPU through Vulkan on every host, so it can run heavy work like deep learning.
 Ask for it with `gpu=True` at making a sandbox, `gpu_memory_mib` for its memory, and install the guest's half of Vulkan in the image:

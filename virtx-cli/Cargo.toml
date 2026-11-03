@@ -1,0 +1,34 @@
+[package]
+name = "virtx-cli"
+version = "0.1.2"
+edition = "2024"
+description = "The `virtx` command: build and manage a virtx server's images from a shell."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "virtx"
+path = "src/main.rs"
+
+[dependencies]
+# The client itself, not `libvirtx_core` through the C ABI: a binary has no other module to
+# share one library with.
+virtx-core = { path = "../virtx-core", default-features = false, features = ["client"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `signal` so Ctrl-C cancels the job it interrupts; `process` to start the server.
+tokio = { version = "1", features = ["macros", "process", "rt", "signal"] }
+
+[target.'cfg(unix)'.dependencies]
+# `signal(SIGPIPE, SIG_DFL)`, so `virtx images | head` ends quietly.
+libc = "0.2"
+
+[dev-dependencies]
+# The test server, served over HTTP for the commands that start jobs.
+virtx-core = { path = "../virtx-core", default-features = false, features = ["testing"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }

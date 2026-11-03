@@ -1,0 +1,96 @@
+//! Following an image job: its log on stderr until its end, and Ctrl-C cancelling it.
+
+use std::fmt;
+
+use futures_util::StreamExt as _;
+use virtx_core::{Client, ImageJob, ImageJobEntry};
+
+/// The command was interrupted, and the job it followed cancelled.
+#[derive(Debug)]
+pub(crate) struct Interrupted;
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("interrupted; the job was cancelled")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// Follow `job` to its end and answer the digest it ended with, its log on stderr unless
+/// `quiet`. Ctrl-C cancels it, since a job runs on without the reader that started it.
+pub(crate) async fn follow(client: &Client, job: &ImageJob, quiet: bool) -> anyhow::Result<String> {
+    tokio::select! {
+        ended = drain(client, &job.id, quiet) => ended,
+        _ = tokio::signal::ctrl_c() => {
+            client.remove_image_job(&job.id).await?;
+            Err(Interrupted.into())
+        }
+    }
+}
+
+async fn drain(client: &Client, id: &str, quiet: bool) -> anyhow::Result<String> {
+    let mut log = client.image_job_log(id, None);
+    while let Some(entry) = log.next().await {
+        match entry?.entry {
+            ImageJobEntry::Log(line) if !quiet => eprintln!("{line}"),
+            ImageJobEntry::Truncated {} if !quiet => {
+                eprintln!("(the log reached the server's limit; the rest is not kept)")
+            }
+            ImageJobEntry::End(end) => return ended(end.digest, end.error),
+            _ => {}
+        }
+    }
+    // The stream closed before its end: the job says how it stands.
+    let job = client.get_image_job(id).await?;
+    anyhow::ensure!(
+        !job.running,
+        "the job's log closed while it ran; it is {id}"
+    );
+    ended(job.digest, job.error)
+}
+
+fn ended(digest: Option<String>, error: Option<String>) -> anyhow::Result<String> {
+    match (digest, error) {
+        (_, Some(error)) => Err(anyhow::anyhow!(error)),
+        (Some(digest), None) => Ok(digest),
+        (None, None) => anyhow::bail!("the job ended without a digest"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use virtx_core::{Auth, Recipe};
+
+    use super::*;
+
+    /// A client of the test server, served over HTTP on loopback.
+    pub(crate) async fn client() -> Client {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, virtx_core::testing::router()).await });
+        Client::connect(&url, Auth::None, http::HeaderMap::new()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_job_answers_the_digest_it_ended_with() {
+        let client = client().await;
+        let job = client
+            .build_image(Recipe::new("alpine:3.20"), "jq:latest")
+            .await
+            .unwrap();
+        assert_eq!(follow(&client, &job, true).await.unwrap(), "sha256:0");
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_fails_with_its_error() {
+        let client = client().await;
+        let job = client
+            .build_image(Recipe::new("missing"), "jq:latest")
+            .await
+            .unwrap();
+        let error = follow(&client, &job, true).await.unwrap_err();
+        assert!(!error.is::<Interrupted>());
+        assert!(!error.to_string().is_empty());
+    }
+}

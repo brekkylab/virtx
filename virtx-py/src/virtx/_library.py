@@ -170,6 +170,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_signal_sandbox_job": _WITH_ARGS,
     "virtx_client_write_sandbox_job_stdin": _WITH_ARGS,
     "virtx_client_sandbox_job_log": _WITH_ARGS,
+    "virtx_client_exec_sandbox_log": _WITH_ARGS,
     "virtx_port_forwarder_open": (
         [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],
         ctypes.c_int,

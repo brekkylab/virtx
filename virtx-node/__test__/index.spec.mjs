@@ -267,6 +267,24 @@ test('a started build is iterated to its end', async () => {
   }
 })
 
+test('a command iterated then awaited answers the job it read', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const { id: sandbox } = await client.createSandbox('alpine:3.20')
+    const echo = client.execSandbox(sandbox, ['echo', 'hi'])
+    const log = await entries(echo)
+    assert.deepEqual(log.at(-1), { id: 2, end: { code: 0 } })
+    const job = await echo
+    assert.deepEqual(job.cmd, ['echo', 'hi'])
+    assert.deepEqual(
+      (await client.listSandboxJob(sandbox)).map((j) => j.id),
+      [job.id],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
 test('a started command is iterated to its end', async () => {
   const client = Client.spawn(testServer)
   try {

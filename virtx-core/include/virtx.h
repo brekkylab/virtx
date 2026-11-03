@@ -682,6 +682,18 @@ struct VirtxStream *virtx_client_sandbox_job_log(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
+// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_exec_sandbox_log(struct VirtxClient *client,
+                                                  const uint8_t *args,
+                                                  size_t args_len);
+
 // Free bytes this library wrote. Null `data` does nothing.
 //
 // # Safety

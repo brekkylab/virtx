@@ -18,8 +18,8 @@ use crate::{
         Recipe, RegistryAuth, oci,
     },
     sandbox::{
-        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
-        SandboxSignalArgs, SandboxStdinArgs,
+        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+        SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
     },
     snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
@@ -416,6 +416,17 @@ impl Client {
         sandbox::client::exec(&self.inner, id.as_ref(), args).await
     }
 
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log (virtx cloud's), two elsewhere. Dropping it leaves the job running.
+    pub fn exec_sandbox_with_log(
+        &self,
+        id: &str,
+        args: &SandboxExecArgs,
+    ) -> impl Stream<Item = Result<SandboxExecItem, Error>> + Unpin + Send + use<'_> {
+        Box::pin(sandbox::client::exec_log(&self.inner, id, args))
+    }
+
     /// The job `job` in the sandbox `id`.
     pub async fn get_sandbox_job(
         &self,
@@ -636,6 +647,34 @@ mod tests {
             assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
             assert!(!client.get_snapshot("work").await.unwrap().in_use);
             client.remove_snapshot("work").await.unwrap();
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exec_read_with_its_log_is_its_job_then_its_entries() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let args = SandboxExecArgs::new(["echo", "hi", "there"]);
+            let items: Vec<_> = client
+                .exec_sandbox_with_log(&sandbox.id, &args)
+                .try_collect()
+                .await
+                .unwrap();
+            let [SandboxExecItem::Job(job), rest @ ..] = &items[..] else {
+                panic!("not its job first: {items:?}");
+            };
+            assert_eq!(job.cmd, ["echo", "hi", "there"]);
+            assert_eq!(
+                rest,
+                [
+                    SandboxExecItem::Log(entry(1, SandboxJobEntry::Stdout("hi there".into()))),
+                    SandboxExecItem::Log(entry(2, end(0))),
+                ]
+            );
             client.close().await;
         }
     }
@@ -951,12 +990,12 @@ pub(crate) mod ffi {
     use bytes::Bytes;
     use futures_util::StreamExt;
     use http::{HeaderMap, HeaderName, HeaderValue};
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use tokio::process::Command;
 
     use super::Client;
     use crate::{
-        Auth,
+        Auth, LogEntry,
         ffi::{
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
@@ -965,7 +1004,9 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        sandbox::{SandboxCreateArgs, SandboxExecArgs},
+        sandbox::{
+            SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
+        },
         snapshot::SnapshotCreateArgs,
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
@@ -2385,6 +2426,53 @@ pub(crate) mod ffi {
                 let mut log = client.sandbox_job_log(&sandbox, &job, after);
                 while let Some(entry) = log.next().await {
                     yield entry.map_err(|e| e.to_string());
+                }
+            }
+        })
+    }
+
+    /// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+    /// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+    /// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+    /// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_exec_sandbox_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        /// An item as the stream gives it.
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Item {
+            Job { job: SandboxJob },
+            Log(LogEntry<SandboxJobEntry>),
+        }
+
+        let args = unsafe { json::<Exec>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let (sandbox, args) = match args {
+                    Ok(Exec { sandbox, cmd, stdin, timeout_ms }) => {
+                        (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
+                    }
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut items = client.exec_sandbox_with_log(&sandbox, &args);
+                while let Some(item) = items.next().await {
+                    yield item
+                        .map(|item| match item {
+                            SandboxExecItem::Job(job) => Item::Job { job },
+                            SandboxExecItem::Log(entry) => Item::Log(entry),
+                        })
+                        .map_err(|e| e.to_string());
                 }
             }
         })

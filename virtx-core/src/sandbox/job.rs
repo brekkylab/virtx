@@ -142,3 +142,13 @@ mod tests {
         assert_eq!(value, json!({"cmd": ["true"]}));
     }
 }
+
+/// What an exec read with its log yields ([`Client::exec_sandbox_with_log`]): its job, once,
+/// first; then each entry of its log, until its end.
+///
+/// [`Client::exec_sandbox_with_log`]: crate::Client::exec_sandbox_with_log
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SandboxExecItem {
+    Job(SandboxJob),
+    Log(crate::LogEntry<SandboxJobEntry>),
+}

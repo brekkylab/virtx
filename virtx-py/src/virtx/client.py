@@ -629,7 +629,14 @@ class Client:
         async def start() -> SandboxJob:
             return SandboxJob.from_dict(await self._call("virtx_client_exec_sandbox", args))
 
-        return StartedJob(start, lambda job: self.sandbox_job_log(sandbox, job.id))
+        async def run() -> AsyncIterator[SandboxJob | LogEntry[SandboxJobEntry]]:
+            async for item in self._items("virtx_client_exec_sandbox_log", args):
+                if "job" in item:
+                    yield SandboxJob.from_dict(item["job"])
+                else:
+                    yield sandbox_job_entry(item)
+
+        return StartedJob(start, lambda job: self.sandbox_job_log(sandbox, job.id), run)
 
     async def get_sandbox_job(self, sandbox: str, job: str) -> SandboxJob:
         """The job ``job`` in ``sandbox``."""

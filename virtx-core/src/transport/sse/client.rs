@@ -31,6 +31,19 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
             Err::<(), _>(refused(response).await)?;
             return;
         }
+        let mut entries = std::pin::pin!(entries(response, path));
+        while let Some(entry) = entries.next().await {
+            yield entry?;
+        }
+    }
+}
+
+/// The entries of `response`, a job's log answered from `path`, each read as an `E`.
+pub(crate) fn entries<E: DeserializeOwned + Send>(
+    response: http::Response<crate::transport::Body>,
+    path: String,
+) -> impl Stream<Item = Result<LogEntry<E>, Error>> + Send {
+    async_stream::try_stream! {
         let mut events = SseStream::new(response.into_body());
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| Error::Transport(format!("reading the log: {e}")))?;

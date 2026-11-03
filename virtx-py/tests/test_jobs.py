@@ -143,6 +143,17 @@ async def test_an_exec_iterated_yields_its_output_and_how_it_ended(test_server: 
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
 
 
+async def test_an_exec_iterated_then_awaited_answers_the_job_it_read(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20")
+        echo = client.exec_sandbox(sandbox.id, ["echo", "hi"])
+        log = [entry async for entry in echo]
+        assert log[-1] == LogEntry(2, SandboxJobEnd(0))
+        job = await echo
+        assert job.cmd == ["echo", "hi"]
+        assert [j.id for j in await client.list_sandbox_job(sandbox.id)] == [job.id]
+
+
 async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         before = len(await client.list_image_job())

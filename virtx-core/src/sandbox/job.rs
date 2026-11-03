@@ -143,12 +143,38 @@ mod tests {
     }
 }
 
-/// What an exec read with its log yields ([`Client::exec_sandbox_with_log`]): its job, once,
-/// first; then each entry of its log, until its end.
-///
-/// [`Client::exec_sandbox_with_log`]: crate::Client::exec_sandbox_with_log
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What an exec read with its log yields (`Client::exec_sandbox_with_log`): its job, once,
+/// first; then each entry of its log, until its end. As JSON, `{"job": {...}}` or the entry as
+/// a log's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExecItem", into = "ExecItem")]
 pub enum SandboxExecItem {
     Job(SandboxJob),
     Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+/// [`SandboxExecItem`] as JSON has it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ExecItem {
+    Job { job: SandboxJob },
+    Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+impl From<ExecItem> for SandboxExecItem {
+    fn from(item: ExecItem) -> Self {
+        match item {
+            ExecItem::Job { job } => SandboxExecItem::Job(job),
+            ExecItem::Log(entry) => SandboxExecItem::Log(entry),
+        }
+    }
+}
+
+impl From<SandboxExecItem> for ExecItem {
+    fn from(item: SandboxExecItem) -> Self {
+        match item {
+            SandboxExecItem::Job(job) => ExecItem::Job { job },
+            SandboxExecItem::Log(entry) => ExecItem::Log(entry),
+        }
+    }
 }

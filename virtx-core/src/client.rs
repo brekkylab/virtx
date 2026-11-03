@@ -990,12 +990,12 @@ pub(crate) mod ffi {
     use bytes::Bytes;
     use futures_util::StreamExt;
     use http::{HeaderMap, HeaderName, HeaderValue};
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
     use tokio::process::Command;
 
     use super::Client;
     use crate::{
-        Auth, LogEntry,
+        Auth,
         ffi::{
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
@@ -1004,9 +1004,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        sandbox::{
-            SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-        },
+        sandbox::{SandboxCreateArgs, SandboxExecArgs},
         snapshot::SnapshotCreateArgs,
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
@@ -2445,14 +2443,6 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxStream {
-        /// An item as the stream gives it.
-        #[derive(Serialize)]
-        #[serde(untagged)]
-        enum Item {
-            Job { job: SandboxJob },
-            Log(LogEntry<SandboxJobEntry>),
-        }
-
         let args = unsafe { json::<Exec>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
@@ -2467,12 +2457,7 @@ pub(crate) mod ffi {
                 };
                 let mut items = client.exec_sandbox_with_log(&sandbox, &args);
                 while let Some(item) = items.next().await {
-                    yield item
-                        .map(|item| match item {
-                            SandboxExecItem::Job(job) => Item::Job { job },
-                            SandboxExecItem::Log(entry) => Item::Log(entry),
-                        })
-                        .map_err(|e| e.to_string());
+                    yield item.map_err(|e| e.to_string());
                 }
             }
         })

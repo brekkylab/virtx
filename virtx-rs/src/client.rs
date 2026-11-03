@@ -13,9 +13,9 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
     ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
     ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountListOutputItem,
+    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJob, SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -695,6 +695,27 @@ impl Client {
         Events::new(
             self.api,
             self.start(self.api.virtx_client_sandbox_job_log, args),
+        )
+    }
+
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log (virtx cloud's), two elsewhere; [`exec_sandbox`](Self::exec_sandbox)'s
+    /// log is always two. Dropping it leaves the job running.
+    pub fn exec_sandbox_with_log(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> Events<SandboxExecItem> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "cmd": args.cmd,
+            "stdin": args.stdin,
+            "timeout_ms": args.timeout_ms,
+        });
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_exec_sandbox_log, args),
         )
     }
 

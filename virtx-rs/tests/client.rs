@@ -19,8 +19,8 @@ use std::{io::Read, net::TcpStream};
 
 use virtx_rs::{
     Auth, Client, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
-    PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry,
-    SnapshotListOutputItem,
+    PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd,
+    SandboxJobEntry, SnapshotListOutputItem,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -302,6 +302,30 @@ fn a_started_job_is_read_as_its_log() {
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .wait()
         .unwrap();
+    // Started and read as one: its job, then its log.
+    let mut items =
+        client.exec_sandbox_with_log(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]));
+    let mut read = Vec::new();
+    while let Some(item) = items.wait_next() {
+        read.push(item.unwrap());
+    }
+    let [SandboxExecItem::Job(job), rest @ ..] = &read[..] else {
+        panic!("not its job first: {read:?}");
+    };
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    assert_eq!(
+        rest.iter()
+            .map(|item| match item {
+                SandboxExecItem::Log(entry) => entry.entry.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        [
+            SandboxJobEntry::Stdout("hi".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
     let mut log = client
         .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
         .log();

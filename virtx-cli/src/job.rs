@@ -64,12 +64,17 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A client of the test server, served over HTTP on loopback.
-    pub(crate) async fn client() -> Client {
+    /// The test server, served over HTTP on loopback, and its base URL.
+    pub(crate) async fn serve() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, virtx_core::testing::router()).await });
-        Client::connect(&url, Auth::None, http::HeaderMap::new()).unwrap()
+        url
+    }
+
+    /// A client of a test server of its own.
+    pub(crate) async fn client() -> Client {
+        Client::connect(&serve().await, Auth::None, http::HeaderMap::new()).unwrap()
     }
 
     #[tokio::test]

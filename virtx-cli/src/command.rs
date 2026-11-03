@@ -291,6 +291,15 @@ mod tests {
     }
 
     #[test]
+    fn a_host_and_a_server_to_start_are_one_or_the_other() {
+        let cli = Cli::try_parse_from(["virtx", "-H", "https://x", "images"]).unwrap();
+        assert_eq!(cli.server.host.as_deref(), Some("https://x"));
+        assert!(
+            Cli::try_parse_from(["virtx", "-H", "https://x", "--server", "./s", "images"]).is_err()
+        );
+    }
+
+    #[test]
     fn the_server_is_named_before_or_after_the_command() {
         let before = Cli::try_parse_from(["virtx", "--server", "./s", "images"]).unwrap();
         let after = Cli::try_parse_from(["virtx", "images", "--server", "./s"]).unwrap();

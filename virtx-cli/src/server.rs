@@ -1,23 +1,54 @@
-//! Reaching the server: `virtx-uvm` started here, over its stdin and stdout.
+//! Reaching the server: one at a URL over HTTP, or `virtx-uvm` started here, over its stdin and
+//! stdout.
 
 use std::{io, path::PathBuf};
 
+use anyhow::Context as _;
 use clap::Args;
 use tokio::process::Command;
-use virtx_core::Client;
+use virtx_core::{Auth, Client};
 
 /// The server's program, as virtx-uvm installs it.
 const PROGRAM: &str = "virtx-uvm";
 
+/// The bearer token a server at `--host` wants, taken from the environment alone so it is never
+/// on a command line.
+const TOKEN: &str = "VIRTX_TOKEN";
+
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct ServerArgs {
+    /// The server's base URL, reached over HTTP with `$VIRTX_TOKEN` as its bearer token if set;
+    /// a server started here if absent.
+    #[arg(
+        short = 'H',
+        long,
+        env = "VIRTX_HOST",
+        global = true,
+        value_name = "URL"
+    )]
+    pub(crate) host: Option<String>,
+
     /// The server to start; `virtx-uvm` in `$VIRTX_HOME/bin`, else on `PATH`, if absent.
-    #[arg(long, env = "VIRTX_SERVER", global = true, value_name = "PROGRAM")]
+    #[arg(
+        long,
+        env = "VIRTX_SERVER",
+        global = true,
+        conflicts_with = "host",
+        value_name = "PROGRAM"
+    )]
     pub(crate) server: Option<PathBuf>,
 }
 
 /// A client of the server `args` names.
 pub(crate) fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
+    if let Some(url) = &args.host {
+        let auth = match std::env::var(TOKEN) {
+            Ok(token) if !token.is_empty() => Auth::Bearer { token },
+            _ => Auth::None,
+        };
+        return Client::connect(url, auth, http::HeaderMap::new())
+            .with_context(|| format!("reaching {url}"));
+    }
     let program = args.server.clone().unwrap_or_else(default_program);
     Client::spawn(Command::new(&program)).map_err(|error| {
         let started = format!("starting {}", program.display());
@@ -72,6 +103,7 @@ mod tests {
             .unwrap();
         let _guard = runtime.enter();
         let args = ServerArgs {
+            host: None,
             server: Some("/nonexistent/virtx-uvm".into()),
         };
         let error = connect(&args).err().unwrap();
@@ -79,5 +111,16 @@ mod tests {
             format!("{error:#}").contains("cargo xtask install"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_host_is_reached_over_http() {
+        let url = crate::job::tests::serve().await;
+        let args = ServerArgs {
+            host: Some(url),
+            server: None,
+        };
+        let client = connect(&args).unwrap();
+        assert!(client.list_image_job().await.unwrap().is_empty());
     }
 }

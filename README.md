@@ -14,7 +14,12 @@ What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-cor
 ## Quickstart
 
 Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
-`virtx-server` is the server's program, started over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+`Client.spawn("virtx-uvm")` starts the server, [`virtx-uvm`](https://github.com/brekkylab/virtx-uvm), and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+No release of `virtx-uvm` speaks this protocol yet, so build it from that repository's `multi-process` branch, as its README says, and install it onto your `PATH`:
+
+```sh
+cargo xtask install --prefix ~/.local   # in virtx-uvm, once built: -> ~/.local/bin/virtx-uvm
+```
 
 ### Python
 
@@ -29,7 +34,7 @@ from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdou
 
 
 async def main() -> None:
-    with Client.spawn("virtx-server") as client:
+    with Client.spawn("virtx-uvm") as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
         async for entry in client.build_image(recipe, "jq:latest"):
             match entry.entry:
@@ -64,7 +69,7 @@ npm install @brekkylab/virtx
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 async function main() {
-  const client = Client.spawn('virtx-server')
+  const client = Client.spawn('virtx-uvm')
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
     for await (const entry of client.buildImage(recipe, 'jq:latest')) {
@@ -109,7 +114,7 @@ use virtx_rs::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn("virtx-server", [] as [&str; 0])?;
+    let client = Client::spawn("virtx-uvm", [] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     let mut log = client.build_image(recipe, "jq:latest").log();

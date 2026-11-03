@@ -9,7 +9,7 @@ import asyncio
 from virtx import Client, ImageJobEnd, Log, Recipe
 
 async def main():
-    with Client.spawn("virtx-server") as client:
+    with Client.spawn("virtx-uvm") as client:
         recipe = Recipe("alpine:3.20").run("apk add jq")
         async for entry in client.build_image(recipe, "jq:latest"):
             match entry.entry:

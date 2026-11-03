@@ -13,6 +13,16 @@ pub(crate) struct Image {
     pub(crate) refs: Vec<String>,
 }
 
+impl Image {
+    /// The image with each ref as a user spells it, for showing.
+    pub(crate) fn familiar(&self) -> Image {
+        Image {
+            digest: self.digest.clone(),
+            refs: self.refs.iter().map(|r| familiar_ref(r)).collect(),
+        }
+    }
+}
+
 /// The listed tags gathered by digest, each image where its first ref is listed.
 pub(crate) fn gather(listed: Vec<ImageListOutputItem>) -> Vec<Image> {
     let mut images: Vec<Image> = Vec::new();
@@ -128,6 +138,18 @@ pub(crate) fn with_tag(reference: &str) -> String {
     }
 }
 
+/// A ref without what [`canonical_ref`] fills in, as `docker` shows one:
+/// `docker.io/library/alpine:3.20` is `alpine:3.20`, and `docker.io/user/app:1` is `user/app:1`.
+pub(crate) fn familiar_ref(reference: &str) -> String {
+    let Some(rest) = reference.strip_prefix("docker.io/") else {
+        return reference.to_string();
+    };
+    match rest.strip_prefix("library/") {
+        Some(name) if !name.contains('/') => name.to_string(),
+        _ => rest.to_string(),
+    }
+}
+
 /// A ref as a registry client fills it in: `registry/path:tag`.
 ///
 /// A name without a tag is `latest`; without a registry it is on `docker.io`, where a lone
@@ -199,6 +221,20 @@ mod tests {
             ("localhost:5000/app:1", "localhost:5000/app:1"),
         ] {
             assert_eq!(canonical_ref(spelled), canonical, "{spelled}");
+        }
+    }
+
+    #[test]
+    fn a_ref_is_shown_as_a_user_spells_it() {
+        assert_eq!(familiar_ref("docker.io/library/alpine:3.20"), "alpine:3.20");
+        assert_eq!(familiar_ref("docker.io/user/app:1"), "user/app:1");
+        assert_eq!(
+            familiar_ref("docker.io/library/deep/app:1"),
+            "library/deep/app:1"
+        );
+        assert_eq!(familiar_ref("ghcr.io/user/app:1"), "ghcr.io/user/app:1");
+        for reference in ["alpine:3.20", "user/app:1", "ghcr.io/user/app:latest"] {
+            assert_eq!(familiar_ref(&canonical_ref(reference)), reference);
         }
     }
 

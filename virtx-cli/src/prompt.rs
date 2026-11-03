@@ -12,8 +12,8 @@ pub(crate) fn confirm(question: &str) -> anyhow::Result<bool> {
     let read = std::io::stdin()
         .read_line(&mut answer)
         .context("reading an answer")?;
-    // No answer leaves the prompt's line open, with no Enter to close it.
-    if read == 0 {
+    // An answer that is not typed, or none at all, leaves the prompt's line open.
+    if read == 0 || !std::io::stdin().is_terminal() {
         eprintln!();
     }
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))

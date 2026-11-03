@@ -5,7 +5,7 @@ use virtx_core::Client;
 
 use crate::{
     command::report,
-    name::{Image, Named, gather, image_id, lookup, repository},
+    name::{Image, Named, familiar_ref, gather, image_id, lookup, repository},
     prompt::{confirm, emphasis},
 };
 
@@ -56,7 +56,7 @@ pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
                 image.refs.len()
             );
             for reference in &image.refs {
-                eprintln!("  {reference}");
+                eprintln!("  {}", familiar_ref(reference));
             }
             if !confirm("remove the image and every ref?")? {
                 continue;
@@ -69,7 +69,7 @@ pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
                     Named::Image(_) => (image.refs.iter().map(String::as_str).collect(), true),
                 };
                 for reference in untagged {
-                    println!("Untagged: {reference}");
+                    println!("Untagged: {}", familiar_ref(reference));
                 }
                 if deleted {
                     println!("Deleted: {}", image_id(&image.digest));

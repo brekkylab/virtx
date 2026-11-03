@@ -20,10 +20,10 @@ pub(crate) async fn inspect(client: &Client, args: InspectArgs) -> anyhow::Resul
     // Every name is looked up, as `docker inspect` does: the found ones print, and one
     // missing fails the command.
     let mut failed = false;
-    let mut found: Vec<&Image> = Vec::new();
+    let mut found: Vec<Image> = Vec::new();
     for name in &args.images {
         match lookup(name, &images) {
-            Ok(named) => found.push(named.image()),
+            Ok(named) => found.push(named.image().familiar()),
             Err(error) => {
                 failed = true;
                 eprintln!("virtx: {}", report(&error));

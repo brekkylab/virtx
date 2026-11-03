@@ -20,7 +20,10 @@ pub(crate) struct LsArgs {
 
 /// List every image, as a table or as bare IDs.
 pub(crate) async fn ls(client: &Client, LsArgs { digests, quiet }: LsArgs) -> anyhow::Result<()> {
-    let images = gather(client.list_image().await?);
+    let images: Vec<Image> = gather(client.list_image().await?)
+        .iter()
+        .map(Image::familiar)
+        .collect();
     if quiet {
         for image in &images {
             let id = if digests {

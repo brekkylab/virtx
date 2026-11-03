@@ -5,13 +5,13 @@ use std::fmt;
 use futures_util::StreamExt as _;
 use virtx_core::{Client, ImageJob, ImageJobEntry};
 
-/// The command was interrupted, and the job it followed cancelled.
+/// Ctrl-C interrupted the command, and what it was doing was undone, as said.
 #[derive(Debug)]
-pub(crate) struct Interrupted;
+pub(crate) struct Interrupted(pub(crate) &'static str);
 
 impl fmt::Display for Interrupted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("interrupted; the job was cancelled")
+        write!(f, "interrupted; {}", self.0)
     }
 }
 
@@ -24,7 +24,7 @@ pub(crate) async fn follow(client: &Client, job: &ImageJob, quiet: bool) -> anyh
         ended = drain(client, &job.id, quiet) => ended,
         _ = tokio::signal::ctrl_c() => {
             client.remove_image_job(&job.id).await?;
-            Err(Interrupted.into())
+            Err(Interrupted("the job was cancelled").into())
         }
     }
 }

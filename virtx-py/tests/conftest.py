@@ -1,5 +1,5 @@
 """Builds ``libvirtx_core`` once and opens it, unless ``$VIRTX_CORE_LIB`` names one, and
-builds ``virtx-core``'s ``files_server`` example, the server the files tests spawn."""
+builds ``virtx-core``'s ``test_server`` example, the in-memory server the tests spawn."""
 
 import os
 import subprocess
@@ -17,16 +17,7 @@ TARGET = ROOT / "target" / "debug"
 def pytest_configure(config: pytest.Config) -> None:
     subprocess.run(["cargo", "build", "-p", "virtx-core", "--lib"], cwd=ROOT, check=True)
     subprocess.run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "virtx-core",
-            "--features",
-            "testing",
-            "--example",
-            "files_server",
-        ],
+        ["cargo", "build", "-p", "virtx-core", "--features", "testing", "--example", "test_server"],
         cwd=ROOT,
         check=True,
     )
@@ -37,7 +28,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture
-def files_server() -> str:
-    """The path of the ``files_server`` example."""
+def test_server() -> str:
+    """The path of the ``test_server`` example."""
     suffix = ".exe" if sys.platform == "win32" else ""
-    return str(TARGET / "examples" / f"files_server{suffix}")
+    return str(TARGET / "examples" / f"test_server{suffix}")

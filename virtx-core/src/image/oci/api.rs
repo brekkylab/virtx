@@ -1,5 +1,5 @@
 //! The registry's requests, one function each, as the OCI Distribution Specification names
-//! them under `/images/v2/`.
+//! them under `/images/oci/v2/`.
 
 use bytes::Bytes;
 use http::{Method, Response, StatusCode, header};
@@ -28,7 +28,7 @@ impl<'a> Registry<'a> {
         Registry { client }
     }
 
-    /// Send `method` to `path`, under `images/v2/`, and answer its response if it is a success.
+    /// Send `method` to `path`, under `images/oci/v2/`, and answer its response if it is a success.
     async fn send(
         &self,
         method: Method,
@@ -38,7 +38,7 @@ impl<'a> Registry<'a> {
     ) -> Result<Response<Body>, Error> {
         let mut request = http::Request::builder()
             .method(method.clone())
-            .uri(format!("/images/v2/{path}"));
+            .uri(format!("/images/oci/v2/{path}"));
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -62,59 +62,37 @@ impl<'a> Registry<'a> {
             #[serde(default)]
             repositories: Option<Vec<String>>,
         }
-        self.pages("_catalog", None, None, |body| {
+        self.pages("_catalog", |body| {
             serde_json::from_slice::<Catalog>(body)
                 .map(|page| page.repositories.unwrap_or_default())
         })
         .await
     }
 
-    /// The repositories after `last`, by name.
-    pub(crate) async fn repositories_after(&self, last: &str) -> Result<Vec<String>, Error> {
-        #[derive(Deserialize)]
-        struct Catalog {
-            #[serde(default)]
-            repositories: Option<Vec<String>>,
-        }
-        self.pages("_catalog", Some(last), None, |body| {
-            serde_json::from_slice::<Catalog>(body)
-                .map(|page| page.repositories.unwrap_or_default())
-        })
-        .await
-    }
-
-    /// The tags in `name` after `last`, `limit` at most.
-    pub(crate) async fn tags_after(
-        &self,
-        name: &str,
-        last: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<Vec<String>, Error> {
+    /// Every tag in `name`.
+    pub(crate) async fn tags(&self, name: &str) -> Result<Vec<String>, Error> {
         #[derive(Deserialize)]
         struct Tags {
             #[serde(default)]
             tags: Option<Vec<String>>,
         }
-        self.pages(&format!("{name}/tags/list"), last, limit, |body| {
+        self.pages(&format!("{name}/tags/list"), |body| {
             serde_json::from_slice::<Tags>(body).map(|page| page.tags.unwrap_or_default())
         })
         .await
     }
 
-    /// Each page of the listing at `path` after `after`, read by `read`, until one comes without
-    /// a `Link` to the next or `limit` are read.
+    /// Each page of the listing at `path`, read by `read`, until one comes without a `Link` to
+    /// the next.
     async fn pages(
         &self,
         path: &str,
-        after: Option<&str>,
-        limit: Option<usize>,
         read: impl Fn(&[u8]) -> serde_json::Result<Vec<String>>,
     ) -> Result<Vec<String>, Error> {
         let mut all: Vec<String> = Vec::new();
         loop {
-            let n = limit.map_or(PAGE, |limit| PAGE.min(limit - all.len()));
-            let mut query = format!("{path}?n={n}");
-            if let Some(last) = all.last().map(String::as_str).or(after) {
+            let mut query = format!("{path}?n={PAGE}");
+            if let Some(last) = all.last() {
                 query.push_str(&format!("&last={last}"));
             }
             let response = self
@@ -125,10 +103,7 @@ impl<'a> Registry<'a> {
                 .map_err(|e| Error::Registry(format!("GET {path}: {e}")))?;
             let ended = page.is_empty();
             all.extend(page);
-            if let Some(limit) = limit {
-                all.truncate(limit);
-            }
-            if !more || ended || limit.is_some_and(|limit| all.len() >= limit) {
+            if !more || ended {
                 return Ok(all);
             }
         }
@@ -191,7 +166,7 @@ impl<'a> Registry<'a> {
 
     /// Whether `name` has the blob `digest`.
     pub(crate) async fn has_blob(&self, name: &str, digest: &str) -> Result<bool, Error> {
-        let request = http::Request::head(format!("/images/v2/{name}/blobs/{digest}"))
+        let request = http::Request::head(format!("/images/oci/v2/{name}/blobs/{digest}"))
             .body(full(Bytes::new()))
             .expect("a valid request");
         let response = self.client.send(request).await?;
@@ -260,7 +235,7 @@ impl<'a> Registry<'a> {
     }
 }
 
-/// An upload a registry started: where to send the blob, under `images/v2/`.
+/// An upload a registry started: where to send the blob, under `images/oci/v2/`.
 pub(crate) struct Upload {
     path: String,
 }

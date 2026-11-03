@@ -82,7 +82,8 @@ MountSource = NotionSource | GdriveSource | OnedriveSource
 
 @dataclass(frozen=True)
 class VolumeListOutputItem:
-    """One volume the server holds."""
+    """One volume the server holds, as ``list_volume``, ``get_volume`` and ``create_volume``
+    answer it."""
 
     name: str
 
@@ -95,20 +96,9 @@ class VolumeListOutputItem:
 
 
 @dataclass(frozen=True)
-class VolumeCreateOutput:
-    """What ``create_volume`` answers."""
-
-    name: str
-    """The volume's name: the one asked for, or the one the server picked."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> VolumeCreateOutput:
-        return cls(value["name"])
-
-
-@dataclass(frozen=True)
 class VolumeMountListOutputItem:
-    """One mount in a volume. Its credentials are not answered."""
+    """One mount in a volume, as ``list_volume_mount`` and ``create_volume_mount`` answer it.
+    Its credentials are not answered."""
 
     path: str
     """Where it is mounted."""

@@ -2,21 +2,18 @@
 
 use std::fmt;
 
-use crate::rpc::ErrorObject;
-
 /// Why a call failed.
 #[derive(Debug)]
 pub enum Error {
-    /// The server answered with an error.
-    Call(ErrorObject),
     /// The request did not reach the server, or its response did not come back: the
     /// connection failed or the session ended.
     Transport(String),
-    /// The server refused the request with an HTTP status: the status, and the body, for a
-    /// person. A `401` or a `403` from any endpoint says the headers are not what it wants: a
-    /// client may set new ones and send the request again.
+    /// The server refused the request with an HTTP status: the status, and why, for a person,
+    /// as `code: message` where the server answered its error as `PROTOCOL.md`'s Resources do. A
+    /// `401` or a `403` from any endpoint says the headers are not what it wants: a client may
+    /// set new ones and send the request again.
     Status(u16, String),
-    /// The params did not encode, or the result did not read as the type asked for.
+    /// The body did not encode, or the answer did not read as the type asked for.
     Json(String),
     /// The server's image registry answered with an error, or with what is not an image.
     Registry(String),
@@ -28,7 +25,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Call(error) => write!(f, "{error}"),
             Error::Transport(reason) => f.write_str(reason),
             Error::Json(reason) => f.write_str(reason),
             Error::Registry(reason) => f.write_str(reason),

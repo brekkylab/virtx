@@ -81,11 +81,9 @@ int virtx_client_spawn(const char *program,
                        struct VirtxClient **client,
                        struct VirtxBytes *error);
 
-// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+// Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` -- the token the
-// command prints, printed again as it runs out -- or null for none, and the `headers_len`
-// headers in `headers` -- each its name
+// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
 // then its value, so `2 * headers_len` strings -- with every request, and write the
 // client, held once, to `client`. The headers are whatever else the server asks of each
 // request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
@@ -152,56 +150,92 @@ void virtx_client_retain(struct VirtxClient *client);
 // `wake`, which runs on the runtime this may stop.
 void virtx_client_release(struct VirtxClient *client);
 
-// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
+// Starts building `recipe`, to point `reference` (`name:tag`) at it, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
-// Its items are its log, a line each, as
-// `{"progress": {"progress": n, "total": n, "content": "..."}}` (`total` and `content` each
-// optional), then what it built, as `{"output": {"digest": "algorithm:hex"}}`.
+// Answers with the job, as `{"id": "...", "kind": "build", "reference": "name:tag",
+// "running": bool, "digest": "algorithm:hex", "error": "..."}`, `digest` once it has
+// succeeded and `error` once it has failed. Its log is `virtx_client_image_job_log`'s.
 //
 // # Safety
 //
 // `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
 // read after this returns.
-struct VirtxStream *virtx_client_build_image(struct VirtxClient *client,
+struct VirtxFuture *virtx_client_build_image(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
 
-// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+// Starts pulling `reference` from its registry, to point it at what it pulls, given
 // `{"reference": "alpine:3.20", "auth": {...}}`, the optional auth as
 // `{"type": "basic", "username": "...", "password": "..."}` or
-// `{"type": "bearer", "token": "..."}`. Its items are its log, as
-// `virtx_client_build_image`'s are, then what it pulled, as
-// `{"output": {"digest": "algorithm:hex"}}`.
+// `{"type": "bearer", "token": "..."}`. Answers with the job, as
+// `virtx_client_build_image` does, its `kind` `"pull"`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxStream *virtx_client_pull_image(struct VirtxClient *client,
+struct VirtxFuture *virtx_client_pull_image(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
-// `image.push`: pushes the image `reference` points at to the registry `reference` names,
-// given `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
-// `virtx_client_pull_image`. Its items are its log, as `virtx_client_build_image`'s are,
-// then what it pushed, as `{"output": {"digest": "algorithm:hex"}}`.
+// Starts pushing the image `reference` points at to the registry `reference` names, given
+// `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
+// `virtx_client_pull_image`. Answers with the job, as `virtx_client_build_image` does, its
+// `kind` `"push"`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxStream *virtx_client_push_image(struct VirtxClient *client,
+struct VirtxFuture *virtx_client_push_image(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
-// Given `{"after": "name:tag", "limit": n}`, both optional, answers with a page of the
-// tags on the server's images, by name and then tag, as
-// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`: every one given `{}`.
+// Answers with every image job, each as `virtx_client_build_image` answers one.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`.
+struct VirtxFuture *virtx_client_list_image_job(struct VirtxClient *client);
+
+// Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
+// answers one.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
+struct VirtxFuture *virtx_client_get_image_job(struct VirtxClient *client,
+                                               const uint8_t *args,
+                                               size_t args_len);
+
+// Cancels the image job `id` if it runs, and forgets it, given `{"id": "..."}`. Answers
+// with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_image_job(struct VirtxClient *client,
+                                                  const uint8_t *args,
+                                                  size_t args_len);
+
+// The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
+// its start, or after its `after`th entry. Its items are the entries, each with its number
+// beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
+// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
+// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_image_job_log(struct VirtxClient *client,
+                                               const uint8_t *args,
+                                               size_t args_len);
+
+// Answers with every tag on the server's images, as
+// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_snapshot`.
+struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
 // Points the tag `target` at the image `source` names, given
 // `{"source": "name:tag" or "name@algorithm:hex", "target": "name:tag"}`. Answers with
@@ -236,7 +270,8 @@ struct VirtxFuture *virtx_client_remove_image(struct VirtxClient *client,
 
 // Writes the image `reference` names to `path` as an OCI image layout in a tar archive,
 // given `{"reference": "name:tag" or "name@algorithm:hex", "path": "..."}`. Its items are
-// its log, a line a blob, as `virtx_client_build_image`'s are, then what it wrote, as
+// its log, a line a blob, as `{"progress": {"progress": n, "total": n, "content": "..."}}`
+// (`total` and `content` each optional), then what it wrote, as
 // `{"output": {"digest": "algorithm:hex"}}`.
 //
 // # Safety
@@ -248,7 +283,7 @@ struct VirtxStream *virtx_client_download_image(struct VirtxClient *client,
 
 // Uploads the image in the OCI image layout archive at `path` and points the tag
 // `reference` at it, given `{"path": "...", "reference": "name:tag"}`. Its items are its
-// log, a line a blob, as `virtx_client_build_image`'s are, then what it uploaded, as
+// log, a line a blob, as `virtx_client_download_image`'s are, then what it uploaded, as
 // `{"output": {"digest": "algorithm:hex"}}`.
 //
 // # Safety
@@ -258,33 +293,28 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// `image.prune`: deletes each image no tag points at and no sandbox uses, and what only
-// such images held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the
-// digests deleted and the bytes freed.
+// Deletes each image no tag points at and no sandbox uses, and what only such images held.
+// Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
+// and the bytes freed.
 //
 // # Safety
 //
 // `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 
-// `snapshot.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page
-// of the snapshots by name, as `[{"name": "...", "size": n, "in_use": false}, ...]`: every
-// one given `{}`.
+// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
 //
 // Every value here is JSON. A request that takes arguments takes them as `args`, the
-// `args_len` bytes of one object, the method's params.
+// `args_len` bytes of one object.
 //
 // # Safety
 //
-// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
-// is as in `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
 
-// `snapshot.create`: keeps a new, empty upper layer under `name`, holding at most
-// `disk_gib` GiB, the server picking either one not given, given
-// `{"name": "...", "disk_gib": 8}` or less. Answers with `{"name": "..."}`.
+// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
+// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
+// with the snapshot, as `virtx_client_list_snapshot` answers each.
 //
 // # Safety
 //
@@ -293,8 +323,18 @@ struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
-// `snapshot.remove`: deletes the snapshot `name` and its upper layer, given
-// `{"name": "..."}`. Answers with `null`.
+// Answers with the snapshot `name`, given `{"name": "..."}`, as
+// `virtx_client_list_snapshot` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_snapshot(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
+
+// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
+// `null`.
 //
 // # Safety
 //
@@ -303,18 +343,16 @@ struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
                                                  const uint8_t *args,
                                                  size_t args_len);
 
-// `volume.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page of
-// the volumes by name, as `[{"name": "...", "size": n}, ...]`: every one given `{}`.
+// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //
 // # Safety
 //
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client,
-                                             const uint8_t *args,
-                                             size_t args_len);
+// `client` is as in `virtx_client_list_snapshot`.
+struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client);
 
-// `volume.create`: keeps a new, empty volume under `name`, or a name the server picks if
-// there is none, given `{"name": "..."}` or `{}`. Answers with `{"name": "..."}`.
+// Keeps a new, empty volume under `name`, or a name the server picks if there is none,
+// given `{"name": "..."}` or `{}`. Answers with the volume, as `virtx_client_list_volume`
+// answers each.
 //
 // # Safety
 //
@@ -323,8 +361,18 @@ struct VirtxFuture *virtx_client_create_volume(struct VirtxClient *client,
                                                const uint8_t *args,
                                                size_t args_len);
 
-// `volume.remove`: deletes the volume `name` and everything in it, given
-// `{"name": "..."}`. Answers with `null`.
+// Answers with the volume `name`, given `{"name": "..."}`, as `virtx_client_list_volume`
+// answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_volume(struct VirtxClient *client,
+                                            const uint8_t *args,
+                                            size_t args_len);
+
+// Deletes the volume `name` and everything in it, given `{"name": "..."}`. Answers with
+// `null`.
 //
 // # Safety
 //
@@ -333,7 +381,7 @@ struct VirtxFuture *virtx_client_remove_volume(struct VirtxClient *client,
                                                const uint8_t *args,
                                                size_t args_len);
 
-// `volume.mount.list`: given `{"volume": "..."}`, answers with the volume's mounts, as
+// Given `{"volume": "..."}`, answers with the volume's mounts, as
 // `[{"path": "...", "mount_type": "notion" or "gdrive" or "onedrive"}, ...]`.
 //
 // # Safety
@@ -343,11 +391,12 @@ struct VirtxFuture *virtx_client_list_volume_mount(struct VirtxClient *client,
                                                    const uint8_t *args,
                                                    size_t args_len);
 
-// `volume.mount.create`: given `{"volume": "...", "path": "...", "source": {...}}`, the
-// source as `{"type": "notion", "api_key": "..."}`,
+// Given `{"volume": "...", "path": "...", "source": {...}}`, the source as
+// `{"type": "notion", "api_key": "..."}`,
 // `{"type": "gdrive", "client_id": "...", "client_secret": "...", "refresh_token": "..."}`
 // or `{"type": "onedrive", "client_id": "...", "refresh_token": "..."}` (and
-// `"client_secret"` if it has one), mounts it. Answers with `null`.
+// `"client_secret"` if it has one), mounts it. Answers with the mount, as
+// `virtx_client_list_volume_mount` answers each.
 //
 // # Safety
 //
@@ -356,8 +405,7 @@ struct VirtxFuture *virtx_client_create_volume_mount(struct VirtxClient *client,
                                                      const uint8_t *args,
                                                      size_t args_len);
 
-// `volume.mount.remove`: given `{"volume": "...", "path": "..."}`, takes the mount away.
-// Answers with `null`.
+// Given `{"volume": "...", "path": "..."}`, takes the mount away. Answers with `null`.
 //
 // # Safety
 //
@@ -512,61 +560,127 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            const uint8_t *args,
                                            size_t args_len);
 
-// `sandbox.list`: answers with the sandboxes, as
-// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool,
-// "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and
-// `ports` only for one that opened some.
+// Answers with the sandboxes, as
+// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
+// `snapshot` only for one that has one.
 //
 // # Safety
 //
 // `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
-// `sandbox.init`: makes a sandbox, given
+// Makes a sandbox, given
 // `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
 // "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
 // `{"type": "tag", "tag": "name:tag"}` or
-// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
-// `{"id": "...", "ports": [{"port": n, "url": "..."}]}`, `ports` only if it was given some.
+// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
+// sandbox as `virtx_client_list_sandbox` answers each, and
+// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_init_sandbox(struct VirtxClient *client,
+struct VirtxFuture *virtx_client_create_sandbox(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
+// answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_sandbox(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
+// with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_sandbox(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Given `{"sandbox": "..."}`, answers with its jobs, each as `virtx_client_exec_sandbox`
+// answers one.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_sandbox_job(struct VirtxClient *client,
+                                                  const uint8_t *args,
+                                                  size_t args_len);
+
+// Starts a process, given `{"sandbox": "...", "cmd": ["..."], "stdin": bool,
+// "timeout_ms": n}`, `stdin` and `timeout_ms` optional. Answers with its job, as
+// `{"id": "...", "kind": "exec", "pid": n, "cmd": ["..."], "running": bool, "code": n}`,
+// `code` once it has ended. Its output is `virtx_client_sandbox_job_log`'s.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_exec_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
-// `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
-// it is written, as `{"progress": ...}` as `virtx_client_build_image`'s are, then how it
-// ended, as `{"output": {"code": n}}`.
+// Answers with the job `job` in the sandbox `sandbox`, given
+// `{"sandbox": "...", "job": "..."}`, as `virtx_client_exec_sandbox` answers one.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxStream *virtx_client_exec_sandbox(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
+struct VirtxFuture *virtx_client_get_sandbox_job(struct VirtxClient *client,
+                                                 const uint8_t *args,
+                                                 size_t args_len);
 
-// `sandbox.ports`: given `{"sandbox": "...", "ports": [n]}`, makes the sandbox's ports
-// those. Answers with `[{"port": n, "url": "..."}]`, in the order given.
+// Cancels the job if it runs, killing its process, and forgets it, given
+// `{"sandbox": "...", "job": "..."}`. Answers with `null`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_ports_sandbox(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
+struct VirtxFuture *virtx_client_remove_sandbox_job(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
 
-// `sandbox.close`: given `{"sandbox": "..."}`, stops the sandbox. Answers with `null`.
+// Sends `signal`, a name such as `"SIGTERM"`, to the job's process and every process it
+// started, given `{"sandbox": "...", "job": "...", "signal": "..."}`. Answers with `null`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_close_sandbox(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
+struct VirtxFuture *virtx_client_signal_sandbox_job(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
+
+// Writes `data` to the stdin of the job's process, then closes it if `eof`, given
+// `{"sandbox": "...", "job": "...", "data": "...", "eof": bool}`, `data` and `eof`
+// optional. Answers with `null` once it is written: the next write is sent only then.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_write_sandbox_job_stdin(struct VirtxClient *client,
+                                                         const uint8_t *args,
+                                                         size_t args_len);
+
+// The log of the job, given `{"sandbox": "...", "job": "...", "after": n}`, `after`
+// optional: from its start, or after its `after`th entry. Its items are the entries, each
+// with its number beside it: `{"id": n, "stdout": "..."}` or `{"id": n, "stderr": "..."}`,
+// a line as it is written, `{"id": n, "truncated": {}}` once if the log reached the
+// server's limit, then `{"id": n, "end": {"code": n}}` last. Freeing it leaves the job as
+// it is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_sandbox_job_log(struct VirtxClient *client,
+                                                 const uint8_t *args,
+                                                 size_t args_len);
 
 // Free bytes this library wrote. Null `data` does nothing.
 //
@@ -631,8 +745,7 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 void virtx_stream_free(struct VirtxStream *stream);
 
 // Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
-// `virtx_client_init_sandbox` or `virtx_client_list_sandbox` answered it, to this machine's
-// loopback: write the forwarder to `forwarder`, and where it is to `out`, as
+// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
 // `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with

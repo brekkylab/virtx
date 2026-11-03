@@ -1,4 +1,4 @@
-//! The image operations against a registry in memory, served at `/images/v2/` over an
+//! The image operations against a registry in memory, served at `/images/oci/v2/` over an
 //! in-memory HTTP/2 connection as stdio serves one.
 //!
 //! The registry pages its listings two names at a time, and mounts a blob from another
@@ -19,7 +19,7 @@ use serde_json::json;
 use super::manifest::sha256;
 use crate::{
     client::Client,
-    method::Event,
+    image::Event,
     transport::{TransportClient, serve_stdio},
 };
 
@@ -171,7 +171,7 @@ impl Registry {
             .collect();
         let headers = request.headers().clone();
         let body = request.into_body().collect().await.unwrap().to_bytes();
-        let Some(path) = uri.path().strip_prefix("/images/v2/") else {
+        let Some(path) = uri.path().strip_prefix("/images/oci/v2/") else {
             return answer(StatusCode::NOT_FOUND);
         };
         let mut state = self.state();
@@ -284,7 +284,7 @@ impl Registry {
                 let id = uuid::Uuid::new_v4().to_string();
                 state.uploads.insert(id.clone(), name.into());
                 let mut response = answer(StatusCode::ACCEPTED);
-                let location = format!("/images/v2/{name}/blobs/uploads/{id}");
+                let location = format!("/images/oci/v2/{name}/blobs/uploads/{id}");
                 response
                     .headers_mut()
                     .insert(header::LOCATION, location.parse().unwrap());
@@ -367,7 +367,7 @@ async fn every_tag_is_listed_with_its_digest_across_pages() {
     let client = registry.client();
 
     let listed: Vec<_> = client
-        .list_image(Default::default())
+        .list_image()
         .await
         .unwrap()
         .into_iter()
@@ -382,36 +382,6 @@ async fn every_tag_is_listed_with_its_digest_across_pages() {
             ("team/base:1".to_owned(), base),
         ]
     );
-}
-
-#[tokio::test]
-async fn images_are_listed_a_page_at_a_time_by_reference() {
-    let registry = Registry::default();
-    for tag in ["1", "2", "3"] {
-        registry.image("alpine", Some(tag), "alpine");
-    }
-    registry.image("jq", Some("latest"), "jq");
-    registry.image("team/base", Some("1"), "base");
-    let client = registry.client();
-    let page = |after: Option<&str>, limit| {
-        let args = crate::image::ImageListArgs {
-            after: after.map(str::to_owned),
-            limit: Some(limit),
-        };
-        let listing = client.list_image(args);
-        async move {
-            let listed = listing.await.unwrap();
-            listed
-                .into_iter()
-                .map(|image| image.reference)
-                .collect::<Vec<_>>()
-        }
-    };
-
-    assert_eq!(page(None, 2).await, ["alpine:1", "alpine:2"]);
-    assert_eq!(page(Some("alpine:2"), 2).await, ["alpine:3", "jq:latest"]);
-    assert_eq!(page(Some("jq:latest"), 2).await, ["team/base:1"]);
-    assert_eq!(page(Some("team/base:1"), 2).await, [] as [&str; 0]);
 }
 
 #[tokio::test]

@@ -77,18 +77,24 @@ const SIGNATURES = {
   virtx_client_build_image: WITH_ARGS,
   virtx_client_pull_image: WITH_ARGS,
   virtx_client_push_image: WITH_ARGS,
-  virtx_client_list_image: WITH_ARGS,
+  virtx_client_list_image_job: PLAIN,
+  virtx_client_get_image_job: WITH_ARGS,
+  virtx_client_remove_image_job: WITH_ARGS,
+  virtx_client_image_job_log: WITH_ARGS,
+  virtx_client_list_image: PLAIN,
   virtx_client_tag_image: WITH_ARGS,
   virtx_client_untag_image: WITH_ARGS,
   virtx_client_remove_image: WITH_ARGS,
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_list_snapshot: WITH_ARGS,
+  virtx_client_list_snapshot: PLAIN,
   virtx_client_create_snapshot: WITH_ARGS,
+  virtx_client_get_snapshot: WITH_ARGS,
   virtx_client_remove_snapshot: WITH_ARGS,
-  virtx_client_list_volume: WITH_ARGS,
+  virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
+  virtx_client_get_volume: WITH_ARGS,
   virtx_client_remove_volume: WITH_ARGS,
   virtx_client_list_volume_mount: WITH_ARGS,
   virtx_client_create_volume_mount: WITH_ARGS,
@@ -107,10 +113,16 @@ const SIGNATURES = {
   virtx_client_rename_file: WITH_ARGS,
   virtx_client_copy_file: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
-  virtx_client_init_sandbox: WITH_ARGS,
+  virtx_client_create_sandbox: WITH_ARGS,
+  virtx_client_get_sandbox: WITH_ARGS,
+  virtx_client_remove_sandbox: WITH_ARGS,
+  virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
-  virtx_client_ports_sandbox: WITH_ARGS,
-  virtx_client_close_sandbox: WITH_ARGS,
+  virtx_client_get_sandbox_job: WITH_ARGS,
+  virtx_client_remove_sandbox_job: WITH_ARGS,
+  virtx_client_signal_sandbox_job: WITH_ARGS,
+  virtx_client_write_sandbox_job_stdin: WITH_ARGS,
+  virtx_client_sandbox_job_log: WITH_ARGS,
   virtx_port_forwarder_open: [
     'int',
     ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
@@ -264,7 +276,9 @@ const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/
 // string a tag. An object is taken as already named.
 function imageName(image) {
   if (typeof image !== 'string') return image
-  return DIGEST.test(image) ? { type: 'digest', digest: image } : { type: 'tag', tag: image }
+  return DIGEST.test(image)
+    ? { type: 'digest', digest: image }
+    : { type: 'tag', tag: image }
 }
 
 // A base and the steps over it, which the server builds: `new Recipe('alpine:3.20').run('apk add
@@ -295,6 +309,30 @@ class Recipe {
   }
 }
 
+// A job as it starts: a promise of the job, and an async iterable of its log's entries, read once
+// the job has started, until its `end` entry. The job starts when it is made, once however it is
+// used; leaving the loop leaves the job running.
+class StartedJob extends Promise {
+  // `then` and the rest answer plain promises.
+  static get [Symbol.species]() {
+    return Promise
+  }
+
+  constructor(executor, log) {
+    super(executor)
+    this._log = log
+  }
+
+  // `started`, a promise of the job; `log`, its log by the job.
+  static of(started, log) {
+    return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
+  }
+
+  async *[Symbol.asyncIterator]() {
+    yield* this._log(await this)
+  }
+}
+
 // Each hold not let go of, released when its client is collected.
 const holds = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_client_release.async(raw, () => {})
@@ -311,9 +349,10 @@ function opening(lib, status, raw, error) {
   throw new VirtxError(`unknown status ${status}`)
 }
 
-// A client of one server, over stdio or Streamable HTTP, made by `libvirtx_core`.
+// A client of one server, over stdio or HTTP, made by `libvirtx_core`.
 //
-// Each method returns a promise, or an async iterable for a request that streams its progress.
+// Each method returns a promise, or an async iterable for a request that streams: a job's log,
+// or a download's or upload's progress. One that starts a job returns a `StartedJob`, both.
 // Holds of one session are counted: `clone` takes another, `close` lets this one go, and the
 // session ends with the last, which answers every request still waiting with an error.
 class Client {
@@ -333,9 +372,8 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
-  // `auth`, the credentials it wants as `{ type: 'bearer', token }`, `{ type: 'command',
-  // program, args }` (the token it prints, printed again as it runs out) or null for none, and
+  // Reach the server at `url`, its base `http` or `https` URL, sending
+  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
   // `headers`, a name to a value, whatever else it asks of each request, with every request.
   // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
   // the clear: over `http` to any host but this machine.
@@ -394,12 +432,7 @@ class Client {
   setHeaders(headers) {
     const strings = Object.entries(headers).flat()
     const error = {}
-    const status = this._lib.virtx_client_set_headers(
-      this._held(),
-      strings,
-      strings.length / 2,
-      error,
-    )
+    const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
     if (status !== OK) this._lib.take(status, error)
   }
 
@@ -464,31 +497,51 @@ class Client {
     return raw ? answer : rekey(answer, camel)
   }
 
-  async *_events(name, args) {
+  async *_items(name, args) {
     const bytes = encode(args)
     const handle = this._lib[name](this._held(), bytes, bytes.length)
-    for await (const item of this._lib.items(handle)) {
-      yield 'progress' in item
-        ? { progress: rekey(item.progress, camel) }
-        : { output: rekey(item.output, camel) }
-    }
+    for await (const item of this._lib.items(handle)) yield rekey(item, camel)
   }
 
+  _imageJob(name, args) {
+    return StartedJob.of(this._call(name, args), (job) => this.imageJobLog(job.id))
+  }
+
+  // Starts the build: the job, and its log as `imageJobLog`'s.
   buildImage(recipe, reference) {
     const declared = recipe instanceof Recipe ? recipe.toJSON() : recipe
-    return this._events('virtx_client_build_image', { recipe: declared, reference })
+    return this._imageJob('virtx_client_build_image', { recipe: declared, reference })
   }
 
   pullImage(reference, auth) {
-    return this._events('virtx_client_pull_image', { reference, auth })
+    return this._imageJob('virtx_client_pull_image', { reference, auth })
   }
 
   pushImage(reference, auth) {
-    return this._events('virtx_client_push_image', { reference, auth })
+    return this._imageJob('virtx_client_push_image', { reference, auth })
   }
 
-  listImage(page = {}) {
-    return this._call('virtx_client_list_image', page)
+  listImageJob() {
+    return this._call('virtx_client_list_image_job')
+  }
+
+  getImageJob(id) {
+    return this._call('virtx_client_get_image_job', { id })
+  }
+
+  // Cancels the job if it runs, and forgets it.
+  async removeImageJob(id) {
+    await this._call('virtx_client_remove_image_job', { id })
+  }
+
+  // The job's log entries, from its start or after the entry numbered `after`, ending after
+  // its `end` entry.
+  imageJobLog(id, after) {
+    return this._items('virtx_client_image_job_log', { id, after })
+  }
+
+  listImage() {
+    return this._call('virtx_client_list_image')
   }
 
   async tagImage(source, target) {
@@ -504,35 +557,43 @@ class Client {
   }
 
   downloadImage(reference, path) {
-    return this._events('virtx_client_download_image', { reference, path })
+    return this._items('virtx_client_download_image', { reference, path })
   }
 
   uploadImage(path, reference) {
-    return this._events('virtx_client_upload_image', { path, reference })
+    return this._items('virtx_client_upload_image', { path, reference })
   }
 
   pruneImage() {
     return this._call('virtx_client_prune_image')
   }
 
-  listSnapshot(page = {}) {
-    return this._call('virtx_client_list_snapshot', page)
+  listSnapshot() {
+    return this._call('virtx_client_list_snapshot')
   }
 
   createSnapshot(name, diskGib) {
     return this._call('virtx_client_create_snapshot', { name, diskGib })
   }
 
+  getSnapshot(name) {
+    return this._call('virtx_client_get_snapshot', { name })
+  }
+
   async removeSnapshot(name) {
     await this._call('virtx_client_remove_snapshot', { name })
   }
 
-  listVolume(page = {}) {
-    return this._call('virtx_client_list_volume', page)
+  listVolume() {
+    return this._call('virtx_client_list_volume')
   }
 
   createVolume(name) {
     return this._call('virtx_client_create_volume', { name })
+  }
+
+  getVolume(name) {
+    return this._call('virtx_client_get_volume', { name })
   }
 
   async removeVolume(name) {
@@ -543,8 +604,8 @@ class Client {
     return this._call('virtx_client_list_volume_mount', { volume })
   }
 
-  async createVolumeMount(volume, at, source) {
-    await this._call('virtx_client_create_volume_mount', { volume, path: at, source })
+  createVolumeMount(volume, at, source) {
+    return this._call('virtx_client_create_volume_mount', { volume, path: at, source })
   }
 
   async removeVolumeMount(volume, at) {
@@ -591,13 +652,7 @@ class Client {
   async writeFile(root, at, content, ifMatch) {
     const bytes = encode({ ...root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    const handle = this._lib.virtx_client_write_file(
-      this._held(),
-      bytes,
-      bytes.length,
-      data,
-      data.length,
-    )
+    const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
     await this._lib.answer(handle)
   }
 
@@ -612,11 +667,7 @@ class Client {
   // Removes what is at `path`: a directory with everything in it.
   // With `missingOk`, nothing being there is fine, as `rm -f`; without it, a `404`.
   async removeFile(root, at, missingOk = false) {
-    await this._call('virtx_client_remove_file', {
-      ...root,
-      path: at,
-      missingOk: missingOk || undefined,
-    })
+    await this._call('virtx_client_remove_file', { ...root, path: at, missingOk: missingOk || undefined })
   }
 
   // Moves what is at `from` to `to` in the same root, replacing what is at `to` if `overwrite`,
@@ -635,20 +686,55 @@ class Client {
     return this._call('virtx_client_list_sandbox')
   }
 
-  initSandbox(image, options = {}) {
-    return this._call('virtx_client_init_sandbox', { ...options, image: imageName(image) })
+  createSandbox(image, options = {}) {
+    return this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
   }
 
-  execSandbox(sandbox, cmd, timeoutMs) {
-    return this._events('virtx_client_exec_sandbox', { sandbox, cmd, timeoutMs })
+  getSandbox(id) {
+    return this._call('virtx_client_get_sandbox', { id })
   }
 
-  portsSandbox(sandbox, ports) {
-    return this._call('virtx_client_ports_sandbox', { sandbox, ports })
+  // Stops the sandbox, ends its jobs and forgets it.
+  async removeSandbox(id) {
+    await this._call('virtx_client_remove_sandbox', { id })
   }
 
-  async closeSandbox(sandbox) {
-    await this._call('virtx_client_close_sandbox', { sandbox })
+  listSandboxJob(sandbox) {
+    return this._call('virtx_client_list_sandbox_job', { sandbox })
+  }
+
+  // Starts `cmd` in the sandbox, its stdin open for `writeSandboxJobStdin` if `stdin`, killed
+  // after `timeoutMs` if given: the job, and its output as `sandboxJobLog`'s.
+  execSandbox(sandbox, cmd, options = {}) {
+    return StartedJob.of(
+      this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd }),
+      (job) => this.sandboxJobLog(sandbox, job.id),
+    )
+  }
+
+  getSandboxJob(sandbox, job) {
+    return this._call('virtx_client_get_sandbox_job', { sandbox, job })
+  }
+
+  // Cancels the job if it runs, killing its process, and forgets it.
+  async removeSandboxJob(sandbox, job) {
+    await this._call('virtx_client_remove_sandbox_job', { sandbox, job })
+  }
+
+  // Sends `signal`, a name such as `'SIGTERM'`, to the job's process and every one it started.
+  async signalSandboxJob(sandbox, job, signal) {
+    await this._call('virtx_client_signal_sandbox_job', { sandbox, job, signal })
+  }
+
+  // Writes `data`, text, to the job's stdin, then closes it if `eof`; resolves once written.
+  async writeSandboxJobStdin(sandbox, job, data, eof = false) {
+    await this._call('virtx_client_write_sandbox_job_stdin', { sandbox, job, data, eof: eof || undefined })
+  }
+
+  // The job's log entries, from its start or after the entry numbered `after`, ending after
+  // its `end` entry.
+  sandboxJobLog(sandbox, job, after) {
+    return this._items('virtx_client_sandbox_job_log', { sandbox, job, after })
   }
 }
 
@@ -675,8 +761,8 @@ class PortForwarder {
     forwarders.register(this, { lib, raw }, this._token)
   }
 
-  // Forward the port a sandbox answered `url` for, as `initSandbox` and `listSandbox` answer one
-  // in `ports`, over `client`'s session. Blocks until it is open.
+  // Forward the port a sandbox answered `url` for, as `createSandbox` answers one in `ports`,
+  // over `client`'s session. Blocks until it is open.
   static open(client, url) {
     const lib = client._lib
     const bytes = encode({ url })
@@ -726,6 +812,7 @@ module.exports = {
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
+  StartedJob,
   VirtxError,
   imageName,
   libraryPath,

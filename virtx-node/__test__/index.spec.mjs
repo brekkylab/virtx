@@ -1,5 +1,5 @@
 // The client over `libvirtx_core`: where no server is needed, and against `virtx-core`'s
-// `files_server` example over stdio for the files. The library and the example are built with
+// `test_server` example over stdio for the rest. The library and the example are built with
 // cargo first, unless `$VIRTX_CORE_LIB` names a library.
 
 import assert from 'node:assert/strict'
@@ -22,17 +22,13 @@ const library =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-const filesServer = path.join(
-  target,
-  'examples',
-  process.platform === 'win32' ? 'files_server.exe' : 'files_server',
-)
+const testServer = path.join(target, 'examples', process.platform === 'win32' ? 'test_server.exe' : 'test_server')
 
 before(() => {
   execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })
   execFileSync(
     'cargo',
-    ['build', '-p', 'virtx-core', '--features', 'testing', '--example', 'files_server'],
+    ['build', '-p', 'virtx-core', '--features', 'testing', '--example', 'test_server'],
     { cwd: root, stdio: 'inherit' },
   )
   virtx.load(process.env[virtx.LIBRARY_ENV] || path.join(target, library))
@@ -65,10 +61,7 @@ function read(host, port) {
 }
 
 test('a header that cannot be sent is refused at connect', () => {
-  assert.throws(
-    () => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }),
-    /not a name/,
-  )
+  assert.throws(() => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }), /not a name/)
 })
 
 test('a token does not go in the clear to another machine', async () => {
@@ -80,18 +73,6 @@ test('a token does not go in the clear to another machine', async () => {
   await client.close()
 })
 
-test('a command is run for the token before a request is sent', async () => {
-  const failing = {
-    type: 'command',
-    program: 'sh',
-    args: ['-c', "echo 'not signed in' >&2; exit 1"],
-  }
-  assert.throws(() => Client.connect('http://example.com/', failing), /in the clear/)
-  const client = Client.connect('http://127.0.0.1:9/', failing)
-  await assert.rejects(client.listSandbox(), /not signed in/)
-  await client.close()
-})
-
 test('a header that cannot be sent is refused when set', async () => {
   const client = Client.connect('http://127.0.0.1:9/')
   client.setHeaders({ authorization: 'Bearer x' })
@@ -100,7 +81,7 @@ test('a header that cannot be sent is refused when set', async () => {
 })
 
 test('the files of a volume are written, listed, moved and read back', async () => {
-  const client = Client.spawn(filesServer)
+  const client = Client.spawn(testServer)
   try {
     const volume = { volume: 'v' }
     await client.createDir(volume, 'dir')
@@ -141,6 +122,165 @@ test('the files of a volume are written, listed, moved and read back', async () 
     assert.equal((await client.readFile(volume, 'c.txt')).toString(), 'hello world')
 
     await assert.rejects(client.readDir({ snapshot: 'locked' }, ''), /423/)
+  } finally {
+    await client.close()
+  }
+})
+
+// Each entry of `log`, until and with its end.
+async function entries(log) {
+  const read = []
+  for await (const entry of log) read.push(entry)
+  return read
+}
+
+test('a snapshot is created, got and removed', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const snapshot = await client.createSnapshot('made', 1)
+    assert.equal(snapshot.name, 'made')
+    assert.equal(snapshot.inUse, false)
+    assert.deepEqual(await client.getSnapshot('made'), snapshot)
+    assert.ok((await client.listSnapshot()).some((s) => s.name === 'made'))
+    assert.equal((await client.getSnapshot('locked')).inUse, true)
+    await client.removeSnapshot('made')
+    await assert.rejects(client.getSnapshot('made'), /404/)
+  } finally {
+    await client.close()
+  }
+})
+
+test('a volume is created and got', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const volume = await client.createVolume('w')
+    assert.equal(volume.name, 'w')
+    assert.deepEqual(await client.getVolume('w'), volume)
+    await client.removeVolume('w')
+  } finally {
+    await client.close()
+  }
+})
+
+test('a command in a sandbox is a job whose log ends with its code', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20')
+    assert.equal(sandbox.running, true)
+    assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
+
+    const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])
+    assert.equal(job.kind, 'exec')
+    assert.deepEqual(job.cmd, ['echo', 'hi'])
+    const log = await entries(client.sandboxJobLog(sandbox.id, job.id))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ stdout: 'hi' }, { end: { code: 0 } }],
+    )
+    // Read again after the first entry, from the second.
+    assert.deepEqual(await entries(client.sandboxJobLog(sandbox.id, job.id, log[0].id)), log.slice(1))
+    assert.equal((await client.getSandboxJob(sandbox.id, job.id)).code, 0)
+    assert.ok((await client.listSandboxJob(sandbox.id)).some((j) => j.id === job.id))
+
+    const failed = await client.execSandbox(sandbox.id, ['fail'])
+    const end = (await entries(client.sandboxJobLog(sandbox.id, failed.id))).at(-1)
+    assert.deepEqual(end.end, { code: 1 })
+
+    await client.removeSandboxJob(sandbox.id, job.id)
+    await assert.rejects(client.getSandboxJob(sandbox.id, job.id), /404/)
+    await client.removeSandbox(sandbox.id)
+    await assert.rejects(client.getSandbox(sandbox.id), /404/)
+  } finally {
+    await client.close()
+  }
+})
+
+test('a job reads its stdin and is signalled', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const { id: sandbox } = await client.createSandbox('alpine:3.20')
+    const cat = await client.execSandbox(sandbox, ['cat'], { stdin: true })
+    await client.writeSandboxJobStdin(sandbox, cat.id, 'one\n')
+    await client.writeSandboxJobStdin(sandbox, cat.id, 'two\n', true)
+    const log = await entries(client.sandboxJobLog(sandbox, cat.id))
+    assert.deepEqual(
+      log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
+      ['one', 'two'],
+    )
+
+    const sleep = await client.execSandbox(sandbox, ['sleep'])
+    await client.signalSandboxJob(sandbox, sleep.id, 'SIGTERM')
+    const end = (await entries(client.sandboxJobLog(sandbox, sleep.id))).at(-1)
+    assert.ok('end' in end)
+  } finally {
+    await client.close()
+  }
+})
+
+test('an image build is a job whose log ends with its digest', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const job = await client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'built:latest')
+    assert.equal(job.kind, 'build')
+    assert.equal(job.reference, 'built:latest')
+    const log = await entries(client.imageJobLog(job.id))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+    )
+    assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
+    assert.ok((await client.listImageJob()).some((j) => j.id === job.id))
+
+    const missing = await client.buildImage(new virtx.Recipe('missing'), 'no:latest')
+    const end = (await entries(client.imageJobLog(missing.id))).at(-1)
+    assert.ok(end.end.error)
+
+    await client.removeImageJob(job.id)
+    await assert.rejects(client.getImageJob(job.id), /404/)
+  } finally {
+    await client.close()
+  }
+})
+
+test('a started build is iterated to its end', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const log = await entries(client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
+test('a started command is iterated to its end', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const { id: sandbox } = await client.createSandbox('alpine:3.20')
+    const log = await entries(client.execSandbox(sandbox, ['echo', 'hi']))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ stdout: 'hi' }, { end: { code: 0 } }],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
+test('a started job awaited and iterated is one job', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const before = (await client.listImageJob()).length
+    const build = client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'once:latest')
+    const job = await build
+    assert.equal(job.kind, 'build')
+    const log = await entries(build)
+    assert.deepEqual(log.at(-1).end, { digest: 'sha256:0' })
+    const jobs = await client.listImageJob()
+    assert.equal(jobs.length, before + 1)
+    assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
   } finally {
     await client.close()
   }

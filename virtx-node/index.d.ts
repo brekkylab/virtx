@@ -59,33 +59,39 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-export interface ImageBuildOutput {
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
+export type ImageJobKind = 'pull' | 'push' | 'build'
+
+/** A build, pull or push the server runs. */
+export interface ImageJob {
+  id: string
+  kind: ImageJobKind
+  /** The tag it points, or the image it pushes. */
+  reference: string
+  running: boolean
+  /** The digest of the manifest, as `algorithm:hex`, once it has succeeded. */
+  digest?: string
+  /** Why it failed, once it has. */
+  error?: string
 }
+
+/** How an image job ended. */
+export type ImageJobEnd = { digest: string } | { error: string }
+
+/** An entry of an image job's log, numbered by `id`; `end` is the last. */
+export type ImageJobEntry = { id: number } & (
+  | { log: string }
+  | { truncated: Record<string, never> }
+  | { end: ImageJobEnd }
+)
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
-  { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string }
+  | { type: 'basic'; username: string; password: string }
+  | { type: 'bearer'; token: string }
 
-/**
- * The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`,
- * or the token `program` with `args` prints -- a token alone, or `{"token": ..., "expires_in": <seconds>}` --
- * run for the first request, and again when its token is a minute from running out or the server refuses
- * it: a person's short-lived token, as `virtx token --json` prints it.
- */
+/** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
 export type Auth =
   { type: 'bearer'; token: string } | { type: 'command'; program: string; args?: string[] }
-
-export interface ImagePullOutput {
-  /** The digest of the image's manifest, as `algorithm:hex`. */
-  digest: string
-}
-
-export interface ImagePushOutput {
-  /** The digest of the manifest pushed, as `algorithm:hex`. */
-  digest: string
-}
 
 export interface ImageListItem {
   /** The tag, as `name:tag`. */
@@ -111,16 +117,10 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-/** A page of a list: those after `after`, `limit` at most. */
-export interface ListPage {
-  after?: string
-  limit?: number
-}
-
-export interface SnapshotListItem {
+export interface SnapshotListOutputItem {
   name: string
   size: number
-  /** Whether a sandbox holds it now, from its `initSandbox` until its `closeSandbox`. */
+  /** Whether a sandbox holds it now, from its `createSandbox` until its `removeSandbox`. */
   inUse: boolean
 }
 
@@ -128,11 +128,6 @@ export interface VolumeListOutputItem {
   name: string
   /** The bytes the volume's files take on the server. */
   size: number
-}
-
-export interface VolumeCreateOutput {
-  /** The one asked for, or the one the server picked. */
-  name: string
 }
 
 /** A mount source's type, without its credentials. */
@@ -191,13 +186,14 @@ export interface DirEntry {
   metadata: Metadata
 }
 
-export interface SandboxListItem {
+export interface Sandbox {
   id: string
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
   /** Whether its VM is up now. */
   running: boolean
+  /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
 }
 
@@ -208,7 +204,7 @@ export interface SandboxPort {
 }
 
 /** Whatever is left out the server picks. */
-export interface SandboxInitOptions {
+export interface SandboxCreateOptions {
   snapshot?: string
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
@@ -220,13 +216,44 @@ export interface SandboxInitOptions {
   volumes?: { volume: string; path: string; readonly?: boolean }[]
 }
 
-export interface SandboxInitOutput {
+export interface SandboxExecOptions {
+  /** Keep its stdin open for `writeSandboxJobStdin`. */
+  stdin?: boolean
+  /** Kill it after this long. */
+  timeoutMs?: number
+}
+
+/** A process started in a sandbox. */
+export interface SandboxJob {
   id: string
-  ports?: SandboxPort[]
+  kind: 'exec'
+  pid: number
+  cmd: string[]
+  running: boolean
+  /** Its exit code, once it has ended. */
+  code?: number
+}
+
+/** An entry of a sandbox job's log, numbered by `id`; `end` is the last. */
+export type SandboxJobEntry = { id: number } & (
+  | { stdout: string }
+  | { stderr: string }
+  | { truncated: Record<string, never> }
+  | { end: { code: number } }
+)
+
+/**
+ * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
+ * read until its `end` entry. The job starts at the call, as a promise's work does, and once
+ * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
+ * leaving one leaves the job running, which `removeImageJob` or `removeSandboxJob` cancels.
+ */
+export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
+  [Symbol.asyncIterator](): AsyncGenerator<E>
 }
 
 /**
- * A client of one server, over stdio or Streamable HTTP, made by `libvirtx_core`. Holds of one
+ * A client of one server, over stdio or HTTP, made by `libvirtx_core`. Holds of one
  * session are counted: `clone` takes another, `close` lets this one go, and the session ends with
  * the last.
  */
@@ -234,7 +261,15 @@ export class Client {
   /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
   static spawn(program: string, args?: string[]): Client
   /**
-   * Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+   * `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+   * `virtx token --json` prints, again as it runs out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
+   * nearest this machine.
+   */
+  static fromEnv(): Client
+  /**
+   * Reach the server at `url`, its base `http` or `https` URL, sending
    * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
    * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
    * would go in the clear: over `http` to any host but this machine.
@@ -253,14 +288,6 @@ export class Client {
    * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
    */
   setHeaders(headers: Record<string, string>): void
-  /**
-   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
-   * `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
-   * `virtx token --json` prints, again as it runs out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
-   * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
-   * nearest this machine.
-   */
-  static fromEnv(): Client
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */
@@ -273,17 +300,20 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  buildImage(
-    recipe: Recipe | ReturnType<Recipe['toJSON']>,
-    reference: string,
-  ): AsyncGenerator<Event<ImageBuildOutput, string>>
-  /** Pull `reference` from its registry, and point it at what it pulls; without `auth` the server pulls anonymously. */
-  pullImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePullOutput, string>>
-  /** Push the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
-  pushImage(reference: string, auth?: RegistryAuth): AsyncGenerator<Event<ImagePushOutput, string>>
+  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
+  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
+  pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
+  pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  listImageJob(): Promise<ImageJob[]>
+  getImageJob(id: string): Promise<ImageJob>
+  /** Cancel the job if it runs, and forget it. */
+  removeImageJob(id: string): Promise<void>
+  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  imageJobLog(id: string, after?: number): AsyncGenerator<ImageJobEntry>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
-  /** The tags on the server's images, by name and then tag: those after the reference `after`, `limit` at most, or every one. */
-  listImage(page?: ListPage): Promise<ImageListItem[]>
+  listImage(): Promise<ImageListItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
   tagImage(source: string, target: string): Promise<void>
   /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */
@@ -296,16 +326,18 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  /** The snapshots, by name: those after `after`, `limit` at most, or every one. */
-  listSnapshot(page?: ListPage): Promise<SnapshotListItem[]>
-  createSnapshot(name?: string, diskGib?: number): Promise<{ name: string }>
+  listSnapshot(): Promise<SnapshotListOutputItem[]>
+  /** The server picks a name or size not given. */
+  createSnapshot(name?: string, diskGib?: number): Promise<SnapshotListOutputItem>
+  getSnapshot(name: string): Promise<SnapshotListOutputItem>
   removeSnapshot(name: string): Promise<void>
-  /** The volumes, by name: those after `after`, `limit` at most, or every one. */
-  listVolume(page?: ListPage): Promise<VolumeListOutputItem[]>
-  createVolume(name?: string): Promise<VolumeCreateOutput>
+  listVolume(): Promise<VolumeListOutputItem[]>
+  /** The server picks a name if none is given. */
+  createVolume(name?: string): Promise<VolumeListOutputItem>
+  getVolume(name: string): Promise<VolumeListOutputItem>
   removeVolume(name: string): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
-  createVolumeMount(volume: string, path: string, source: MountSource): Promise<void>
+  createVolumeMount(volume: string, path: string, source: MountSource): Promise<VolumeMountListOutputItem>
   removeVolumeMount(volume: string, path: string): Promise<void>
   /** A path is relative to its root, as `dir/file.txt`; the empty path is the root. */
   statFile(root: FileRoot, path: string): Promise<Metadata>
@@ -321,12 +353,7 @@ export class Client {
    * The whole file, created if it does not exist; its parent directory must exist. With `ifMatch`, the `etag`
    * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
    */
-  writeFile(
-    root: FileRoot,
-    path: string,
-    content: Buffer | Uint8Array | string,
-    ifMatch?: string,
-  ): Promise<void>
+  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
   /** The parent must exist. */
   createDir(root: FileRoot, path: string): Promise<void>
   /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */
@@ -337,17 +364,23 @@ export class Client {
   renameFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
   /** A directory with everything in it; `overwrite` as in `renameFile`. */
   copyFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
-  listSandbox(): Promise<SandboxListItem[]>
-  initSandbox(image: string | ImageName, options?: SandboxInitOptions): Promise<SandboxInitOutput>
-  /** Killed after `timeoutMs` if one is given. */
-  execSandbox(
-    sandbox: string,
-    cmd: string[],
-    timeoutMs?: number,
-  ): AsyncGenerator<Event<{ code: number }, string>>
-  /** Make the sandbox's ports `ports`: answered with where each is reached from, in the order given. A port kept keeps its URL, one left out is closed, one added gets a URL of its own. A machine running keeps the ports it started with; the next one opens these. */
-  portsSandbox(sandbox: string, ports: number[]): Promise<SandboxPort[]>
-  closeSandbox(sandbox: string): Promise<void>
+  listSandbox(): Promise<Sandbox[]>
+  createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
+  getSandbox(id: string): Promise<Sandbox>
+  /** Stop the sandbox, end its jobs and forget it. */
+  removeSandbox(id: string): Promise<void>
+  listSandboxJob(sandbox: string): Promise<SandboxJob[]>
+  /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */
+  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
+  getSandboxJob(sandbox: string, job: string): Promise<SandboxJob>
+  /** Cancel the job if it runs, killing its process, and forget it. */
+  removeSandboxJob(sandbox: string, job: string): Promise<void>
+  /** Send `signal`, a name such as `'SIGTERM'`, to the job's process and every one it started. */
+  signalSandboxJob(sandbox: string, job: string, signal: string): Promise<void>
+  /** Write `data` to the job's stdin, then close it if `eof`; resolves once it is written. */
+  writeSandboxJobStdin(sandbox: string, job: string, data?: string, eof?: boolean): Promise<void>
+  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  sandboxJobLog(sandbox: string, job: string, after?: number): AsyncGenerator<SandboxJobEntry>
 }
 
 /**

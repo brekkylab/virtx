@@ -11,7 +11,10 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+from .job import LogEntry, Truncated
 
 
 @dataclass(frozen=True)
@@ -108,40 +111,80 @@ RegistryAuth = BasicAuth | BearerAuth
 """Credentials for a remote image registry."""
 
 
-@dataclass(frozen=True)
-class ImageBuildOutput:
-    """What ``build_image`` built."""
+class ImageJobKind(str, Enum):
+    """What an image job does."""
 
-    digest: str
-    """The digest of the image's manifest, as ``algorithm:hex``."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImageBuildOutput:
-        return cls(value["digest"])
+    PULL = "pull"
+    PUSH = "push"
+    BUILD = "build"
 
 
 @dataclass(frozen=True)
-class ImagePullOutput:
-    """What ``pull_image`` pulled."""
+class ImageJob:
+    """A build, pull or push the server runs: what ``build_image``, ``pull_image`` and
+    ``push_image`` answer. Its log is ``image_job_log``'s."""
 
-    digest: str
-    """The digest of the image's manifest, as ``algorithm:hex``."""
+    id: str
+    """The job's id, which every request about it names it by."""
+
+    kind: ImageJobKind
+
+    reference: str
+    """The reference it was started with."""
+
+    running: bool
+    """Whether it runs still."""
+
+    digest: str | None = None
+    """Once it has succeeded, the digest of the manifest it copied or built, as
+    ``algorithm:hex``."""
+
+    error: str | None = None
+    """Once it has failed, why, for a person."""
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImagePullOutput:
-        return cls(value["digest"])
+    def from_dict(cls, value: Mapping[str, Any]) -> ImageJob:
+        return cls(
+            value["id"],
+            ImageJobKind(value["kind"]),
+            value["reference"],
+            value["running"],
+            value.get("digest"),
+            value.get("error"),
+        )
 
 
 @dataclass(frozen=True)
-class ImagePushOutput:
-    """What ``push_image`` pushed."""
+class Log:
+    """A line of an image job's log."""
 
-    digest: str
-    """The digest of the manifest pushed, as ``algorithm:hex``."""
+    line: str
 
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImagePushOutput:
-        return cls(value["digest"])
+
+@dataclass(frozen=True)
+class ImageJobEnd:
+    """How an image job ended, last in its log: with ``digest`` if it succeeded, ``error`` if
+    not."""
+
+    digest: str | None = None
+    error: str | None = None
+
+
+ImageJobEntry = Log | Truncated | ImageJobEnd
+"""An entry of an image job's log."""
+
+
+def image_job_entry(item: Mapping[str, Any]) -> LogEntry[ImageJobEntry]:
+    """An item of ``image_job_log``'s stream, as ``{"id": n, "log": "..."}`` and the like."""
+    entry: ImageJobEntry
+    if "log" in item:
+        entry = Log(item["log"])
+    elif "truncated" in item:
+        entry = Truncated()
+    else:
+        end = item["end"]
+        entry = ImageJobEnd(end.get("digest"), end.get("error"))
+    return LogEntry(item["id"], entry)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,7 @@
-//! The typed client: each method of [`method`](crate::method) as a call, each request to
-//! the files of a volume or a snapshot, and what is done to images through the server's
-//! registry at `/images/v2/`, over a [`TransportClient`].
+//! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
+//! made by the module of what it names: [`image`](crate::image), [`snapshot`](crate::snapshot),
+//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a snapshot
+//! over WebDAV.
 
 use std::{io, path::PathBuf};
 
@@ -11,31 +12,20 @@ use tokio::process::Command;
 
 use crate::{
     Auth, Error,
-    files::{DirEntry, FileRoot, Metadata},
     image::{
-        ImageBuild, ImageBuildArgs, ImageBuildOutput, ImageDownloadOutput, ImageListArgs,
-        ImageListOutputItem, ImagePrune, ImagePruneArgs, ImagePruneOutput, ImagePull,
-        ImagePullArgs, ImagePullOutput, ImagePush, ImagePushArgs, ImagePushOutput,
-        ImageUploadOutput, Recipe, RegistryAuth, oci,
+        self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
+        ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
+        Recipe, RegistryAuth, oci,
     },
-    method::{Event, Request},
     sandbox::{
-        SandboxClose, SandboxCloseArgs, SandboxCloseOutput, SandboxExec, SandboxExecArgs,
-        SandboxExecOutput, SandboxInit, SandboxInitArgs, SandboxInitOutput, SandboxList,
-        SandboxListArgs, SandboxListOutputItem, SandboxPort, SandboxPorts, SandboxPortsArgs,
-        SandboxPortsOutput,
+        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
+        SandboxSignalArgs, SandboxStdinArgs,
     },
-    snapshot::{
-        SnapshotCreate, SnapshotCreateArgs, SnapshotCreateOutput, SnapshotList, SnapshotListArgs,
-        SnapshotListOutputItem, SnapshotRemove, SnapshotRemoveArgs, SnapshotRemoveOutput,
-    },
-    transport::TransportClient,
+    snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
+    transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
-        MountSource, VolumeCreate, VolumeCreateArgs, VolumeCreateOutput, VolumeList,
-        VolumeListArgs, VolumeListOutputItem, VolumeMountCreate, VolumeMountCreateArgs,
-        VolumeMountCreateOutput, VolumeMountList, VolumeMountListArgs, VolumeMountListOutputItem,
-        VolumeMountRemove, VolumeMountRemoveArgs, VolumeMountRemoveOutput, VolumeRemove,
-        VolumeRemoveArgs, VolumeRemoveOutput,
+        self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+        VolumeMountListOutputItem,
     },
 };
 
@@ -76,62 +66,77 @@ impl Client {
         self.inner.set_headers(headers);
     }
 
-    /// Build `recipe`, and point `reference` at it. The stream is the build's log, a [`Event::Progress`] a line, then what it built as its last
-    /// item, an [`Event::Output`] or the error it failed with. Dropping it drops the build.
-    pub fn build_image(
+    /// Start building `recipe`, to point `reference` at what it builds. Its log is
+    /// [`image_job_log`](Self::image_job_log)'s.
+    pub async fn build_image(
         &self,
         recipe: Recipe,
         reference: impl Into<String>,
-    ) -> impl Stream<Item = Result<Event<ImageBuildOutput, String>, Error>> + Unpin + Send + '_
-    {
-        Box::pin(self.inner.request_with_progress(
-            ImageBuild::NAME,
-            ImageBuildArgs {
-                recipe,
-                reference: reference.into(),
-            },
-        ))
+    ) -> Result<ImageJob, Error> {
+        let args = ImageBuildArgs {
+            recipe,
+            reference: reference.into(),
+        };
+        image::client::build(&self.inner, &args).await
     }
 
-    /// Pull `reference` from its registry, and point it at what it pulls; without `auth` the
-    /// server pulls anonymously. The stream is the pull's log, a [`Event::Progress`] a line,
-    /// then what it pulled as its last item, an [`Event::Output`] or the error it failed with.
-    /// Dropping it drops the pull.
-    pub fn pull_image(
+    /// Start pulling `reference` from its registry, to point it at what it pulls; without
+    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s.
+    pub async fn pull_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> impl Stream<Item = Result<Event<ImagePullOutput, String>, Error>> + Unpin + Send + '_ {
-        Box::pin(self.inner.request_with_progress(
-            ImagePull::NAME,
-            ImagePullArgs {
-                reference: reference.into(),
-                auth,
-            },
-        ))
+    ) -> Result<ImageJob, Error> {
+        let args = ImagePullArgs {
+            reference: reference.into(),
+            auth,
+        };
+        image::client::pull(&self.inner, &args).await
     }
 
-    /// Push the image `reference` points at to the registry `reference` names; without `auth`
-    /// the server pushes anonymously. The stream is the push's log, a [`Event::Progress`] a
-    /// line, then what it pushed as its last item, an [`Event::Output`] or the error it failed
-    /// with. Dropping it drops the push.
-    pub fn push_image(
+    /// Start pushing the image `reference` points at to the registry `reference` names;
+    /// without `auth` the server pushes anonymously. Its log is
+    /// [`image_job_log`](Self::image_job_log)'s.
+    pub async fn push_image(
         &self,
         reference: impl Into<String>,
         auth: Option<RegistryAuth>,
-    ) -> impl Stream<Item = Result<Event<ImagePushOutput, String>, Error>> + Unpin + Send + '_ {
-        Box::pin(self.inner.request_with_progress(
-            ImagePush::NAME,
-            ImagePushArgs {
-                reference: reference.into(),
-                auth,
-            },
-        ))
+    ) -> Result<ImageJob, Error> {
+        let args = ImagePushArgs {
+            reference: reference.into(),
+            auth,
+        };
+        image::client::push(&self.inner, &args).await
+    }
+
+    /// Every image job the server holds.
+    pub async fn list_image_job(&self) -> Result<Vec<ImageJob>, Error> {
+        image::client::list_job(&self.inner).await
+    }
+
+    /// The image job `id`.
+    pub async fn get_image_job(&self, id: impl AsRef<str>) -> Result<ImageJob, Error> {
+        image::client::get_job(&self.inner, id.as_ref()).await
+    }
+
+    /// Cancel the image job `id` if it runs, and forget it.
+    pub async fn remove_image_job(&self, id: impl AsRef<str>) -> Result<(), Error> {
+        image::client::remove_job(&self.inner, id.as_ref()).await
+    }
+
+    /// The log of the image job `id`, from its start or after its `after`th entry, until its
+    /// `end` entry. Dropping it leaves the job as it is.
+    pub fn image_job_log(
+        &self,
+        id: &str,
+        after: Option<u64>,
+    ) -> impl Stream<Item = Result<LogEntry<ImageJobEntry>, Error>> + Unpin + Send + use<'_> {
+        Box::pin(image::client::job_log(&self.inner, id, after))
     }
 
     /// Every tag on the server's images, as `name:tag`, with the digest it points at.
-    pub async fn list_image(&self, page: ImageListArgs) -> Result<Vec<ImageListOutputItem>, Error> {
-        oci::list(&self.inner, page).await
+    pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
+        oci::list(&self.inner).await
     }
 
     /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
@@ -184,17 +189,12 @@ impl Client {
 
     /// Delete each image no tag points at and no sandbox uses, and what only such images held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
-        self.inner
-            .request(ImagePrune::NAME, ImagePruneArgs {})
-            .await
+        image::client::prune(&self.inner).await
     }
 
     /// Every snapshot the server holds.
-    pub async fn list_snapshot(
-        &self,
-        page: SnapshotListArgs,
-    ) -> Result<Vec<SnapshotListOutputItem>, Error> {
-        self.inner.request(SnapshotList::NAME, page).await
+    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
+        snapshot::client::list(&self.inner).await
     }
 
     /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
@@ -203,140 +203,104 @@ impl Client {
         &self,
         name: Option<impl Into<String>>,
         disk_gib: Option<u32>,
-    ) -> Result<SnapshotCreateOutput, Error> {
-        self.inner
-            .request(
-                SnapshotCreate::NAME,
-                SnapshotCreateArgs {
-                    name: name.map(Into::into),
-                    disk_gib,
-                },
-            )
-            .await
+    ) -> Result<SnapshotListOutputItem, Error> {
+        let args = SnapshotCreateArgs {
+            name: name.map(Into::into),
+            disk_gib,
+        };
+        snapshot::client::create(&self.inner, &args).await
+    }
+
+    /// The snapshot `name`.
+    pub async fn get_snapshot(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<SnapshotListOutputItem, Error> {
+        snapshot::client::get(&self.inner, name.as_ref()).await
     }
 
     /// Delete the snapshot `name` and its upper layer.
-    pub async fn remove_snapshot(&self, name: impl Into<String>) -> Result<(), Error> {
-        let _: SnapshotRemoveOutput = self
-            .inner
-            .request(
-                SnapshotRemove::NAME,
-                SnapshotRemoveArgs { name: name.into() },
-            )
-            .await?;
-        Ok(())
+    pub async fn remove_snapshot(&self, name: impl AsRef<str>) -> Result<(), Error> {
+        snapshot::client::remove(&self.inner, name.as_ref()).await
     }
 
     /// Every volume the server holds.
-    pub async fn list_volume(
-        &self,
-        page: VolumeListArgs,
-    ) -> Result<Vec<VolumeListOutputItem>, Error> {
-        self.inner.request(VolumeList::NAME, page).await
+    pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
+        volume::client::list(&self.inner).await
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
     pub async fn create_volume(
         &self,
         name: Option<impl Into<String>>,
-    ) -> Result<VolumeCreateOutput, Error> {
-        self.inner
-            .request(
-                VolumeCreate::NAME,
-                VolumeCreateArgs {
-                    name: name.map(Into::into),
-                },
-            )
-            .await
+    ) -> Result<VolumeListOutputItem, Error> {
+        let args = VolumeCreateArgs {
+            name: name.map(Into::into),
+        };
+        volume::client::create(&self.inner, &args).await
+    }
+
+    /// The volume `name`.
+    pub async fn get_volume(&self, name: impl AsRef<str>) -> Result<VolumeListOutputItem, Error> {
+        volume::client::get(&self.inner, name.as_ref()).await
     }
 
     /// Delete the volume `name` and everything in it.
-    pub async fn remove_volume(&self, name: impl Into<String>) -> Result<(), Error> {
-        let _: VolumeRemoveOutput = self
-            .inner
-            .request(VolumeRemove::NAME, VolumeRemoveArgs { name: name.into() })
-            .await?;
-        Ok(())
+    pub async fn remove_volume(&self, name: impl AsRef<str>) -> Result<(), Error> {
+        volume::client::remove(&self.inner, name.as_ref()).await
     }
 
     /// The mounts in `volume`, without their credentials.
     pub async fn list_volume_mount(
         &self,
-        volume: impl Into<String>,
+        volume: impl AsRef<str>,
     ) -> Result<Vec<VolumeMountListOutputItem>, Error> {
-        self.inner
-            .request(
-                VolumeMountList::NAME,
-                VolumeMountListArgs {
-                    volume: volume.into(),
-                },
-            )
-            .await
+        volume::client::list_mount(&self.inner, volume.as_ref()).await
     }
 
     /// Mount `source` at `path` in `volume`, a directory the mount creates.
     pub async fn create_volume_mount(
         &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
+        volume: impl AsRef<str>,
+        path: impl AsRef<str>,
         source: MountSource,
-    ) -> Result<(), Error> {
-        let _: VolumeMountCreateOutput = self
-            .inner
-            .request(
-                VolumeMountCreate::NAME,
-                VolumeMountCreateArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                    source,
-                },
-            )
-            .await?;
-        Ok(())
+    ) -> Result<VolumeMountListOutputItem, Error> {
+        let args = VolumeMountCreateArgs { source };
+        volume::client::create_mount(&self.inner, volume.as_ref(), path.as_ref(), &args).await
     }
 
     /// Take away the mount at `path` in `volume`, leaving its source as it is.
     pub async fn remove_volume_mount(
         &self,
-        volume: impl Into<String>,
-        path: impl Into<String>,
+        volume: impl AsRef<str>,
+        path: impl AsRef<str>,
     ) -> Result<(), Error> {
-        let _: VolumeMountRemoveOutput = self
-            .inner
-            .request(
-                VolumeMountRemove::NAME,
-                VolumeMountRemoveArgs {
-                    volume: volume.into(),
-                    path: path.into(),
-                },
-            )
-            .await?;
-        Ok(())
+        volume::client::remove_mount(&self.inner, volume.as_ref(), path.as_ref()).await
     }
 
     /// What is at `path` in `root`.
     pub async fn stat_file(&self, root: &FileRoot, path: &str) -> Result<Metadata, Error> {
-        self.inner.stat(root, path).await
+        webdav::client::stat(&self.inner, root, path).await
     }
 
     /// Whether anything is at `path` in `root`.
     pub async fn exists(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        self.inner.exists(root, path).await
+        webdav::client::exists(&self.inner, root, path).await
     }
 
     /// Whether a file is at `path` in `root`.
     pub async fn is_file(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        self.inner.is_file(root, path).await
+        webdav::client::is_file(&self.inner, root, path).await
     }
 
     /// Whether a directory is at `path` in `root`.
     pub async fn is_dir(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        self.inner.is_dir(root, path).await
+        webdav::client::is_dir(&self.inner, root, path).await
     }
 
     /// The entries of the directory at `path` in `root`.
     pub async fn read_dir(&self, root: &FileRoot, path: &str) -> Result<Vec<DirEntry>, Error> {
-        self.inner.read_dir(root, path).await
+        webdav::client::read_dir(&self.inner, root, path).await
     }
 
     /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
@@ -347,12 +311,12 @@ impl Client {
         offset: u64,
         length: Option<u64>,
     ) -> Result<Bytes, Error> {
-        self.inner.read(root, path, offset, length).await
+        webdav::client::read(&self.inner, root, path, offset, length).await
     }
 
     /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
     pub async fn read_text(&self, root: &FileRoot, path: &str) -> Result<String, Error> {
-        self.inner.read_text(root, path).await
+        webdav::client::read_text(&self.inner, root, path).await
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
@@ -366,19 +330,19 @@ impl Client {
         content: impl Into<Bytes>,
         if_match: Option<&str>,
     ) -> Result<(), Error> {
-        self.inner.write(root, path, content, if_match).await
+        webdav::client::write(&self.inner, root, path, content, if_match).await
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
     pub async fn create_dir(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
-        self.inner.create_dir(root, path).await
+        webdav::client::create_dir(&self.inner, root, path).await
     }
 
     /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
     /// needed, and one there already is left as it is. Refused with a `405` when a file is at
     /// `path`.
     pub async fn create_dir_all(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
-        self.inner.create_dir_all(root, path).await
+        webdav::client::create_dir_all(&self.inner, root, path).await
     }
 
     /// Remove what is at `path` in `root`: a directory with everything in it. With
@@ -389,7 +353,7 @@ impl Client {
         path: &str,
         missing_ok: bool,
     ) -> Result<(), Error> {
-        self.inner.remove(root, path, missing_ok).await
+        webdav::client::remove(&self.inner, root, path, missing_ok).await
     }
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
@@ -401,7 +365,7 @@ impl Client {
         to: &str,
         overwrite: bool,
     ) -> Result<(), Error> {
-        self.inner.rename(root, from, to, overwrite).await
+        webdav::client::rename(&self.inner, root, from, to, overwrite).await
     }
 
     /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
@@ -413,75 +377,103 @@ impl Client {
         to: &str,
         overwrite: bool,
     ) -> Result<(), Error> {
-        self.inner.copy(root, from, to, overwrite).await
+        webdav::client::copy(&self.inner, root, from, to, overwrite).await
     }
 
     /// Every sandbox the server holds.
-    pub async fn list_sandbox(&self) -> Result<Vec<SandboxListOutputItem>, Error> {
-        self.inner
-            .request(SandboxList::NAME, SandboxListArgs {})
-            .await
+    pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
+        sandbox::client::list(&self.inner).await
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxInitArgs::new`].
-    pub async fn init_sandbox(&self, args: SandboxInitArgs) -> Result<SandboxInitOutput, Error> {
-        self.inner.request(SandboxInit::NAME, args).await
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
+    /// here only.
+    pub async fn create_sandbox(&self, args: &SandboxCreateArgs) -> Result<Sandbox, Error> {
+        sandbox::client::create(&self.inner, args).await
     }
 
-    /// Run `cmd` in `sandbox` to its end, killed after `timeout_ms` if one is given. The stream
-    /// is its output, an [`Event::Progress`] a line as it is written, then how it ended as its
-    /// last item, an [`Event::Output`] or the error it failed with. Dropping it drops the
-    /// command.
-    pub fn exec_sandbox(
+    /// The sandbox `id`, without its ports.
+    pub async fn get_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
+        sandbox::client::get(&self.inner, id.as_ref()).await
+    }
+
+    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
+        sandbox::client::remove(&self.inner, id.as_ref()).await
+    }
+
+    /// Every job in the sandbox `id`.
+    pub async fn list_sandbox_job(&self, id: impl AsRef<str>) -> Result<Vec<SandboxJob>, Error> {
+        sandbox::client::list_job(&self.inner, id.as_ref()).await
+    }
+
+    /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
+    /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s.
+    pub async fn exec_sandbox(
         &self,
-        sandbox: impl Into<String>,
-        cmd: impl IntoIterator<Item = impl Into<String>>,
-        timeout_ms: Option<u64>,
-    ) -> impl Stream<Item = Result<Event<SandboxExecOutput, String>, Error>> + Unpin + Send + '_
-    {
-        Box::pin(self.inner.request_with_progress(
-            SandboxExec::NAME,
-            SandboxExecArgs {
-                sandbox: sandbox.into(),
-                cmd: cmd.into_iter().map(Into::into).collect(),
-                timeout_ms,
-            },
-        ))
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> Result<SandboxJob, Error> {
+        sandbox::client::exec(&self.inner, id.as_ref(), args).await
     }
 
-    /// Make `sandbox`'s ports `ports`, answered with where each is reached from, in the order
-    /// given: a port kept keeps its URL, one left out is closed, one added gets a URL of its
-    /// own. A machine running keeps the ports it started with; the next one opens these.
-    pub async fn ports_sandbox(
+    /// The job `job` in the sandbox `id`.
+    pub async fn get_sandbox_job(
         &self,
-        sandbox: impl Into<String>,
-        ports: impl IntoIterator<Item = u16>,
-    ) -> Result<Vec<SandboxPort>, Error> {
-        let output: SandboxPortsOutput = self
-            .inner
-            .request(
-                SandboxPorts::NAME,
-                SandboxPortsArgs {
-                    sandbox: sandbox.into(),
-                    ports: ports.into_iter().collect(),
-                },
-            )
-            .await?;
-        Ok(output.ports)
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+    ) -> Result<SandboxJob, Error> {
+        sandbox::client::get_job(&self.inner, id.as_ref(), job.as_ref()).await
     }
 
-    /// Stop `sandbox` and forget its id, keeping its snapshot and volumes.
-    pub async fn close_sandbox(&self, sandbox: impl Into<String>) -> Result<(), Error> {
-        let _: SandboxCloseOutput = self
-            .inner
-            .request(
-                SandboxClose::NAME,
-                SandboxCloseArgs {
-                    sandbox: sandbox.into(),
-                },
-            )
-            .await?;
-        Ok(())
+    /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
+    pub async fn remove_sandbox_job(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+    ) -> Result<(), Error> {
+        sandbox::client::remove_job(&self.inner, id.as_ref(), job.as_ref()).await
+    }
+
+    /// Send `signal`, such as `SIGTERM`, to the process of the job `job` in the sandbox `id`
+    /// and every process it started.
+    pub async fn signal_sandbox_job(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+        signal: impl Into<String>,
+    ) -> Result<(), Error> {
+        let args = SandboxSignalArgs {
+            signal: signal.into(),
+        };
+        sandbox::client::signal_job(&self.inner, id.as_ref(), job.as_ref(), &args).await
+    }
+
+    /// Write `data` to the stdin of the process of the job `job` in the sandbox `id`, then
+    /// close it if `eof`. Answers once it is written: a caller writes again only then, so the
+    /// writes land in order.
+    pub async fn write_sandbox_job_stdin(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+        data: Option<impl Into<String>>,
+        eof: bool,
+    ) -> Result<(), Error> {
+        let args = SandboxStdinArgs {
+            data: data.map(Into::into),
+            eof,
+        };
+        sandbox::client::write_job_stdin(&self.inner, id.as_ref(), job.as_ref(), &args).await
+    }
+
+    /// The log of the job `job` in the sandbox `id`, its process's output, from its start or
+    /// after its `after`th entry, until its `end` entry. Dropping it leaves the job as it is.
+    pub fn sandbox_job_log(
+        &self,
+        id: &str,
+        job: &str,
+        after: Option<u64>,
+    ) -> impl Stream<Item = Result<LogEntry<SandboxJobEntry>, Error>> + Unpin + Send + use<'_> {
+        Box::pin(sandbox::client::job_log(&self.inner, id, job, after))
     }
 
     /// End the session; see [`TransportClient::close`].
@@ -492,119 +484,457 @@ impl Client {
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
-    use futures_util::StreamExt;
+    //! The typed client against the [`testing`](crate::testing) server, over each transport.
+
+    use futures_util::{StreamExt, TryStreamExt};
 
     use super::*;
-    use crate::{method::Progress, rpc::tests::connect};
+    use crate::{
+        image::{ImageJobEnd, ImageJobKind},
+        sandbox::SandboxJobEnd,
+        transport::tests::clients,
+        volume::MountType,
+    };
 
-    /// The first line of a log, as the test methods send it.
-    fn line(line: &str) -> Progress<String> {
-        Progress {
-            progress: 1,
-            total: None,
-            content: Some(line.into()),
+    /// A client of a test server of its own over each transport.
+    async fn each() -> [Client; 2] {
+        clients().await.map(|inner| Client { inner })
+    }
+
+    /// The status `result` was refused with, and its message.
+    fn refusal<T: std::fmt::Debug>(result: Result<T, Error>) -> (u16, String) {
+        match result {
+            Err(Error::Status(status, message)) => (status, message),
+            other => panic!("not a refusal: {other:?}"),
+        }
+    }
+
+    /// The entries of the job `job`'s log in `sandbox`, after its `after`th.
+    async fn sandbox_log(
+        client: &Client,
+        sandbox: &str,
+        job: &str,
+        after: Option<u64>,
+    ) -> Vec<LogEntry<SandboxJobEntry>> {
+        client
+            .sandbox_job_log(sandbox, job, after)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    fn entry(id: u64, entry: SandboxJobEntry) -> LogEntry<SandboxJobEntry> {
+        LogEntry { id, entry }
+    }
+
+    fn end(code: i32) -> SandboxJobEntry {
+        SandboxJobEntry::End(SandboxJobEnd { code })
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_made_read_and_removed() {
+        for client in each().await {
+            let made = client.create_snapshot(Some("dev"), Some(8)).await.unwrap();
+            assert_eq!(
+                made,
+                SnapshotListOutputItem {
+                    name: "dev".into(),
+                    size: 0,
+                    in_use: false,
+                }
+            );
+            assert_eq!(client.get_snapshot("dev").await.unwrap(), made);
+            assert!(client.list_snapshot().await.unwrap().contains(&made));
+            let named = client.create_snapshot(None::<String>, None).await.unwrap();
+            assert_ne!(named.name, "dev");
+
+            let (status, message) = refusal(client.create_snapshot(Some("dev"), None).await);
+            assert_eq!(status, 409);
+            assert!(message.starts_with("exists: "), "{message}");
+            assert_eq!(refusal(client.remove_snapshot("locked").await).0, 409);
+
+            client.remove_snapshot("dev").await.unwrap();
+            assert_eq!(refusal(client.get_snapshot("dev").await).0, 404);
+            client.close().await;
         }
     }
 
     #[tokio::test]
-    async fn a_build_streams_its_log_then_its_output() {
-        let client = Client { inner: connect() };
-        let mut build = client.build_image(Recipe::new("alpine:3.20"), "jq:latest");
-        let mut events = Vec::new();
-        while let Some(event) = build.next().await {
-            events.push(event.unwrap());
+    async fn a_name_that_needs_encoding_names_its_resource() {
+        for client in each().await {
+            let name = "한글 & spaces #1";
+            client.create_volume(Some(name)).await.unwrap();
+            assert_eq!(client.get_volume(name).await.unwrap().name, name);
+            let root = FileRoot::Volume(name.into());
+            client.write_file(&root, "a", "x", None).await.unwrap();
+            assert_eq!(client.read_text(&root, "a").await.unwrap(), "x");
+            client.remove_volume(name).await.unwrap();
+            client.close().await;
         }
-        let output = ImageBuildOutput {
-            digest: "sha256:0".into(),
-        };
-        assert_eq!(
-            events,
-            [
-                Event::Progress(line("pulling alpine:3.20")),
-                Event::Output(output)
-            ]
-        );
     }
 
     #[tokio::test]
-    async fn a_failed_build_ends_its_stream_with_the_error() {
-        let client = Client { inner: connect() };
-        let mut build = client.build_image(Recipe::new("missing"), "missing:latest");
-        assert!(matches!(build.next().await, Some(Ok(Event::Progress(_)))));
-        assert!(matches!(build.next().await, Some(Err(Error::Call(_)))));
-        assert!(build.next().await.is_none());
-    }
+    async fn a_volume_and_its_mounts_are_made_read_and_removed() {
+        for client in each().await {
+            let volume = client.create_volume(Some("data")).await.unwrap();
+            assert_eq!(volume.name, "data");
+            assert!(client.list_volume().await.unwrap().contains(&volume));
 
-    #[tokio::test]
-    async fn a_pull_streams_its_log_then_its_output() {
-        let client = Client { inner: connect() };
-        let events: Vec<_> = client
-            .pull_image("alpine:3.20", None)
-            .map(Result::unwrap)
-            .collect()
-            .await;
-        let output = ImagePullOutput {
-            digest: "sha256:0".into(),
-        };
-        assert_eq!(
-            events,
-            [
-                Event::Progress(line("pulling alpine:3.20")),
-                Event::Output(output)
-            ]
-        );
-    }
+            let source = MountSource::Notion {
+                api_key: "key".into(),
+            };
+            let mount = client
+                .create_volume_mount("data", "docs/notion", source.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                mount,
+                VolumeMountListOutputItem {
+                    path: "docs/notion".into(),
+                    mount_type: MountType::Notion,
+                }
+            );
+            assert_eq!(client.list_volume_mount("data").await.unwrap(), [mount]);
+            let again = client.create_volume_mount("data", "docs/notion", source);
+            assert_eq!(refusal(again.await).0, 409);
+            client
+                .remove_volume_mount("data", "docs/notion")
+                .await
+                .unwrap();
+            assert!(client.list_volume_mount("data").await.unwrap().is_empty());
 
-    #[tokio::test]
-    async fn a_failed_pull_ends_its_stream_with_the_error() {
-        let client = Client { inner: connect() };
-        let mut pull = client.pull_image("missing", None);
-        assert!(matches!(pull.next().await, Some(Ok(Event::Progress(_)))));
-        assert!(matches!(pull.next().await, Some(Err(Error::Call(_)))));
-        assert!(pull.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_prune_answers_what_it_deleted() {
-        let client = Client { inner: connect() };
-        let pruned = client.prune_image().await.unwrap();
-        assert_eq!(pruned.images, ["sha256:0"]);
-        assert_eq!(pruned.reclaimed, 1024);
-    }
-
-    #[tokio::test]
-    async fn a_push_carries_its_credentials_and_streams_its_log_then_its_output() {
-        let client = Client { inner: connect() };
-        let auth = RegistryAuth::Bearer {
-            token: "token".into(),
-        };
-        let events: Vec<_> = client
-            .push_image("ghcr.io/owner/jq:latest", Some(auth))
-            .map(Result::unwrap)
-            .collect()
-            .await;
-        let output = ImagePushOutput {
-            digest: "sha256:0".into(),
-        };
-        assert_eq!(
-            events,
-            [
-                Event::Progress(line("pushing ghcr.io/owner/jq:latest as bearer")),
-                Event::Output(output)
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn an_exec_streams_its_output_then_how_it_ended() {
-        let client = Client { inner: connect() };
-        let mut exec = client.exec_sandbox("s", ["echo", "hi"], None);
-        let mut events = Vec::new();
-        while let Some(event) = exec.next().await {
-            events.push(event.unwrap());
+            client.remove_volume("data").await.unwrap();
+            assert_eq!(refusal(client.get_volume("data").await).0, 404);
+            client.close().await;
         }
-        let output = SandboxExecOutput { code: 0 };
-        assert_eq!(events, [Event::Progress(line("hi")), Event::Output(output)]);
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_holds_its_snapshot_until_it_is_removed() {
+        for client in each().await {
+            client.create_snapshot(Some("work"), None).await.unwrap();
+            let mut args = SandboxCreateArgs::new("alpine:3.20");
+            args.snapshot = Some("work".into());
+            args.ports = vec![3000];
+            let sandbox = client.create_sandbox(&args).await.unwrap();
+            assert_eq!(sandbox.snapshot.as_deref(), Some("work"));
+            assert!(sandbox.running);
+            assert_eq!(sandbox.ports.len(), 1);
+            assert_eq!(sandbox.ports[0].port, 3000);
+
+            // Ports are answered at making only.
+            let read = client.get_sandbox(&sandbox.id).await.unwrap();
+            assert!(read.ports.is_empty());
+            assert!(client.list_sandbox().await.unwrap().contains(&read));
+
+            assert!(client.get_snapshot("work").await.unwrap().in_use);
+            let root = FileRoot::Snapshot("work".into());
+            assert_eq!(refusal(client.read_dir(&root, "").await).0, 423);
+            assert_eq!(refusal(client.remove_snapshot("work").await).0, 409);
+
+            client.remove_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
+            assert!(!client.get_snapshot("work").await.unwrap().in_use);
+            client.remove_snapshot("work").await.unwrap();
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_process_s_log_is_its_output_then_how_it_ended() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let job = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi", "there"]))
+                .await
+                .unwrap();
+            assert_eq!(job.kind, sandbox::SandboxJobKind::Exec);
+            assert_eq!(job.cmd, ["echo", "hi", "there"]);
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &job.id, None).await,
+                [
+                    entry(1, SandboxJobEntry::Stdout("hi there".into())),
+                    entry(2, end(0)),
+                ]
+            );
+            let ended = client.get_sandbox_job(&sandbox.id, &job.id).await.unwrap();
+            assert!(!ended.running);
+            assert_eq!(ended.code, Some(0));
+
+            let failed = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["fail"]))
+                .await
+                .unwrap();
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &failed.id, None).await,
+                [
+                    entry(1, SandboxJobEntry::Stderr("failed".into())),
+                    entry(2, end(1)),
+                ]
+            );
+            let jobs = client.list_sandbox_job(&sandbox.id).await.unwrap();
+            assert_eq!(jobs.len(), 2);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_log_is_read_again_from_after_any_entry() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let job = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["lines", "3"]))
+                .await
+                .unwrap();
+            let whole = sandbox_log(&client, &sandbox.id, &job.id, None).await;
+            assert_eq!(whole.len(), 4);
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &job.id, None).await,
+                whole
+            );
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &job.id, Some(2)).await,
+                whole[2..]
+            );
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_log_past_the_limit_is_truncated_but_keeps_its_end() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let job = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["lines", "100"]))
+                .await
+                .unwrap();
+            let log = sandbox_log(&client, &sandbox.id, &job.id, None).await;
+            let limit = crate::testing::LOG_LIMIT;
+            assert_eq!(log.len(), limit + 2);
+            assert_eq!(log[limit].entry, SandboxJobEntry::Truncated {});
+            assert_eq!(log[limit + 1].entry, end(0));
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stdin_written_in_order_comes_back_and_its_end_ends_the_process() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let mut args = SandboxExecArgs::new(["cat"]);
+            args.stdin = true;
+            let job = client.exec_sandbox(&sandbox.id, &args).await.unwrap();
+            // A reader from the start sees what is written after it started reading.
+            let mut log = client.sandbox_job_log(&sandbox.id, &job.id, None);
+            client
+                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("a\nb\n"), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                log.next().await.unwrap().unwrap(),
+                entry(1, SandboxJobEntry::Stdout("a".into()))
+            );
+            client
+                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("c"), true)
+                .await
+                .unwrap();
+            let rest: Vec<_> = log.try_collect().await.unwrap();
+            assert_eq!(
+                rest,
+                [
+                    entry(2, SandboxJobEntry::Stdout("b".into())),
+                    entry(3, SandboxJobEntry::Stdout("c".into())),
+                    entry(4, end(0)),
+                ]
+            );
+            let closed = client
+                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("d"), false)
+                .await;
+            assert_eq!(refusal(closed).0, 409);
+
+            let quiet = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo"]))
+                .await
+                .unwrap();
+            let unasked = client
+                .write_sandbox_job_stdin(&sandbox.id, &quiet.id, Some("x"), false)
+                .await;
+            assert_eq!(refusal(unasked).0, 409);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signal_or_a_cancellation_ends_a_process() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let sleep = SandboxExecArgs::new(["sleep"]);
+            let job = client.exec_sandbox(&sandbox.id, &sleep).await.unwrap();
+            assert!(job.running);
+            client
+                .signal_sandbox_job(&sandbox.id, &job.id, "SIGTERM")
+                .await
+                .unwrap();
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &job.id, None).await,
+                [entry(1, end(143))]
+            );
+            let again = client.signal_sandbox_job(&sandbox.id, &job.id, "SIGTERM");
+            assert_eq!(refusal(again.await).0, 409);
+
+            // Removed while read, its log ends where it is.
+            let job = client.exec_sandbox(&sandbox.id, &sleep).await.unwrap();
+            let log = client.sandbox_job_log(&sandbox.id, &job.id, None);
+            let remove = async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                client.remove_sandbox_job(&sandbox.id, &job.id).await
+            };
+            let (read, removed) = tokio::join!(log.try_collect::<Vec<_>>(), remove);
+            removed.unwrap();
+            assert!(read.unwrap().len() <= 1);
+            assert_eq!(
+                refusal(client.get_sandbox_job(&sandbox.id, &job.id).await).0,
+                404
+            );
+
+            let mut timed = sleep.clone();
+            timed.timeout_ms = Some(10);
+            let job = client.exec_sandbox(&sandbox.id, &timed).await.unwrap();
+            assert_eq!(
+                sandbox_log(&client, &sandbox.id, &job.id, None).await,
+                [entry(1, end(137))]
+            );
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_that_cannot_start_makes_no_job() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let refused = client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
+                .await;
+            let (status, message) = refusal(refused);
+            assert_eq!(status, 422);
+            assert!(message.starts_with("not_started: "), "{message}");
+            assert!(
+                client
+                    .list_sandbox_job(&sandbox.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            client.close().await;
+        }
+    }
+
+    /// The entries of the image job `id`'s log.
+    async fn image_log(client: &Client, id: &str) -> Vec<ImageJobEntry> {
+        client
+            .image_job_log(id, None)
+            .map_ok(|entry| entry.entry)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    fn digest(digest: &str) -> ImageJobEntry {
+        ImageJobEntry::End(ImageJobEnd {
+            digest: Some(digest.into()),
+            error: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_image_job_logs_then_ends_with_what_it_did() {
+        for client in each().await {
+            let build = client
+                .build_image(Recipe::new("alpine:3.20"), "jq:latest")
+                .await
+                .unwrap();
+            assert_eq!(build.kind, ImageJobKind::Build);
+            assert_eq!(build.reference, "jq:latest");
+            assert_eq!(
+                image_log(&client, &build.id).await,
+                [
+                    ImageJobEntry::Log("pulling alpine:3.20".into()),
+                    digest("sha256:0")
+                ]
+            );
+            let read = client.get_image_job(&build.id).await.unwrap();
+            assert!(!read.running);
+            assert_eq!(read.digest.as_deref(), Some("sha256:0"));
+
+            let pull = client.pull_image("missing", None).await.unwrap();
+            assert_eq!(pull.kind, ImageJobKind::Pull);
+            assert_eq!(pull.error.as_deref(), Some("no image missing"));
+            let log = image_log(&client, &pull.id).await;
+            assert!(matches!(
+                log.last(),
+                Some(ImageJobEntry::End(ImageJobEnd { error: Some(_), .. }))
+            ));
+
+            let auth = RegistryAuth::Bearer {
+                token: "token".into(),
+            };
+            let push = client
+                .push_image("ghcr.io/owner/jq:latest", Some(auth))
+                .await
+                .unwrap();
+            assert_eq!(
+                image_log(&client, &push.id).await,
+                [
+                    ImageJobEntry::Log("pushing ghcr.io/owner/jq:latest as bearer".into()),
+                    digest("sha256:0")
+                ]
+            );
+            assert_eq!(client.list_image_job().await.unwrap().len(), 3);
+
+            let pruned = client.prune_image().await.unwrap();
+            assert_eq!(pruned.images, ["sha256:0"]);
+            assert_eq!(pruned.reclaimed, 1024);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_image_job_cancelled_is_gone() {
+        for client in each().await {
+            let job = client.pull_image("hang", None).await.unwrap();
+            assert!(job.running);
+            let mut log = client.image_job_log(&job.id, None);
+            assert_eq!(
+                log.next().await.unwrap().unwrap().entry,
+                ImageJobEntry::Log("pulling hang".into())
+            );
+            client.remove_image_job(&job.id).await.unwrap();
+            // What was there when it went, and no more.
+            while let Some(entry) = log.next().await {
+                entry.unwrap();
+            }
+            drop(log);
+            assert_eq!(refusal(client.get_image_job(&job.id).await).0, 404);
+            client.close().await;
+        }
     }
 }
 
@@ -621,6 +951,7 @@ pub(crate) mod ffi {
     use bytes::Bytes;
     use futures_util::StreamExt;
     use http::{HeaderMap, HeaderName, HeaderValue};
+    use serde::Deserialize;
     use tokio::process::Command;
 
     use super::Client;
@@ -630,18 +961,74 @@ pub(crate) mod ffi {
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
             retain, share, write,
         },
-        files::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         image::{
-            ImageBuildArgs, ImageDownloadArgs, ImageListArgs, ImagePullArgs, ImagePushArgs,
-            ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+            ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
+            ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        sandbox::{SandboxCloseArgs, SandboxExecArgs, SandboxInitArgs, SandboxPortsArgs},
-        snapshot::{SnapshotCreateArgs, SnapshotListArgs, SnapshotRemoveArgs},
-        volume::{
-            VolumeCreateArgs, VolumeListArgs, VolumeMountCreateArgs, VolumeMountListArgs,
-            VolumeMountRemoveArgs, VolumeRemoveArgs,
-        },
+        sandbox::{SandboxCreateArgs, SandboxExecArgs},
+        snapshot::SnapshotCreateArgs,
+        transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
+        volume::{MountSource, VolumeCreateArgs},
     };
+
+    /// What names a snapshot or a volume: `{"name": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Name {
+        name: String,
+    }
+
+    /// What names a sandbox or an image job: `{"id": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Id {
+        id: String,
+    }
+
+    /// What reading an image job's log takes: `{"id": "...", "after": n}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ImageJobLogArgs {
+        id: String,
+        after: Option<u64>,
+    }
+
+    /// What names a volume's mounts, or one of them, and what mounting one takes:
+    /// `{"volume": "...", "path": "...", "source": {...}}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Mount {
+        volume: String,
+        #[serde(default)]
+        path: String,
+        source: Option<MountSource>,
+    }
+
+    /// What starting a process takes: its sandbox beside what `SandboxExecArgs` holds.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Exec {
+        sandbox: String,
+        cmd: Vec<String>,
+        #[serde(default)]
+        stdin: bool,
+        timeout_ms: Option<u64>,
+    }
+
+    /// What names a sandbox's jobs, or one of them, and what each request to one takes beside:
+    /// `{"sandbox": "...", "job": "...", "signal": "...", "data": "...", "eof": bool,
+    /// "after": n}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Job {
+        sandbox: String,
+        job: Option<String>,
+        signal: Option<String>,
+        data: Option<String>,
+        #[serde(default)]
+        eof: bool,
+        after: Option<u64>,
+    }
 
     /// A `Client`, as C holds it.
     pub struct VirtxClient(pub(crate) Runtime<Client>);
@@ -712,8 +1099,7 @@ pub(crate) mod ffi {
         Ok(map)
     }
 
-    /// The `auth_len` bytes at `auth`, an [`Auth`] as JSON: `{"type": "bearer", "token": "..."}`,
-    /// `{"type": "command", "program": "...", "args": [...]}`, or null for none.
+    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, or null for none.
     ///
     /// # Safety
     ///
@@ -725,11 +1111,9 @@ pub(crate) mod ffi {
         unsafe { json(auth, auth_len) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL (`/rpc` is under it), sending
+    /// Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
     /// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-    /// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` -- the token the
-    /// command prints, printed again as it runs out -- or null for none, and the `headers_len`
-    /// headers in `headers` -- each its name
+    /// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
     /// then its value, so `2 * headers_len` strings -- with every request, and write the
     /// client, held once, to `client`. The headers are whatever else the server asks of each
     /// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
@@ -848,11 +1232,11 @@ pub(crate) mod ffi {
         }
     }
 
-    /// `image.build`: builds `recipe` and points `reference` (`name:tag`) at it, given
+    /// Starts building `recipe`, to point `reference` (`name:tag`) at it, given
     /// `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
-    /// Its items are its log, a line each, as
-    /// `{"progress": {"progress": n, "total": n, "content": "..."}}` (`total` and `content` each
-    /// optional), then what it built, as `{"output": {"digest": "algorithm:hex"}}`.
+    /// Answers with the job, as `{"id": "...", "kind": "build", "reference": "name:tag",
+    /// "running": bool, "digest": "algorithm:hex", "error": "..."}`, `digest` once it has
+    /// succeeded and `error` once it has failed. Its log is `virtx_client_image_job_log`'s.
     ///
     /// # Safety
     ///
@@ -863,31 +1247,22 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
-    ) -> *mut VirtxStream {
+    ) -> *mut VirtxFuture {
         let args = unsafe { json::<ImageBuildArgs>(args, args_len) };
-        unsafe { &(*client).0 }.stream(|client| {
-            async_stream::stream! {
-                let ImageBuildArgs { recipe, reference } = match args {
-                    Ok(args) => args,
-                    Err(error) => {
-                        yield Err(error);
-                        return;
-                    }
-                };
-                let mut build = client.build_image(recipe, reference);
-                while let Some(event) = build.next().await {
-                    yield event.map_err(|e| e.to_string());
-                }
-            }
+        unsafe { &(*client).0 }.future(|client| async move {
+            let ImageBuildArgs { recipe, reference } = args?;
+            client
+                .build_image(recipe, reference)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 
-    /// `image.pull`: pulls `reference` from its registry and points it at what it pulls, given
+    /// Starts pulling `reference` from its registry, to point it at what it pulls, given
     /// `{"reference": "alpine:3.20", "auth": {...}}`, the optional auth as
     /// `{"type": "basic", "username": "...", "password": "..."}` or
-    /// `{"type": "bearer", "token": "..."}`. Its items are its log, as
-    /// `virtx_client_build_image`'s are, then what it pulled, as
-    /// `{"output": {"digest": "algorithm:hex"}}`.
+    /// `{"type": "bearer", "token": "..."}`. Answers with the job, as
+    /// `virtx_client_build_image` does, its `kind` `"pull"`.
     ///
     /// # Safety
     ///
@@ -897,29 +1272,21 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
-    ) -> *mut VirtxStream {
+    ) -> *mut VirtxFuture {
         let args = unsafe { json::<ImagePullArgs>(args, args_len) };
-        unsafe { &(*client).0 }.stream(|client| {
-            async_stream::stream! {
-                let ImagePullArgs { reference, auth } = match args {
-                    Ok(args) => args,
-                    Err(error) => {
-                        yield Err(error);
-                        return;
-                    }
-                };
-                let mut pull = client.pull_image(reference, auth);
-                while let Some(event) = pull.next().await {
-                    yield event.map_err(|e| e.to_string());
-                }
-            }
+        unsafe { &(*client).0 }.future(|client| async move {
+            let ImagePullArgs { reference, auth } = args?;
+            client
+                .pull_image(reference, auth)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 
-    /// `image.push`: pushes the image `reference` points at to the registry `reference` names,
-    /// given `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
-    /// `virtx_client_pull_image`. Its items are its log, as `virtx_client_build_image`'s are,
-    /// then what it pushed, as `{"output": {"digest": "algorithm:hex"}}`.
+    /// Starts pushing the image `reference` points at to the registry `reference` names, given
+    /// `{"reference": "ghcr.io/owner/name:tag", "auth": {...}}`, the optional auth as in
+    /// `virtx_client_pull_image`. Answers with the job, as `virtx_client_build_image` does, its
+    /// `kind` `"push"`.
     ///
     /// # Safety
     ///
@@ -929,42 +1296,116 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
-    ) -> *mut VirtxStream {
+    ) -> *mut VirtxFuture {
         let args = unsafe { json::<ImagePushArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let ImagePushArgs { reference, auth } = args?;
+            client
+                .push_image(reference, auth)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Answers with every image job, each as `virtx_client_build_image` answers one.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_snapshot`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_image_job(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }.future(|client| async move {
+            client.list_image_job().await.map_err(|e| e.to_string())
+        })
+    }
+
+    /// Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
+    /// answers one.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_image_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .get_image_job(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Cancels the image job `id` if it runs, and forgets it, given `{"id": "..."}`. Answers
+    /// with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_image_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .remove_image_job(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
+    /// its start, or after its `after`th entry. Its items are the entries, each with its number
+    /// beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
+    /// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
+    /// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_image_job_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<ImageJobLogArgs>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
-                let ImagePushArgs { reference, auth } = match args {
+                let ImageJobLogArgs { id, after } = match args {
                     Ok(args) => args,
                     Err(error) => {
                         yield Err(error);
                         return;
                     }
                 };
-                let mut push = client.push_image(reference, auth);
-                while let Some(event) = push.next().await {
-                    yield event.map_err(|e| e.to_string());
+                let mut log = client.image_job_log(&id, after);
+                while let Some(entry) = log.next().await {
+                    yield entry.map_err(|e| e.to_string());
                 }
             }
         })
     }
 
-    /// Given `{"after": "name:tag", "limit": n}`, both optional, answers with a page of the
-    /// tags on the server's images, by name and then tag, as
-    /// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`: every one given `{}`.
+    /// Answers with every tag on the server's images, as
+    /// `[{"reference": "name:tag", "digest": "algorithm:hex"}, ...]`.
     ///
     /// # Safety
     ///
-    /// As `virtx_client_build_image`.
+    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_image(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<ImageListArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.list_image(args?).await.map_err(|e| e.to_string())
-        })
+    pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
     }
 
     /// Points the tag `target` at the image `source` names, given
@@ -1034,7 +1475,8 @@ pub(crate) mod ffi {
 
     /// Writes the image `reference` names to `path` as an OCI image layout in a tar archive,
     /// given `{"reference": "name:tag" or "name@algorithm:hex", "path": "..."}`. Its items are
-    /// its log, a line a blob, as `virtx_client_build_image`'s are, then what it wrote, as
+    /// its log, a line a blob, as `{"progress": {"progress": n, "total": n, "content": "..."}}`
+    /// (`total` and `content` each optional), then what it wrote, as
     /// `{"output": {"digest": "algorithm:hex"}}`.
     ///
     /// # Safety
@@ -1066,7 +1508,7 @@ pub(crate) mod ffi {
 
     /// Uploads the image in the OCI image layout archive at `path` and points the tag
     /// `reference` at it, given `{"path": "...", "reference": "name:tag"}`. Its items are its
-    /// log, a line a blob, as `virtx_client_build_image`'s are, then what it uploaded, as
+    /// log, a line a blob, as `virtx_client_download_image`'s are, then what it uploaded, as
     /// `{"output": {"digest": "algorithm:hex"}}`.
     ///
     /// # Safety
@@ -1096,9 +1538,9 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `image.prune`: deletes each image no tag points at and no sandbox uses, and what only
-    /// such images held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the
-    /// digests deleted and the bytes freed.
+    /// Deletes each image no tag points at and no sandbox uses, and what only such images held.
+    /// Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
+    /// and the bytes freed.
     ///
     /// # Safety
     ///
@@ -1111,32 +1553,25 @@ pub(crate) mod ffi {
             .future(|client| async move { client.prune_image().await.map_err(|e| e.to_string()) })
     }
 
-    /// `snapshot.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page
-    /// of the snapshots by name, as `[{"name": "...", "size": n, "in_use": false}, ...]`: every
-    /// one given `{}`.
+    /// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
     ///
     /// Every value here is JSON. A request that takes arguments takes them as `args`, the
-    /// `args_len` bytes of one object, the method's params.
+    /// `args_len` bytes of one object.
     ///
     /// # Safety
     ///
-    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
-    /// is as in `virtx_client_build_image`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_snapshot(
         client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SnapshotListArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.list_snapshot(args?).await.map_err(|e| e.to_string())
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_snapshot().await.map_err(|e| e.to_string()) })
     }
 
-    /// `snapshot.create`: keeps a new, empty upper layer under `name`, holding at most
-    /// `disk_gib` GiB, the server picking either one not given, given
-    /// `{"name": "...", "disk_gib": 8}` or less. Answers with `{"name": "..."}`.
+    /// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
+    /// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
+    /// with the snapshot, as `virtx_client_list_snapshot` answers each.
     ///
     /// # Safety
     ///
@@ -1157,8 +1592,29 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `snapshot.remove`: deletes the snapshot `name` and its upper layer, given
-    /// `{"name": "..."}`. Answers with `null`.
+    /// Answers with the snapshot `name`, given `{"name": "..."}`, as
+    /// `virtx_client_list_snapshot` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_snapshot(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .get_snapshot(args?.name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
+    /// `null`.
     ///
     /// # Safety
     ///
@@ -1169,7 +1625,7 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SnapshotRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<Name>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_snapshot(args?.name)
@@ -1178,26 +1634,22 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.list`: given `{"after": "...", "limit": n}`, both optional, answers with a page of
-    /// the volumes by name, as `[{"name": "...", "size": n}, ...]`: every one given `{}`.
+    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
     ///
     /// # Safety
     ///
-    /// As `virtx_client_build_image`.
+    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<VolumeListArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.list_volume(args?).await.map_err(|e| e.to_string())
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_volume().await.map_err(|e| e.to_string()) })
     }
 
-    /// `volume.create`: keeps a new, empty volume under `name`, or a name the server picks if
-    /// there is none, given `{"name": "..."}` or `{}`. Answers with `{"name": "..."}`.
+    /// Keeps a new, empty volume under `name`, or a name the server picks if there is none,
+    /// given `{"name": "..."}` or `{}`. Answers with the volume, as `virtx_client_list_volume`
+    /// answers each.
     ///
     /// # Safety
     ///
@@ -1217,8 +1669,29 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.remove`: deletes the volume `name` and everything in it, given
-    /// `{"name": "..."}`. Answers with `null`.
+    /// Answers with the volume `name`, given `{"name": "..."}`, as `virtx_client_list_volume`
+    /// answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_volume(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .get_volume(args?.name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Deletes the volume `name` and everything in it, given `{"name": "..."}`. Answers with
+    /// `null`.
     ///
     /// # Safety
     ///
@@ -1229,7 +1702,7 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<VolumeRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<Name>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .remove_volume(args?.name)
@@ -1238,7 +1711,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.mount.list`: given `{"volume": "..."}`, answers with the volume's mounts, as
+    /// Given `{"volume": "..."}`, answers with the volume's mounts, as
     /// `[{"path": "...", "mount_type": "notion" or "gdrive" or "onedrive"}, ...]`.
     ///
     /// # Safety
@@ -1250,7 +1723,7 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<VolumeMountListArgs>(args, args_len) };
+        let args = unsafe { json::<Mount>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             client
                 .list_volume_mount(args?.volume)
@@ -1259,11 +1732,12 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.mount.create`: given `{"volume": "...", "path": "...", "source": {...}}`, the
-    /// source as `{"type": "notion", "api_key": "..."}`,
+    /// Given `{"volume": "...", "path": "...", "source": {...}}`, the source as
+    /// `{"type": "notion", "api_key": "..."}`,
     /// `{"type": "gdrive", "client_id": "...", "client_secret": "...", "refresh_token": "..."}`
     /// or `{"type": "onedrive", "client_id": "...", "refresh_token": "..."}` (and
-    /// `"client_secret"` if it has one), mounts it. Answers with `null`.
+    /// `"client_secret"` if it has one), mounts it. Answers with the mount, as
+    /// `virtx_client_list_volume_mount` answers each.
     ///
     /// # Safety
     ///
@@ -1274,13 +1748,14 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<VolumeMountCreateArgs>(args, args_len) };
+        let args = unsafe { json::<Mount>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeMountCreateArgs {
+            let Mount {
                 volume,
                 path,
                 source,
             } = args?;
+            let source = source.ok_or("missing field `source`")?;
             client
                 .create_volume_mount(volume, path, source)
                 .await
@@ -1288,8 +1763,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `volume.mount.remove`: given `{"volume": "...", "path": "..."}`, takes the mount away.
-    /// Answers with `null`.
+    /// Given `{"volume": "...", "path": "..."}`, takes the mount away. Answers with `null`.
     ///
     /// # Safety
     ///
@@ -1300,9 +1774,9 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<VolumeMountRemoveArgs>(args, args_len) };
+        let args = unsafe { json::<Mount>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            let VolumeMountRemoveArgs { volume, path } = args?;
+            let Mount { volume, path, .. } = args?;
             client
                 .remove_volume_mount(volume, path)
                 .await
@@ -1635,10 +2109,9 @@ pub(crate) mod ffi {
         })
     }
 
-    /// `sandbox.list`: answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool,
-    /// "ports": [{"port": n, "url": "..."}]}, ...]`, `snapshot` only for one that has one and
-    /// `ports` only for one that opened some.
+    /// Answers with the sandboxes, as
+    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
+    /// `snapshot` only for one that has one.
     ///
     /// # Safety
     ///
@@ -1651,33 +2124,100 @@ pub(crate) mod ffi {
             .future(|client| async move { client.list_sandbox().await.map_err(|e| e.to_string()) })
     }
 
-    /// `sandbox.init`: makes a sandbox, given
+    /// Makes a sandbox, given
     /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
     /// `{"type": "tag", "tag": "name:tag"}` or
-    /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with
-    /// `{"id": "...", "ports": [{"port": n, "url": "..."}]}`, `ports` only if it was given some.
+    /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
+    /// sandbox as `virtx_client_list_sandbox` answers each, and
+    /// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
     ///
     /// # Safety
     ///
     /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_init_sandbox(
+    pub unsafe extern "C" fn virtx_client_create_sandbox(
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SandboxInitArgs>(args, args_len) };
+        let args = unsafe { json::<SandboxCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client.init_sandbox(args?).await.map_err(|e| e.to_string())
+            client
+                .create_sandbox(&args?)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 
-    /// `sandbox.exec`: given `{"sandbox": "...", "cmd": ["..."], "timeout_ms": n}`,
-    /// `timeout_ms` optional, runs `cmd` to its end. Its items are its output, a line each as
-    /// it is written, as `{"progress": ...}` as `virtx_client_build_image`'s are, then how it
-    /// ended, as `{"output": {"code": n}}`.
+    /// Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
+    /// answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .get_sandbox(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
+    /// with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .remove_sandbox(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Given `{"sandbox": "..."}`, answers with its jobs, each as `virtx_client_exec_sandbox`
+    /// answers one.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_sandbox_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Job>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .list_sandbox_job(args?.sandbox)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts a process, given `{"sandbox": "...", "cmd": ["..."], "stdin": bool,
+    /// "timeout_ms": n}`, `stdin` and `timeout_ms` optional. Answers with its job, as
+    /// `{"id": "...", "kind": "exec", "pid": n, "cmd": ["..."], "running": bool, "code": n}`,
+    /// `code` once it has ended. Its output is `virtx_client_sandbox_job_log`'s.
     ///
     /// # Safety
     ///
@@ -1687,64 +2227,166 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Exec>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Exec {
+                sandbox,
+                cmd,
+                stdin,
+                timeout_ms,
+            } = args?;
+            let args = SandboxExecArgs {
+                cmd,
+                stdin,
+                timeout_ms,
+            };
+            client
+                .exec_sandbox(sandbox, &args)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Answers with the job `job` in the sandbox `sandbox`, given
+    /// `{"sandbox": "...", "job": "..."}`, as `virtx_client_exec_sandbox` answers one.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_sandbox_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Job>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Job { sandbox, job, .. } = args?;
+            client
+                .get_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Cancels the job if it runs, killing its process, and forgets it, given
+    /// `{"sandbox": "...", "job": "..."}`. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_sandbox_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Job>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Job { sandbox, job, .. } = args?;
+            client
+                .remove_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Sends `signal`, a name such as `"SIGTERM"`, to the job's process and every process it
+    /// started, given `{"sandbox": "...", "job": "...", "signal": "..."}`. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_signal_sandbox_job(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Job>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Job {
+                sandbox,
+                job,
+                signal,
+                ..
+            } = args?;
+            client
+                .signal_sandbox_job(
+                    sandbox,
+                    job.ok_or("missing field `job`")?,
+                    signal.ok_or("missing field `signal`")?,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Writes `data` to the stdin of the job's process, then closes it if `eof`, given
+    /// `{"sandbox": "...", "job": "...", "data": "...", "eof": bool}`, `data` and `eof`
+    /// optional. Answers with `null` once it is written: the next write is sent only then.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_write_sandbox_job_stdin(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Job>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Job {
+                sandbox,
+                job,
+                data,
+                eof,
+                ..
+            } = args?;
+            client
+                .write_sandbox_job_stdin(sandbox, job.ok_or("missing field `job`")?, data, eof)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// The log of the job, given `{"sandbox": "...", "job": "...", "after": n}`, `after`
+    /// optional: from its start, or after its `after`th entry. Its items are the entries, each
+    /// with its number beside it: `{"id": n, "stdout": "..."}` or `{"id": n, "stderr": "..."}`,
+    /// a line as it is written, `{"id": n, "truncated": {}}` once if the log reached the
+    /// server's limit, then `{"id": n, "end": {"code": n}}` last. Freeing it leaves the job as
+    /// it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_sandbox_job_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
     ) -> *mut VirtxStream {
-        let args = unsafe { json::<SandboxExecArgs>(args, args_len) };
+        let args = unsafe { json::<Job>(args, args_len) };
         unsafe { &(*client).0 }.stream(|client| {
             async_stream::stream! {
-                let SandboxExecArgs { sandbox, cmd, timeout_ms } = match args {
-                    Ok(args) => args,
+                let (sandbox, job, after) = match args {
+                    Ok(Job { sandbox, job: Some(job), after, .. }) => (sandbox, job, after),
+                    Ok(_) => {
+                        yield Err("missing field `job`".to_owned());
+                        return;
+                    }
                     Err(error) => {
                         yield Err(error);
                         return;
                     }
                 };
-                let mut exec = client.exec_sandbox(sandbox, cmd, timeout_ms);
-                while let Some(event) = exec.next().await {
-                    yield event.map_err(|e| e.to_string());
+                let mut log = client.sandbox_job_log(&sandbox, &job, after);
+                while let Some(entry) = log.next().await {
+                    yield entry.map_err(|e| e.to_string());
                 }
             }
-        })
-    }
-
-    /// `sandbox.ports`: given `{"sandbox": "...", "ports": [n]}`, makes the sandbox's ports
-    /// those. Answers with `[{"port": n, "url": "..."}]`, in the order given.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_ports_sandbox(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SandboxPortsArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let SandboxPortsArgs { sandbox, ports } = args?;
-            client
-                .ports_sandbox(sandbox, ports)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// `sandbox.close`: given `{"sandbox": "..."}`, stops the sandbox. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_close_sandbox(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SandboxCloseArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .close_sandbox(args?.sandbox)
-                .await
-                .map_err(|e| e.to_string())
         })
     }
 

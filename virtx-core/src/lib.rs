@@ -17,17 +17,11 @@ mod client;
 mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
-mod files;
 mod image;
-mod method;
-mod page;
-#[cfg(any(feature = "client", feature = "server"))]
-mod rpc;
 mod sandbox;
 mod snapshot;
 #[cfg(feature = "testing")]
 pub mod testing;
-#[cfg(any(feature = "client", feature = "server"))]
 mod transport;
 mod volume;
 
@@ -36,14 +30,8 @@ pub use auth::Auth;
 pub use client::Client;
 #[cfg(feature = "client")]
 pub use error::Error;
-pub use files::*;
 pub use image::*;
-pub use method::*;
-pub use page::page;
-#[cfg(any(feature = "client", feature = "server"))]
-pub use rpc::*;
 pub use sandbox::*;
 pub use snapshot::*;
-#[cfg(any(feature = "client", feature = "server"))]
 pub use transport::*;
 pub use volume::*;

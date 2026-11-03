@@ -1,6 +1,6 @@
-//! Building images, and copying them between the server and other registries. Every other
-//! thing done to the images the server keeps is done through its OCI registry at `/images/v2/`,
-//! not through these methods.
+//! Image jobs: building images, and copying them between the server and other registries, each
+//! started at `/images/jobs/`. Every other thing done to the images the server keeps is done
+//! through its OCI registry at `/images/oci/v2/`.
 //!
 //! - Digest: the hash of an image's manifest, as `algorithm:hex` (such as `sha256:0123abcd...`).
 //!   It identifies one image's content and never changes.
@@ -10,23 +10,45 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Recipe, RegistryAuth};
-use crate::method::{Request, StreamingRequest};
 
-/// `image.build`: build a recipe, and point a reference at what it builds.
-pub struct ImageBuild;
+/// An image job, as the server answers it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageJob {
+    /// The job's id, which every request about it names it by.
+    pub id: String,
 
-impl Request for ImageBuild {
-    const NAME: &'static str = "image.build";
-    type Args = ImageBuildArgs;
-    type Output = ImageBuildOutput;
+    pub kind: ImageJobKind,
+
+    /// The reference it was started with.
+    pub reference: String,
+
+    /// Whether it runs still.
+    pub running: bool,
+
+    /// Once it has succeeded, the digest of the manifest it copied or built, as
+    /// `algorithm:hex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+
+    /// Once it has failed, why, for a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-impl StreamingRequest for ImageBuild {
-    /// A line of the build's log.
-    type Content = String;
+/// What an image job does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageJobKind {
+    /// Fetches an image from its registry, and points its reference at it.
+    Pull,
+    /// Sends an image the server holds to the registry its reference names.
+    Push,
+    /// Builds a recipe, and points a reference at what it builds.
+    Build,
 }
 
-/// What `image.build` takes.
+/// What a build takes: `POST /images/jobs/build/`'s body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageBuildArgs {
@@ -39,29 +61,7 @@ pub struct ImageBuildArgs {
     pub reference: String,
 }
 
-/// What `image.build` answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageBuildOutput {
-    /// The digest of the image's manifest, as `algorithm:hex`.
-    pub digest: String,
-}
-
-/// `image.pull`: fetch an image from its registry, and point its reference at it.
-pub struct ImagePull;
-
-impl Request for ImagePull {
-    const NAME: &'static str = "image.pull";
-    type Args = ImagePullArgs;
-    type Output = ImagePullOutput;
-}
-
-impl StreamingRequest for ImagePull {
-    /// A line of the pull's log.
-    type Content = String;
-}
-
-/// What `image.pull` takes.
+/// What a pull takes: `POST /images/jobs/pull/`'s body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagePullArgs {
@@ -74,29 +74,7 @@ pub struct ImagePullArgs {
     pub auth: Option<RegistryAuth>,
 }
 
-/// What `image.pull` answers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImagePullOutput {
-    /// The digest of the image's manifest, as `algorithm:hex`.
-    pub digest: String,
-}
-
-/// `image.push`: send an image the server holds to the registry its reference names.
-pub struct ImagePush;
-
-impl Request for ImagePush {
-    const NAME: &'static str = "image.push";
-    type Args = ImagePushArgs;
-    type Output = ImagePushOutput;
-}
-
-impl StreamingRequest for ImagePush {
-    /// A line of the push's log.
-    type Content = String;
-}
-
-/// What `image.push` takes.
+/// What a push takes: `POST /images/jobs/push/`'s body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagePushArgs {
@@ -109,30 +87,33 @@ pub struct ImagePushArgs {
     pub auth: Option<RegistryAuth>,
 }
 
-/// What `image.push` answers.
+/// One entry of an image job's log. As JSON, an object of one member, as `{"log": "..."}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageJobEntry {
+    /// A line of its log.
+    Log(String),
+
+    /// The log reached the server's limit: nothing after is kept or sent.
+    Truncated {},
+
+    /// How it ended, last.
+    End(ImageJobEnd),
+}
+
+/// How an image job ended: with a digest if it succeeded, an error if not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImagePushOutput {
-    /// The digest of the manifest pushed, as `algorithm:hex`.
-    pub digest: String,
+pub struct ImageJobEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// `image.prune`: delete each image no reference points at and no sandbox uses, and what only
-/// such images held.
-pub struct ImagePrune;
-
-impl Request for ImagePrune {
-    const NAME: &'static str = "image.prune";
-    type Args = ImagePruneArgs;
-    type Output = ImagePruneOutput;
-}
-
-/// What `image.prune` takes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImagePruneArgs {}
-
-/// What `image.prune` answers.
+/// What `POST /images/prune` answers: what it deleted, each image no reference points at and no
+/// sandbox uses, and what only such images held.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagePruneOutput {
@@ -141,4 +122,34 @@ pub struct ImagePruneOutput {
 
     /// How many bytes the server freed.
     pub reclaimed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_job_and_its_end_say_only_what_they_have() {
+        let job = ImageJob {
+            id: "j".into(),
+            kind: ImageJobKind::Build,
+            reference: "jq:latest".into(),
+            running: true,
+            digest: None,
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&job).unwrap(),
+            json!({"id": "j", "kind": "build", "reference": "jq:latest", "running": true})
+        );
+        let end = ImageJobEntry::End(ImageJobEnd {
+            digest: None,
+            error: Some("no image".into()),
+        });
+        let value = json!({"end": {"error": "no image"}});
+        assert_eq!(serde_json::to_value(&end).unwrap(), value);
+        assert_eq!(serde_json::from_value::<ImageJobEntry>(value).unwrap(), end);
+    }
 }

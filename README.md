@@ -1,18 +1,25 @@
 # virtx
 
-<img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> <a href="https://crates.io/crates/virtx"><img src="https://img.shields.io/crates/v/virtx?label=virtx&color=dea584" alt="crates.io"></a>
 <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
 <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> <a href="https://www.npmjs.com/package/@brekkylab/virtx"><img src="https://img.shields.io/npm/v/@brekkylab/virtx?label=@brekkylab/virtx&color=339933" alt="npm node"></a>
 
 virtx lets you run tasks in disposable Linux VMs from your own code.
 
-It's useful for jobs with heavy dependencies that you'd rather not install on your own machine.
-Whatever they install or change is gone when the VM shuts down.
+It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all.
+Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
 
-No Docker or heavy daemon required.
-Create, use, and dispose of VMs directly from your code.
+A virtx server runs the VMs, on your machine or another one, and this repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
+What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md): plain HTTP, over TCP or over a server the client starts as a child process.
 
 ## Quickstart
+
+Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
+`Client.spawn("virtx-uvm")` starts the server, [`virtx-uvm`](https://github.com/brekkylab/virtx-uvm), and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+No release of `virtx-uvm` speaks this protocol yet, so build it from that repository's `multi-process` branch, as its README says, and install it onto your `PATH`:
+
+```sh
+cargo xtask install --prefix ~/.local   # in virtx-uvm, once built: -> ~/.local/bin/virtx-uvm
+```
 
 ### Python
 
@@ -23,24 +30,30 @@ pip install virtx
 ```python
 import asyncio
 
-from virtx import ConsoleClient, Recipe, ensure_virtx
+from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdout
 
 
 async def main() -> None:
-    # Fetches the console server into virtx's cache the first time; a no-op after.
-    await ensure_virtx()
-    console = await (
-        ConsoleClient.builder()
-        .image(Recipe("alpine:latest").step("apk add --no-cache jq"))
-        .build()
-    )
+    with Client.spawn("virtx-uvm") as client:
+        recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
+        async for entry in client.build_image(recipe, "jq:latest"):
+            match entry.entry:
+                case Log(line):
+                    print(line)
+                case ImageJobEnd(error=str(error)):
+                    raise RuntimeError(error)
 
-    async with console:
-        result = await console.exec(
-            ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-        )
-
-    print("\n" + result.stdout.decode(), end="")
+        sandbox = await client.create_sandbox("jq:latest")
+        try:
+            cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
+            async for entry in client.exec_sandbox(sandbox.id, cmd):
+                match entry.entry:
+                    case Stdout(line) | Stderr(line):
+                        print(line)
+                    case SandboxJobEnd(code):
+                        print("exited", code)
+        finally:
+            await client.remove_sandbox(sandbox.id)
 
 
 asyncio.run(main())
@@ -53,58 +66,83 @@ npm install @brekkylab/virtx
 ```
 
 ```js
-import { ConsoleClient, Recipe, ensureVirtx } from '@brekkylab/virtx'
+const { Client, Recipe } = require('@brekkylab/virtx')
 
-// Fetches the console server into virtx's cache the first time; a no-op after.
-await ensureVirtx()
-const console_ = await ConsoleClient.builder()
-  .image(new Recipe('alpine:latest').step('apk add --no-cache jq'))
-  .build()
+async function main() {
+  const client = Client.spawn('virtx-uvm')
+  try {
+    const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
+    for await (const entry of client.buildImage(recipe, 'jq:latest')) {
+      if ('log' in entry) console.log(entry.log)
+      else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
+    }
 
-try {
-  const result = await console_.exec(['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`])
-  process.stdout.write('\n' + result.stdout)
-} finally {
-  await console_.close()
+    const sandbox = await client.createSandbox('jq:latest')
+    try {
+      const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
+      for await (const entry of client.execSandbox(sandbox.id, cmd)) {
+        if ('stdout' in entry) console.log(entry.stdout)
+        else if ('stderr' in entry) console.error(entry.stderr)
+        else if ('end' in entry) console.log('exited', entry.end.code)
+      }
+    } finally {
+      await client.removeSandbox(sandbox.id)
+    }
+  } finally {
+    await client.close()
+  }
 }
+
+main()
 ```
 
 ### Rust
 
-```sh
-cargo add virtx
+The Rust package is `virtx-rs`, not on crates.io yet:
+
+```toml
+[dependencies]
+virtx-rs = { git = "https://github.com/brekkylab/virtx" }
 ```
+
+It opens `libvirtx_core` at run time, from `virtx_rs::load(path)` or `$VIRTX_CORE_LIB`, so every module in a process shares one client.
+Each request is a `Future` or a `Stream` any async runtime awaits, or blocks with `wait` and `wait_next` on a thread without one, as here:
 
 ```rust
-use virtx::{console::ConsoleClient, ensure_virtx, image::Recipe};
+use virtx_rs::{
+    Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
+};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    ensure_virtx().await?;
-    let mut console = ConsoleClient::builder()
-        .image(Recipe::new("alpine:latest").step("apk add --no-cache jq"))
-        .build()
-        .await?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::spawn("virtx-uvm", [] as [&str; 0])?;
 
-    let result = console
-        .exec(["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#], None)
-        .await?;
+    let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
+    let mut log = client.build_image(recipe, "jq:latest").log();
+    while let Some(entry) = log.wait_next() {
+        match entry?.entry {
+            ImageJobEntry::Log(line) => println!("{line}"),
+            ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
+            _ => {}
+        }
+    }
 
-    print!("\n{}", String::from_utf8_lossy(&result.stdout));
-
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
+        .wait()?;
+    let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(cmd))
+        .log();
+    while let Some(entry) = log.wait_next() {
+        match entry?.entry {
+            SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
+            SandboxJobEntry::End(end) => println!("exited {}", end.code),
+            _ => {}
+        }
+    }
+    client.remove_sandbox(&sandbox.id).wait()?;
     Ok(())
 }
-```
-
-Output:
-```text
-step 1/1: cd '/' && apk add --no-cache jq
-(1/2) Installing oniguruma (6.9.10-r0)
-(2/2) Installing jq (1.8.2-r0)
-Executing busybox-1.37.0-r31.trigger
-OK: 9426 KiB in 18 packages
-
-virtx
 ```
 
 Or let a coding agent do it: this repo is its own plugin marketplace, so the [agent skill](skills/virtx/SKILL.md) installs with no clone first.
@@ -114,51 +152,117 @@ claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@bre
 codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 ```
 
-## Features
+## Resources
 
-### Coverage
+| | What it is | Made and read with |
+|---|---|---|
+| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
+| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox` |
+| **Snapshot** | The writable layer of a sandbox's root filesystem, kept under a name | `create_snapshot`, `get_snapshot`, `list_snapshot`, `remove_snapshot`; its files over WebDAV |
+| **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
 
-| | Supported |
-|---|---|
-| **Languages** | <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust |
-| **Hosts** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS (Apple silicon) · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows 11 or later |
-| **Guest** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux, always |
+Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
+Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
 
-### GPU support
+## Jobs and their logs
 
-The VM gets a GPU through Vulkan on every host, so it can run heavy work like deep learning.
+A build, pull or push, and every command in a sandbox, is a job the server runs apart from the request that started it.
+`build_image`, `pull_image`, `push_image` and `exec_sandbox` answer a started job, which is two things at once:
 
-Turn it on with the builder's `gpu` option, and install the guest's half of Vulkan in the image:
+- Iterated (`async for` in Python, `for await` in Node, `.log()` in Rust), it is the job's log, an entry at a time until its last, `end`, which says how it ended: an image's digest or why it failed, a process's exit code.
+- Awaited (`.wait()` in Rust, too), it is the job itself, whose `id` names it to every other request.
+
+One value awaited and iterated starts one job. Its log can be read again any time with `image_job_log` or `sandbox_job_log`.
+
+- Every entry has an `id`, its number in the log. A reader whose stream dropped asks for the log `after` the last one it saw, and picks up there.
+- Any number of readers read one log, each from its start or from wherever they ask.
+- A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes.
+- A process's output is a line per entry, `stdout` or `stderr`, without its line ending.
+- Leaving the loop leaves the job running. `remove_image_job` and `remove_sandbox_job` cancel one that runs, killing a process and its children, and forget it.
+
+A process started with `stdin` takes what `write_sandbox_job_stdin` writes, the next write sent once the one before is answered, until one closes it with `eof`. `signal_sandbox_job` sends it a signal such as `SIGTERM`, and `timeout_ms` kills it when it runs out.
 
 ```python
-import asyncio
+run = client.exec_sandbox(sandbox.id, ["cat"], stdin=True)
+job = await run
+await client.write_sandbox_job_stdin(sandbox.id, job.id, "hello\n", eof=True)
+async for entry in run:
+    print(entry)
+```
 
-from virtx import ConsoleClient, Recipe, ensure_virtx
+## Snapshots and volumes
 
+A sandbox made on a snapshot starts with the changes in it and writes into it, so what one sandbox installed the next one finds.
+While a sandbox holds it, its files are the sandbox's: reading them, and removing the snapshot, are refused until the sandbox is removed.
 
-async def main() -> None:
-    await ensure_virtx()
-    console = await (
-        ConsoleClient.builder()
-        .image(
-            Recipe("alpine:latest").step(
-                # The Vulkan loader, the venus driver that reaches the host's GPU,
-                # and vulkaninfo to look at it.
-                "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
-            )
-        )
-        .gpu(True)
-        .gpu_memory_mib(8192)
-        .build()
-    )
+```python
+await client.create_snapshot("dev")
+sandbox = await client.create_sandbox("jq:latest", snapshot="dev")
+```
 
-    async with console:
-        result = await console.exec(["vulkaninfo", "--summary"])
+A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go.
 
-    print(result.stdout.decode(), end="")
+```python
+from virtx import SandboxVolume
 
+await client.create_volume("data")
+sandbox = await client.create_sandbox(
+    "jq:latest", volumes=[SandboxVolume(volume="data", path="/data", readonly=False)]
+)
+```
 
-asyncio.run(main())
+The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it:
+
+```python
+from virtx import Volume
+
+volume = Volume("data")
+await client.create_dir_all(volume, "in")
+await client.write_file(volume, "in/notes.txt", b"ship the release")
+for entry in await client.read_dir(volume, "in"):
+    print(entry.name, entry.metadata.size)
+print(await client.read_text(volume, "in/notes.txt"))
+```
+
+A write can name the `etag` a read gave, so it goes only over the file it read. Files move with `rename_file` and `copy_file`, and go with `remove_file`.
+
+## Ports
+
+`ports` at making a sandbox open TCP ports in it, each answered with a URL, there only. A `PortForwarder` opened over the client with that URL puts the port at an address on this machine's loopback, for any TCP client:
+
+```python
+from virtx import PortForwarder
+
+sandbox = await client.create_sandbox("jq:latest", ports=[8000])
+with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
+    print("reach it at", forwarder.address)
+```
+
+Ports are the way in. `network=False` takes away the way out.
+
+## Images
+
+A recipe is a base image and the steps over it, as a Dockerfile is; in Rust, `Recipe::from_dockerfile` reads one.
+A build stores what it builds under its tag, and `create_sandbox` boots it by that tag, or by its digest for exactly that build.
+`pull_image` and `push_image` copy an image between the server and a registry such as Docker Hub or `ghcr.io`, with that registry's credentials if it wants them.
+
+Everything else is the server's OCI registry: `list_image`, `tag_image`, `untag_image` and `remove_image`, and `download_image` and `upload_image` to move an image to and from an OCI archive on this machine. `prune_image` deletes what no tag points at and no sandbox uses.
+
+## GPU
+
+The VM gets a GPU through Vulkan on every host, so it can run heavy work like deep learning.
+Ask for it with `gpu=True` at making a sandbox, `gpu_memory_mib` for its memory, and install the guest's half of Vulkan in the image:
+
+```python
+recipe = Recipe("alpine:latest").run(
+    # The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
+    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
+)
+async for entry in client.build_image(recipe, "vulkan:latest"):
+    print(entry.entry)
+sandbox = await client.create_sandbox("vulkan:latest", gpu=True, gpu_memory_mib=8192)
+async for entry in client.exec_sandbox(sandbox.id, ["vulkaninfo", "--summary"]):
+    print(entry.entry)
 ```
 
 The host's GPU shows up in the guest as `Virtio-GPU Venus (<the host's GPU>)`. What the image needs for that:
@@ -171,254 +275,14 @@ The host's GPU shows up in the guest as `Virtio-GPU Venus (<the host's GPU>)`. W
 - **Install the loader yourself.** Without it, no program in the guest finds a Vulkan device, whatever the host has. Some packages bring it along (Debian's `vulkan-tools` does) and some don't (Alpine's doesn't), so name it rather than count on it.
 - **An image with no venus driver still runs, but on the CPU.** Debian bookworm's Mesa has no venus, and Vulkan there falls back to `llvmpipe`, a software renderer. Check the `deviceName` your program picks.
 
-If the host can't give a GPU, `build()` fails instead of quietly running on the CPU. On the host, that takes a Vulkan loader too: `libvulkan1` (Debian, Ubuntu) or `vulkan-loader` (Fedora) on Linux, and on Windows `vulkan-1.dll`, which comes with the GPU's driver.
+A server that can't give a GPU refuses the sandbox rather than run it on the CPU.
 
-### Filesystem
+## Coverage
 
-Mount a host directory into the VM by passing its path.
+| | Supported |
+|---|---|
+| **Languages** | <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust |
+| **Hosts** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS (Apple silicon) · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows 11 or later |
+| **Guest** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux, always |
 
-```python
-import asyncio
-
-from virtx import ConsoleClient, Recipe
-
-
-async def main() -> None:
-    console = await (
-        ConsoleClient.builder()
-        .image(Recipe("alpine:latest"))
-        .mount(".", "/project")
-        .mount_readonly("/etc", "/host-etc")
-        .build()
-    )
-
-    async with console:
-        result = await console.exec(["sh", "-c", "ls /project && touch /project/hello.txt"])
-
-    print(result.stdout.decode(), end="")
-
-
-asyncio.run(main())
-```
-
-Writes to `/project` land in the host's current directory, while `/host-etc` is read-only: commands in the VM can read it but not write to it.
-
-Going further, you can build a virtual directory in code and mount it into the VM through FUSE.
-It mixes files held only in memory with host directories, all under one mount point.
-
-```python
-import asyncio
-import tempfile
-
-from virtx import ConsoleClient, Directory, HostMount, Recipe
-
-
-async def main() -> None:
-    directory = (
-        Directory()
-        .with_file("notes/today.md", "ship the release")
-        .with_mount("project", ".")
-    )
-    mount = HostMount(directory, tempfile.mkdtemp())
-
-    console = await (
-        ConsoleClient.builder()
-        .image(Recipe("alpine:latest"))
-        .mount(mount, "/data")
-        .build()
-    )
-
-    async with console:
-        result = await console.exec(["sh", "-c", "cat /data/notes/today.md && ls /data/project"])
-
-    print(result.stdout.decode(), end="")
-
-
-asyncio.run(main())
-```
-
-`notes/today.md` lives only in memory, and `project` is the host's current directory.
-
-Moreover, external stores like S3, Google Drive and Notion, and commands inside the VM can read them as ordinary files.
-
-```rust
-use virtx::{
-    console::ConsoleClient,
-    fs::{S3Config, S3Fs},
-    image::Recipe,
-};
-
-#[cfg(target_os = "linux")]
-use virtx::fs::FuseMount as HostMount;
-#[cfg(target_os = "macos")]
-use virtx::fs::FuseTMount as HostMount;
-#[cfg(windows)]
-use virtx::fs::DokanMount as HostMount;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let bucket = S3Fs::new(&S3Config {
-        bucket: "my-bucket".into(),
-        region: "us-east-1".into(),
-        access_key_id: std::env::var("AWS_ACCESS_KEY_ID")?,
-        secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")?,
-        endpoint: None,
-        key_prefix: None,
-    })?;
-
-    let mountpoint = std::env::temp_dir().join("virtx-s3");
-    std::fs::create_dir_all(&mountpoint)?;
-    let mount = HostMount::try_new(bucket, &mountpoint)?;
-
-    let mut console = ConsoleClient::builder()
-        .image(Recipe::new("alpine:latest"))
-        .mount_readonly(mount, "/s3")
-        .build()
-        .await?;
-
-    let result = console.exec(["ls", "-R", "/s3"], None).await?;
-    print!("{}", String::from_utf8_lossy(&result.stdout));
-
-    Ok(())
-}
-```
-
-These stores are Rust only for now, each behind its own feature: `s3`, `gdrive` and `notion`.
-S3 is read-only, so it's mounted with `mount_readonly`.
-
-This feature needs an extra package installed on macOS and Windows.
-The `mount` feature, on by default, mounts a virtx filesystem on the host through the host's FUSE provider:
-
-| Host  | Provider | Needed to build | Needed to mount |
-|-------|----------|-----------------|---------------|
-| Linux | `/dev/fuse` in the kernel | — | — |
-| macOS | [FUSE-T](https://www.fuse-t.org) | — | ✓ |
-| Windows | [Dokany](https://github.com/dokan-dev/dokany) | — | ✓ |
-
-A program built with `mount` runs on a host without the provider; only mounting fails, with an error that says what to install.
-`virtx::fs::mount_support()` (`mount_support()` in Python, `mountSupport()` in Node) asks ahead of a mount.
-
-On Windows, a Rust program gets that only if it delay-loads `dokan2.dll`, which it has to ask for in its own `build.rs`. virtx's cannot do it on the program's behalf, since a link argument reaches only the package that prints it. The Node and Python packages already do it. Without it, a program that mounts needs Dokany installed just to start.
-
-```rust
-// build.rs of a program that depends on virtx
-fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        println!("cargo::rustc-link-arg=/DELAYLOAD:dokan2.dll");
-        println!("cargo::rustc-link-lib=delayimp");
-    }
-}
-```
-
-If you don't mount on the host, build with `default-features = false` and skip all of this.
-
-For macOS
-
-```sh
-brew install --cask fuse-t
-```
-
-virtx mounts through FUSE-T 1.x from 1.2.9 on, and is checked against 1.2.9. An older release is refused before a mount: it resets the process's `SIGCHLD` handler on every mount, and unmounting the first of two mounts waits for the second. A FUSE-T of another major version is refused too, with the release to install instead, rather than risk a crash on a layout that changed.
-
-And for windows
-
-```powershell
-winget install --id dokan-dev.Dokany
-```
-
-### Images
-
-`.image()` takes any of these:
-
-| Kind | Example | Runs on |
-|---|---|---|
-| Recipe | `Recipe::new("alpine:latest").step("apk add jq")` | The base, pulled, with the steps built on it for this session only |
-| Ref | `ImageSource::reference("jq:latest")` | The build stored under that name, looked up when the VM starts |
-| Digest | `ImageSource::digest("sha256:3d75…")` | Exactly that build |
-
-Build an image ahead of time with `ImageClient`, then start any number of VMs on it by its ref or digest:
-
-```rust
-use virtx::{
-    console::ConsoleClient,
-    ensure_virtx,
-    image::{ImageClient, ImageSource, Recipe},
-};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    ensure_virtx().await?;
-    let mut images = ImageClient::try_new().await?;
-    let built = images
-        .build(
-            Recipe::new("alpine:latest").step("apk add --no-cache jq"),
-            Some("jq:latest"), // the ref to store the build under
-        )
-        .await?;
-    println!("{} {}", built.reference, built.digest);
-
-    let mut console = ConsoleClient::builder()
-        .image(ImageSource::reference("jq:latest")) // the build stored above
-        .build()
-        .await?;
-
-    let result = console.exec(["jq", "--version"], None).await?;
-    print!("{}", String::from_utf8_lossy(&result.stdout));
-
-    Ok(())
-}
-```
-
-Rebuilding under the same ref moves it to the new build, while `ImageSource::digest(&built.digest)` stays on this one.  
-`images.list()` shows what's built, and `images.remove(...)` deletes an image by its ref or digest.
-
-## Remote servers
-
-A client reaches a server over HTTP by its base URL. Credentials and the organization go with
-every request: an API key of virtx cloud, say, which names its organization itself.
-
-Without `VIRTX_URL`, `from_env` takes the endpoint from a virtx cloud API key itself: its
-prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.sh`), under
-`VIRTX_DOMAIN` when that is set.
-
-```python
-client = virtx.Client.connect("https://apne2.api.example.com", virtx.BearerAuth(api_key))
-client = virtx.Client.from_env()  # VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
-```
-
-```js
-const client = Client.connect('https://apne2.api.example.com', { type: 'bearer', token: apiKey })
-const fromEnv = Client.fromEnv() // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
-```
-
-```rust
-let auth = Auth::Bearer { token: api_key };
-let client = Client::connect("https://apne2.api.example.com", auth, [] as [(&str, &str); 0])?;
-let client = Client::from_env()?; // VIRTX_URL, VIRTX_API_KEY, VIRTX_ORG
-```
-
-A person signs in from a terminal with `virtx login` (the `virtx-cli` crate). Unlike an API
-key, their session names no organization, so `VIRTX_ORG` (the organization's UUID) goes with
-it; given it and no key, `from_env` sends the session's access token, which `virtx token --json`
-prints, and runs it again as each token runs out (in 15 minutes) or is refused:
-
-```sh
-virtx login
-VIRTX_ORG=<org uuid> python agent.py
-```
-
-`virtx token` prints the token alone, for whatever else wants one.
-
-## Cache
-
-virtx keeps all persistent state in a single cache directory that you can safely delete at any time:
-
-| Host | Cache directory |
-|------|-----------------|
-| Linux | `$XDG_CACHE_HOME/virtx`, or `~/.cache/virtx` |
-| macOS | `~/Library/Caches/virtx` |
-| Windows | `%LOCALAPPDATA%\virtx` |
-
-Set `VIRTX_HOME` to put it somewhere else.
+Each package's own README has the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md).

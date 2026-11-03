@@ -1,4 +1,4 @@
-"""The files of a volume, against ``virtx-core``'s ``files_server`` example over stdio."""
+"""The files of a volume, against ``virtx-core``'s ``test_server`` example over stdio."""
 
 import pytest
 
@@ -6,10 +6,10 @@ from virtx import Client, DirEntry, Metadata, Snapshot, VirtxError, Volume
 
 
 async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
-    files_server: str,
+    test_server: str,
 ) -> None:
     volume = Volume("v")
-    with Client.spawn(files_server) as client:
+    with Client.spawn(test_server) as client:
         await client.create_dir(volume, "dir")
         await client.write_file(volume, "dir/a.txt", b"hello world")
         await client.create_dir_all(volume, "deep/er/dir")

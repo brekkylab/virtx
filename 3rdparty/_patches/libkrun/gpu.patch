@@ -596,10 +596,18 @@ index 38fb0ad..6af1cee 100644
              // On macOS, devices change the guest's memory map through the worker.
              #[cfg(not(target_arch = "x86_64"))]
 diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
-index 7141beb..d24d2af 100644
+index 7141beb..7b81984 100644
 --- a/src/libkrun/src/vmm/builder.rs
 +++ b/src/libkrun/src/vmm/builder.rs
-@@ -1388,7 +1388,7 @@ pub fn build_microvm(
+@@ -1356,7 +1356,6 @@ pub fn build_microvm(
+         exit_evt,
+         exit_observers: Vec::new(),
+         exit_code: exit_code.clone(),
+-        #[cfg(not(target_os = "windows"))]
+         vm,
+         mmio_device_manager,
+         #[cfg(all(
+@@ -1388,7 +1387,7 @@ pub fn build_microvm(
              event_manager,
              &_shm_manager,
              intc.clone(),
@@ -655,10 +663,15 @@ index 5f5ee21..1232646 100644
  #[derive(Debug, Eq, PartialEq)]
  pub struct VcpuConfig {
 diff --git a/src/libkrun/src/vmm/mod.rs b/src/libkrun/src/vmm/mod.rs
-index 784a144..a709147 100644
+index 784a144..065e8c6 100644
 --- a/src/libkrun/src/vmm/mod.rs
 +++ b/src/libkrun/src/vmm/mod.rs
-@@ -62,7 +62,7 @@ use crate::vmm::vstate::Vm;
+@@ -57,12 +57,11 @@ use crate::vmm::device_manager::mmio::MMIODeviceManager;
+ use crate::vmm::device_manager::pci::PciHostManager;
+ #[cfg(any(target_os = "linux", target_os = "windows"))]
+ use crate::vmm::vstate::VcpuEvent;
+-#[cfg(not(target_os = "windows"))]
+ use crate::vmm::vstate::Vm;
  use crate::vmm::vstate::{Vcpu, VcpuHandle, VcpuResponse};
  
  use arch::{ArchMemoryInfo, InitrdConfig};
@@ -667,7 +680,15 @@ index 784a144..a709147 100644
  use crossbeam_channel::Sender;
  #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
  use devices::fdt;
-@@ -435,7 +435,7 @@ impl Vmm {
+@@ -157,7 +156,6 @@ pub struct Vmm {
+ 
+     pub(crate) vcpus_handles: Vec<VcpuHandle>,
+     pub(crate) exit_evt: EventFd,
+-    #[cfg(not(target_os = "windows"))]
+     pub(crate) vm: Vm,
+     pub(crate) exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
+     pub(crate) exit_code: Arc<AtomicI32>,
+@@ -435,7 +433,7 @@ impl Vmm {
          &self.vm
      }
  
@@ -676,7 +697,7 @@ index 784a144..a709147 100644
      pub fn add_mapping(
          &self,
          reply_sender: Sender<bool>,
-@@ -447,7 +447,7 @@ impl Vmm {
+@@ -447,7 +445,7 @@ impl Vmm {
              .add_mapping(reply_sender, host_addr, guest_addr, len);
      }
  

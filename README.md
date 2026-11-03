@@ -448,6 +448,9 @@ had to be written rather than widened:
   For the same reason the `VIRTIO_GPU_F_BLOB_ALIGNMENT` upstream offers
   (`51367cf`) is 4096 there: upstream reads it from `sysconf`, which Windows
   does not have.
+- **`Vmm::vm` on Windows.** Upstream has no use for the field there and drops
+  it (`5be8aa18`), but the `Vmm::add_mapping` wrappers reach the WHP partition
+  through it.
 - **`needs_worker`** on x86_64 followed `split_irqchip` alone, so the thread the
   GPU device sends its mappings to never started. Upstream fixed the macOS arm
   of the same expression (`221a028`); this is the x86_64 one.

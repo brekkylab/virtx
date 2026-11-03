@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+# The stdio server's: this binary links libkrun and becomes a machine just the same.
+build = "../virtx-stdio-server/build.rs"
 
 # The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names.
 [features]

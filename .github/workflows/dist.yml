@@ -109,13 +109,13 @@ jobs:
     steps:
       # With the submodules, which only the kernel does not need: `cargo xtask` loads the
       # whole workspace, and that names crates in them.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: virtx-uvm
           submodules: true
 
       # The workspace builds against brekkylab/virtx, as `../virtx`, and `cargo xtask` loads it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: brekkylab/virtx
           ref: ${{ env.VIRTX_REF }}
@@ -123,7 +123,7 @@ jobs:
 
       # A kernel is only its tag, its config and this script; the Makefile and configs come
       # from the libkrunfw clone, pinned by tag in the script.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: cache
         with:
           path: virtx-uvm/build/krunfw
@@ -165,7 +165,7 @@ jobs:
       # Through the cache rather than as artifacts: this repository's artifacts count against
       # the organization's storage quota, and its cache does not. One entry per run, which
       # every `dist` job of the arch restores, whatever its OS.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         with:
           path: handoff
           key: handoff-${{ matrix.arch }}-${{ github.run_id }}
@@ -222,12 +222,12 @@ jobs:
         working-directory: .
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: virtx-uvm
           submodules: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: brekkylab/virtx
           ref: ${{ env.VIRTX_REF }}
@@ -281,13 +281,13 @@ jobs:
       # MoltenVK takes most of a macOS build, and changes only with its submodule and patches.
       - name: MoltenVK cache
         if: runner.os == 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             virtx-uvm/3rdparty/MoltenVK/Package
           key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK/*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: handoff
           key: handoff-${{ matrix.kernel }}-${{ github.run_id }}
@@ -368,7 +368,7 @@ jobs:
 
       - name: Assume the publishing role
         if: github.event_name != 'workflow_dispatch' || inputs.upload
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -404,7 +404,7 @@ jobs:
       # same bytes, with the sha they were built from kept on each; and read back.
       - name: Assume the publishing role
         if: env.LATEST == 'true' || github.ref_type == 'tag'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}

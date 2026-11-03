@@ -48,10 +48,10 @@ index 1be01ea..0ebf333 100644
              #[cfg(target_os = "macos")]
 diff --git a/src/devices/src/virtio/fs/external.rs b/src/devices/src/virtio/fs/external.rs
 new file mode 100644
-index 0000000..3609a5e
+index 0000000..45780da
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/external.rs
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,328 @@
 +// A virtio-fs device served by the embedder rather than from a host directory.
 +//
 +// `ExternalFs` is what the embedder implements: a read-only tree, inode by inode, in plain
@@ -69,6 +69,8 @@ index 0000000..3609a5e
 +    ZeroCopyWriter,
 +};
 +use super::fuse;
++#[cfg(target_os = "windows")]
++use super::windows::{fs_utils, passthrough};
 +
 +/// How long the guest may cache what it was told about an inode.
 +const TIMEOUT: Duration = Duration::from_secs(1);
@@ -203,15 +205,15 @@ index 0000000..3609a5e
 +    where
 +        F: FnMut(DirEntry) -> io::Result<usize>,
 +    {
++        #[cfg(not(target_os = "windows"))]
++        let (dt_dir, dt_reg) = (libc::DT_DIR as u32, libc::DT_REG as u32);
++        #[cfg(target_os = "windows")]
++        let (dt_dir, dt_reg) = (passthrough::DT_DIR, passthrough::DT_REG);
 +        for entry in self.0.readdir(inode, offset)? {
 +            let added = add_entry(DirEntry {
 +                ino: entry.ino as _,
 +                offset: entry.offset,
-+                type_: if entry.dir {
-+                    libc::DT_DIR as u32
-+                } else {
-+                    libc::DT_REG as u32
-+                },
++                type_: if entry.dir { dt_dir } else { dt_reg },
 +                name: &entry.name,
 +            })?;
 +            // The guest's buffer is full; it asks again from here.
@@ -233,7 +235,11 @@ index 0000000..3609a5e
 +        _kill_priv: bool,
 +        flags: u32,
 +    ) -> io::Result<(Option<u64>, OpenOptions)> {
-+        if flags as i32 & libc::O_ACCMODE != libc::O_RDONLY {
++        #[cfg(not(target_os = "windows"))]
++        let o_accmode = libc::O_ACCMODE;
++        #[cfg(target_os = "windows")]
++        let o_accmode = fs_utils::O_ACCMODE;
++        if flags as i32 & o_accmode != libc::O_RDONLY {
 +            return Err(read_only());
 +        }
 +        Ok((Some(0), OpenOptions::empty()))
@@ -362,7 +368,11 @@ index 0000000..3609a5e
 +    }
 +
 +    fn access(&self, _ctx: Context, _inode: u64, mask: u32) -> io::Result<()> {
-+        if mask & libc::W_OK as u32 != 0 {
++        #[cfg(not(target_os = "windows"))]
++        let w_ok = libc::W_OK;
++        #[cfg(target_os = "windows")]
++        let w_ok = fs_utils::W_OK;
++        if mask & w_ok as u32 != 0 {
 +            return Err(read_only());
 +        }
 +        Ok(())

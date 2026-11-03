@@ -259,7 +259,8 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
 - `running` is whether its VM is up now.
 
-A sandbox lives until its `DELETE`, which stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay.
+A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
+Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 #### Ports
@@ -307,7 +308,7 @@ Its log's entries are each an object with one member:
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
-The job, and its log, are kept until its `DELETE` or its sandbox's.
+The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.
@@ -381,4 +382,4 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.
 
-A snapshot in use, held by a sandbox from its `POST` until its `DELETE`, is answered `423 Locked` to every request, reads included: its files are the sandbox's until then.
+A snapshot in use, held by a sandbox from its `POST` until its `DELETE` or its reclaiming, is answered `423 Locked` to every request, reads included: its files are the sandbox's until then.

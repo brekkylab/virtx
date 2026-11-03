@@ -248,6 +248,22 @@ A build stores what it builds under its tag, and `create_sandbox` boots it by th
 
 Everything else is the server's OCI registry: `list_image`, `tag_image`, `untag_image` and `remove_image`, and `download_image` and `upload_image` to move an image to and from an OCI archive on this machine. `prune_image` deletes what no tag points at and no sandbox uses.
 
+### From a shell
+
+[`virtx-cli`](virtx-cli/) is the `virtx` command, which does the same to a server's images with the commands `docker` has for them: `build`, `images`, `inspect`, `tag`, `rmi`, `pull`, `push`, `save`, `load`, each also as `virtx image <command>`, and `virtx image prune`.
+
+```sh
+cargo install --path virtx-cli
+virtx build -t jq:latest .                     # ./Dockerfile; the log on stderr, `jq:latest sha256:…` on stdout
+virtx images
+virtx tag jq:latest ghcr.io/me/jq:1
+echo "$GHCR_TOKEN" | virtx push -u me ghcr.io/me/jq:1
+virtx save -o jq.tar jq:latest
+virtx rmi jq:latest
+```
+
+It starts `virtx-uvm` from `$VIRTX_HOME/bin`, else from `PATH`, or the program `--server` names; `--host URL` reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token. Ctrl-C during a build, pull or push cancels the job.
+
 ## GPU
 
 The VM gets a GPU through Vulkan on every host, so it can run heavy work like deep learning.

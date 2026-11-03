@@ -380,7 +380,7 @@ A client reaches a server over HTTP by its base URL. Credentials and the organiz
 every request: an API key of virtx cloud, say, which names its organization itself.
 
 Without `VIRTX_URL`, `from_env` takes the endpoint from a virtx cloud API key itself: its
-prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.brekkylab.com`), under
+prefix names its cell (`vx_sk_apne2_…` is `https://apne2.api.virtx.sh`), under
 `VIRTX_DOMAIN` when that is set.
 
 ```python

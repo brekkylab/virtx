@@ -690,7 +690,7 @@ unsafe fn opened(
 
 /// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
 /// for one.
-pub const DOMAIN: &str = "virtx.brekkylab.com";
+pub const DOMAIN: &str = "virtx.sh";
 
 /// The header a request names its organization in, on a server that keeps organizations
 /// apart (PROTOCOL.md, Authentication).

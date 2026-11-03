@@ -711,7 +711,7 @@ if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prot
 
 // Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
 // for one.
-const DOMAIN = 'virtx.brekkylab.com'
+const DOMAIN = 'virtx.sh'
 
 // The header a request names its organization in, on a server that keeps organizations apart
 // (PROTOCOL.md, Authentication).

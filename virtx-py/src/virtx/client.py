@@ -591,7 +591,7 @@ class Client:
         await self._call("virtx_client_close_sandbox", _args(sandbox=sandbox))
 
 
-DOMAIN = "virtx.brekkylab.com"
+DOMAIN = "virtx.sh"
 """Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and
 ``<cell>.api.<DOMAIN>`` for one."""
 

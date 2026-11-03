@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Where virtx cloud is, by default, as the SDKs have it.
-const DOMAIN: &str = "virtx.brekkylab.com";
+const DOMAIN: &str = "virtx.sh";
 const KEYCHAIN: &str = "virtx";
 /// How long an access token kept has to have left to be given again: more than the minute
 /// before it runs out in which an SDK asks for another.

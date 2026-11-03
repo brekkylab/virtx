@@ -3,7 +3,7 @@
 use clap::Args;
 use virtx_core::Client;
 
-use crate::{job, name::with_tag};
+use crate::{job, name::with_tag, registry::RegistryArgs};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct PullArgs {
@@ -13,12 +13,15 @@ pub(crate) struct PullArgs {
     /// Print only the ref and digest, not the pull's log.
     #[arg(short, long)]
     pub(crate) quiet: bool,
+
+    #[command(flatten)]
+    pub(crate) registry: RegistryArgs,
 }
 
 /// Pull an image and print the ref and the digest it pulled.
 pub(crate) async fn pull(client: &Client, args: PullArgs) -> anyhow::Result<()> {
     let reference = with_tag(&args.image);
-    let job = client.pull_image(&reference, None).await?;
+    let job = client.pull_image(&reference, args.registry.auth()?).await?;
     let digest = job::follow(client, &job, args.quiet).await?;
     println!("{reference} {digest}");
     Ok(())

@@ -9,6 +9,7 @@ use crate::{
     job::Interrupted,
     ls::{self, LsArgs},
     pull::{self, PullArgs},
+    push::{self, PushArgs},
     rm::{self, RmArgs},
     server::{self, ServerArgs},
     tag::{self, TagArgs},
@@ -35,6 +36,7 @@ const INSPECT: &str = "Print images as JSON, each by a ref (`name:tag`), image I
 const RM: &str = "Untag refs (`name:tag`), removing an image with its last ref, or remove \
                   images by image ID or digest with every ref on them";
 const PULL: &str = "Pull an image from a registry, tagged as it is named";
+const PUSH: &str = "Push an image to the registry its ref names";
 const TAG: &str = "Point a ref at an image, moving the ref if it is in use";
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +62,9 @@ enum Command {
     #[command(about = PULL)]
     Pull(PullArgs),
 
+    #[command(about = PUSH)]
+    Push(PushArgs),
+
     #[command(about = TAG)]
     Tag(TagArgs),
 }
@@ -73,6 +78,7 @@ impl Command {
             Command::Inspect(args) => ImageCommand::Inspect(args),
             Command::Rmi(args) => ImageCommand::Rm(args),
             Command::Pull(args) => ImageCommand::Pull(args),
+            Command::Push(args) => ImageCommand::Push(args),
             Command::Tag(args) => ImageCommand::Tag(args),
         }
     }
@@ -94,6 +100,9 @@ enum ImageCommand {
 
     #[command(about = PULL)]
     Pull(PullArgs),
+
+    #[command(about = PUSH)]
+    Push(PushArgs),
 
     #[command(about = TAG)]
     Tag(TagArgs),
@@ -140,6 +149,7 @@ async fn dispatch(client: &Client, command: ImageCommand) -> anyhow::Result<()> 
         ImageCommand::Inspect(args) => inspect::inspect(client, args).await,
         ImageCommand::Rm(args) => rm::rm(client, args).await,
         ImageCommand::Pull(args) => pull::pull(client, args).await,
+        ImageCommand::Push(args) => push::push(client, args).await,
         ImageCommand::Tag(args) => tag::tag(client, args).await,
     }
 }
@@ -218,7 +228,7 @@ mod tests {
 
     #[test]
     fn both_spellings_are_the_same_command() {
-        let pairs: [(&[&str], &[&str]); 6] = [
+        let pairs: [(&[&str], &[&str]); 7] = [
             (
                 &["build", "-t", "a:1", "dir"],
                 &["image", "build", "-t", "a:1", "dir"],
@@ -228,6 +238,10 @@ mod tests {
             (&["rmi", "-f", "a:1"], &["image", "rm", "-f", "a:1"]),
             (&["pull", "alpine:3.20"], &["image", "pull", "alpine:3.20"]),
             (&["tag", "a:1", "b"], &["image", "tag", "a:1", "b"]),
+            (
+                &["push", "-u", "me", "a:1"],
+                &["image", "push", "-u", "me", "a:1"],
+            ),
         ];
         for (alias, command) in pairs {
             assert_eq!(parse(alias), parse(command), "{alias:?}");

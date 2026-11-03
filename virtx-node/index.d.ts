@@ -79,15 +79,12 @@ export type ImageJobEnd = { digest: string } | { error: string }
 
 /** An entry of an image job's log, numbered by `id`; `end` is the last. */
 export type ImageJobEntry = { id: number } & (
-  | { log: string }
-  | { truncated: Record<string, never> }
-  | { end: ImageJobEnd }
+  { log: string } | { truncated: Record<string, never> } | { end: ImageJobEnd }
 )
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
-  | { type: 'basic'; username: string; password: string }
-  | { type: 'bearer'; token: string }
+  { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string }
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
 export type Auth =
@@ -301,7 +298,10 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
@@ -337,7 +337,11 @@ export class Client {
   getVolume(name: string): Promise<VolumeListOutputItem>
   removeVolume(name: string): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
-  createVolumeMount(volume: string, path: string, source: MountSource): Promise<VolumeMountListOutputItem>
+  createVolumeMount(
+    volume: string,
+    path: string,
+    source: MountSource,
+  ): Promise<VolumeMountListOutputItem>
   removeVolumeMount(volume: string, path: string): Promise<void>
   /** A path is relative to its root, as `dir/file.txt`; the empty path is the root. */
   statFile(root: FileRoot, path: string): Promise<Metadata>
@@ -353,7 +357,12 @@ export class Client {
    * The whole file, created if it does not exist; its parent directory must exist. With `ifMatch`, the `etag`
    * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
    */
-  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
+  writeFile(
+    root: FileRoot,
+    path: string,
+    content: Buffer | Uint8Array | string,
+    ifMatch?: string,
+  ): Promise<void>
   /** The parent must exist. */
   createDir(root: FileRoot, path: string): Promise<void>
   /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */
@@ -371,7 +380,11 @@ export class Client {
   removeSandbox(id: string): Promise<void>
   listSandboxJob(sandbox: string): Promise<SandboxJob[]>
   /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */
-  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
+  execSandbox(
+    sandbox: string,
+    cmd: string[],
+    options?: SandboxExecOptions,
+  ): StartedJob<SandboxJob, SandboxJobEntry>
   getSandboxJob(sandbox: string, job: string): Promise<SandboxJob>
   /** Cancel the job if it runs, killing its process, and forget it. */
   removeSandboxJob(sandbox: string, job: string): Promise<void>

@@ -22,7 +22,11 @@ const library =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-const testServer = path.join(target, 'examples', process.platform === 'win32' ? 'test_server.exe' : 'test_server')
+const testServer = path.join(
+  target,
+  'examples',
+  process.platform === 'win32' ? 'test_server.exe' : 'test_server',
+)
 
 before(() => {
   execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })
@@ -61,7 +65,10 @@ function read(host, port) {
 }
 
 test('a header that cannot be sent is refused at connect', () => {
-  assert.throws(() => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }), /not a name/)
+  assert.throws(
+    () => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }),
+    /not a name/,
+  )
 })
 
 test('a token does not go in the clear to another machine', async () => {
@@ -178,7 +185,10 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
       [{ stdout: 'hi' }, { end: { code: 0 } }],
     )
     // Read again after the first entry, from the second.
-    assert.deepEqual(await entries(client.sandboxJobLog(sandbox.id, job.id, log[0].id)), log.slice(1))
+    assert.deepEqual(
+      await entries(client.sandboxJobLog(sandbox.id, job.id, log[0].id)),
+      log.slice(1),
+    )
     assert.equal((await client.getSandboxJob(sandbox.id, job.id)).code, 0)
     assert.ok((await client.listSandboxJob(sandbox.id)).some((j) => j.id === job.id))
 
@@ -245,7 +255,9 @@ test('an image build is a job whose log ends with its digest', async () => {
 test('a started build is iterated to its end', async () => {
   const client = Client.spawn(testServer)
   try {
-    const log = await entries(client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'))
+    const log = await entries(
+      client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'),
+    )
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],

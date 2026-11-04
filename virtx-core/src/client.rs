@@ -415,6 +415,12 @@ impl Client {
             .await
     }
 
+    /// Close the port `port` in the sandbox `id`: its URL reaches it no more, and it is not
+    /// opened again as the sandbox starts. One not open is refused `404`.
+    pub async fn close_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Result<(), Error> {
+        sandbox::client::close_port(&self.inner, id.as_ref(), port).await
+    }
+
     /// Open the port `port` in the sandbox `id` as `args` say -- what it is for, and how it is
     /// reached, TCP or HTTP -- and answer where it is reached from.
     pub async fn open_sandbox_port_with(
@@ -666,6 +672,18 @@ mod tests {
             assert_eq!(
                 (web.label.as_deref(), web.protocol),
                 (Some("dev server"), crate::PortProtocol::Http)
+            );
+            // Closed: gone from what starting it answers; closed again, not found.
+            client.close_sandbox_port(&sandbox.id, 5173).await.unwrap();
+            let started = client.start_sandbox(&sandbox.id).await.unwrap();
+            assert!(
+                started.ports.iter().all(|p| p.port != 5173),
+                "{:?}",
+                started.ports
+            );
+            assert_eq!(
+                refusal(client.close_sandbox_port(&sandbox.id, 5173).await).0,
+                404
             );
             let missing = client.open_sandbox_port("nobody", 8080).await;
             assert_eq!(refusal(missing).0, 404);
@@ -2324,6 +2342,34 @@ pub(crate) mod ffi {
             };
             client
                 .open_sandbox_port_with(args.id, args.port, &open)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Closes the port `port` in the sandbox `id`, given `{"id": "...", "port": n}`: its URL
+    /// reaches it no more. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_close_sandbox_port(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct IdPort {
+            id: String,
+            port: u16,
+        }
+        let args = unsafe { json::<IdPort>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let args = args?;
+            client
+                .close_sandbox_port(args.id, args.port)
                 .await
                 .map_err(|e| e.to_string())
         })

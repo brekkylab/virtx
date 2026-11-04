@@ -274,7 +274,7 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
         .route(
             "/sandboxes/{id}/ports/{port}",
-            axum::routing::put(open_port),
+            axum::routing::put(open_port).delete(close_port),
         )
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
         .route("/sandboxes/{id}/jobs/exec/", post(exec))
@@ -745,6 +745,22 @@ async fn remove_sandbox(State(shared): State<Shared>, Path(id): Path<String>) ->
         job.log.remove();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn close_port(
+    State(shared): State<Shared>,
+    Path((id, port)): Path<(String, u16)>,
+) -> Response {
+    let mut data = shared.lock().unwrap();
+    let Some(held) = data.sandboxes.get_mut(&id) else {
+        return not_found("such sandbox");
+    };
+    let before = held.ports.len();
+    held.ports.retain(|open| open.port != port);
+    match held.ports.len() < before {
+        true => StatusCode::NO_CONTENT.into_response(),
+        false => not_found("such port open"),
+    }
 }
 
 async fn open_port(

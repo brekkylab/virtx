@@ -32,11 +32,12 @@ enum Removal {
 /// with its last ref; an image named by its ID goes with every ref on it, and one named by
 /// `name@digest` with every ref in that repository, after asking when that is several.
 pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
-    let mut images = gather(client.list_image().await?);
     // Every name is tried, and one failure fails the command at the end rather than leaving
     // the rest. A declined one is not a failure.
     let mut failed = false;
     for name in &args.images {
+        // Among what the names before it left, so its last ref is seen as last.
+        let images = gather(client.list_image().await?);
         let named = match lookup(name, &images) {
             Ok(named) => named,
             Err(error) => {
@@ -86,11 +87,8 @@ pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
             Err(error) => {
                 failed = true;
                 eprintln!("virtx: {name}: {}", report(&error));
-                continue;
             }
         }
-        // The next name is looked up among what is left, so its last ref is seen as last.
-        images = gather(client.list_image().await?);
     }
     anyhow::ensure!(!failed, "not every image was removed");
     Ok(())

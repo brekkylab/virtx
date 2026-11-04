@@ -34,3 +34,13 @@ __pycache__/
 
 # Written by the workflow that packs the crate -- see `pin_server` in build.rs.
 /virtx-uvm.version
+
+# The server's build: `virtx-abins/` and `virtx-uvm-guest/` are workspaces of their own and so
+# build into target directories of their own, with lockfiles of their own.
+target/
+virtx-abins/Cargo.lock
+virtx-uvm-guest/Cargo.lock
+# What `cargo xtask build` and `cargo xtask install` write: the dependencies and kernel built
+# from `3rdparty/`, and a staged install.
+/build
+/install

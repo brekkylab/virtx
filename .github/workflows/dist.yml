@@ -1,0 +1,436 @@
+# Build virtx-uvm for every platform it is published for, and upload each to the dist
+# bucket, all under the one commit this runs on. Every name a release has is one directory
+# of the same shape:
+#
+#   virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
+#
+# Each platform's job uploads its archive under the sha (`cargo xtask upload`). The names a
+# whole release goes by -- `latest`, what `ensure_virtx` fetches when told no version, and a
+# tag -- are given by `verify`, once all four platforms' archives are up, and all four at
+# once, so no name ever holds some platforms of one release and some of another:
+#
+# | run                      | virtx it builds against      | named `latest`     | named for its tag |
+# |--------------------------|------------------------------|--------------------|-------------------|
+# | a tag pushed             | the same tag in virtx        | yes                | yes               |
+# | a dispatch               | `virtx-ref`, else `main`     | if `latest` is set | on a tag's ref    |
+#
+# A push to a branch runs nothing: a build is either a release, or asked for.
+#
+# A tag is a release of both repositories at once: virtx-uvm speaks the protocol of the
+# virtx it is built with, so the tag has to exist in brekkylab/virtx too, and the checkout
+# fails if it does not. brekkylab/virtx's `packages` workflow, releasing the same tag,
+# refuses to run until `virtx-uvm/<tag>/` holds all four platforms, and pins its packages
+# to that tag.
+#
+# # Platforms
+#
+# | release        | runner           | kernel and abin from                   | host build |
+# |----------------|------------------|----------------------------------------|------------|
+# | macos-aarch64  | macos-15         | kernel.c, abin: the arm64 Linux job    | gpu        |
+# | linux-x86_64   | ubuntu-24.04, in manylinux_2_28     | libkrunfw.so, abin: x86_64 Linux job | gpu |
+# | linux-aarch64  | ubuntu-24.04-arm, in manylinux_2_28 | libkrunfw.so, abin: arm64 Linux job  | gpu |
+# | windows-x86_64 | windows-2025     | libkrunfw.dll, abin: x86_64 Linux job  | gpu        |
+#
+# The guest kernel is built in a Linux container (see xtask/scripts/build-libkrunfw.sh),
+# which neither GitHub's macOS runners (no Docker) nor its Windows runners (Windows
+# containers) can run -- so the two Linux jobs build every platform's kernel and hand it on.
+# abin goes the same way: it is the guest's, so it depends on the architecture and not on
+# the host, and its C (SQLite) is cross-compiled by `xtask/scripts/musl-cc.sh`, a shell
+# script around clang that Windows cannot run. One build per architecture, then.
+#
+# # The glibc floor
+#
+# A Linux release runs on glibc 2.28 and later -- RHEL 8, Debian 10, Ubuntu 20.04 on. Its two
+# executables are built in a manylinux_2_28 container (AlmaLinux 8), because a binary needs
+# the glibc of the headers it was compiled against: built on the runner itself, glibc 2.39,
+# it would need 2.39. What they link is that glibc and nothing else a distribution ships at
+# its own version -- no OpenSSL (oci-client is rustls on Linux), no libdrm, and Vulkan only
+# opened at run time. `The glibc floor` checks both, after every build.
+#
+# # What it needs
+#
+# - `AWS_ROLE_ARN`: the role `aws-actions/configure-aws-credentials` assumes over OIDC,
+#   trusted for this repository and allowed `s3:PutObject` under `virtx-uvm/` only.
+name: dist
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+    inputs:
+      virtx-ref:
+        description: The brekkylab/virtx ref to build against (empty is main, or the tag on a tag)
+        default: ""
+      upload:
+        description: Upload to the dist bucket
+        type: boolean
+        default: true
+      latest:
+        description: Point every platform's latest at this commit (what ensure_virtx fetches by default)
+        type: boolean
+        default: false
+
+concurrency:
+  group: dist
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  BUCKET: virtx-dist
+  AWS_REGION: us-east-1
+  DIST_URL: https://virtx-dist.s3.us-east-1.amazonaws.com
+  # A dispatch's word first, then a tag's own name, then main -- see the table above.
+  VIRTX_REF: ${{ inputs.virtx-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
+  # "true" on a pushed tag or a dispatch that asks; every other run leaves `latest` alone.
+  LATEST: ${{ inputs.latest == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guest-parts:
+    name: guest parts (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            targets: linux windows
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            targets: linux macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: virtx-uvm
+    steps:
+      # With the submodules, which only the kernel does not need: `cargo xtask` loads the
+      # whole workspace, and that names crates in them.
+      - uses: actions/checkout@v7
+        with:
+          path: virtx-uvm
+          submodules: true
+
+      # The workspace builds against brekkylab/virtx, as `../virtx`, and `cargo xtask` loads it.
+      - uses: actions/checkout@v7
+        with:
+          repository: brekkylab/virtx
+          ref: ${{ env.VIRTX_REF }}
+          path: virtx
+
+      # A kernel is only its tag, its config and this script; the Makefile and configs come
+      # from the libkrunfw clone, pinned by tag in the script.
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: virtx-uvm/build/krunfw
+          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('virtx-uvm/xtask/scripts/build-libkrunfw.sh') }}
+
+      - name: Kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          for target in ${{ matrix.targets }}; do
+            echo "::group::libkrunfw for $target"
+            LIBKRUNFW_TARGET=$target sh xtask/scripts/build-libkrunfw.sh
+            echo "::endgroup::"
+          done
+
+      - run: ls -la build/krunfw
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: virtx-uvm
+          key: abin-${{ matrix.arch }}
+
+      - name: abin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+          cargo xtask build abin
+          ls -la target/release/abin
+
+      - name: Hand the kernel and abin on
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/handoff/kernel"
+          cp -v build/krunfw/* "$GITHUB_WORKSPACE/handoff/kernel/"
+          cp -R target/release/abin "$GITHUB_WORKSPACE/handoff/abin"
+
+      # Through the cache rather than as artifacts: this repository's artifacts count against
+      # the organization's storage quota, and its cache does not. One entry per run, which
+      # every `dist` job of the arch restores, whatever its OS.
+      - uses: actions/cache/save@v6
+        with:
+          path: handoff
+          key: handoff-${{ matrix.arch }}-${{ github.run_id }}
+          enableCrossOsArchive: true
+
+  # Which platforms this run builds: all of them, unless the commit says
+  # `[dist:<release>]`, as a change that touches one platform's build does to try it
+  # without rebuilding, and re-uploading, the other three.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      all: ${{ steps.plan.outputs.all }}
+    steps:
+      - id: plan
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+          REF_TYPE: ${{ github.ref_type }}
+          PLATFORMS: >-
+            [{"release": "macos-aarch64", "runner": "macos-15", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "linux-x86_64", "runner": "ubuntu-24.04", "container": "quay.io/pypa/manylinux_2_28_x86_64", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}, {"release": "linux-aarch64", "runner": "ubuntu-24.04-arm", "container": "quay.io/pypa/manylinux_2_28_aarch64", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "windows-x86_64", "runner": "windows-2025", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}]
+        run: |
+          # A tag is a release, and a release is every platform, whatever its commit says.
+          only=$(printf '%s' "$MESSAGE" | grep -oE '\[dist:[a-z0-9_-]+\]' | sed -E 's/\[dist:(.*)\]/\1/' | head -1)
+          if [ "$REF_TYPE" = tag ]; then only=""; fi
+          if [ -n "$only" ]; then
+            matrix=$(printf '%s' "$PLATFORMS" | jq -c --arg only "$only" '[.[] | select(.release == $only)]')
+            all=false
+          else
+            matrix=$(printf '%s' "$PLATFORMS" | jq -c .)
+            all=true
+          fi
+          echo "building: $(printf '%s' "$matrix" | jq -r '[.[].release] | join(" ")')"
+          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
+          echo "all=$all" >> "$GITHUB_OUTPUT"
+
+  dist:
+    name: dist (${{ matrix.release }})
+    needs: [plan, guest-parts]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    # The Linux releases' glibc floor -- see above. None for macOS and Windows.
+    container: ${{ matrix.container }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: virtx-uvm
+    steps:
+      # Before any checkout: Windows' git converts to CRLF by default, and the submodule
+      # patches, written against LF, then find no context to apply to.
+      - name: Keep line endings as committed
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          path: virtx-uvm
+          submodules: true
+
+      - uses: actions/checkout@v7
+        with:
+          repository: brekkylab/virtx
+          ref: ${{ env.VIRTX_REF }}
+          path: virtx
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.musl }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: virtx-uvm
+          # Apart from anything built on the runner itself: C compiled against its newer
+          # glibc's headers, restored here, would put that glibc back into the release.
+          key: ${{ matrix.release }}${{ matrix.container && '-manylinux_2_28' || '' }}
+
+      # In the manylinux_2_28 container, as root: AlmaLinux's packages, and the image's own
+      # Python for meson, virglrenderer's generators and the aws CLI the upload runs. The
+      # image sets PKG_CONFIG_PATH, and `.cargo/config.toml`'s [env] does not override a set
+      # variable, so virglrenderer's goes in front of it here.
+      - name: Toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # zstd too: the handoff below is compressed with it, and a cache restores only where
+          # it is decompressed the way it was compressed.
+          dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
+          py=/opt/python/cp312-cp312/bin
+          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako awscli
+          echo "$py" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install lld llvm meson ninja
+
+      # virglrenderer's Windows build: pkg-config, and libclang for bindgen -- see the
+      # README's Windows section. No Vulkan SDK: build-deps.ps1 makes do with the headers
+      # virglrenderer bundles, and an import library it makes from them.
+      - name: Toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # pkg-config.exe itself: build-deps.ps1 asks PowerShell for it, and the one Git
+          # Bash finds first is not an .exe PowerShell can run.
+          choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
+      - name: Patch the submodules
+        run: cargo xtask init
+
+      # MoltenVK takes most of a macOS build, and changes only with its submodule and patches.
+      - name: MoltenVK cache
+        if: runner.os == 'macOS'
+        uses: actions/cache@v6
+        with:
+          path: |
+            virtx-uvm/3rdparty/MoltenVK/Package
+          key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK/*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: handoff
+          key: handoff-${{ matrix.kernel }}-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Put the kernel in place
+        run: |
+          mkdir -p build/krunfw
+          case "${{ matrix.release }}" in
+            macos-*)   LIBKRUNFW_KERNEL_C="$GITHUB_WORKSPACE/handoff/kernel/kernel.c" cargo xtask build kernel ;;
+            linux-*)   cp -v "$GITHUB_WORKSPACE"/handoff/kernel/libkrunfw.so.* build/krunfw/ ;;
+            windows-*) cp -v "$GITHUB_WORKSPACE"/handoff/kernel/libkrunfw.dll build/krunfw/ ;;
+          esac
+          ls -la build/krunfw
+
+      - name: Put abin in place
+        run: |
+          mkdir -p target/release
+          cp -R "$GITHUB_WORKSPACE/handoff/abin" target/release/
+          ls -la target/release/abin
+
+      - name: Build
+        run: cargo xtask build host
+
+      - name: virglrenderer's log (Windows, on failure)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          log=build/virglrenderer-build.log
+          # Windows PowerShell writes a redirect as UTF-16.
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          iconv -f UTF-16 -t UTF-8 "$log" > "$log.txt" 2>/dev/null || tr -d '\000' < "$log" > "$log.txt"
+          grep -nE "^FAILED|error( [A-Z]+[0-9]+)?:" "$log.txt" | head -20
+          echo ...
+          grep -nE -B3 -A6 "error( [A-Z]+[0-9]+)?:" "$log.txt" | head -80
+          tail -30 build/virglrenderer-build/meson-logs/meson-log.txt 2>/dev/null || true
+
+      - name: What was built
+        run: |
+          ls -la target/release | grep -E "virtx-uvm|libkrunfw" || true
+          ls target/release/abin || true
+
+      # What a Linux release asks of the machine it runs on -- see "The glibc floor" above.
+      # `__isoc23_*` is glibc 2.38's, and comes in unversioned, so the version check alone
+      # would not see it.
+      - name: The glibc floor (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          floor=28
+          for exe in target/release/virtx-uvm; do
+            need=$(objdump -T "$exe" | grep -oE 'GLIBC_2\.[0-9]+' | sort -t. -k2 -n -u | tail -1)
+            libs=$(objdump -p "$exe" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
+            echo "$exe: needs $need; links $libs"
+            [ "${need#GLIBC_2.}" -le "$floor" ] || { echo "::error::$exe needs $need, above glibc 2.$floor"; fail=1; }
+            if objdump -T "$exe" | grep -q __isoc23_; then echo "::error::$exe references __isoc23_*, glibc 2.38's"; fail=1; fi
+            if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$exe links OpenSSL"; fail=1; fi
+          done
+          exit ${fail:-0}
+
+      # What each executable needs from the loader at start-up, delay-loaded or not -- the
+      # DLLs a release has to carry are the ones in the first list that Windows itself
+      # does not ship.
+      - name: DLL imports (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          readobj="/c/Program Files/LLVM/bin/llvm-readobj.exe"
+          for exe in target/release/virtx-uvm.exe; do
+            echo "== $exe"
+            "$readobj" --coff-imports "$exe" | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' | sort -u | tee "$RUNNER_TEMP/imports.txt"
+            # Nothing a release does not carry and Windows may not have, loaded at start-up:
+            # the C++ runtime is linked in, and the rest are delay-loaded, so a host without
+            # them still runs virtx-uvm far enough to say what to install.
+            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv|dokan)" "$RUNNER_TEMP/imports.txt"; then
+              echo "::error::$exe needs the DLLs above to start"; fail=1
+            fi
+          done
+          exit ${fail:-0}
+
+      - name: Assume the publishing role
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload
+        run: |
+          # `inputs` is empty on a push, which uploads; only a dispatch can say not to.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.upload }}" != true ]; then flags=--dry-run; fi
+          # By sha only. `latest` and a tag are names for a whole release, which `verify`
+          # gives it once every platform's archive is up. With the abin put in place above.
+          cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" --with-abin ${flags:-}
+
+  verify:
+    needs: [plan, dist]
+    if: needs.plan.outputs.all == 'true' && (github.event_name != 'workflow_dispatch' || inputs.upload)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Every platform's archive for this commit, under its sha.
+      - name: Every platform has this commit's release
+        run: |
+          fail=0
+          for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            archive="$DIST_URL/virtx-uvm/$GITHUB_SHA/virtx-uvm-$release.tar.gz"
+            size=$(curl -fsSI "$archive" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
+            printf '%-15s %s bytes\n' "$release" "${size:-missing}"
+            [ -n "$size" ] || fail=1
+          done
+          exit $fail
+
+      # Then the release's names, all four platforms at once and only now that all four are
+      # there: `latest` when asked, and the tag on a tag. Copied within the bucket, as the
+      # same bytes, with the sha they were built from kept on each; and read back.
+      - name: Assume the publishing role
+        if: env.LATEST == 'true' || github.ref_type == 'tag'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Name the release
+        if: env.LATEST == 'true' || github.ref_type == 'tag'
+        run: |
+          names=""
+          [ "$LATEST" = true ] && names="latest"
+          [ "${{ github.ref_type }}" = tag ] && names="$names $GITHUB_REF_NAME"
+          for name in $names; do
+            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+              archive="virtx-uvm-$release.tar.gz"
+              aws s3 cp --only-show-errors \
+                "s3://$BUCKET/virtx-uvm/$GITHUB_SHA/$archive" "s3://$BUCKET/virtx-uvm/$name/$archive" \
+                --metadata-directive REPLACE --metadata "sha=$GITHUB_SHA" \
+                --content-type application/gzip --cache-control no-cache
+            done
+          done
+          fail=0
+          for name in $names; do
+            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+              sha=$(curl -fsSI "$DIST_URL/virtx-uvm/$name/virtx-uvm-$release.tar.gz" \
+                | awk 'tolower($1)=="x-amz-meta-sha:"{print $2}' | tr -d '\r')
+              printf 'virtx-uvm/%s/%-35s sha=%s\n' "$name" "virtx-uvm-$release.tar.gz" "${sha:-missing}"
+              [ "$sha" = "$GITHUB_SHA" ] || fail=1
+            done
+          done
+          exit $fail

@@ -1,0 +1,196 @@
+diff --git a/src/devices/src/virtio/fs/macos/passthrough.rs b/src/devices/src/virtio/fs/macos/passthrough.rs
+index f6a863e..1bf9452 100644
+--- a/src/devices/src/virtio/fs/macos/passthrough.rs
++++ b/src/devices/src/virtio/fs/macos/passthrough.rs
+@@ -56,6 +56,9 @@ struct InodeData {
+     dev: i32,
+     refcount: AtomicU64,
+     unlinked_fd: AtomicI64,
++    /// The parent this inode was last looked up under, and its name there. `None` for the
++    /// root. What a share without volfs is addressed by -- see [`PassthroughFs::volfs`].
++    location: Mutex<Option<(Inode, CString)>>,
+ }
+ 
+ enum InodeHandle {
+@@ -165,6 +168,10 @@ fn einval() -> io::Error {
+     linux_error(io::Error::from_raw_os_error(libc::EINVAL))
+ }
+ 
++fn enoent() -> io::Error {
++    linux_error(io::Error::from_raw_os_error(libc::ENOENT))
++}
++
+ fn item_to_value(item: &[u8], radix: u32) -> Option<u32> {
+     match std::str::from_utf8(item) {
+         Ok(val) => match u32::from_str_radix(val, radix) {
+@@ -645,6 +652,12 @@ pub struct PassthroughFs {
+     // `cfg.writeback` is true and `init` was called with `FsOptions::WRITEBACK_CACHE`.
+     writeback: AtomicBool,
+     announce_submounts: AtomicBool,
++
++    /// Whether the share's filesystem answers volfs paths, `/.vol/{dev}/{ino}`, which is how
++    /// an inode is addressed when it does. APFS and HFS+ do; NFS, SMB and FSKit volumes do
++    /// not -- a FUSE-T mount is one of those -- and there an inode is addressed by the path
++    /// its [`InodeData::location`]s spell from the root instead. Found out in `init`.
++    volfs: AtomicBool,
+     cfg: Config,
+ }
+ 
+@@ -677,10 +690,38 @@ impl PassthroughFs {
+ 
+             writeback: AtomicBool::new(false),
+             announce_submounts: AtomicBool::new(false),
++            volfs: AtomicBool::new(true),
+             cfg,
+         })
+     }
+ 
++    /// The path `inode` is at, from the root along the names it was looked up by. For a
++    /// share without volfs, where that is the only way to name it.
++    fn inode_path(&self, inode: Inode) -> io::Result<CString> {
++        let inodes = self.inodes.read().unwrap();
++        let mut names = Vec::new();
++        let mut current = inode;
++        while current != fuse::ROOT_ID {
++            let data = inodes.get(&current).ok_or_else(ebadf)?;
++            let location = data.location.lock().unwrap();
++            // An inode the guest holds but whose parent it has forgotten, or that was never
++            // looked up by name: nothing says where it is any more.
++            let (parent, name) = location.as_ref().ok_or_else(enoent)?;
++            names.push(name.to_bytes().to_vec());
++            current = *parent;
++        }
++
++        let mut path = self.cfg.root_dir.trim_end_matches('/').as_bytes().to_vec();
++        for name in names.iter().rev() {
++            path.push(b'/');
++            path.extend_from_slice(name);
++        }
++        if path.is_empty() {
++            path.push(b'/');
++        }
++        CString::new(path).map_err(|_| einval())
++    }
++
+     fn inode_to_handle(&self, inode: Inode, supports_fd: bool) -> io::Result<InodeHandle> {
+         debug!("inode_to_handle: inode={inode}");
+         let data = self
+@@ -691,8 +732,11 @@ impl PassthroughFs {
+             .cloned()
+             .ok_or_else(ebadf)?;
+ 
+-        let cstr =
+-            CString::new(format!("/.vol/{}/{}", data.dev, data.ino)).map_err(|_| einval())?;
++        let cstr = if self.volfs.load(Ordering::Relaxed) {
++            CString::new(format!("/.vol/{}/{}", data.dev, data.ino)).map_err(|_| einval())?
++        } else {
++            self.inode_path(inode)?
++        };
+         debug!("inode_to_handle: path={}", cstr.to_string_lossy());
+ 
+         if supports_fd {
+@@ -719,13 +763,22 @@ impl PassthroughFs {
+             .cloned()
+             .ok_or_else(ebadf)?;
+ 
+-        let cstr = CString::new(format!(
+-            "/.vol/{}/{}/{}",
+-            data.dev,
+-            data.ino,
+-            name.to_string_lossy()
+-        ))
+-        .map_err(|_| einval())?;
++        let cstr = if self.volfs.load(Ordering::Relaxed) {
++            CString::new(format!(
++                "/.vol/{}/{}/{}",
++                data.dev,
++                data.ino,
++                name.to_string_lossy()
++            ))
++            .map_err(|_| einval())?
++        } else {
++            let mut path = self.inode_path(parent)?.into_bytes();
++            if path.last() != Some(&b'/') {
++                path.push(b'/');
++            }
++            path.extend_from_slice(name.to_bytes());
++            CString::new(path).map_err(|_| einval())?
++        };
+         debug!("name_to_path: path={}", cstr.to_string_lossy());
+         Ok(cstr)
+     }
+@@ -1350,6 +1403,22 @@ impl FileSystem for PassthroughFs {
+         };
+         let st = fstat(&ctx, self.cfg.semantics, f.as_raw_fd(), true)?;
+ 
++        // Whether this share can be addressed by volfs at all, asked of its root: a volume
++        // that does not answer `/.vol` for the root answers it for nothing under it either.
++        let volfs = CString::new(format!("/.vol/{}/{}", st.st_dev, st.st_ino))
++            .map(|path| {
++                let mut probe = MaybeUninit::<libc::stat>::zeroed();
++                unsafe { libc::lstat(path.as_ptr(), probe.as_mut_ptr()) == 0 }
++            })
++            .unwrap_or(false);
++        if !volfs {
++            info!(
++                "virtio-fs: {} does not answer volfs paths; serving it by path",
++                self.cfg.root_dir
++            );
++        }
++        self.volfs.store(volfs, Ordering::Relaxed);
++
+         // Safe because this doesn't modify any memory and there is no need to check the return
+         // value because this system call always succeeds. We need to clear the umask here because
+         // we want the client to be able to set all the bits in the mode.
+@@ -1370,6 +1439,7 @@ impl FileSystem for PassthroughFs {
+                 dev: st.st_dev,
+                 refcount: AtomicU64::new(2),
+                 unlinked_fd: AtomicI64::new(-1),
++                location: Mutex::new(None),
+             }),
+         );
+ 
+@@ -1442,9 +1512,19 @@ impl FileSystem for PassthroughFs {
+         };
+         let data = self.inodes.read().unwrap().get_alt(&altkey).cloned();
+ 
++        // Where this lookup found it, which is where it is now: after a rename, or under the
++        // name of another of its links. `.` and `..` name somewhere else.
++        let location = match name.to_bytes() {
++            b"." | b".." => None,
++            _ => Some((parent, name.to_owned())),
++        };
++
+         let inode = if let Some(data) = data {
+             // Matches with the release store in `forget`.
+             data.refcount.fetch_add(1, Ordering::Acquire);
++            if location.is_some() {
++                *data.location.lock().unwrap() = location;
++            }
+             data.inode
+         } else {
+             // There is a possible race here where 2 threads end up adding the same file
+@@ -1463,6 +1543,7 @@ impl FileSystem for PassthroughFs {
+                     dev: st.st_dev,
+                     refcount: AtomicU64::new(1),
+                     unlinked_fd: AtomicI64::new(-1),
++                    location: Mutex::new(location),
+                 }),
+             );
+ 
+@@ -2086,8 +2167,15 @@ impl FileSystem for PassthroughFs {
+                 }
+             }
+ 
++            // Looked up again so that the inode now at each name is recorded as being there,
++            // which a share addressed by path needs: the new name for the one that moved, and
++            // the old one too for a swap, which put the other inode there.
+             let entry = self.lookup(ctx, newdir, newname)?;
+             self.forget(ctx, entry.inode, 1);
++            if ((flags as i32) & bindings::LINUX_RENAME_EXCHANGE) != 0 {
++                let entry = self.lookup(ctx, olddir, oldname)?;
++                self.forget(ctx, entry.inode, 1);
++            }
+ 
+             Ok(())
+         } else {

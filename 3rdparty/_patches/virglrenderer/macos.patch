@@ -1,0 +1,144 @@
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index 4f87d5a..11aa4e9 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -8,6 +8,9 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <sys/mman.h>
++#ifndef HAVE_EVENTFD_H
++#include <sys/socket.h>
++#endif
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
+@@ -518,10 +521,12 @@ proxy_context_destroy(struct virgl_context *base)
+    if (ctx->sync_thread.fence_eventfd >= 0) {
+       if (ctx->sync_thread.created) {
+          ctx->sync_thread.stop = true;
+-         write_eventfd(ctx->sync_thread.fence_eventfd, 1);
++         write_eventfd(ctx->sync_thread.fence_notify_fd, 1);
+          thrd_join(ctx->sync_thread.thread, NULL);
+       }
+ 
++      if (ctx->sync_thread.fence_notify_fd != ctx->sync_thread.fence_eventfd)
++         close(ctx->sync_thread.fence_notify_fd);
+       close(ctx->sync_thread.fence_eventfd);
+    }
+ 
+@@ -565,6 +570,40 @@ proxy_context_init_base(struct proxy_context *ctx)
+    ctx->base.submit_fence = proxy_context_submit_fence;
+ }
+ 
++#ifndef HAVE_EVENTFD_H
++/* Without eventfd (macOS), a socket pair stands in for it: the render server
++ * writes to one end and the sync thread polls and drains the other. The
++ * writing end is kept here as well, to hand to the server and to wake the
++ * sync thread on destroy. SO_NOSIGPIPE makes a write after the reading end is
++ * gone fail with EPIPE instead of raising SIGPIPE.
++ */
++static bool
++proxy_context_create_fence_socket_pair(struct proxy_context *ctx)
++{
++   int fds[2];
++   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds))
++      return false;
++
++   const int on = 1;
++   for (int i = 0; i < 2; i++) {
++      if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) || fcntl(fds[i], F_SETFL, O_NONBLOCK)) {
++         close(fds[0]);
++         close(fds[1]);
++         return false;
++      }
++   }
++   if (setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on))) {
++      close(fds[0]);
++      close(fds[1]);
++      return false;
++   }
++
++   ctx->sync_thread.fence_eventfd = fds[0];
++   ctx->sync_thread.fence_notify_fd = fds[1];
++   return true;
++}
++#endif
++
+ static bool
+ proxy_context_init_fencing(struct proxy_context *ctx)
+ {
+@@ -579,11 +618,19 @@ proxy_context_init_fencing(struct proxy_context *ctx)
+    if (!(proxy_renderer.flags & VIRGL_RENDERER_THREAD_SYNC))
+       return true;
+ 
++#ifdef HAVE_EVENTFD_H
+    ctx->sync_thread.fence_eventfd = create_eventfd(0);
+    if (ctx->sync_thread.fence_eventfd < 0) {
+       proxy_log("failed to create fence eventfd");
+       return false;
+    }
++   ctx->sync_thread.fence_notify_fd = ctx->sync_thread.fence_eventfd;
++#else
++   if (!proxy_context_create_fence_socket_pair(ctx)) {
++      proxy_log("failed to create fence socket pair");
++      return false;
++   }
++#endif
+ 
+    if (proxy_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB) {
+       int ret = thrd_create(&ctx->sync_thread.thread, proxy_context_sync_thread, ctx);
+@@ -668,7 +715,7 @@ proxy_context_init(struct proxy_context *ctx, uint32_t ctx_flags)
+       .flags = ctx_flags,
+       .shmem_size = ctx->shmem.size,
+    };
+-   const int req_fds[2] = { ctx->shmem.fd, ctx->sync_thread.fence_eventfd };
++   const int req_fds[2] = { ctx->shmem.fd, ctx->sync_thread.fence_notify_fd };
+    const int req_fd_count = req_fds[1] >= 0 ? 2 : 1;
+    if (!proxy_socket_send_request_with_fds(&ctx->socket, &req, sizeof(req), req_fds,
+                                            req_fd_count)) {
+@@ -708,6 +755,7 @@ proxy_context_create(uint32_t ctx_id,
+    mtx_init(&ctx->free_fences_mutex, mtx_plain);
+    list_inithead(&ctx->free_fences);
+    ctx->sync_thread.fence_eventfd = -1;
++   ctx->sync_thread.fence_notify_fd = -1;
+ 
+    if (!proxy_context_init(ctx, ctx_flags)) {
+       proxy_context_destroy(&ctx->base);
+diff --git a/src/proxy/proxy_context.h b/src/proxy/proxy_context.h
+index ce29eca..fe08dcb 100644
+--- a/src/proxy/proxy_context.h
++++ b/src/proxy/proxy_context.h
+@@ -53,6 +53,10 @@ struct proxy_context {
+    struct {
+       /* when VIRGL_RENDERER_THREAD_SYNC is set */
+       int fence_eventfd;
++      /* the end the render server writes to; the same fd as fence_eventfd
++       * unless eventfd is unavailable and a socket pair stands in for it
++       */
++      int fence_notify_fd;
+ 
+       /* when VIRGL_RENDERER_ASYNC_FENCE_CB is also set */
+       thrd_t thread;
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index ce2b03d..cca83a2 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -874,7 +874,17 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+    int ret;
+ 
+    /* VIRGL_RENDERER_THREAD_SYNC is a hint and can be silently ignored */
+-   if (!has_eventfd() || getenv("VIRGL_DISABLE_MT"))
++   bool can_thread_sync = has_eventfd();
++#if defined(ENABLE_RENDER_SERVER) && !defined(HAVE_EVENTFD_H)
++   /* Without eventfd, the render server path can still honour it: proxy
++    * context falls back to a socket pair. vrend and the drm renderers cannot,
++    * so the hint survives only when neither is asked for.
++    */
++   if ((flags & VIRGL_RENDERER_RENDER_SERVER) && (flags & VIRGL_RENDERER_NO_VIRGL) &&
++       !(flags & VIRGL_RENDERER_DRM))
++      can_thread_sync = true;
++#endif
++   if (!can_thread_sync || getenv("VIRGL_DISABLE_MT"))
+       flags &= ~VIRGL_RENDERER_THREAD_SYNC;
+ 
+    if (state.client_initialized && (state.cookie != cookie ||

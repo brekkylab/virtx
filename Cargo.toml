@@ -1,6 +1,70 @@
 # Members share this workspace's target directory and lockfile. The Python and Node
 # packages (`virtx-py`, `virtx-node`) are not Cargo crates: they load `libvirtx_core` at
 # run time.
+#
+# The client is `virtx-core` and `virtx-rs`. The server is the rest, kept apart because it is
+# built apart: `virtx-uvm` is the whole of the machinery -- images, disks, machines -- and
+# links libkrun. `virtx-stdio-server` is the server on `virtx-core`'s protocol over stdio --
+# the `virtx-uvm` binary -- and, as `virtx-uvm boot`, spawned by itself, the process that
+# becomes a micro-VM; `virtx-http-server` is the same server over Streamable HTTP, to the
+# users and projects its config names. `xtask` builds, signs and packs them.
+#
+# A bare `cargo build` or `cargo test` builds the client alone: the server needs the
+# submodules patched (`cargo xtask init`), a guest kernel and a musl target, which a change to
+# the client should not.
 [workspace]
 resolver = "3"
-members = ["virtx-core", "virtx-rs"]
+members = [
+    "virtx-core",
+    "virtx-rs",
+    "virtx-uvm",
+    "virtx-stdio-server",
+    "virtx-http-server",
+    "xtask",
+]
+default-members = ["virtx-core", "virtx-rs"]
+
+# `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
+# workspace. Without this, cargo would auto-adopt the path dependencies as
+# members and collide with that workspace.
+#
+# `virtx-abins/` is a workspace root of its own: it is cross-compiled to
+# `*-unknown-linux-musl`, and a member would be built for the host by a bare
+# `cargo build` -- for a target that has no host to run on. Listed here and not merely
+# left out of `members`: a package under this directory that is neither resolves against
+# this root, and the ones in `virtx-abins/` inherit dependencies this workspace has no
+# reason to declare.
+#
+# `virtx-uvm-guest/` is the agent inside each machine, which `virtx-uvm`'s build script
+# cross-compiles to `*-unknown-linux-musl` and embeds -- a workspace root of its own for the
+# same reason as `virtx-abins/`.
+exclude = [
+    "3rdparty/libkrun",
+    "virtx-abins",
+    "virtx-uvm-guest",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+# 1.89 for `std::fs::File::lock`, which guards `index.json` against concurrent pulls.
+rust-version = "1.89"
+
+[workspace.dependencies]
+anyhow = "1"
+# The protocol the servers answer: the methods' args and outputs, and the server's end of
+# the stdio and Streamable HTTP transports. No default features, which are the C ABI over a
+# client; a member takes `server`.
+virtx-core = { path = "virtx-core", default-features = false }
+virtx-uvm = { path = "virtx-uvm" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+tokio = "1"
+
+# rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
+# 2026-09-02) and routes macOS to a stub backend that panics at runtime.
+# Track the repo until a release carries it.
+[patch.crates-io]
+rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
+magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }

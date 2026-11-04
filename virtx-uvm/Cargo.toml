@@ -1,0 +1,91 @@
+[package]
+name = "virtx-uvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus support --
+# `cargo xtask build host` builds it first.
+gpu = ["krun/gpu", "dep:krun_display"]
+
+[dependencies]
+oci-spec = { version = "0.10", default-features = false, features = ["image", "distribution"] }
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+# `filesystem`: layers' archives in their two compressions, the ext4 a session writes, and
+# the erofs an image is read through.
+thiserror = "2"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+ruzstd = "0.9"
+# A mount's source, as the protocol spells it.
+virtx-core = { workspace = true }
+# A layer's conversion is CPU that is moved off the runtime's threads, a served volume's
+# stores are waited on from libkrun's threads, and a VM is a process of its own.
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }
+# The registry this host serves, as HTTP requests and responses: a layer streamed from its
+# file, and a request's body read as it arrives.
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+tokio-util = { version = "0.7", features = ["io"] }
+form_urlencoded = "1"
+# The files endpoints: WebDAV over a volume or a snapshot, which `dav-server` speaks over a
+# filesystem of this crate's, each request answered as an axum response for whichever
+# server mounts them.
+axum = { version = "0.8", default-features = false }
+dav-server = { version = "0.11", default-features = false }
+# Notion's page ids.
+uuid = { version = "1", features = ["v4", "serde"] }
+# A volume's files, resolved under its root however a guest rearranges the tree under them.
+cap-std = "3"
+# The remote stores a volume mounts: HTTP for their APIs, `chrono` for their RFC 3339
+# timestamps, and `unicode-normalization` because macOS looks a name up decomposed whatever a
+# listing returned. Their failures inside are `anyhow`'s. The same reqwest oci-client uses.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form"] }
+chrono = "0.4"
+unicode-normalization = "0.1"
+anyhow = { workspace = true }
+# The errno values a served volume answers the guest in.
+libc = { workspace = true }
+# libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
+log = "0.4"
+# The machine: libkrun linked in, its block devices on, and the init it lays over the
+# guest's root. Vendored.
+krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }
+krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["direct"] }
+# A display backend, which libkrun's virtio-gpu device has to be handed.
+krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
+
+# The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
+# downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic
+# OpenSSL's soname is the distribution's.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+# The host's resolvers, which Windows keeps per adapter rather than in a file.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an adapter's
+    # shape is NDIS's, and windows-sys gates the whole call on it.
+    "Win32_NetworkManagement_Ndis",
+] }
+
+[dev-dependencies]
+# The remote stores' tests: directories to read local files from, and a runtime with threads
+# for the mock servers they answer from.
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }

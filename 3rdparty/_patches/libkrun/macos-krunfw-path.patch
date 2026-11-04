@@ -1,0 +1,24 @@
+diff --git a/src/libkrun/src/api/payload.rs b/src/libkrun/src/api/payload.rs
+index 67845fe..7edf2c1 100644
+--- a/src/libkrun/src/api/payload.rs
++++ b/src/libkrun/src/api/payload.rs
+@@ -275,8 +275,18 @@ const KRUNFW_NAME: &str = "libkrunfw.so.5";
+ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
+ #[cfg(all(target_os = "linux", feature = "tdx"))]
+ const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
++// `@loader_path/` and not a leaf name, which is what every other target here uses. The
++// kernel is shipped beside the binary that opens it -- see `virtx-uvm/build.rs` --
++// and on the other two platforms a leaf name finds it there: Windows searches the
++// executable's own directory first, and Linux the calling object's `DT_RUNPATH`, which
++// the link sets to `$ORIGIN`. dyld does neither. A `dlopen` argument with no slash in it
++// is looked for in `DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH`, and nowhere
++// near the caller -- `@rpath` and `@loader_path` are prefixes dyld expands in a *path*,
++// so a name that is not one is never resolved against them. Spelling the prefix is what
++// puts macOS under the same rule as the others rather than under an environment variable
++// that has to be set by whoever runs the binary.
+ #[cfg(target_os = "macos")]
+-const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
++const KRUNFW_NAME: &str = "@loader_path/libkrunfw.5.dylib";
+ #[cfg(target_os = "windows")]
+ const KRUNFW_NAME: &str = "libkrunfw.dll";
+ 

@@ -1,0 +1,30 @@
+[submodule "libkrun"]
+	path = 3rdparty/libkrun
+	# `cargo xtask init` patches this tree in place; cargo needs the real
+	# path, so the patch cannot live in an exported copy.
+	ignore = dirty
+	url = https://github.com/libkrun/libkrun.git
+[submodule "virglrenderer"]
+	path = 3rdparty/virglrenderer
+	ignore = dirty
+	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
+[submodule "rutabaga_gfx"]
+	path = 3rdparty/rutabaga_gfx
+	# `cargo xtask init` patches this tree in place; cargo needs the real
+	# path, so the patch cannot live in an exported copy.
+	ignore = dirty
+	url = https://github.com/magma-gpu/rutabaga_gfx.git
+[submodule "3rdparty/libepoxy"]
+	path = 3rdparty/libepoxy
+	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer
+	# requires epoxy unconditionally, and Windows has no package manager here.
+	url = https://github.com/anholt/libepoxy.git
+	ignore = dirty
+[submodule "MoltenVK"]
+	path = 3rdparty/MoltenVK
+	url = https://github.com/KhronosGroup/MoltenVK.git
+	ignore = dirty
+[submodule "SPIRV-Cross"]
+	path = 3rdparty/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	ignore = dirty

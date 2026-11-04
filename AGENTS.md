@@ -27,7 +27,7 @@ virtx is a library for running tasks in disposable Linux micro-VMs from your own
 Run these before pushing. There is no pull-request CI, so what you run locally is the gate.
 
 ```bash
-cargo fmt --all --check
+cargo fmt --check                                                       # members only: `--all` reaches into 3rdparty/
 cargo clippy --workspace -- -D warnings
 cargo test
 cargo test -- --ignored                                                # real mounts; needs a FUSE provider

@@ -48,7 +48,7 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 | what it installs kept for later | nothing: a sandbox keeps its disk when it stops; `name=` finds it again with `find_sandbox` |
 | what it installs, for other sandboxes to start from | `commit_image(sandbox.id, "name:tag")`, then sandboxes of that image |
 | nothing kept once done | `ephemeral=True`, deleted when it stops |
-| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)` |
+| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)`; `await sandbox.open_port(9000)` opens one later |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
 | more CPUs or memory | `vcpus=`, `memory_mib=` |
@@ -77,7 +77,7 @@ async for entry in sandbox.exec(["sh", "-c", "jq --version"], timeout_ms=10_000)
 
 Look at the volume, with its `read_file` or `read_dir`, or at the log's lines, rather than at the exit code alone: a command that printed "done" but wrote outside every volume has written nothing that outlives the sandbox. If a file is missing, the usual causes are a path outside the volumes, a read-only volume, or a step the image needed and lacked.
 
-Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`, or make it `ephemeral=True`: otherwise it is kept, stopped, after it goes unused, holding its disk.
+Remove the sandbox when the task is done: `async with await client.create_sandbox(...) as sandbox:` deletes it on leaving the block (`await using` in Node), or call `sandbox.remove()` in a `finally`, or make it `ephemeral=True`: otherwise it is kept, stopped, after it goes unused, holding its disk.
 
 ## Where to read more
 

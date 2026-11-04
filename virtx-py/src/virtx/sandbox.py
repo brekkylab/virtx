@@ -131,9 +131,15 @@ class Sandbox(Files):
 
     async def open_port(self, port: int) -> SandboxPort:
         """Open the TCP port ``port`` in it, as those it was made with are, and answer where it
-        is reached from. A program in it listening on ``port`` already is reached once it
-        listens again."""
-        return await self.client.open_sandbox_port(self.id, port)
+        is reached from, kept in ``ports`` in place of one for the same port. A program in it
+        listening on ``port`` already is reached once it listens again."""
+        opened = await self.client.open_sandbox_port(self.id, port)
+        at = next((i for i, known in enumerate(self.ports) if known.port == port), None)
+        if at is None:
+            self.ports.append(opened)
+        else:
+            self.ports[at] = opened
+        return opened
 
     def commit(self, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
         """Make an image of it, as ``Client.commit_image`` does, to point ``reference`` at."""

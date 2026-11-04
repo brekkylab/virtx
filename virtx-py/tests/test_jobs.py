@@ -14,6 +14,7 @@ from virtx import (
     SandboxJob,
     SandboxJobEnd,
     SandboxJobKind,
+    SandboxPort,
     SandboxState,
     SandboxVolume,
     Stderr,
@@ -72,6 +73,38 @@ async def test_a_sandbox_made_for_a_block_is_deleted_on_leaving_it(test_server: 
 
         async with await client.create_sandbox("alpine:3.20") as sandbox:
             await sandbox.remove()
+
+
+async def test_a_port_opened_after_is_kept_in_the_sandbox_s_ports(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
+        opened = await sandbox.open_port(8080)
+        assert opened == SandboxPort(8080, opened.url)
+        assert [port.port for port in sandbox.ports] == [8000, 8080]
+        assert await sandbox.open_port(8080) == opened
+        assert sandbox.ports == (await client.start_sandbox(sandbox.id)).ports
+
+        got = await client.get_sandbox(sandbox.id)
+        assert await got.open_port(8000) == sandbox.ports[0]
+        assert got.ports == [sandbox.ports[0]]
+
+
+async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        async with await client.create_sandbox("alpine:3.20") as sandbox:
+            assert (await client.get_sandbox(sandbox.id)).running
+        with pytest.raises(VirtxError, match="404"):
+            await client.get_sandbox(sandbox.id)
+
+        with pytest.raises(RuntimeError):
+            async with await client.create_sandbox("alpine:3.20") as failed:
+                raise RuntimeError
+        with pytest.raises(VirtxError, match="404"):
+            await client.get_sandbox(failed.id)
+
+        # One deleted already in the block is left so.
+        async with await client.create_sandbox("alpine:3.20") as removed:
+            await removed.remove()
 
 
 async def test_a_volume_is_created_and_got(test_server: str) -> None:

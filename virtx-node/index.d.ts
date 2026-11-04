@@ -325,6 +325,8 @@ export class Sandbox extends Files implements SandboxInfo {
   commit(reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
+  /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */
+  [Symbol.asyncDispose](): Promise<void>
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */

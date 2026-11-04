@@ -987,8 +987,10 @@ class Sandbox extends Files {
   }
 
   // Opens the TCP port `port` in it, as those it was made with are: where it is reached from.
-  openPort(port) {
-    return this.client._call('virtx_client_open_sandbox_port', { id: this.id, port })
+  async openPort(port) {
+    const opened = await this.client._call('virtx_client_open_sandbox_port', { id: this.id, port })
+    this.ports = (this.ports ?? []).filter((known) => known.port !== port).concat([opened])
+    return opened
   }
 
   // Starts making an image of it, to point `reference` at: the job, and its log as the job's
@@ -1000,6 +1002,18 @@ class Sandbox extends Files {
   // Deletes it: stopped first if it runs, and its disk removed. Its volumes stay.
   async remove() {
     await this.client._call('virtx_client_remove_sandbox', { id: this.id })
+  }
+}
+
+// `await using sandbox = await client.createSandbox(...)`, where the runtime has it: deletes it
+// on leaving, as `remove` does, and leaves one deleted already so.
+if (Symbol.asyncDispose) {
+  Sandbox.prototype[Symbol.asyncDispose] = async function () {
+    try {
+      await this.remove()
+    } catch (e) {
+      if (e.status !== 404) throw e
+    }
   }
 }
 

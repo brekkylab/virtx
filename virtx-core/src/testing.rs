@@ -178,6 +178,10 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
         .route("/sandboxes/{id}/start", post(start_sandbox))
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
+        .route(
+            "/sandboxes/{id}/ports/{port}",
+            axum::routing::put(open_port),
+        )
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
         .route("/sandboxes/{id}/jobs/exec/", post(exec))
         .route(
@@ -650,6 +654,28 @@ async fn remove_sandbox(State(shared): State<Shared>, Path(id): Path<String>) ->
         job.log.remove();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn open_port(
+    State(shared): State<Shared>,
+    Path((id, port)): Path<(String, u16)>,
+) -> Response {
+    if port == 0 {
+        return refuse(StatusCode::BAD_REQUEST, "invalid", "port 0");
+    }
+    let mut data = shared.lock().unwrap();
+    let Some(held) = data.sandboxes.get_mut(&id) else {
+        return not_found("such sandbox");
+    };
+    if let Some(open) = held.ports.iter().find(|open| open.port == port) {
+        return json(open);
+    }
+    let open = SandboxPort {
+        port,
+        url: format!("http://127.0.0.1:{port}"),
+    };
+    held.ports.push(open.clone());
+    created(format!("/sandboxes/{id}/ports/{port}"), &open)
 }
 
 async fn list_sandbox_jobs(State(shared): State<Shared>, Path(id): Path<String>) -> Response {

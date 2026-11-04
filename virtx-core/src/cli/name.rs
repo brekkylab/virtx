@@ -151,14 +151,22 @@ pub(crate) fn familiar_ref(reference: &str) -> String {
     }
 }
 
-/// A ref as a registry client fills it in: `registry/path:tag`.
+/// A ref as a registry client fills it in: `registry/path:tag`, or `registry/path@digest`.
 ///
-/// A name without a tag is `latest`; without a registry it is on `docker.io`, where a lone
-/// name is under `library/`. The first component is a registry when it has a `.` or a `:`
-/// or is `localhost`, as `docker` tells `ghcr.io/x` from `user/x`.
+/// A name without a tag or digest is `latest`; without a registry it is on `docker.io`, where
+/// a lone name is under `library/`. The first component is a registry when it has a `.` or a
+/// `:` or is `localhost`, as `docker` tells `ghcr.io/x` from `user/x`.
 pub(crate) fn canonical_ref(reference: &str) -> String {
-    let tagged = with_tag(reference);
-    let (name, tag) = tagged.rsplit_once(':').expect("tagged");
+    let (name, suffix) = match reference.split_once('@') {
+        Some((name, digest)) => (name, format!("@{digest}")),
+        None => {
+            let name = repository(reference);
+            match &reference[name.len()..] {
+                "" => (name, ":latest".to_string()),
+                tag => (name, tag.to_string()),
+            }
+        }
+    };
     let path = match name.split_once('/') {
         Some((registry, rest))
             if registry.contains('.') || registry.contains(':') || registry == "localhost" =>
@@ -172,7 +180,7 @@ pub(crate) fn canonical_ref(reference: &str) -> String {
         Some(_) => format!("docker.io/{name}"),
         None => format!("docker.io/library/{name}"),
     };
-    format!("{path}:{tag}")
+    format!("{path}{suffix}")
 }
 
 #[cfg(test)]
@@ -254,6 +262,9 @@ mod tests {
             }
         );
         assert!(lookup("alpine", &images).is_err());
+        // A digest ref names no tag the server lists.
+        assert!(lookup("app@foo", &images).is_err());
+        assert!(lookup("jq@sha256:bb", &images).is_err());
     }
 
     #[test]

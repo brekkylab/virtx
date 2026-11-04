@@ -39,7 +39,7 @@ pub(crate) async fn ls(client: &Client, LsArgs { digests, quiet }: LsArgs) -> an
     Ok(())
 }
 
-/// One line per ref. The digest column is there on request, as the ID names the image already.
+/// One line per ref; the digest column only with `--digests`, as the ID names the image already.
 fn table(images: &[Image], digests: bool) -> String {
     let rows: Vec<(&str, &Image)> = images
         .iter()

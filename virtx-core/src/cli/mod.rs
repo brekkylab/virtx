@@ -68,7 +68,8 @@ mod ffi {
         unsafe {
             libc::signal(libc::SIGINT, libc::SIG_DFL);
         }
-        c_int::from(super::main(argv))
+        // Unwinding into the host aborts it; a panic ends the command with 101, as in the binary.
+        std::panic::catch_unwind(|| super::main(argv)).map_or(101, c_int::from)
     }
 
     // An argument is the bytes the OS gave, which on Unix need not be UTF-8.

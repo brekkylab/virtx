@@ -98,10 +98,11 @@ pub struct SandboxCreateArgs {
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
 
-    /// TCP ports in it to open, each answered with where it is reached from. Reserved as it is
-    /// made, and kept until it is removed; `0` and a port given twice are refused.
+    /// Ports in it to open, each answered with where it is reached from: a number, or one with
+    /// what it is for and how it is reached ([`PortSpec`]). Reserved as it is made, and kept
+    /// until it is removed; `0` and a port given twice are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<u16>,
+    pub ports: Vec<PortSpec>,
 
     /// How many vCPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +270,7 @@ mod given_or_null {
     }
 }
 
-/// A TCP port opened in a sandbox, and where it is reached from.
+/// A port opened in a sandbox, and where it is reached from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPort {
@@ -281,6 +282,112 @@ pub struct SandboxPort {
     /// as those credentials, and the server's to form: a client does not build one or take it
     /// apart.
     pub url: String,
+
+    /// What it is for, in words of whoever opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// How it is reached ([`PortProtocol`]).
+    #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
+    pub protocol: PortProtocol,
+}
+
+/// How a port is reached from outside its sandbox.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortProtocol {
+    /// TCP, carried in a WebSocket of the subprotocol `virtx.tcp` to its `url`.
+    #[default]
+    Tcp,
+    /// HTTP served in the sandbox, reached at its `url` as HTTP -- over TLS, from a server
+    /// reachable from other machines -- by a browser as by any client; WebSockets too.
+    Http,
+}
+
+impl PortProtocol {
+    pub fn is_tcp(&self) -> bool {
+        *self == PortProtocol::Tcp
+    }
+}
+
+/// A port to open in a sandbox: its number, what it is for, and how it is reached. Written as
+/// the number alone when it is TCP and named nothing, `{port, label?, protocol?}` otherwise; read
+/// as either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortSpec {
+    pub port: u16,
+    pub label: Option<String>,
+    pub protocol: PortProtocol,
+}
+
+impl PortSpec {
+    pub fn new(port: u16) -> PortSpec {
+        PortSpec {
+            port,
+            label: None,
+            protocol: PortProtocol::Tcp,
+        }
+    }
+}
+
+impl From<u16> for PortSpec {
+    fn from(port: u16) -> PortSpec {
+        PortSpec::new(port)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortSpecObject {
+    port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
+    protocol: PortProtocol,
+}
+
+impl Serialize for PortSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.label.is_none() && self.protocol.is_tcp() {
+            return serializer.serialize_u16(self.port);
+        }
+        PortSpecObject {
+            port: self.port,
+            label: self.label.clone(),
+            protocol: self.protocol,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PortSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Port(u16),
+            Spec(PortSpecObject),
+        }
+        Ok(match Either::deserialize(deserializer)? {
+            Either::Port(port) => PortSpec::new(port),
+            Either::Spec(spec) => PortSpec {
+                port: spec.port,
+                label: spec.label,
+                protocol: spec.protocol,
+            },
+        })
+    }
+}
+
+/// What opening a port in a sandbox already made asks for (`PUT /sandboxes/{id}/ports/{port}`):
+/// what it is for, and how it is reached; TCP if not said.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPortOpenArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<PortProtocol>,
 }
 
 /// A volume mounted into a sandbox.
@@ -383,5 +490,42 @@ mod tests {
             },
         ];
         assert_eq!(args, expected);
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn a_port_is_written_as_its_number_unless_it_says_more() {
+        let plain = PortSpec::new(8080);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!(8080)
+        );
+        let web = PortSpec {
+            port: 5173,
+            label: Some("dev server".into()),
+            protocol: PortProtocol::Http,
+        };
+        let written = serde_json::to_value(&web).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"port": 5173, "label": "dev server", "protocol": "http"})
+        );
+        let read: Vec<PortSpec> =
+            serde_json::from_value(serde_json::json!([8080, written, {"port": 22}])).unwrap();
+        assert_eq!(read, [plain, web, PortSpec::new(22)]);
+        assert!(
+            serde_json::from_value::<PortSpec>(serde_json::json!({"port": 1, "x": 2})).is_err()
+        );
+        // A port answered as before: TCP, named nothing.
+        let answered: SandboxPort =
+            serde_json::from_value(serde_json::json!({"port": 1, "url": "ports/x"})).unwrap();
+        assert_eq!(
+            (answered.label, answered.protocol),
+            (None, PortProtocol::Tcp)
+        );
     }
 }

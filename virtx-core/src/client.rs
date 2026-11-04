@@ -19,7 +19,7 @@ use crate::{
     },
     sandbox::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
-        SandboxJobEntry, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
+        SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -411,7 +411,19 @@ impl Client {
         id: impl AsRef<str>,
         port: u16,
     ) -> Result<SandboxPort, Error> {
-        sandbox::client::open_port(&self.inner, id.as_ref(), port).await
+        self.open_sandbox_port_with(id, port, &SandboxPortOpenArgs::default())
+            .await
+    }
+
+    /// Open the port `port` in the sandbox `id` as `args` say -- what it is for, and how it is
+    /// reached, TCP or HTTP -- and answer where it is reached from.
+    pub async fn open_sandbox_port_with(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+        args: &SandboxPortOpenArgs,
+    ) -> Result<SandboxPort, Error> {
+        sandbox::client::open_port(&self.inner, id.as_ref(), port, args).await
     }
 
     /// Every job in the sandbox `id`.
@@ -610,7 +622,7 @@ mod tests {
         for client in each().await {
             let mut args = SandboxCreateArgs::new("alpine:3.20");
             args.name = Some("work".into());
-            args.ports = vec![3000];
+            args.ports = vec![3000.into()];
             let sandbox = client.create_sandbox(&args).await.unwrap();
             assert_eq!(sandbox.name.as_deref(), Some("work"));
             assert_eq!(sandbox.state, SandboxState::Running);
@@ -639,6 +651,22 @@ mod tests {
             assert_eq!(again, opened);
             let started = client.start_sandbox(&sandbox.id).await.unwrap();
             assert_eq!(started.ports[1], opened);
+            // One for a browser, named for what it is.
+            let web = client
+                .open_sandbox_port_with(
+                    &sandbox.id,
+                    5173,
+                    &SandboxPortOpenArgs {
+                        label: Some("dev server".into()),
+                        protocol: Some(crate::PortProtocol::Http),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (web.label.as_deref(), web.protocol),
+                (Some("dev server"), crate::PortProtocol::Http)
+            );
             let missing = client.open_sandbox_port("nobody", 8080).await;
             assert_eq!(refusal(missing).0, 404);
 
@@ -2308,8 +2336,9 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Opens the TCP port `port` in the sandbox `id`, given `{"id": "...", "port": n}`. Answers
-    /// with `{"port": n, "url": "..."}`: where it is reached from now.
+    /// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
+    /// "protocol"?: "tcp" | "http"}`. Answers with `{"port": n, "url": "...", "label"?,
+    /// "protocol"?}`: where it is reached from now.
     ///
     /// # Safety
     ///
@@ -2325,12 +2354,20 @@ pub(crate) mod ffi {
         struct IdPort {
             id: String,
             port: u16,
+            #[serde(default)]
+            label: Option<String>,
+            #[serde(default)]
+            protocol: Option<crate::PortProtocol>,
         }
         let args = unsafe { json::<IdPort>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let args = args?;
+            let open = crate::SandboxPortOpenArgs {
+                label: args.label,
+                protocol: args.protocol,
+            };
             client
-                .open_sandbox_port(args.id, args.port)
+                .open_sandbox_port_with(args.id, args.port, &open)
                 .await
                 .map_err(|e| e.to_string())
         })

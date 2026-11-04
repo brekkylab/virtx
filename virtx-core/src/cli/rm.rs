@@ -162,52 +162,52 @@ fn plan(named: &Named) -> Vec<Removal> {
 mod tests {
     use super::*;
 
-    fn image(refs: &[&str]) -> Image {
-        Image {
+    #[test]
+    fn a_name_untags_or_takes_the_image_from_the_repositories_it_reaches() {
+        let shared = Image {
             digest: "sha256:aa".into(),
-            refs: refs.iter().map(|r| r.to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn a_ref_is_untagged_while_its_repository_holds_the_image_under_another() {
-        let shared = image(&["jq:1", "jq:latest", "mine:1"]);
-        assert_eq!(
-            plan(&Named::Ref {
-                image: &shared,
-                reference: "jq:1"
-            }),
-            [Removal::Untag("jq:1".into())]
-        );
-        assert_eq!(
-            plan(&Named::Ref {
-                image: &shared,
-                reference: "mine:1"
-            }),
-            [Removal::Remove("mine@sha256:aa".into())]
-        );
-    }
-
-    #[test]
-    fn an_image_is_removed_from_every_repository_it_is_in() {
-        let shared = image(&["jq:1", "jq:latest", "mine:1"]);
-        assert_eq!(
-            plan(&Named::Image(&shared)),
-            [
-                Removal::Remove("jq@sha256:aa".into()),
-                Removal::Remove("mine@sha256:aa".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_digest_takes_the_image_from_its_repository_alone() {
-        let shared = image(&["jq:1", "jq:latest", "mine:1"]);
-        let named = Named::Digest {
-            image: &shared,
-            repository: "jq",
+            refs: ["jq:1", "jq:latest", "mine:1"].map(String::from).to_vec(),
         };
-        assert_eq!(plan(&named), [Removal::Remove("jq@sha256:aa".into())]);
-        assert_eq!(untagged(&named), ["jq:1", "jq:latest"]);
+        let untag = |reference: &str| Removal::Untag(reference.into());
+        let remove = |reference: &str| Removal::Remove(reference.into());
+        let cases = [
+            // Another tag in its repository keeps the image there.
+            (
+                Named::Ref {
+                    image: &shared,
+                    reference: "jq:1",
+                },
+                vec![untag("jq:1")],
+                vec!["jq:1"],
+            ),
+            (
+                Named::Ref {
+                    image: &shared,
+                    reference: "mine:1",
+                },
+                vec![remove("mine@sha256:aa")],
+                vec!["mine:1"],
+            ),
+            (
+                Named::Image(&shared),
+                vec![remove("jq@sha256:aa"), remove("mine@sha256:aa")],
+                vec!["jq:1", "jq:latest", "mine:1"],
+            ),
+            (
+                Named::Digest {
+                    image: &shared,
+                    repository: "jq",
+                },
+                vec![remove("jq@sha256:aa")],
+                vec!["jq:1", "jq:latest"],
+            ),
+        ];
+        for (named, removals, refs) in cases {
+            assert_eq!(
+                (plan(&named), untagged(&named)),
+                (removals, refs),
+                "{named:?}"
+            );
+        }
     }
 }

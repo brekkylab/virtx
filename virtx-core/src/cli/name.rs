@@ -258,60 +258,32 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_is_found_as_spelled_or_as_docker_fills_it_in() {
+    fn a_name_is_found_as_spelled_or_as_docker_fills_it_in() {
         let images = [
             image("sha256:aa", &["alpine:3.20", "mine:1"]),
             image("sha256:bb", &["docker.io/library/jq:latest"]),
         ];
-        let found = lookup("mine:1", &images).unwrap();
-        assert_eq!(
-            found,
-            Named::Ref {
-                image: &images[0],
-                reference: "mine:1"
-            }
-        );
-        assert_eq!(found.reference(), "mine:1");
-        assert_eq!(
-            lookup("jq", &images).unwrap(),
-            Named::Ref {
-                image: &images[1],
-                reference: "docker.io/library/jq:latest"
-            }
-        );
-        assert_eq!(
-            lookup("docker.io/library/alpine:3.20", &images).unwrap(),
-            Named::Ref {
-                image: &images[0],
-                reference: "alpine:3.20"
-            }
-        );
-        assert!(lookup("alpine", &images).is_err());
-        assert!(lookup("app@foo", &images).is_err());
-    }
-
-    #[test]
-    fn a_digest_names_the_image_in_one_repository() {
-        let images = [
-            image("sha256:aa", &["alpine:3.20", "mine:1"]),
-            image("sha256:bb", &["docker.io/library/jq:latest"]),
-        ];
-        let found = lookup("docker.io/library/alpine@sha256:aa", &images).unwrap();
-        assert_eq!(
-            found,
-            Named::Digest {
-                image: &images[0],
-                repository: "alpine"
-            }
-        );
-        assert_eq!(found.reference(), "alpine@sha256:aa");
-        assert_eq!(
-            lookup("jq@sha256:bb", &images).unwrap().reference(),
-            "docker.io/library/jq@sha256:bb"
-        );
-        // The image is not in that repository, or no image has that digest.
-        assert!(lookup("jq@sha256:aa", &images).is_err());
-        assert!(lookup("alpine@sha256:a", &images).is_err());
+        // What each name reaches, as the server takes it.
+        for (name, reached) in [
+            ("mine:1", Some("mine:1")),
+            ("jq", Some("docker.io/library/jq:latest")),
+            ("docker.io/library/alpine:3.20", Some("alpine:3.20")),
+            ("alpine", None),
+            (
+                "docker.io/library/alpine@sha256:aa",
+                Some("alpine@sha256:aa"),
+            ),
+            // In the repository named, not that of the image's first ref.
+            ("mine@sha256:aa", Some("mine@sha256:aa")),
+            ("jq@sha256:bb", Some("docker.io/library/jq@sha256:bb")),
+            // Not in that repository; a digest is whole, not a prefix; not a digest.
+            ("jq@sha256:aa", None),
+            ("alpine@sha256:a", None),
+            ("app@foo", None),
+        ] {
+            let found = lookup(name, &images).ok().map(|named| named.reference());
+            assert_eq!(found.as_deref(), reached, "{name}");
+        }
     }
 
     #[test]

@@ -255,6 +255,7 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 | `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
 | `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running}` |
 | `DELETE /sandboxes/{id}` | | `204` |
+| `PUT /sandboxes/{id}/ports/{port}` | | `201`, `{port, url}`; `200` for one open already |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
@@ -272,7 +273,9 @@ One whose VM has exited is still held until then.
 `ports` in the body are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
 They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
 
-The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+A port is opened in a sandbox already made with `PUT /sandboxes/{id}/ports/{port}`, and kept from then on as those it was made with are. Opened again, it is answered `200` with where it was: the same `url`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+
+The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.

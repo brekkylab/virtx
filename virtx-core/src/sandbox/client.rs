@@ -7,7 +7,7 @@ use futures_util::StreamExt as _;
 
 use super::{
     Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxSignalArgs, SandboxStdinArgs,
+    SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -49,6 +49,16 @@ pub(crate) async fn get(client: &TransportClient, id: &str) -> Result<Sandbox, E
 /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
 pub(crate) async fn remove(client: &TransportClient, id: &str) -> Result<(), Error> {
     http::delete(client, &sandbox(id)).await
+}
+
+/// Open the TCP port `port` in the sandbox `id`, as those it was made with are: where it is
+/// reached from.
+pub(crate) async fn open_port(
+    client: &TransportClient,
+    id: &str,
+    port: u16,
+) -> Result<SandboxPort, Error> {
+    http::put(client, &format!("{}/ports/{port}", sandbox(id)), &()).await
 }
 
 /// Every job in the sandbox `id`.

@@ -19,7 +19,7 @@ use crate::{
     },
     sandbox::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
-        SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
+        SandboxJobEntry, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
     },
     snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
@@ -399,6 +399,17 @@ impl Client {
     /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
+    }
+
+    /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
+    /// where it is reached from: as secret as a port's URL is. A program in it that listens on
+    /// `port` already is reached once it listens again.
+    pub async fn open_sandbox_port(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+    ) -> Result<SandboxPort, Error> {
+        sandbox::client::open_port(&self.inner, id.as_ref(), port).await
     }
 
     /// Every job in the sandbox `id`.

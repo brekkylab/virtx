@@ -161,6 +161,7 @@ api! {
     virtx_client_start_sandbox: WithArgs,
     virtx_client_stop_sandbox: WithArgs,
     virtx_client_open_sandbox_port: WithArgs,
+    virtx_client_close_sandbox_port: WithArgs,
     virtx_client_remove_sandbox: WithArgs,
     virtx_client_list_sandbox_job: WithArgs,
     virtx_client_exec_sandbox: WithArgs,

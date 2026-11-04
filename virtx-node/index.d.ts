@@ -197,10 +197,12 @@ export class Sandbox {
   autoDeleteDays?: number
   /** When it was last used, as RFC 3339. */
   usedAt: string
-  /** Only as `createSandbox` and `startSandbox` answer it, if it has some, and each `openPort` adds. */
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some, each `openPort` adding one and `closePort` dropping it. */
   ports?: SandboxPort[]
   /** Open the port `port` in it, as `openSandboxPort` does, and keep the answer in `ports`, in place of one for the same port. */
   openPort(port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
+  /** Close the port `port` in it, as `closeSandboxPort` does, and drop it from `ports`. */
+  closePort(port: number): Promise<void>
   /** Delete it, as `removeSandbox` does, for `await using`; one deleted already is left so. */
   [Symbol.asyncDispose](): Promise<void>
 }
@@ -417,6 +419,8 @@ export class Client {
   stopSandbox(id: string): Promise<Sandbox>
   /** Open the port `port` in it, as those it was made with are, TCP unless `protocol` says `'http'`; where it is reached from. Opened already, it is answered as it is, `label` renaming it. */
   openSandboxPort(id: string, port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
+  /** Close the port `port` in it: its `url` reaches it no more, and it is not opened again as the sandbox starts. One not open is refused `404`. */
+  closeSandboxPort(id: string, port: number): Promise<void>
   /** Delete the sandbox: stopped first if it runs, and its disk removed. Its volumes stay. */
   removeSandbox(id: string): Promise<void>
   listSandboxJob(sandbox: string): Promise<SandboxJob[]>

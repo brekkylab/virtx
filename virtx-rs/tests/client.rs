@@ -185,6 +185,14 @@ fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
     assert_eq!(opened.port, 8080);
     let started = client.start_sandbox(&made.id).wait().unwrap();
     assert_eq!(started.ports, [opened]);
+    client.close_sandbox_port(&made.id, 8080).unwrap_wait();
+    let started = client.start_sandbox(&made.id).wait().unwrap();
+    assert_eq!(started.ports, []);
+    let closed = client
+        .close_sandbox_port(&made.id, 8080)
+        .wait()
+        .unwrap_err();
+    assert!(closed.to_string().contains("404"), "{closed}");
     let job = client.commit_image(&made.id, "mine:v1").wait().unwrap();
     assert_eq!(job.kind, ImageJobKind::Commit);
     client.remove_sandbox(&made.id).unwrap_wait();

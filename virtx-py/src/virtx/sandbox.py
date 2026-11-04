@@ -128,8 +128,8 @@ class Sandbox:
     """When it was last used, as RFC 3339."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` and ``start_sandbox`` only, and each
-    ``open_port`` adds."""
+    """Its opened ports: answered by ``create_sandbox`` and ``start_sandbox`` only, each
+    ``open_port`` adding one and ``close_port`` dropping it."""
 
     _client: Client | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -159,6 +159,12 @@ class Sandbox:
         else:
             self.ports[at] = opened
         return opened
+
+    async def close_port(self, port: int) -> None:
+        """Close the port ``port`` in it, as ``Client.close_sandbox_port`` does, and drop it from
+        ``ports``."""
+        await self._held().close_sandbox_port(self.id, port)
+        self.ports[:] = [known for known in self.ports if known.port != port]
 
     async def __aenter__(self) -> Self:
         return self

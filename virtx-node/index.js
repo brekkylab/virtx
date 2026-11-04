@@ -124,6 +124,7 @@ const SIGNATURES = {
   virtx_client_start_sandbox: WITH_ARGS,
   virtx_client_stop_sandbox: WITH_ARGS,
   virtx_client_open_sandbox_port: WITH_ARGS,
+  virtx_client_close_sandbox_port: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -414,6 +415,12 @@ class Sandbox {
     if (at === -1) ports.push(opened)
     else ports[at] = opened
     return opened
+  }
+
+  // Closes the port as `closeSandboxPort` does, and drops it from `ports`.
+  async closePort(port) {
+    await this._client.closeSandboxPort(this.id, port)
+    if (this.ports) this.ports = this.ports.filter((known) => known.port !== port)
   }
 }
 
@@ -817,6 +824,11 @@ class Client {
   // renaming it.
   openSandboxPort(id, port, { label, protocol } = {}) {
     return this._call('virtx_client_open_sandbox_port', { id, port, label, protocol })
+  }
+
+  // Its URL reaches it no more, and it is not opened again as the sandbox starts.
+  async closeSandboxPort(id, port) {
+    await this._call('virtx_client_close_sandbox_port', { id, port })
   }
 
   // Deletes the sandbox: stopped first if it runs, and its disk removed.

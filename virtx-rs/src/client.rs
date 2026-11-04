@@ -633,6 +633,13 @@ impl Client {
         self.call(self.api.virtx_client_open_sandbox_port, args)
     }
 
+    /// Close the port `port` in the sandbox `id`: its URL reaches it no more, and it is not
+    /// opened again as the sandbox starts. One not open is refused `404`.
+    pub fn close_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<()> {
+        let args = json!({ "id": id.as_ref(), "port": port });
+        self.call(self.api.virtx_client_close_sandbox_port, args)
+    }
+
     /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes
     /// stay.
     pub fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {

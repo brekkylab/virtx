@@ -247,6 +247,8 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
 
 A port can say what it is for, and be HTTP rather than TCP: `PortSpec(5173, label="dev server", protocol="http")` in `ports`, or `open_port(5173, label=..., protocol="http")`, is answered with a URL a browser opens, from a server reachable from other machines an `https` one, rather than one for a `PortForwarder`. `ports` mixes the two, `[5900, PortSpec(5173, protocol="http")]`; Node takes `{ port, label, protocol }` there, and Rust a `PortSpec`, `8080.into()` for a plain one.
 
+`sandbox.close_port(port)` closes one, dropping it from `sandbox.ports` -- `closePort` in Node, and `close_sandbox_port(id, port)` on the client, `closeSandboxPort` in Node and the only way in Rust: its URL reaches it no more, and it is not opened again as the sandbox starts. A TCP port is made HTTP by closing it and opening it again, at another URL.
+
 Ports are the way in. `network=False` takes away the way out.
 
 ## Images

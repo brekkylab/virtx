@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import { before, test } from 'node:test'
@@ -316,6 +317,34 @@ test('a port says what it is for, and whether it is HTTP', async () => {
     assert.deepEqual([plain.label, plain.protocol], [undefined, undefined])
   } finally {
     await client.close()
+  }
+})
+
+// The test server is on the client's machine and gives no port an address: a server that does
+// is played by one answering a sandbox, and a port opened in it with such an address.
+test('a TCP port answered with an address has it', async () => {
+  const answer = { port: 22, url: 'ports/x', address: 'tcp.example:20001' }
+  const sandbox = {
+    id: 'sb',
+    image: 'sha256:0',
+    state: 'running',
+    ephemeral: false,
+    auto_stop_minutes: 15,
+    auto_delete_days: 30,
+    used_at: '2026-01-01T00:00:00Z',
+  }
+  const server = http.createServer((request, response) => {
+    const opening = request.method === 'PUT'
+    response.writeHead(opening ? 201 : 200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(opening ? answer : sandbox))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const client = Client.connect(`http://127.0.0.1:${server.address().port}/`)
+  try {
+    assert.deepEqual(await (await client.getSandbox('sb')).openPort(22), answer)
+  } finally {
+    await client.close()
+    server.close()
   }
 })
 

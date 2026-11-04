@@ -597,6 +597,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
             url: format!("http://127.0.0.1:{}", spec.port),
             label: spec.label.clone(),
             protocol: spec.protocol,
+            address: None,
         })
         .collect();
     data.sandboxes.insert(
@@ -703,6 +704,7 @@ async fn open_port(
         url: format!("http://127.0.0.1:{port}"),
         label: asked.label,
         protocol: asked.protocol.unwrap_or_default(),
+        address: None,
     };
     held.ports.push(open.clone());
     created(format!("/sandboxes/{id}/ports/{port}"), &open)

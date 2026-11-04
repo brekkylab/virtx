@@ -322,10 +322,11 @@ A port is opened in a sandbox already made, running or stopped, with `PUT /sandb
 
 A port is closed with `DELETE /sandboxes/{id}/ports/{port}`: its URL reaches it no more from then on, and it is not opened again as the sandbox starts; one not open is answered `404`, `not_found`. A server MAY refuse to close a port it opens in every sandbox, with `409`, `in_use`. To reach a port another way -- `http` rather than `tcp` -- it is closed and opened again, at another URL.
 
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?}` -- `protocol` left out for `tcp` -- in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?}` -- `protocol` left out for `tcp`, `address` for a port that has none -- in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
-- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
+- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.
+- A server reachable from other machines MAY answer a `tcp` port with an `address` too, `host:port`, such as `tcp.example.com:20001`, where any TCP client reaches it directly, with no WebSocket and no credentials. It is not secret, as the URL is: what listens on the port answers whoever connects there, and authenticates them itself. The server MAY give one to some `tcp` ports and not others; an `http` port has none, and nor does any on a server on the client's machine.
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
 - A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; an `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.

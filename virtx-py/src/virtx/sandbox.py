@@ -45,6 +45,10 @@ class SandboxPort:
 
     protocol: PortProtocol = PortProtocol.TCP
 
+    address: str | None = None
+    """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
+    one. Not secret, as ``url`` is: what listens there answers whoever connects."""
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
         return cls(
@@ -52,6 +56,7 @@ class SandboxPort:
             value["url"],
             value.get("label"),
             PortProtocol(value.get("protocol", "tcp")),
+            value.get("address"),
         )
 
 

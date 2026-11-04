@@ -135,6 +135,12 @@ def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:
     assert SandboxPort.from_dict({"port": 1, "url": "u"}) == SandboxPort(1, "u")
 
 
+def test_a_tcp_port_answered_with_an_address_has_it() -> None:
+    reached = SandboxPort.from_dict({"port": 22, "url": "u", "address": "tcp.example:20001"})
+    assert reached == SandboxPort(22, "u", address="tcp.example:20001")
+    assert SandboxPort.from_dict({"port": 1, "url": "u"}).address is None
+
+
 async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         async with await client.create_sandbox("alpine:3.20") as sandbox:

@@ -11,8 +11,10 @@ from virtx import (
     Log,
     LogEntry,
     Recipe,
+    Sandbox,
     SandboxJobEnd,
     SandboxJobKind,
+    SandboxPort,
     SandboxState,
     Stderr,
     Stdout,
@@ -51,6 +53,41 @@ async def test_a_sandbox_stops_starts_again_and_is_found_by_its_name(test_server
         await client.remove_sandbox(made.id)
         with pytest.raises(VirtxError, match="404"):
             await client.get_sandbox(made.id)
+
+
+async def test_a_port_opened_after_is_kept_in_the_sandbox_s_ports(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
+        opened = await sandbox.open_port(8080)
+        assert opened == SandboxPort(8080, opened.url)
+        assert [port.port for port in sandbox.ports] == [8000, 8080]
+        assert await sandbox.open_port(8080) == opened
+        assert sandbox.ports == (await client.start_sandbox(sandbox.id)).ports
+
+        got = await client.get_sandbox(sandbox.id)
+        assert await got.open_port(8000) == sandbox.ports[0]
+        assert got.ports == [sandbox.ports[0]]
+        made = Sandbox("sb", None, "sha256:0", SandboxState.RUNNING, False, 15, None, "")
+        with pytest.raises(VirtxError, match="not answered by a client"):
+            await made.open_port(8000)
+
+
+async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        async with await client.create_sandbox("alpine:3.20") as sandbox:
+            assert (await client.get_sandbox(sandbox.id)).running
+        with pytest.raises(VirtxError, match="404"):
+            await client.get_sandbox(sandbox.id)
+
+        with pytest.raises(RuntimeError):
+            async with await client.create_sandbox("alpine:3.20") as failed:
+                raise RuntimeError
+        with pytest.raises(VirtxError, match="404"):
+            await client.get_sandbox(failed.id)
+
+        # One deleted already in the block is left so.
+        async with await client.create_sandbox("alpine:3.20") as removed:
+            await client.remove_sandbox(removed.id)
 
 
 async def test_a_volume_is_created_and_got(test_server: str) -> None:

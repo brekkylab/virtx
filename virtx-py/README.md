@@ -49,7 +49,14 @@ async for entry in run:
 await client.remove_sandbox(sandbox.id)
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox is kept, stopped, once unused, until it is deleted. One the client answered is also an async context manager that deletes it on leaving, so a sandbox for one block is one line; one deleted already in the block is left so.
+
+```python
+async with await client.create_sandbox("alpine:3.20") as sandbox:
+    await client.exec_sandbox(sandbox.id, ["echo", "hi"])
+```
+
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it, or `open_port` for one opened after: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```python
 from virtx import PortForwarder
@@ -57,6 +64,7 @@ from virtx import PortForwarder
 sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
 with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
+port = await sandbox.open_port(9000)  # kept in sandbox.ports too
 ```
 
 The files of a volume are read and written through the client, each request naming its root as a `Volume`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.

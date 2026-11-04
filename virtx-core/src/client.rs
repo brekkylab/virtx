@@ -632,6 +632,16 @@ mod tests {
             assert_eq!(started.state, SandboxState::Running);
             assert_eq!(started.ports, sandbox.ports);
 
+            // A port opened after is kept as those it was made with are.
+            let opened = client.open_sandbox_port(&sandbox.id, 8080).await.unwrap();
+            assert_eq!(opened.port, 8080);
+            let again = client.open_sandbox_port(&sandbox.id, 8080).await.unwrap();
+            assert_eq!(again, opened);
+            let started = client.start_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(started.ports[1], opened);
+            let missing = client.open_sandbox_port("nobody", 8080).await;
+            assert_eq!(refusal(missing).0, 404);
+
             // A job started in a stopped one starts it.
             client.stop_sandbox(&sandbox.id).await.unwrap();
             client

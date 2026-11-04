@@ -172,6 +172,45 @@ test('a sandbox stops, starts again, is found by its name and committed', async 
   }
 })
 
+test("a port opened after is kept in the sandbox's ports", async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000] })
+    const opened = await sandbox.openPort(8080)
+    assert.equal(opened.port, 8080)
+    assert.deepEqual(
+      sandbox.ports.map(({ port }) => port),
+      [8000, 8080],
+    )
+    assert.deepEqual(await sandbox.openPort(8080), opened)
+    assert.deepEqual(sandbox.ports, (await client.startSandbox(sandbox.id)).ports)
+
+    const got = await client.getSandbox(sandbox.id)
+    assert.equal(got.ports, undefined)
+    assert.deepEqual(await got.openPort(8000), sandbox.ports[0])
+    assert.deepEqual(got.ports, [sandbox.ports[0]])
+  } finally {
+    await client.close()
+  }
+})
+
+// What `await using` calls on leaving its block, called as it would be, so the test parses on a
+// Node without that syntax.
+test('a sandbox is deleted when disposed', { skip: !Symbol.asyncDispose }, async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20')
+    assert.equal((await client.getSandbox(sandbox.id)).state, 'running')
+    await sandbox[Symbol.asyncDispose]()
+    await assert.rejects(client.getSandbox(sandbox.id), /404/)
+
+    // One deleted already is left so.
+    await sandbox[Symbol.asyncDispose]()
+  } finally {
+    await client.close()
+  }
+})
+
 test('a volume is created and got', async () => {
   const client = Client.spawn(testServer)
   try {

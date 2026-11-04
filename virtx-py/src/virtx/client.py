@@ -552,7 +552,7 @@ class Client:
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds, without its ports."""
         items = await self._call("virtx_client_list_sandbox")
-        return [Sandbox.from_dict(item) for item in items]
+        return [Sandbox.from_dict(item, self) for item in items]
 
     async def create_sandbox(
         self,
@@ -598,28 +598,31 @@ class Client:
         if auto_delete_days == "never":
             args["auto_delete_days"] = None
         return Sandbox.from_dict(
-            await self._call("virtx_client_create_sandbox", json.dumps(args).encode())
+            await self._call("virtx_client_create_sandbox", json.dumps(args).encode()), self
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``, running or stopped, without its ports."""
-        return Sandbox.from_dict(await self._call("virtx_client_get_sandbox", _args(id=id)))
+        output = await self._call("virtx_client_get_sandbox", _args(id=id))
+        return Sandbox.from_dict(output, self)
 
     async def find_sandbox(self, name: str) -> Sandbox | None:
         """The sandbox named ``name``, without its ports, if one is."""
         found = await self._call("virtx_client_find_sandbox", _args(name=name))
-        return None if found is None else Sandbox.from_dict(found)
+        return None if found is None else Sandbox.from_dict(found, self)
 
     async def start_sandbox(self, id: str) -> Sandbox:
         """Start the sandbox ``id`` if it is stopped -- its VM booted over its disk as it was
         left -- and answer it once it runs, with where its ports are now. A job started in a
         stopped sandbox starts it too."""
-        return Sandbox.from_dict(await self._call("virtx_client_start_sandbox", _args(id=id)))
+        output = await self._call("virtx_client_start_sandbox", _args(id=id))
+        return Sandbox.from_dict(output, self)
 
     async def stop_sandbox(self, id: str) -> Sandbox:
         """Stop the sandbox ``id`` if it runs: its jobs end, and its disk is kept -- or, for an
         ephemeral one, deleted with it. Answered once it has stopped."""
-        return Sandbox.from_dict(await self._call("virtx_client_stop_sandbox", _args(id=id)))
+        output = await self._call("virtx_client_stop_sandbox", _args(id=id))
+        return Sandbox.from_dict(output, self)
 
     async def open_sandbox_port(self, id: str, port: int) -> SandboxPort:
         """Open the TCP port ``port`` in the sandbox ``id``, as those it was made with are, and

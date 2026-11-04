@@ -394,6 +394,41 @@ function authBytes(auth) {
   return auth ? Buffer.from(JSON.stringify(auth)) : Buffer.alloc(0)
 }
 
+// How a refusal with `404` reads, as `libvirtx_core` words it.
+const NOT_FOUND = 'the server answered 404'
+
+// A sandbox as the client answered it, its members those of the wire, and that client's: `openPort`
+// is sent over it, and `await using` deletes the sandbox on leaving.
+class Sandbox {
+  constructor(client, fields) {
+    Object.defineProperty(this, '_client', { value: client })
+    Object.assign(this, fields)
+  }
+
+  // Opens the port as `openSandboxPort` does, and keeps the answer in `ports`, in place of one
+  // for the same port.
+  async openPort(port) {
+    const opened = await this._client.openSandboxPort(this.id, port)
+    const ports = (this.ports ??= [])
+    const at = ports.findIndex((known) => known.port === port)
+    if (at === -1) ports.push(opened)
+    else ports[at] = opened
+    return opened
+  }
+}
+
+// `await using`, where the runtime has it: deletes it as `removeSandbox` does, and leaves one
+// deleted already so.
+if (Symbol.asyncDispose) {
+  Sandbox.prototype[Symbol.asyncDispose] = async function () {
+    try {
+      await this._client.removeSandbox(this.id)
+    } catch (e) {
+      if (!String(e.message).startsWith(NOT_FOUND)) throw e
+    }
+  }
+}
+
 function opening(lib, status, raw, error) {
   if (status === OK) return new Client(raw[0], lib)
   lib.take(status, error)
@@ -740,13 +775,19 @@ class Client {
     await this._call('virtx_client_copy_file', { ...root, from, to, overwrite })
   }
 
-  listSandbox() {
-    return this._call('virtx_client_list_sandbox')
+  async _sandbox(name, args) {
+    const answer = await this._call(name, args)
+    return answer === null ? undefined : new Sandbox(this, answer)
+  }
+
+  async listSandbox() {
+    const items = await this._call('virtx_client_list_sandbox')
+    return items.map((item) => new Sandbox(this, item))
   }
 
   createSandbox(image, options = {}) {
     const autoDeleteDays = options.autoDeleteDays === 'never' ? NULL : options.autoDeleteDays
-    return this._call('virtx_client_create_sandbox', {
+    return this._sandbox('virtx_client_create_sandbox', {
       ...options,
       autoDeleteDays,
       image: imageName(image),
@@ -754,22 +795,22 @@ class Client {
   }
 
   getSandbox(id) {
-    return this._call('virtx_client_get_sandbox', { id })
+    return this._sandbox('virtx_client_get_sandbox', { id })
   }
 
   // The sandbox named `name`, or `undefined` if none is.
-  async findSandbox(name) {
-    return (await this._call('virtx_client_find_sandbox', { name })) ?? undefined
+  findSandbox(name) {
+    return this._sandbox('virtx_client_find_sandbox', { name })
   }
 
   // Starts it if it is stopped; answered once it runs, with where its ports are now.
   startSandbox(id) {
-    return this._call('virtx_client_start_sandbox', { id })
+    return this._sandbox('virtx_client_start_sandbox', { id })
   }
 
   // Stops it if it runs, its disk kept -- or, for an ephemeral one, deleted with it.
   stopSandbox(id) {
-    return this._call('virtx_client_stop_sandbox', { id })
+    return this._sandbox('virtx_client_stop_sandbox', { id })
   }
 
   openSandboxPort(id, port) {
@@ -918,6 +959,7 @@ module.exports = {
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
+  Sandbox,
   StartedJob,
   VirtxError,
   imageName,

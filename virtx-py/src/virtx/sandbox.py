@@ -7,15 +7,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from ._library import VirtxError
 from .job import LogEntry, Truncated
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
+    from .client import Client
 
 
 @dataclass(frozen=True)
 class SandboxPort:
-    """A TCP port in a sandbox, opened as it was made, and the ``url`` a ``PortForwarder``
-    reaches it by."""
+    """A TCP port opened in a sandbox, and the ``url`` a ``PortForwarder`` reaches it by."""
 
     port: int
     url: str
@@ -48,7 +53,11 @@ class SandboxState(str, Enum):
 
 @dataclass(frozen=True)
 class Sandbox:
-    """One sandbox the server holds, running or stopped."""
+    """One sandbox the server holds, running or stopped.
+
+    One a client answered is that client's: ``open_port`` is sent over it, and ``async with``
+    deletes the sandbox on leaving, as ``async with await client.create_sandbox(...) as
+    sandbox:`` makes one for a block."""
 
     id: str
 
@@ -75,16 +84,47 @@ class Sandbox:
     """When it was last used, as RFC 3339."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` and ``start_sandbox`` only."""
+    """Its opened ports: answered by ``create_sandbox`` and ``start_sandbox`` only, and each
+    ``open_port`` adds."""
+
+    _client: Client | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def running(self) -> bool:
         """Whether its VM is up."""
         return self.state == SandboxState.RUNNING
 
+    def _held(self) -> Client:
+        if self._client is None:
+            raise VirtxError("the sandbox was not answered by a client")
+        return self._client
+
+    async def open_port(self, port: int) -> SandboxPort:
+        """Open the TCP port ``port`` in it, as ``Client.open_sandbox_port`` does, and keep the
+        answer in ``ports``, in place of one for the same port."""
+        opened = await self._held().open_sandbox_port(self.id, port)
+        at = next((i for i, known in enumerate(self.ports) if known.port == port), None)
+        if at is None:
+            self.ports.append(opened)
+        else:
+            self.ports[at] = opened
+        return opened
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Delete it, as ``Client.remove_sandbox`` does; one deleted already is left so."""
+        try:
+            await self._held().remove_sandbox(self.id)
+        except VirtxError as error:
+            if not str(error).startswith(_NOT_FOUND):
+                raise
+
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Sandbox:
-        return cls(
+    def from_dict(cls, value: Mapping[str, Any], client: Client | None = None) -> Sandbox:
+        """``value`` as the wire has it, sent over ``client`` if given."""
+        sandbox = cls(
             value["id"],
             value.get("name"),
             value["image"],
@@ -95,6 +135,12 @@ class Sandbox:
             value["used_at"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
         )
+        object.__setattr__(sandbox, "_client", client)
+        return sandbox
+
+
+_NOT_FOUND = "the server answered 404"
+"""How a refusal with ``404`` reads, as ``libvirtx_core`` words it."""
 
 
 class SandboxJobKind(str, Enum):

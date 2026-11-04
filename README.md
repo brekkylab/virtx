@@ -199,6 +199,8 @@ sandbox = await client.create_sandbox("jq:latest", name="dev")
 sandbox = await client.find_sandbox("dev")  # tomorrow: what it installed is there
 ```
 
+A sandbox used for one block only is deleted on leaving it: `async with await client.create_sandbox(...) as sandbox:` in Python, `await using sandbox = await client.createSandbox(...)` in Node.
+
 To start others from what a sandbox made, commit it to an image: its image, with what it wrote as one more layer, which any number of sandboxes boot.
 
 ```python
@@ -233,7 +235,7 @@ A write can name the `etag` a read gave, so it goes only over the file it read. 
 
 ## Ports
 
-`ports` at making a sandbox open TCP ports in it, each answered with a URL, there only. A `PortForwarder` opened over the client with that URL puts the port at an address on this machine's loopback, for any TCP client:
+`ports` at making a sandbox open TCP ports in it, each answered with a URL, there and at `start_sandbox` only; `sandbox.open_port(port)` opens one later, answering its URL the same way. A `PortForwarder` opened over the client with that URL puts the port at an address on this machine's loopback, for any TCP client:
 
 ```python
 from virtx import PortForwarder

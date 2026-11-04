@@ -181,6 +181,10 @@ fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
     assert_eq!(stopped.state, SandboxState::Stopped);
     let started = client.start_sandbox(&made.id).wait().unwrap();
     assert_eq!(started.state, SandboxState::Running);
+    let opened = client.open_sandbox_port(&made.id, 8080).wait().unwrap();
+    assert_eq!(opened.port, 8080);
+    let started = client.start_sandbox(&made.id).wait().unwrap();
+    assert_eq!(started.ports, [opened]);
     let job = client.commit_image(&made.id, "mine:v1").wait().unwrap();
     assert_eq!(job.kind, ImageJobKind::Commit);
     client.remove_sandbox(&made.id).unwrap_wait();

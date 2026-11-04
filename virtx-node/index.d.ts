@@ -181,7 +181,7 @@ export interface DirEntry {
  * stops when unused or told to, and starts again as it was left, under the same id, until it is
  * deleted.
  */
-export interface Sandbox {
+export class Sandbox {
   id: string
   /** The name it was given, which `findSandbox` finds it by. */
   name?: string
@@ -197,8 +197,12 @@ export interface Sandbox {
   autoDeleteDays?: number
   /** When it was last used, as RFC 3339. */
   usedAt: string
-  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some, and each `openPort` adds. */
   ports?: SandboxPort[]
+  /** Open the TCP port `port` in it, as `openSandboxPort` does, and keep the answer in `ports`, in place of one for the same port. */
+  openPort(port: number): Promise<SandboxPort>
+  /** Delete it, as `removeSandbox` does, for `await using`; one deleted already is left so. */
+  [Symbol.asyncDispose](): Promise<void>
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */

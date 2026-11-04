@@ -407,8 +407,8 @@ class Sandbox {
 
   // Opens the port as `openSandboxPort` does, and keeps the answer in `ports`, in place of one
   // for the same port.
-  async openPort(port) {
-    const opened = await this._client.openSandboxPort(this.id, port)
+  async openPort(port, options = {}) {
+    const opened = await this._client.openSandboxPort(this.id, port, options)
     const ports = (this.ports ??= [])
     const at = ports.findIndex((known) => known.port === port)
     if (at === -1) ports.push(opened)
@@ -813,8 +813,10 @@ class Client {
     return this._sandbox('virtx_client_stop_sandbox', { id })
   }
 
-  openSandboxPort(id, port) {
-    return this._call('virtx_client_open_sandbox_port', { id, port })
+  // TCP unless `protocol` says `'http'`; opened already, it is answered as it is, `label`
+  // renaming it.
+  openSandboxPort(id, port, { label, protocol } = {}) {
+    return this._call('virtx_client_open_sandbox_port', { id, port, label, protocol })
   }
 
   // Deletes the sandbox: stopped first if it runs, and its disk removed.

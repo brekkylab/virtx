@@ -10,6 +10,8 @@ from virtx import (
     ImageJobKind,
     Log,
     LogEntry,
+    PortProtocol,
+    PortSpec,
     Recipe,
     Sandbox,
     SandboxJobEnd,
@@ -70,6 +72,37 @@ async def test_a_port_opened_after_is_kept_in_the_sandbox_s_ports(test_server: s
         made = Sandbox("sb", None, "sha256:0", SandboxState.RUNNING, False, 15, None, "")
         with pytest.raises(VirtxError, match="not answered by a client"):
             await made.open_port(8000)
+
+
+async def test_a_port_says_what_it_is_for_and_whether_it_is_http(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox(
+            "alpine:3.20",
+            ports=[
+                5900,
+                PortSpec(5173, label="dev server", protocol=PortProtocol.HTTP),
+                {"port": 3000, "label": "api"},
+            ],
+        )
+        vnc, dev, api = sandbox.ports
+        assert (vnc.port, vnc.label, vnc.protocol) == (5900, None, PortProtocol.TCP)
+        assert (dev.port, dev.label, dev.protocol) == (5173, "dev server", PortProtocol.HTTP)
+        assert (api.port, api.label, api.protocol) == (3000, "api", PortProtocol.TCP)
+
+        web = await sandbox.open_port(8080, label="docs", protocol="http")
+        assert web == SandboxPort(8080, web.url, "docs", PortProtocol.HTTP)
+        assert sandbox.ports[-1] == web
+        renamed = await client.open_sandbox_port(sandbox.id, 8080, label="manual")
+        assert (renamed.label, renamed.protocol) == ("manual", PortProtocol.HTTP)
+        plain = await client.open_sandbox_port(sandbox.id, 9000)
+        assert (plain.label, plain.protocol) == (None, PortProtocol.TCP)
+
+
+def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:
+    assert PortSpec(8080).to_dict() == 8080
+    assert PortSpec(22, label="ssh").to_dict() == {"port": 22, "label": "ssh"}
+    assert PortSpec(5173, protocol="http").to_dict() == {"port": 5173, "protocol": "http"}
+    assert SandboxPort.from_dict({"port": 1, "url": "u"}) == SandboxPort(1, "u")
 
 
 async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(test_server: str) -> None:

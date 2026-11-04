@@ -29,8 +29,8 @@ pub use portforward::PortForwarder;
 pub use virtx_core::{
     Auth, DirEntry, Event, FileRoot, ImageDownloadOutput, ImageJob, ImageJobEnd, ImageJobEntry,
     ImageJobKind, ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry,
-    Metadata, MountSource, MountType, Progress, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs,
-    SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEnd, SandboxJobEntry, SandboxJobKind,
-    SandboxPort, SandboxState, SandboxVolume, Step, VolumeListOutputItem,
-    VolumeMountListOutputItem,
+    Metadata, MountSource, MountType, PortProtocol, PortSpec, Progress, Recipe, RegistryAuth,
+    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEnd,
+    SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxPortOpenArgs, SandboxState, SandboxVolume,
+    Step, VolumeListOutputItem, VolumeMountListOutputItem,
 };

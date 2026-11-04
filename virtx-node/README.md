@@ -51,6 +51,8 @@ forwarder.close()
 const port = await sandbox.openPort(9000) // kept in sandbox.ports too
 ```
 
+A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `{ ports: [8080, { port: 5173, label: 'dev server', protocol: 'http' }] }`, or `openPort(5173, { label: 'dev server', protocol: 'http' })`. Each answered port has its `label`, and its `protocol` when it is `'http'`.
+
 The files of a volume are read and written through the client, each request naming its root as `{ volume }`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js

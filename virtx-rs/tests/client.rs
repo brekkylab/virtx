@@ -19,8 +19,8 @@ use std::{io::Read, net::TcpStream};
 
 use virtx_rs::{
     Auth, Client, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
-    PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd,
-    SandboxJobEntry, SandboxState,
+    PortForwarder, PortProtocol, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs, SandboxState,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -190,6 +190,46 @@ fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
     client.remove_sandbox(&made.id).unwrap_wait();
     let gone = client.get_sandbox(&made.id).wait().unwrap_err();
     assert!(gone.to_string().contains("404"), "{gone}");
+}
+
+fn a_port_says_what_it_is_for_and_whether_it_is_http() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.ports = vec![
+        5900.into(),
+        PortSpec {
+            port: 5173,
+            label: Some("dev server".into()),
+            protocol: PortProtocol::Http,
+        },
+    ];
+    let made = client.create_sandbox(&args).wait().unwrap();
+    let described: Vec<_> = made
+        .ports
+        .iter()
+        .map(|p| (p.port, p.label.as_deref(), p.protocol))
+        .collect();
+    assert_eq!(
+        described,
+        [
+            (5900, None, PortProtocol::Tcp),
+            (5173, Some("dev server"), PortProtocol::Http)
+        ]
+    );
+    let open = SandboxPortOpenArgs {
+        label: Some("docs".into()),
+        protocol: Some(PortProtocol::Http),
+    };
+    let web = client
+        .open_sandbox_port_with(&made.id, 8080, &open)
+        .wait()
+        .unwrap();
+    assert_eq!(
+        (web.port, web.label.as_deref(), web.protocol),
+        (8080, Some("docs"), PortProtocol::Http)
+    );
+    let plain = client.open_sandbox_port(&made.id, 9000).wait().unwrap();
+    assert_eq!((plain.label, plain.protocol), (None, PortProtocol::Tcp));
 }
 
 fn a_process_run_in_a_sandbox_is_read_from_its_log() {
@@ -509,6 +549,7 @@ fn main() -> ExitCode {
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
         the_files_of_a_volume_are_written_listed_moved_and_read_back,
         a_sandbox_stops_starts_again_and_is_found_by_its_name,
+        a_port_says_what_it_is_for_and_whether_it_is_http,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,

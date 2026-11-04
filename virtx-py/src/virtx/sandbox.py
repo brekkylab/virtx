@@ -18,16 +18,60 @@ if TYPE_CHECKING:
     from .client import Client
 
 
+class PortProtocol(str, Enum):
+    """How a sandbox's port is reached from outside it."""
+
+    TCP = "tcp"
+    """TCP, through a ``PortForwarder`` opened with its ``url``."""
+
+    HTTP = "http"
+    """HTTP served in the sandbox, reached at its ``url`` as HTTP by a browser as by any client,
+    WebSockets included."""
+
+
 @dataclass(frozen=True)
 class SandboxPort:
-    """A TCP port opened in a sandbox, and the ``url`` a ``PortForwarder`` reaches it by."""
+    """A port opened in a sandbox, and the ``url`` it is reached by: a ``PortForwarder``'s for
+    TCP, a browser's for HTTP."""
 
     port: int
     url: str
 
+    label: str | None = None
+    """What it is for, in words of whoever opened it."""
+
+    protocol: PortProtocol = PortProtocol.TCP
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
-        return cls(value["port"], value["url"])
+        return cls(
+            value["port"],
+            value["url"],
+            value.get("label"),
+            PortProtocol(value.get("protocol", "tcp")),
+        )
+
+
+@dataclass(frozen=True)
+class PortSpec:
+    """A port to open in a sandbox as ``create_sandbox`` makes it: its number, what it is for,
+    and how it is reached. ``ports`` takes a plain ``int`` for TCP named nothing."""
+
+    port: int
+    label: str | None = None
+    protocol: PortProtocol | str = PortProtocol.TCP
+
+    def to_dict(self) -> int | dict[str, Any]:
+        """As the wire has it: the number alone when it says no more."""
+        protocol = PortProtocol(self.protocol)
+        if self.label is None and protocol == PortProtocol.TCP:
+            return self.port
+        spec: dict[str, Any] = {"port": self.port}
+        if self.label is not None:
+            spec["label"] = self.label
+        if protocol != PortProtocol.TCP:
+            spec["protocol"] = protocol.value
+        return spec
 
 
 @dataclass(frozen=True)
@@ -99,10 +143,16 @@ class Sandbox:
             raise VirtxError("the sandbox was not answered by a client")
         return self._client
 
-    async def open_port(self, port: int) -> SandboxPort:
-        """Open the TCP port ``port`` in it, as ``Client.open_sandbox_port`` does, and keep the
+    async def open_port(
+        self,
+        port: int,
+        *,
+        label: str | None = None,
+        protocol: PortProtocol | str | None = None,
+    ) -> SandboxPort:
+        """Open the port ``port`` in it, as ``Client.open_sandbox_port`` does, and keep the
         answer in ``ports``, in place of one for the same port."""
-        opened = await self._held().open_sandbox_port(self.id, port)
+        opened = await self._held().open_sandbox_port(self.id, port, label=label, protocol=protocol)
         at = next((i for i, known in enumerate(self.ports) if known.port == port), None)
         if at is None:
             self.ports.append(opened)

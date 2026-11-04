@@ -199,16 +199,33 @@ export class Sandbox {
   usedAt: string
   /** Only as `createSandbox` and `startSandbox` answer it, if it has some, and each `openPort` adds. */
   ports?: SandboxPort[]
-  /** Open the TCP port `port` in it, as `openSandboxPort` does, and keep the answer in `ports`, in place of one for the same port. */
-  openPort(port: number): Promise<SandboxPort>
+  /** Open the port `port` in it, as `openSandboxPort` does, and keep the answer in `ports`, in place of one for the same port. */
+  openPort(port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
   /** Delete it, as `removeSandbox` does, for `await using`; one deleted already is left so. */
   [Symbol.asyncDispose](): Promise<void>
 }
 
-/** A TCP port opened in a sandbox, and where it is reached from. */
+/** How a sandbox's port is reached: `'tcp'` through a `PortForwarder`, `'http'` at its `url` by a browser as by any client. */
+export type PortProtocol = 'tcp' | 'http'
+
+/** A port opened in a sandbox, and where it is reached from. */
 export interface SandboxPort {
   port: number
   url: string
+  /** What it is for, in words of whoever opened it. */
+  label?: string
+  /** Absent for `'tcp'`. */
+  protocol?: PortProtocol
+}
+
+/** A port to open as a sandbox is made: a number for TCP named nothing, or one that says more. */
+export type PortSpec = number | { port: number; label?: string; protocol?: PortProtocol }
+
+/** What opening a port in a sandbox already made asks for; TCP if not said. */
+export interface SandboxPortOpenOptions {
+  /** What it is for; given for one open already, its label from then on. */
+  label?: string
+  protocol?: PortProtocol
 }
 
 /** Whatever is left out the server picks. */
@@ -223,8 +240,8 @@ export interface SandboxCreateOptions {
   /** How much it may write over its image, in GiB. */
   diskGib?: number
   network?: boolean
-  /** TCP ports in it to open, reserved as it is made. */
-  ports?: number[]
+  /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */
+  ports?: PortSpec[]
   vcpus?: number
   memoryMib?: number
   gpu?: boolean
@@ -398,8 +415,8 @@ export class Client {
   startSandbox(id: string): Promise<Sandbox>
   /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
   stopSandbox(id: string): Promise<Sandbox>
-  /** Open the TCP port `port` in it, as those it was made with are; where it is reached from. */
-  openSandboxPort(id: string, port: number): Promise<SandboxPort>
+  /** Open the port `port` in it, as those it was made with are, TCP unless `protocol` says `'http'`; where it is reached from. Opened already, it is answered as it is, `label` renaming it. */
+  openSandboxPort(id: string, port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
   /** Delete the sandbox: stopped first if it runs, and its disk removed. Its volumes stay. */
   removeSandbox(id: string): Promise<void>
   listSandboxJob(sandbox: string): Promise<SandboxJob[]>

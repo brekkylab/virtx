@@ -136,8 +136,8 @@ class ImageJob:
     """Whether it runs still."""
 
     digest: str | None = None
-    """Once it has succeeded, the digest of the manifest it copied or built, as
-    ``algorithm:hex``."""
+    """Once it has succeeded, as ``algorithm:hex``: the digest of the image a pull or build
+    left here, or of the manifest a push put on the registry."""
 
     error: str | None = None
     """Once it has failed, why, for a person."""

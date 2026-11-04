@@ -155,7 +155,7 @@ An image job copies an image between the server's [images](#images) and another 
 An image job is `{id, kind, reference, running, digest?, error?}`:
 
 - `kind` is `"pull"`, `"push"` or `"build"`, and `reference` the one it was started with.
-- `digest`, once it has succeeded, is the digest of the manifest it copied or built; for an image index, the index's own.
+- `digest`, once it has succeeded, is that of the image a pull or build left here, as the [images](#images) list it, or of the manifest a push put on the registry.
 - `error`, once it has failed, is why, for a person to read.
 
 Its log's entries are `{"log": "..."}`, a line of it, and `{"truncated": {}}`, then `{"end": {"digest": "..."}}` or `{"end": {"error": "..."}}`, as the job has them.

@@ -1,5 +1,5 @@
-//! A sandbox's port, forwarded to this machine's loopback: what `sandbox.init` answered for it,
-//! as an address any TCP client connects to.
+//! A sandbox's port, forwarded to this machine's loopback: what making the sandbox answered for
+//! it, as an address any TCP client connects to.
 //!
 //! A server on this machine answers a loopback address already, which is reached as it is. A
 //! server over HTTP answers a URL relative to its base, which only a WebSocket of the
@@ -49,8 +49,8 @@ pub struct PortForwarder {
 }
 
 impl PortForwarder {
-    /// The port a sandbox answered `url` for, as `sandbox.init` and `sandbox.list` answer one,
-    /// at an address on this machine's loopback, reached over `client`'s connection.
+    /// The port making a sandbox answered `url` for, at an address on this machine's loopback,
+    /// reached over `client`'s connection.
     ///
     /// Over stdio the server is on this machine, and its loopback address is the forwarder's.
     /// Over HTTP `url` is resolved against the server's base, and each connection to a loopback
@@ -346,8 +346,7 @@ mod ffi {
     pub struct VirtxPortForwarder(#[allow(dead_code)] PortForwarder);
 
     /// Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
-    /// `virtx_client_init_sandbox` or `virtx_client_list_sandbox` answered it, to this machine's
-    /// loopback: write the forwarder to `forwarder`, and where it is to `out`, as
+    /// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
     /// `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
     ///
     /// It runs on `client`'s runtime, so the client's last release stops it, and is freed with

@@ -1,17 +1,27 @@
 //! The client over `libvirtx_core`: where no server is needed, and against `virtx-core`'s
-//! `files_server` example over stdio for the files.
+//! `test_server` example over stdio.
 
 use std::{
     env,
+    future::{self, Future},
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
+    pin::{Pin, pin},
     process::{Command, ExitCode},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll, Wake},
+    thread::{self, Thread},
 };
+
+use futures_core::Stream;
 
 use std::{io::Read, net::TcpStream};
 
-use virtx_rs::{Auth, Client, Error, FileRoot, PortForwarder};
+use virtx_rs::{
+    Auth, Client, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
+    PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry,
+    SnapshotListOutputItem,
+};
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
 /// one in `deps`: that is the dependency's, built without the C ABI.
@@ -43,8 +53,8 @@ fn library() -> PathBuf {
         .clone()
 }
 
-/// `virtx-core`'s `files_server` example, built now.
-fn files_server() -> PathBuf {
+/// `virtx-core`'s `test_server` example, built now.
+fn test_server() -> PathBuf {
     static SERVER: OnceLock<PathBuf> = OnceLock::new();
     SERVER
         .get_or_init(|| {
@@ -58,21 +68,21 @@ fn files_server() -> PathBuf {
                 "--features",
                 "testing",
                 "--example",
-                "files_server",
+                "test_server",
             ]);
             if profile.ends_with("release") {
                 build.arg("--release");
             }
-            assert!(build.status().unwrap().success(), "building files_server");
+            assert!(build.status().unwrap().success(), "building test_server");
             profile
                 .join("examples")
-                .join(format!("files_server{}", env::consts::EXE_SUFFIX))
+                .join(format!("test_server{}", env::consts::EXE_SUFFIX))
         })
         .clone()
 }
 
 fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
-    let client = Client::spawn(files_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
     let volume = FileRoot::Volume("v".into());
     client.create_dir(&volume, "dir").unwrap_wait();
     client
@@ -160,6 +170,203 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     let locked = FileRoot::Snapshot("locked".into());
     let refused = client.read_dir(&locked, "").wait().unwrap_err();
     assert!(refused.to_string().contains("423"), "{refused}");
+}
+
+fn a_snapshot_is_created_got_and_removed() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let created = client.create_snapshot(Some("t"), None).wait().unwrap();
+    assert_eq!(
+        (created.name.as_str(), created.in_use),
+        ("t", false),
+        "{created:?}"
+    );
+    let got: SnapshotListOutputItem = client.get_snapshot("t").wait().unwrap();
+    assert_eq!(got, created);
+    client.remove_snapshot("t").unwrap_wait();
+    let gone = client.get_snapshot("t").wait().unwrap_err();
+    assert!(gone.to_string().contains("404"), "{gone}");
+}
+
+fn a_process_run_in_a_sandbox_is_read_from_its_log() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .wait()
+        .unwrap();
+    assert_eq!(
+        client.get_sandbox(&sandbox.id).wait().unwrap().id,
+        sandbox.id
+    );
+
+    let job = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+        .wait()
+        .unwrap();
+    let mut log = client.sandbox_job_log(&sandbox.id, &job.id, None);
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap());
+    }
+    assert_eq!(
+        entries,
+        [
+            LogEntry {
+                id: 1,
+                entry: SandboxJobEntry::Stdout("hi".into()),
+            },
+            LogEntry {
+                id: 2,
+                entry: SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            },
+        ]
+    );
+    let jobs = client.list_sandbox_job(&sandbox.id).wait().unwrap();
+    assert!(
+        jobs.iter().any(|j| j.id == job.id && j.code == Some(0)),
+        "{jobs:?}"
+    );
+
+    // `cat` echoes its stdin until it is closed.
+    let mut args = SandboxExecArgs::new(["cat"]);
+    args.stdin = true;
+    let cat = client.exec_sandbox(&sandbox.id, &args).wait().unwrap();
+    client
+        .write_sandbox_job_stdin(&sandbox.id, &cat.id, Some("a\n"), true)
+        .unwrap_wait();
+    let mut log = client.sandbox_job_log(&sandbox.id, &cat.id, None);
+    let first = log.wait_next().unwrap().unwrap();
+    assert_eq!(first.entry, SandboxJobEntry::Stdout("a".into()));
+
+    client.remove_sandbox(&sandbox.id).unwrap_wait();
+    let gone = client.get_sandbox(&sandbox.id).wait().unwrap_err();
+    assert!(gone.to_string().contains("404"), "{gone}");
+}
+
+fn an_image_build_is_a_job_with_a_log() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let job = client
+        .build_image(Recipe::new("alpine:3.20"), "t:latest")
+        .wait()
+        .unwrap();
+    assert_eq!(job.kind, ImageJobKind::Build);
+    let mut log = client.image_job_log(&job.id, None);
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            ImageJobEntry::Log("pulling alpine:3.20".into()),
+            ImageJobEntry::End(ImageJobEnd {
+                digest: Some("sha256:0".into()),
+                error: None,
+            }),
+        ]
+    );
+    let done = client.get_image_job(&job.id).wait().unwrap();
+    assert_eq!(done.digest.as_deref(), Some("sha256:0"), "{done:?}");
+    assert!(
+        client
+            .list_image_job()
+            .wait()
+            .unwrap()
+            .iter()
+            .any(|j| j.id == job.id)
+    );
+    client.remove_image_job(&job.id).unwrap_wait();
+    assert!(client.get_image_job(&job.id).wait().is_err());
+}
+
+fn a_started_job_is_read_as_its_log() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let mut log = client
+        .build_image(Recipe::new("alpine:3.20"), "t:latest")
+        .log();
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            ImageJobEntry::Log("pulling alpine:3.20".into()),
+            ImageJobEntry::End(ImageJobEnd {
+                digest: Some("sha256:0".into()),
+                error: None,
+            }),
+        ]
+    );
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .wait()
+        .unwrap();
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+        .log();
+    assert!(log.job().is_none());
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+        // The job is the log's once started, to act on mid-stream.
+        assert_eq!(log.job().unwrap().cmd, ["echo", "hi"]);
+    }
+    assert_eq!(
+        entries,
+        [
+            SandboxJobEntry::Stdout("hi".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
+    // Polled, as a runtime would.
+    let job =
+        block_on(client.exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "a"]))).unwrap();
+    assert_eq!(job.cmd, ["echo", "a"]);
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "b"]))
+        .log();
+    let mut entries = Vec::new();
+    while let Some(entry) = block_on(future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx))) {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(log.job().unwrap().cmd, ["echo", "b"]);
+    assert_eq!(
+        entries,
+        [
+            SandboxJobEntry::Stdout("b".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
+    // A start refused is the log's one item.
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
+        .log();
+    let refused = log.wait_next().unwrap().unwrap_err();
+    assert!(refused.to_string().contains("422"), "{refused}");
+    assert!(log.wait_next().is_none());
+    assert!(log.job().is_none());
+}
+
+/// Polls `future` on this thread until it is ready, parking between wakes.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Arc::new(Unpark(thread::current())).into();
+    let mut cx = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => thread::park(),
+        }
+    }
 }
 
 /// Waits on a call that answers nothing, panicking on an error.
@@ -259,6 +466,10 @@ fn main() -> ExitCode {
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
         the_files_of_a_volume_are_written_listed_moved_and_read_back,
+        a_snapshot_is_created_got_and_removed,
+        a_process_run_in_a_sandbox_is_read_from_its_log,
+        an_image_build_is_a_job_with_a_log,
+        a_started_job_is_read_as_its_log,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

@@ -30,8 +30,8 @@ use super::{
 };
 use crate::{
     Error,
+    image::{Event, Progress},
     image::{ImageDownloadOutput, ImageUploadOutput},
-    method::{Event, Progress},
     transport::{Body, TransportClient},
 };
 

@@ -1,5 +1,5 @@
-//! What a client does to the server's images through its OCI registry at `/images/v2/`, not
-//! through an RPC method: listing, tagging, removing, and moving an image to and from a file on
+//! What a client does to the server's images through its OCI registry at `/images/oci/v2/`, not
+//! through a job: listing, tagging, removing, and moving an image to and from a file on
 //! this machine. The args and outputs are those the C ABI takes and answers.
 //!
 //! A reference here is the server's: `name:tag`, or `name@algorithm:hex` for an image by its
@@ -9,6 +9,27 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// What a stream of the client's own gives, such as a download's: each step, then its output
+/// last. As JSON, `{"progress": {"progress": 1, "total": 3, "content": ...}}` or
+/// `{"output": ...}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Event<R, C> {
+    Progress(Progress<C>),
+    Output(R),
+}
+
+/// One step of a stream: how far it has got, what that will reach when known, and what the
+/// step says, if anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress<C> {
+    pub progress: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<C>,
+}
 
 /// One tag in what listing images answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

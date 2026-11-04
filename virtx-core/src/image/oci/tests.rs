@@ -1,4 +1,4 @@
-//! The image operations against a registry in memory, served at `/images/v2/` over an
+//! The image operations against a registry in memory, served at `/images/oci/v2/` over an
 //! in-memory HTTP/2 connection as stdio serves one.
 //!
 //! The registry pages its listings two names at a time, and mounts a blob from another
@@ -19,7 +19,7 @@ use serde_json::json;
 use super::manifest::sha256;
 use crate::{
     client::Client,
-    method::Event,
+    image::Event,
     transport::{TransportClient, serve_stdio},
 };
 
@@ -171,7 +171,7 @@ impl Registry {
             .collect();
         let headers = request.headers().clone();
         let body = request.into_body().collect().await.unwrap().to_bytes();
-        let Some(path) = uri.path().strip_prefix("/images/v2/") else {
+        let Some(path) = uri.path().strip_prefix("/images/oci/v2/") else {
             return answer(StatusCode::NOT_FOUND);
         };
         let mut state = self.state();
@@ -284,7 +284,7 @@ impl Registry {
                 let id = uuid::Uuid::new_v4().to_string();
                 state.uploads.insert(id.clone(), name.into());
                 let mut response = answer(StatusCode::ACCEPTED);
-                let location = format!("/images/v2/{name}/blobs/uploads/{id}");
+                let location = format!("/images/oci/v2/{name}/blobs/uploads/{id}");
                 response
                     .headers_mut()
                     .insert(header::LOCATION, location.parse().unwrap());

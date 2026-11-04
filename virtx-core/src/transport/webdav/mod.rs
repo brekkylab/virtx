@@ -1,8 +1,12 @@
-//! The files in a volume or a snapshot, reached at `/volumes/{name}/` or `/snapshots/{name}/`
-//! with WebDAV: what each request names, and what a `PROPFIND` reads into.
+//! The files of a volume or a snapshot, which `PROTOCOL.md`'s Files has a server serve with
+//! WebDAV (RFC 4918) under `/volumes/{name}/files/` or `/snapshots/{name}/files/`: what each
+//! request names, and what a `PROPFIND` reads into. The client's end is [`client`].
 //!
 //! A path is relative to the root, `/`-separated, as `dir/file.txt`; the empty path is the
 //! root. The server refuses one that leads outside.
+
+#[cfg(feature = "client")]
+pub(crate) mod client;
 
 use serde::{Deserialize, Serialize};
 

@@ -1,6 +1,10 @@
 # virtx-uvm
 
-Rust host-side bindings and runtime built on [libkrun](https://github.com/libkrun/libkrun) 2.0.
+The server's machinery, on [libkrun](https://github.com/libkrun/libkrun) 2.0: images and the
+disks made of them, machines booted from those disks, and the snapshots and volumes they
+write to. [`virtx-stdio-server`](../virtx-stdio-server/) and
+[`virtx-http-server`](../virtx-http-server/) serve it on `virtx-core`'s protocol, over stdio
+and over HTTP; a client reaches a machine through one of them, never through this crate.
 
 libkrun is vendored as a submodule and linked as an rlib, so there is no
 `libkrun.so`/`libkrun.dylib` to ship and no C ABI in the middle — `virtx-uvm`
@@ -12,8 +16,8 @@ depends on the `libkrun` crate directly.
 
 ## Requirements
 
-macOS on Apple Silicon (Linux hosts are untested here). x86_64 Windows boots
-too, over the Windows Hypervisor Platform, with its own setup — see
+macOS on Apple Silicon. Releases are built for Linux on x86_64 and aarch64 too, and for
+x86_64 Windows over the Windows Hypervisor Platform, which has its own setup — see
 [Windows (WHP)](#windows-whp). The rest of this section is macOS.
 
 ```sh
@@ -34,82 +38,60 @@ cargo xtask init                        # checks out and patches the submodules,
                                         #    target (--force resets the submodules first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
 cargo xtask build stdio-server          # -> target/release/virtx-uvm (builds MoltenVK and
-                                        #    virglrenderer first; add http-server, and abin for /abin)
-cargo xtask install                     # -> ~/.cache/virtx/bin, or --prefix <dir>
+                                        #    virglrenderer first; add http-server too)
+cargo xtask install                     # -> $VIRTX_HOME/bin, or --prefix <dir>
 ```
 
 ## Running
 
-```sh
-cargo xtask run --example run -- alpine:3.21 'id'          # pulls an OCI image and runs in it
-VIRTX_NET=1 cargo xtask run --example run -- alpine:3.21 'apk add curl'
-VIRTX_NET=1 VIRTX_GPU=1 cargo xtask run --features gpu --example run -- alpine:latest \
-    'apk add mesa-vulkan-virtio vulkan-loader vulkan-tools && vulkaninfo --summary'
-```
-
-One example, because there is one thing to show: a machine made out of the parts
-this repository has. What a *session* is — the agent, the console protocol, `/abin`
-— is the server's, and a client reaches that by spawning `virtx-uvm` rather than
-by running an example.
-
-`run` is the [`machine`](src/machine/) module end to end: it pulls the
-image into the cache, makes its layers into one disk -- the [root
-filesystem](src/fstree/erofs/) -- formats a writable ext4 beside it and boots
-the guest on an overlay of the two. The session is the ext4 file, so the
-second run of the same image sees what the first one did:
+A server is started by whoever wants a sandbox: a client spawns `virtx-uvm` and speaks to it
+over its stdin and stdout, or reaches a `virtx-http-server` over HTTP. The repository's
+[README](../README.md) has a client's side; the servers' own tests are the quickest way to boot
+machines from here:
 
 ```sh
-cargo xtask run --example run -- alpine:3.21 'echo hi > /root/note'
-cargo xtask run --example run -- alpine:3.21 'cat /root/note'     # hi
+cargo xtask test -p virtx-stdio-server    # spawns the built binary, as a client does
+cargo xtask test -p virtx-http-server
 ```
 
-Deleting `data/sessions/<image>.ext4` is how one starts over. The file is
-sparse — a 2 GiB ceiling costs a couple of megabytes until it is used.
+`KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging, which a
+machine's process passes on to the server with the guest's console.
 
-`KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging.
+`cargo xtask run` and `cargo xtask test` are `cargo run` and `cargo test` with one thing added:
+they build through cargo, then sign each binary before running it. On macOS that is
+mandatory: an ad-hoc codesign with `com.apple.security.hypervisor`. No developer certificate
+is needed, but Hypervisor.framework refuses to start without the entitlement. A test signs the
+server binary it spawns, too, since that binary spawns itself to be each machine.
 
-Nothing in it is gated by host: `session` attaches the guest's console itself,
-which is the one call that would otherwise differ. What running it takes is
-host-specific all the same, and the Windows setup is different throughout; see
-[Windows (WHP)](#windows-whp).
+A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not sign, and a
+binary that creates a VM fails without it. `cargo xtask build stdio-server` and
+`http-server` sign what they build, since a server is started by whoever wants a sandbox --
+a test, an agent runtime, a CLI -- and `cargo xtask run` is not on that path: the binary that
+calls `hv_vm_create` has to come out of the build already entitled. A plain `cargo build`
+leaves it unsigned.
 
-`cargo xtask run` and `cargo xtask test` are `cargo run` and `cargo test` with
-that part added: they build through cargo, then prepare each binary before
-running it. On macOS that is one thing, and it is mandatory: an ad-hoc codesign
-with `com.apple.security.hypervisor`. No developer certificate is needed, but
-Hypervisor.framework refuses to start without the entitlement.
+Nothing has to be on a search path: the guest kernel is built here and installed beside the
+binaries, and libkrun looks there first — see [The guest kernel is built, not
+installed](#the-guest-kernel-is-built-not-installed). Worth not adding one: a search path wide
+enough to find the kernel was also wide enough to let the virglrenderer that krunkit's tap
+installs stand in for the one `build/` had built, silently, since the GPU still came up.
 
-It used to be two. The second put Homebrew's `lib` on
-`DYLD_FALLBACK_LIBRARY_PATH` so that dyld would find the guest kernel there, and
-is gone now that the kernel is built here and sits beside the binary — see [The
-guest kernel is built, not
-installed](#the-guest-kernel-is-built-not-installed). Worth not bringing back: a
-search path wide enough to find the kernel was also wide enough to let the
-virglrenderer that krunkit's tap installs stand in for the one `build/` had
-built, silently, since the GPU still came up.
-
-A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not
-sign, and a binary that creates a VM fails without it. The one exception is
-the one that matters for a console server: `cargo xtask build stdio-server` signs
-`virtx-uvm` once cargo has built it -- the one binary, since the process that
-becomes a VM is `virtx-uvm boot`, spawned by the server from its own file. A console server is started by
-whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
-is not on that path, so the binary that calls `hv_vm_create` has to come out of
-the build already entitled. A plain `cargo build` leaves it unsigned.
-
-## Sessions — `3rdparty/_patches/libkrun/overlay-root.patch`
+## Machines — `3rdparty/_patches/libkrun/overlay-root.patch`
 
 [`fstree::erofs`](src/fstree/erofs/) makes an image's layers into a disk: one
 read-only EROFS filesystem -- the layers merged into a metadata image that points into
 them, rather than a copy of them -- shared by every machine ever booted on those layers.
-[`machine`](src/machine/) is what makes one of those machines writable, by
-stacking an ext4 of its own over it:
+A [snapshot](src/snapshot.rs) is what makes one of those machines writable: an ext4 of its own,
+stacked over it by [`machine`](src/machine/):
 
 ```
-/dev/vdb  ext4,  writable    this session's upper layer ─┐
-                                                         ├─ overlay ──► /
-/dev/vda  erofs, read-only   the image's disk           ─┘
+/dev/vdb  ext4,  writable    the snapshot, the upper layer ─┐
+                                                            ├─ overlay ──► /
+/dev/vda  erofs, read-only   the image's disk              ─┘
 ```
+
+A sandbox made without a snapshot gets a temporary one, gone with it. The devices a machine
+has, and why each, are in [`machine/boot.rs`](src/machine/boot.rs).
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem
 and the host has no way to mount one — let alone an EROFS a macOS kernel cannot
@@ -117,8 +99,8 @@ read at all. libkrun's init already knows how to mount a block device as the
 root and pivot onto it (`KRUN_BLOCK_ROOT_DEVICE`), but it takes exactly one
 device. The patch teaches it the two-device form: `KRUN_BLOCK_LOWER_DEVICE` and
 `KRUN_BLOCK_UPPER_DEVICE`, mounted, overlaid and pivoted onto through the same
-code path. It touches one file, `init/init-binary/src/fs.rs`, and a boot that
-names neither variable behaves exactly as before.
+code path, in `init/init-binary/src/fs.rs`. A boot that names neither variable behaves exactly
+as before.
 
 **Two block devices and not a virtio-fs share for the upper layer**, which would
 need no patch at all and does not work. The guest kernel refuses a FUSE
@@ -129,24 +111,17 @@ anything but root. It is the same wall [`fstree`](src/fstree/) is
 written around, and the reason layers become EROFS images rather than extracted
 directories.
 
-**The patch carries a second, smaller thing**: the guest's exit status. libkrun's
-init reports it as an ioctl on the virtiofs mount, and any boot that pivots onto
-a block root — the existing `KRUN_BLOCK_ROOT_DEVICE` one as much as this — has
+**The patch carries a second, smaller thing**, in `init/init-binary/src/exec.rs`: the guest's
+exit status. libkrun's init reports it as an ioctl on the virtiofs mount, and any boot that
+pivots onto a block root — the existing `KRUN_BLOCK_ROOT_DEVICE` one as much as this — has
 left that mount under no path by the time the workload exits, so the status was
 dropped and the host always saw 0. The init now holds a descriptor on the
-virtiofs root across the pivot and sends the ioctl to that, which is what makes
-`cargo xtask run --example run -- alpine:3.21 'exit 42'` exit 42.
+virtiofs root across the pivot and sends the ioctl to that.
 
-## Mounts — `3rdparty/_patches/libkrun/session-mounts.patch`
+## Volumes — `3rdparty/_patches/libkrun/session-mounts.patch`
 
-A session can see host directories, each one a virtio-fs share:
-
-```rust
-Session::new(rootfs, image.config)
-    .mount(Mount::new("./data", "/data").read_only())
-    .command(["ls", "/data"])
-    .enter()?;
-```
+A sandbox can be given volumes, each one a virtio-fs share, and one more for each remote store
+mounted in the volume (see [`volume`](src/volume/)).
 
 **The host half needs no patch.** Sharing a directory under a tag is what
 libkrun has always done — `krun_add_virtiofs` in the C API, `FsDevice::new` and
@@ -157,61 +132,45 @@ device rather than something bolted on afterwards.
 has no notion of where it belongs: it exports a directory under a tag, and
 something in the guest has to run `mount -t virtiofs <tag> <dir>`. libkrun's init
 mounts the root and one tmpfs and stops there, which leaves automounting to
-whoever builds the guest's boot — and for a session that is this repo. The patch
+whoever builds the guest's boot — and for a machine that is this crate. The patch
 reads the rest of the `mounts` list the init already parses out of
 `/.krun_config.json`, and mounts each entry as the config spells it. It touches
 `init/init-binary/src/config.rs` and `init/init-binary/src/main.rs` and adds
 `init/init-binary/src/mounts.rs`; the overlay-root patch owns `fs.rs`, so the two
 do not stack on one file.
 
-**The mounts go on after the pivot**, once the root is the overlay. One made
-before it would sit on the boot root the pivot leaves behind, which afterwards is
-under no path at all. The directory a share lands on is created if the image
-shipped none, which puts it on the upper layer — so it is made once and found
-again by the next session over the same one.
+**The mounts go on after the pivot**, once the root is the overlay, in the order given, so a
+store's share lands over the directory the volume's own share holds for it. One made before
+the pivot would sit on the boot root the pivot leaves behind, which afterwards is under no path
+at all. The directory a share lands on is created if the image shipped none, which puts it on
+the upper layer.
 
-**Read-only is the host's, not the guest's.** `Mount::read_only` attaches the
-device read-only, and the virtiofs server then refuses every write whatever the
-guest mounted it with. A guest that writes anyway gets an error from the write
-rather than from the mount, and `/proc/mounts` inside the guest still says `rw` —
-the flag a guest could remount away is not where the guarantee lives.
+**Read-only is the host's, not the guest's.** A read-only volume is attached read-only at the
+device, and the virtiofs server then refuses every write whatever the guest mounted it with. A
+guest that writes anyway gets an error from the write rather than from the mount, and
+`/proc/mounts` inside the guest still says `rw` — the flag a guest could remount away is not
+where the guarantee lives.
 
-Nothing here is a sandbox. libkrun's own README is explicit that a virtio-fs
-share offers no protection against a guest reaching other directories on the same
-host filesystem, and `read_only` bounds what a guest may write, not what it may
-read.
+Nothing here is a sandbox of the host's filesystem by itself. libkrun's own README is explicit
+that a virtio-fs share offers no protection against a guest reaching other directories on the
+same host filesystem, and read-only bounds what a guest may write, not what it may read.
 
 ## The network — `3rdparty/_patches/libkrun/tsi.patch`
 
-A session's network is on or off, and on is libkrun's Transparent Socket
-Impersonation: the guest kernel hands every socket its own stack cannot answer
-to a vsock device, and libkrun opens the host socket that answers it. There is
-no interface, no address and no lease — nothing to configure in the guest and
-nothing to forward on the host.
-
-```rust
-Session::new(rootfs, image.config)
-    .network(true)
-    .publish(80, TcpListener::bind("127.0.0.1:8080")?)
-    .command(["httpd", "-f", "-p", "80"])
-```
+A machine's network is libkrun's Transparent Socket Impersonation: the guest kernel hands every
+socket its own stack cannot answer to a vsock device, and libkrun opens the host socket that
+answers it. There is no interface, no address and no lease — nothing to configure in the guest
+and nothing to forward on the host. [`machine/net`](src/machine/net/mod.rs) has the whole of
+it: where a guest's connections may go (`none`, `host` or `public`), and how a published port
+reaches a listener in the guest.
 
 **What TSI lacks is a say in where a socket goes.** Upstream opens whatever the
 guest asked for, so a guest's `listen` binds the host's own port on every
 interface, and its own published port is reached at the host's port rather than
 the guest's listener. The patch adds `TsiPolicy`, which the vsock muxer asks before a
 `connect`, a datagram's destination or a `listen` reaches any proxy, and
-`VsockDevice::set_policy` to hand one over. An answer is an address, not a yes:
-
-| the guest asks for | it gets |
-|---|---|
-| `10.0.2.3:53` | this host's resolver |
-| loopback or `0.0.0.0` | its own published listener on that port (`ECONNREFUSED` until it listens), else that port on this host's loopback |
-| anywhere else | where it asked |
-| `listen` on a published port | a listener on this host's loopback, which the relay joins to the published one |
-| `listen` on any other port | `EPERM`, which the guest kernel takes as "listen on your own stack" |
-
-The policy itself is [`net/policy.rs`](src/machine/net/policy.rs).
+`VsockDevice::set_policy` to hand one over. An answer is an address, not a yes; what each
+request gets is the table in [`net/policy.rs`](src/machine/net/policy.rs).
 In the muxer rather than in each proxy, because the muxer is the one place every
 request passes through on every host — the unix and Windows proxies below it are
 two implementations of the same thing.
@@ -220,7 +179,7 @@ two implementations of the same thing.
 init write `nameserver $KRUN_NAMESERVER` into `/etc/resolv.conf` once the root is
 in place, the same moment libkrun's DHCP client writes its own. A datagram's reply is
 stamped by the guest kernel with the address it was sent to, so the guest never
-sees that `10.0.2.3` was answered from somewhere else.
+sees that its resolver was answered from somewhere else.
 
 ## The `gpu` feature
 
@@ -228,32 +187,19 @@ Guest Vulkan goes through virtio-gpu with [venus](https://docs.mesa3d.org/driver
 the guest runs Mesa's venus driver, virglrenderer serves it on the host, and
 MoltenVK turns that into Metal.
 
-A session asks for one with `.gpu(true)`:
+A sandbox asks for one with `gpu`, and `gpu_memory_mib` for how much the guest's GPU may hold
+(libkrun's 8 GiB otherwise). The image carries the guest half
+(`apk add mesa-vulkan-virtio vulkan-loader`); one without it boots and finds no device.
 
-```rust
-Session::new(rootfs, image.config)
-    .gpu(true)
-    .command(["vulkaninfo", "--summary"])
-    .enter()?;
-```
+**The servers do not ignore it.** `cargo xtask build` always builds them with the feature, and
+a server built without it refuses a sandbox that asks for a GPU rather than running it on the
+CPU: a client on the other end of a pipe cannot `cfg` around anything, and a sandbox that
+silently ran without one costs it the whole run to find out. A host with no Vulkan loader still
+runs a `gpu` build -- the boot opens the loader at run time -- so one build serves hosts with a
+GPU and without.
 
-**Without the feature the flag is ignored**, and deliberately: a build that has no
-virglrenderer to serve Vulkan runs the same session without a GPU rather than
-refusing to start, so a caller never has to `cfg` around the call. The image
-carries the guest half either way (`apk add mesa-vulkan-virtio vulkan-loader`);
-one without it boots and finds no device.
-
-**The console server does not ignore it.** `virtx-uvm` answers a `gpu` member on
-`init`, and there what is asked for is what is given: it checks whether its own
-build has the `gpu` feature and the host a Vulkan loader -- the boot is the same
-file, so what it can attach is known rather than asked -- and refuses
-the session with `UNSUPPORTED_MACHINE` when it cannot. A client on the other end
-of a pipe cannot `cfg` around anything, and a session that silently ran on the CPU
-costs it the whole run to find out. `vcpus` and `memory_mib` come the same way,
-with `VIRTX_UVM_GPU`, `VIRTX_UVM_VCPUS` and `VIRTX_UVM_MEMORY_MIB` as this
-server's own defaults for a client that says nothing. So does `disk_gib`, how much
-a session may write on top of its image (a sparse ceiling, 2 GiB by default), with
-`VIRTX_UVM_DISK_GIB` as the default -- which is also the size a build's disk gets.
+[`MachineSpec::gpu`](src/machine/machine.rs) itself is ignored in a build of this crate without
+the feature, so a caller of the crate never has to `cfg` around it.
 
 ### Which Vulkan version the guest device reports
 
@@ -340,8 +286,8 @@ of a real macOS path:
   is exported as an ordinary `FD_SHM` descriptor, which
   `virgl_renderer_resource_map` simply `mmap`s.
 
-Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so the
-session asks for it wherever the render server is built -- macOS and Linux, not
+Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so a
+machine asks for it wherever the render server is built -- macOS and Linux, not
 Windows (see `virtx-uvm/src/machine/gpu.rs`). The patch carries what
 upstream main still gets wrong there:
 
@@ -478,7 +424,7 @@ applies them to the submodule working trees, and both submodules are marked
 An x86_64 Windows host boots a microVM over the Windows Hypervisor Platform:
 
 ```powershell
-cargo xtask run --example run -- alpine:3.21 'uname -srm'
+cargo xtask test -p virtx-stdio-server
 ```
 
 The guest kernel there is `libkrunfw.dll`'s, which is 6.12.109 on x86_64 at the
@@ -504,35 +450,25 @@ a caller: the two spellings differ by little more than `AsFd` → `AsHandle`, an
 holding the difference in one place is what lets everything above it be written
 once.
 
-### The console channel is two pipes
+### The agent's port is two pipes
 
-What a console *session* runs on is a named virtio-console port, and the host end
-of one is a descriptor the server and the boot share — a unix socket on macOS.
-Windows gets **two named pipes** instead, and
-[`machine::wire`](src/machine/wire.rs) is where both ends of
-that live so that nothing above it has to know which host it is on.
+The agent inside a machine talks to the machine's process over a named virtio-console port,
+and on every host the process end of that port is **two pipes**, one each way, made in
+[`machine/boot.rs`](src/machine/boot.rs) and passed on over `ctrlin` and `ctrlout` (see
+[`machine::wire`](src/machine/wire.rs)).
 
-Two, because libkrun's Windows console reads the port's input handle with a
-blocking `ReadFile` on one thread and writes its output handle with a blocking
+Two, and not one socket, because of Windows: libkrun's Windows console reads the port's input
+handle with a blocking `ReadFile` on one thread and writes its output handle with a blocking
 `WriteFile` on another, neither of them overlapped. Both handles therefore have to
 be synchronous, and two handles onto one synchronous file object serialize against
 each other — so a read parked waiting for the guest would hold the write that was
 meant to wake it, and the protocol would deadlock on its first call. Two pipes are
-two file objects.
-
-An `AF_UNIX` socket would have been the smaller change, and Windows has had them
-since 1803, but a socket is not a handle `ReadFile` takes and Rust's standard
+two file objects. An `AF_UNIX` socket is not a handle `ReadFile` takes, and Rust's standard
 library has no Windows spelling for one.
 
-The name travels the other way round from the path it replaces: `Listener::bind`
-answers with what the boot has to be told, because a pipe name is not a path and
-is not under the directory a caller picked. On Windows it also has to be called
-from inside a Tokio runtime — `ServerOptions::create` registers the pipe with the
-reactor — which `Machine::boot` already is.
-
-It also hands the console no stdin. libkrun's Windows console parks its input
+The guest's own console gets no stdin either. libkrun's Windows console parks its input
 thread in a blocking `ReadFile`, and the VMM joins that thread before it exits
-— so a tty stdin means the process runs the command, prints, and then hangs
+— so a tty stdin means the process runs, prints, and then hangs
 forever. Ctrl-C does not help: raw mode clears `ENABLE_PROCESSED_INPUT`, so it
 arrives as a byte rather than a signal. Nothing here needs guest stdin, and
 leaving it out avoids the code path entirely; an interactive console on Windows
@@ -595,7 +531,7 @@ git submodule update --init
 cargo xtask init                        # patches the submodules
 cargo xtask build kernel                # guest kernel -> build/krunfw/
 cargo xtask build stdio-server          # builds libepoxy and virglrenderer first
-cargo xtask run --example run -- alpine:3.21 'uname -srm'
+cargo xtask test -p virtx-stdio-server
 ```
 
 The kernel first, because a build of `virtx-uvm` stops without one -- it is
@@ -722,7 +658,7 @@ never boots a guest. The first two are on the path every `execve` takes.
 `lchown` on one fails and `apk` reports `failed to preserve <file>: owner`.
 Ownership is uniformly root here and the install completes, so it is a wart
 rather than a blocker.
-Two more, found the first time a session was given mounts rather than a bare
+Two more, found the first time a machine was given shares rather than a bare
 guest. Both stop a machine before it has a guest to report from, and neither
 error says what it is about.
 
@@ -744,7 +680,7 @@ error says what it is about.
   than relaxed.
 
   It is gone because it did not buy what its wording suggested. What it covered
-  was the *root*, which an operator names when starting a session and a guest
+  was the *root*, which the host names when it boots a machine and a guest
   never picks. What a guest can reach it never covered: `lookup` composes a
   child path by joining strings and opens it absolutely,
   `FILE_OPEN_REPARSE_POINT` applies only to the last component, and the object
@@ -765,7 +701,7 @@ message it was carrying was dropped on the way.
 
 ### libkrun — `3rdparty/_patches/libkrun/windows-vsock.patch`
 
-Three stalls in TSI, which is the whole of a session's network — see
+Three stalls in TSI, which is the whole of a machine's network — see
 [The network](#the-network--3rdparty_patcheslibkruntsipatch).
 All of them are credit mistaken for something else, and all of them are made
 permanent by the same property of this epoll: it is
@@ -806,15 +742,7 @@ There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-### A guest command is an argument
-
-`cargo xtask run --example run -- alpine:3.21 '<script>'` starts the binary itself,
-with no PowerShell in between. The cargo runner this replaced went through
-`powershell -File`, whose argument parsing mangled a multi-line shell script --
-indented lines vanished, a double-quoted run of words lost everything after its
-first space -- and said nothing. A script kept in a file still has to have LF line
-endings: `Set-Content` gives CRLF, and `sh` takes the carriage return as part of
-each command.
+### Guest Vulkan on Windows
 
 **The blob mapping is what the design rests on.** Guest Vulkan puts host memory
 in the guest's shm window: venus
@@ -893,7 +821,7 @@ and a fence to a C harness. A VM on it panics in rutabaga's Darwin backend on a
 blob-as-host-pointer path the context pairs with on Windows is `_WIN32`-only and
 has not been compiled on the new base.
 
-**`meson` runs from a venv under `data/`.** It needs `pyyaml` for gallium's
+**`meson` runs from a venv under `build/`.** It needs `pyyaml` for gallium's
 codegen, which is this build's business and not the system Python's. Two traps
 follow from that: meson resolves `python3` off `PATH` — a native-file
 `[binaries] python3` entry does *not* steer the python module — and a Windows
@@ -912,7 +840,7 @@ Firecracker's original `for i in 0..16` produced. A GSI with no `MP_INTSRC`
 entry is one the kernel never routes, so the device holding it waits for an
 interrupt that cannot arrive — and waits silently, because nothing failed.
 
-Which device that is depends on the session's shape. A session with a GPU, a
+Which device that is depends on the machine's shape. A machine with a GPU, a
 network and three shares lands on:
 
 ```
@@ -930,7 +858,7 @@ log that has 5, 13, 14 and 15.
 
 The table now carries one entry per pin, counted from `IRQ_MAX` rather than
 from a literal of its own, so the two cannot drift apart again. That is eleven
-virtio-mmio devices before the fix and nineteen after — with the nine a session
+virtio-mmio devices before the fix and nineteen after — with the nine a machine
 always has, two user mounts and ten.
 
 **Not a Windows bug**, although this is where it was found: the MP table and
@@ -1018,9 +946,18 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 ## `/abin`
 
-Every guest gets one directory of virtx's own executables at `/abin`, **first on a
-command's `PATH`**. Today that is `index` and `mem` -- the programs in
-[`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+`/abin` is a directory of virtx's own executables for the guest: today `index` and `mem` --
+the programs in [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+
+**No machine is given it at present.** `cargo xtask build abin` builds it, `cargo xtask install`
+installs it beside the servers, and the dist workflow puts it in a release, but neither server
+shares it into a machine: that went with the move to a machine per sandbox, and is not back.
+
+```sh
+cargo xtask build abin                     # -> target/release/abin, beside the server;
+                                           #    fetches the musl sysroot the first time
+cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
+```
 
 `docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
 C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
@@ -1029,24 +966,11 @@ that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built 
 `~/.cache/virtx/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
 and `docread` added to `ABINS` in [`xtask`](../xtask/src/main.rs).
 
-```sh
-cargo xtask build abin                     # -> target/release/abin, beside the server;
-                                           #    fetches the musl sysroot the first time
-cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
-```
-
-Everything this host keeps is under that one root -- `$VIRTX_HOME`, or `virtx` under the
-user's cache directory (`~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows,
-`XDG_CACHE_HOME` or `~/.cache` otherwise): `abin/` here, `images/` that every tool in this
-repository pulls into, and `session/{pid}/` while a server is up. One rule, in
-`virtx::cache_root`, because a host has one answer to where its things go. `VIRTX_IMAGE_CACHE_ROOT` still moves the images out from
-under it on their own, being the narrower of the two.
-
 What each program is travels with it: `virtx-abins/{program}/SKILLS.md` is installed at
-`/abin/skills/{program}/SKILLS.md`, so a session gets the programs and the reading of them from
-the one mount. Under `skills/` rather than beside the executables, because the top of `/abin`
-is what goes on `PATH` -- a file there that is not a program is something a shell would offer
-to run. A program whose crate carries no `SKILLS.md` has none installed.
+`abin/skills/{program}/SKILLS.md`, so whatever gets the programs gets the reading of them too.
+Under `skills/` rather than beside the executables, because the top of `/abin` is what would go
+on `PATH` -- a file there that is not a program is something a shell would offer to run. A
+program whose crate carries no `SKILLS.md` has none installed.
 
 What is in one is the program's own `--help`, copied out: the front matter's `name` and
 `description` are the usage line and the sentence clap opens with, and the body is that output,
@@ -1054,57 +978,60 @@ subcommand by subcommand where there are subcommands. The content is settled on 
 program that answers `--help` has already written down what it is, and a second description
 kept beside it is one that drifts from the parser it describes -- but **the copying is by hand
 today**. Nothing checks that a `SKILLS.md` still says what its binary says, so a clap string
-that moves is a file to regenerate. Making that mechanical is work not done.
+that moves is a file to regenerate.
 
-The server looks for `abin/` beside its own binary first -- the one `xtask` builds and
-installs with it -- and then for `abin/` under `home()`. **A host with no such directory is a session with no `/abin`**, not a session
-that fails -- these are executables a session is better off with and can run without, and what
-its absence costs is a `PATH` that is only the image's.
+## Where a host keeps things
 
-It is shared read-only, which here means read-only *at the device*: the host's virtiofs server
-refuses the write whatever the guest mounted it with, so a guest that is root inside itself
-cannot remount it away. Prepended to `PATH` rather than appended, because `/abin` is what this
-backend undertakes to provide -- an image that happens to carry a program of the same name
-would make that undertaking untrue, and nothing would say which one a session got. The path is
-reserved: a client that asks for a tree there is refused.
+Under one root: `$VIRTX_HOME`, or `virtx` under the user's cache directory (`~/Library/Caches`
+on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise), as
+[`cache_root`](src/lib.rs) answers it.
+
+```text
+<root>/
+  bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
+                        beside them, libvirtx_core, abin/
+  images/               the image store, shared by both servers
+  snapshot/             the stdio server's snapshots, one ext4 each
+  volume/               the stdio server's volumes
+  project/<name>/       the HTTP server's, a snapshot/ and a volume/ per project; its config's
+                        `home` moves the whole of it
+```
 
 ## Layout
 
 ```
-virtx-uvm/                  the machinery: images, the root filesystems made of them,
-                            machines and booting them
-virtx-stdio-server/         the one binary, `virtx-uvm`: the server a user runs over
-                            stdio -- the RPC at `/rpc`, and the files of its volumes and
-                            snapshots at `/volumes/` and `/snapshots/` beside it -- and,
-                            as `virtx-uvm vm`, spawned by itself, the process that
-                            becomes a VM; signed on macOS
-virtx-http-server/          the same server over HTTP, to the users and projects its
-                            config names
-virtx-abins/                the programs in the guest's /abin -- index and mem, with docread
-                            beside them and not on it -- and a SKILLS.md each, saying what one
-                            is; its own workspace, built for musl
+virtx-uvm/                  this crate: images, the disks made of them, machines and booting
+                            them, snapshots, volumes and their remote stores, and the WebDAV
+                            files endpoints
+virtx-stdio-server/         the server over stdio, as the `virtx-uvm` binary -- and, as
+                            `virtx-uvm vm`, spawned by itself, the process that becomes a VM;
+                            signed on macOS
+virtx-http-server/          the same server over HTTP, to the users and projects its config
+                            names; also a VM's process, as `virtx-http-server vm`
+virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
+                            own workspace, built for musl by this crate's build script and
+                            embedded in it
+virtx-abins/                the programs for /abin -- index and mem, with docread beside them
+                            -- and a SKILLS.md each; its own workspace, built for musl
 3rdparty/libkrun/           submodule: libkrun, pinned
 3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
-3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned to main at e0a1caf
+3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned
+3rdparty/MoltenVK/          submodule: MoltenVK, with SPIRV-Cross; macOS builds only
 3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-3rdparty/_patches/           applied to the submodules above by `cargo xtask init`;
-                            see "Sessions", "Mounts", "The gpu feature" and "Windows (WHP)"
-xtask/                      `cargo xtask init` / `build` / `install` / `run` / `test`: the
-                            server, the guest and abin/ built and placed as one
-                            set; xtask/scripts/ has what it runs -- the GPU libraries'
-                            build, the musl sysroot fetch, and the musl cc/ar that
+3rdparty/_patches/          applied to the submodules above by `cargo xtask init`; see
+                            "Machines", "Volumes", "The network", "The gpu feature" and
+                            "Windows (WHP)"
+xtask/                      every build, check and release step as `cargo xtask`;
+                            xtask/scripts/ has what it runs -- the guest kernel's and the GPU
+                            libraries' builds, the musl sysroot fetch, and the musl cc/ar that
                             virtx-abins/ cross-compiles with
-data/                       untracked: musl sysroot, sessions, build outputs
+build/                      untracked: the kernel, the GPU libraries, the musl sysroot and the
+                            meson venv, all reproducible from the scripts
 ```
 
-`Cargo.lock` is not tracked. `data/` holds everything reproducible from the
-scripts.
-
-`cargo xtask build` is what puts all three binaries in one directory:
-`virtx-uvm` finds the other two by looking beside itself. A plain `cargo build`
-links the server and the boot but not the guest, which is a musl cross-build of its
-own workspace; `cargo xtask install` copies the whole set into `<prefix>/bin`. On macOS
-the boot needs the hypervisor entitlement, which `cargo xtask build stdio-server` puts on
-after cargo links it -- after rustc's own strip too, which would otherwise rewrite
-the signature. `cargo xtask run` and `cargo xtask test` sign whatever they run, which
-is what the examples and tests that create a VM themselves need.
+`cargo xtask build` is what puts the server and the kernel in one directory: a server finds
+the kernel by looking beside itself. A plain `cargo build` links a server, the agent embedded
+in it, but not the kernel; `cargo xtask install` copies the whole set into `<prefix>/bin`. On
+macOS the server needs the hypervisor entitlement, which `cargo xtask build` puts on after
+cargo links it -- after rustc's own strip too, which would otherwise rewrite the signature.
+`cargo xtask run` and `cargo xtask test` sign whatever they run.

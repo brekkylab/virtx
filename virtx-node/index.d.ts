@@ -284,7 +284,7 @@ export interface SandboxInfo {
   autoDeleteDays?: number
   /** When it was last used, as RFC 3339. */
   usedAt: string
-  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some, each `openPort` adding one and `closePort` dropping it. */
   ports?: SandboxPort[]
 }
 
@@ -323,6 +323,8 @@ export class Sandbox extends Files implements SandboxInfo {
   openPort(port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
   /** Start making an image of it, as `Client.commitImage` does, to point `reference` at. */
   commit(reference: string): StartedJob<ImageJob, ImageJobEntry>
+  /** Close the port `port` in it: its `url` reaches it no more, and it is not opened again as it starts; dropped from `ports`. One not open is refused `404`. */
+  closePort(port: number): Promise<void>
   /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
   /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */

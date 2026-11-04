@@ -63,6 +63,12 @@ impl Sandbox {
         self.client.open_sandbox_port(&self.info.id, port)
     }
 
+    /// Close the port `port` in it: its URL reaches it no more, and it is not opened again as
+    /// it starts. One not open is refused `404`.
+    pub fn close_port(&self, port: u16) -> Call<()> {
+        self.client.close_sandbox_port(&self.info.id, port)
+    }
+
     /// Start making an image of it -- its image, with what it has written as one more layer --
     /// to point `reference` at: how a sandbox is kept to start others from. Of a running one,
     /// as it is when the job starts; of a stopped one, as it was left.

@@ -91,6 +91,19 @@ async def test_a_port_opened_after_is_kept_in_the_sandbox_s_ports(test_server: s
         assert got.ports == [sandbox.ports[0]]
 
 
+async def test_a_port_closed_is_dropped_from_the_sandbox_s_ports(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20", ports=[8000, 8080])
+        kept = sandbox.ports[1]
+        await sandbox.close_port(8000)
+        assert sandbox.ports == [kept]
+        await client.close_sandbox_port(sandbox.id, 8080)
+        assert (await client.start_sandbox(sandbox.id)).ports == []
+        with pytest.raises(VirtxError, match="404"):
+            await sandbox.close_port(8080)
+        assert sandbox.ports == [kept]
+
+
 async def test_a_port_says_what_it_is_for_and_whether_it_is_http(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         sandbox = await client.create_sandbox(

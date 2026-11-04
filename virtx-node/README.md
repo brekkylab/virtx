@@ -67,6 +67,7 @@ const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
 console.log('reach it at', forwarder.address)
 forwarder.close()
 const port = await sandbox.openPort(9000) // kept in sandbox.ports too
+await sandbox.closePort(9000) // its url reaches it no more, and it leaves sandbox.ports
 ```
 
 A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `{ ports: [8080, { port: 5173, label: 'dev server', protocol: 'http' }] }`, or `openPort(5173, { label: 'dev server', protocol: 'http' })`. Each answered port has its `label`, and its `protocol` when it is `'http'`.

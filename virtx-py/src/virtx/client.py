@@ -536,6 +536,11 @@ class Client:
         )
         return SandboxPort.from_dict(await self._call("virtx_client_open_sandbox_port", args))
 
+    async def close_sandbox_port(self, id: str, port: int) -> None:
+        """Close the port ``port`` in the sandbox ``id``: its ``url`` reaches it no more, and it
+        is not opened again as the sandbox starts. One not open is refused ``404``."""
+        await self._call("virtx_client_close_sandbox_port", _args(id=id, port=port))
+
 
 DOMAIN = "virtx.sh"
 """Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and

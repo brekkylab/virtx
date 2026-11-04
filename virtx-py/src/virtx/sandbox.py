@@ -135,7 +135,8 @@ class Sandbox(Files):
     """When it was last used, as RFC 3339."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` and ``start`` only."""
+    """Its opened ports: answered by ``create_sandbox`` and ``start`` only, each ``open_port``
+    adding one and ``close_port`` dropping it."""
 
     @property
     def running(self) -> bool:
@@ -190,6 +191,12 @@ class Sandbox(Files):
         else:
             self.ports[at] = opened
         return opened
+
+    async def close_port(self, port: int) -> None:
+        """Close the port ``port`` in it, as ``Client.close_sandbox_port`` does, and drop it from
+        ``ports``."""
+        await self.client.close_sandbox_port(self.id, port)
+        self.ports[:] = [known for known in self.ports if known.port != port]
 
     def commit(self, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
         """Make an image of it, as ``Client.commit_image`` does, to point ``reference`` at."""

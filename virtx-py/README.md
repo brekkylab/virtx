@@ -74,6 +74,7 @@ sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
 with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 port = await sandbox.open_port(9000)  # kept in sandbox.ports too
+await sandbox.close_port(9000)  # its url reaches it no more, and it leaves sandbox.ports
 ```
 
 A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `PortSpec(5173, label="dev server", protocol="http")` in `ports`, beside plain numbers, or `open_port(5173, label="dev server", protocol="http")`. Each answered port has its `label` and `protocol` (`PortProtocol.TCP` unless said).

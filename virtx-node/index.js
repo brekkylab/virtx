@@ -129,6 +129,7 @@ const SIGNATURES = {
   virtx_client_start_sandbox: WITH_ARGS,
   virtx_client_stop_sandbox: WITH_ARGS,
   virtx_client_open_sandbox_port: WITH_ARGS,
+  virtx_client_close_sandbox_port: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -998,6 +999,13 @@ class Sandbox extends Files {
     })
     this.ports = (this.ports ?? []).filter((known) => known.port !== port).concat([opened])
     return opened
+  }
+
+  // Closes the port `port` in it: its URL reaches it no more, and it is not opened again as it
+  // starts; dropped from `ports`.
+  async closePort(port) {
+    await this.client._call('virtx_client_close_sandbox_port', { id: this.id, port })
+    if (this.ports) this.ports = this.ports.filter((known) => known.port !== port)
   }
 
   // Starts making an image of it, to point `reference` at: the job, and its log as the job's

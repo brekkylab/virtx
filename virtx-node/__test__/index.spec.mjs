@@ -276,6 +276,22 @@ test("a port opened after is kept in the sandbox's ports", async () => {
   }
 })
 
+test("a port closed is dropped from the sandbox's ports", async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000, 8080] })
+    const kept = sandbox.ports[1]
+    await sandbox.closePort(8000)
+    assert.deepEqual(sandbox.ports, [kept])
+    await (await client.getSandbox(sandbox.id)).closePort(8080)
+    assert.deepEqual((await client.startSandbox(sandbox.id)).ports ?? [], [])
+    await assert.rejects(sandbox.closePort(8080), /404/)
+    assert.deepEqual(sandbox.ports, [kept])
+  } finally {
+    await client.close()
+  }
+})
+
 test('a port says what it is for, and whether it is HTTP', async () => {
   const client = Client.spawn(testServer)
   try {

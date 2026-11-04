@@ -249,6 +249,8 @@ A port can say what it is for, and be HTTP rather than TCP: `PortSpec(5173, labe
 
 `sandbox.close_port(port)` closes one, dropping it from `sandbox.ports` -- `closePort` in Node, and `close_sandbox_port(id, port)` on the client, `closeSandboxPort` in Node and the only way in Rust: its URL reaches it no more, and it is not opened again as the sandbox starts. A TCP port is made HTTP by closing it and opening it again, at another URL.
 
+A server reachable from other machines may also answer a TCP port with an `address`, `host:port`, where any TCP client reaches it directly, without a `PortForwarder`; one on this machine, and an HTTP port, have none. Unlike the URL it is not secret, so what is served there must authenticate whoever connects itself.
+
 Ports are the way in. `network=False` takes away the way out.
 
 ## Images

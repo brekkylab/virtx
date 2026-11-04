@@ -54,6 +54,8 @@ await sandbox.closePort(9000) // its url reaches it no more, and it leaves sandb
 
 A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `{ ports: [8080, { port: 5173, label: 'dev server', protocol: 'http' }] }`, or `openPort(5173, { label: 'dev server', protocol: 'http' })`. Each answered port has its `label`, and its `protocol` when it is `'http'`.
 
+A TCP port may also have an `address`, `host:port`, from a server reachable from other machines: any TCP client reaches it there directly, without a `PortForwarder`. Unlike the `url` it is not secret, so what is served there must authenticate whoever connects itself. It is absent when the server gives none.
+
 The files of a volume are read and written through the client, each request naming its root as `{ volume }`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js

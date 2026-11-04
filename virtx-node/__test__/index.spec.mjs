@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import { before, test } from 'node:test'
@@ -234,6 +235,24 @@ test('a port says what it is for, and whether it is HTTP', async () => {
     assert.deepEqual([plain.label, plain.protocol], [undefined, undefined])
   } finally {
     await client.close()
+  }
+})
+
+// The test server is on the client's machine and gives no port an address: a server that does
+// is played by one answering every request with such a port.
+test('a TCP port answered with an address has it', async () => {
+  const answer = { port: 22, url: 'ports/x', address: 'tcp.example:20001' }
+  const server = http.createServer((_, response) => {
+    response.writeHead(201, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(answer))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const client = Client.connect(`http://127.0.0.1:${server.address().port}/`)
+  try {
+    assert.deepEqual(await client.openSandboxPort('sb', 22), answer)
+  } finally {
+    await client.close()
+    server.close()
   }
 })
 

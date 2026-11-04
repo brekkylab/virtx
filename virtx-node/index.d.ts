@@ -218,6 +218,8 @@ export interface SandboxPort {
   label?: string
   /** Absent for `'tcp'`. */
   protocol?: PortProtocol
+  /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
+  address?: string
 }
 
 /** A port to open as a sandbox is made: a number for TCP named nothing, or one that says more. */

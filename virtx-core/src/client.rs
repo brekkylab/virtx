@@ -2312,7 +2312,7 @@ pub(crate) mod ffi {
 
     /// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
     /// "protocol"?: "tcp" | "http"}`. Answers with `{"port": n, "url": "...", "label"?,
-    /// "protocol"?}`: where it is reached from now.
+    /// "protocol"?, "address"?}`: where it is reached from now.
     ///
     /// # Safety
     ///

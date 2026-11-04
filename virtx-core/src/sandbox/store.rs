@@ -198,6 +198,11 @@ pub struct SandboxPort {
     /// How it is reached ([`PortProtocol`]).
     #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
     pub protocol: PortProtocol,
+
+    /// A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it
+    /// one. Not secret, as `url` is: what listens there answers whoever connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// How a port is reached from outside its sandbox.
@@ -398,8 +403,14 @@ mod port_tests {
         let answered: SandboxPort =
             serde_json::from_value(serde_json::json!({"port": 1, "url": "ports/x"})).unwrap();
         assert_eq!(
-            (answered.label, answered.protocol),
-            (None, PortProtocol::Tcp)
+            (answered.label, answered.protocol, answered.address),
+            (None, PortProtocol::Tcp, None)
         );
+        // A TCP port a server gives a public address to.
+        let reached =
+            serde_json::json!({"port": 22, "url": "ports/y", "address": "tcp.example:20001"});
+        let answered: SandboxPort = serde_json::from_value(reached.clone()).unwrap();
+        assert_eq!(answered.address.as_deref(), Some("tcp.example:20001"));
+        assert_eq!(serde_json::to_value(&answered).unwrap(), reached);
     }
 }

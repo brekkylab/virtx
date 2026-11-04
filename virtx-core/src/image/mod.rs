@@ -1,3 +1,9 @@
+//! Images: what the server keeps in its OCI registry at `/images/oci/v2/`, the recipes it
+//! builds them from, and the jobs at `/images/jobs/` that build them or copy them between it and
+//! other registries.
+
+#[cfg(feature = "client")]
+pub(crate) mod client;
 mod content;
 mod image_name;
 #[cfg(feature = "client")]

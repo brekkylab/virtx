@@ -30,9 +30,8 @@ class PortForwarder:
 
     @classmethod
     def open(cls, client: Client, url: str) -> PortForwarder:
-        """Forward the port a sandbox answered ``url`` for, as ``init_sandbox`` and
-        ``list_sandbox`` answer one in ``ports``, over ``client``'s session. Blocks until it is
-        open."""
+        """Forward the port a sandbox answered ``url`` for, as ``create_sandbox`` answers one in
+        ``ports``, over ``client``'s session. Blocks until it is open."""
         lib = client._lib
         args = json.dumps({"url": url}).encode()
         raw = ctypes.c_void_p()

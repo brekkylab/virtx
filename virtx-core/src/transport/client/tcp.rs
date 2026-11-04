@@ -64,7 +64,7 @@ impl Tcp {
         *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
     }
 
-    /// Send `request`, whose URI is a path under the base, such as `/rpc`.
+    /// Send `request`, whose URI is a path under the base, such as `/snapshots/`.
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,

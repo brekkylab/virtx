@@ -36,8 +36,14 @@ impl Stdio {
     /// Start `command` as the server, and the connection over its stdin and stdout. Must be
     /// called inside a tokio runtime.
     pub(super) fn spawn(command: impl Into<Command>) -> io::Result<Stdio> {
+        let mut command = command.into();
+        // A process group of its own, so a terminal's Ctrl-C reaches the client alone, which can
+        // still make its last requests before it closes the server's stdin.
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
         let mut child = command
-            .into()
             .stdin(Piped::piped())
             .stdout(Piped::piped())
             .kill_on_drop(true)
@@ -78,7 +84,7 @@ impl Stdio {
         }
     }
 
-    /// Send `request`, whose URI is a path such as `/rpc`.
+    /// Send `request`, whose URI is a path such as `/snapshots/`.
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,
@@ -110,5 +116,28 @@ impl Stdio {
         {
             let _ = child.kill().await;
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn process_group(pid: u32) -> String {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_server_is_out_of_the_clients_process_group() {
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let stdio = Stdio::spawn(command).unwrap();
+        let server = stdio.child.as_ref().unwrap().id().unwrap();
+        assert_eq!(process_group(server), server.to_string());
+        assert_ne!(process_group(server), process_group(std::process::id()));
     }
 }

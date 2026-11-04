@@ -250,10 +250,13 @@ Everything else is the server's OCI registry: `list_image`, `tag_image`, `untag_
 
 ### From a shell
 
-[`virtx-cli`](virtx-cli/) is the `virtx` command, which does the same to a server's images with the commands `docker` has for them: `build`, `images`, `inspect`, `tag`, `rmi`, `pull`, `push`, `save`, `load`, each also as `virtx image <command>`, and `virtx image prune`.
+The `virtx` command does the same to a server's images with the commands `docker` has for them: `build`, `images`, `inspect`, `tag`, `rmi`, `pull`, `push`, `save`, `load`, each also as `virtx image <command>`, and `virtx image prune`. The Python and Node packages install it, as `libvirtx_core` carries it, and [`virtx-cli`](virtx-cli/) builds it as a binary of its own.
 
 ```sh
+uvx virtx images                               # or `pip install virtx`
+npx @brekkylab/virtx images                    # or `npm install -g @brekkylab/virtx`
 cargo install --path virtx-cli
+
 virtx build -t jq:latest .                     # ./Dockerfile; the log on stderr, `jq:latest sha256:…` on stdout
 virtx images
 virtx tag jq:latest ghcr.io/me/jq:1

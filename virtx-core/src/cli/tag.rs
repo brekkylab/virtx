@@ -1,9 +1,9 @@
 //! `tag`: a ref pointed at an image.
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::name::{gather, lookup, with_tag};
+use crate::cli::name::{gather, lookup, with_tag};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct TagArgs {

@@ -2,10 +2,10 @@
 
 use std::fmt::Write as _;
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::name::{Image, gather, image_id};
+use crate::cli::name::{Image, gather, image_id};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct LsArgs {

@@ -3,10 +3,10 @@
 
 use std::{io, path::PathBuf};
 
+use crate::{Auth, Client};
 use anyhow::Context as _;
 use clap::Args;
 use tokio::process::Command;
-use virtx_core::{Auth, Client};
 
 /// The server's program, as virtx-uvm installs it.
 const PROGRAM: &str = "virtx-uvm";
@@ -113,9 +113,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn a_host_is_reached_over_http() {
-        let url = crate::job::tests::serve().await;
+        let url = crate::cli::job::tests::serve().await;
         let args = ServerArgs {
             host: Some(url),
             server: None,

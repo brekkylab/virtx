@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 
+use crate::Client;
 use clap::{Parser, Subcommand};
-use virtx_core::Client;
 
-use crate::{
+use crate::cli::{
     build::{self, BuildArgs},
     inspect::{self, InspectArgs},
     job::Interrupted,

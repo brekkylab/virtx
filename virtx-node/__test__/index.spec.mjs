@@ -3,7 +3,7 @@
 // cargo first, unless `$VIRTX_CORE_LIB` names a library.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import net from 'node:net'
 import path from 'node:path'
 import { before, test } from 'node:test'
@@ -296,4 +296,23 @@ test('a forwarder is on the loopback until it is closed', async () => {
   forwarder.close()
   await client.close()
   await assert.rejects(read(forwarder.host, forwarder.port), /ECONNREFUSED/)
+})
+
+// The `virtx` command the package installs, run as a process of its own.
+function virtxCommand(...args) {
+  return spawnSync(process.execPath, [path.join(root, 'virtx-node', 'cli.js'), ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, [virtx.LIBRARY_ENV]: virtx.libraryPath() },
+  })
+}
+
+test('the command runs against a server', () => {
+  const pulled = virtxCommand('--server', testServer, 'pull', '-q', 'alpine:3.20')
+  assert.deepEqual([pulled.status, pulled.stdout], [0, 'alpine:3.20 sha256:0\n'], pulled.stderr)
+})
+
+test('a bad argument exits as clap does', () => {
+  const refused = virtxCommand('images', '--bogus')
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /unexpected argument '--bogus'/)
 })

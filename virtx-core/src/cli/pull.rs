@@ -1,9 +1,9 @@
 //! `pull`: an image from a registry, tagged on the server as it is named.
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{job, name::with_tag, registry::RegistryArgs};
+use crate::cli::{job, name::with_tag, registry::RegistryArgs};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct PullArgs {

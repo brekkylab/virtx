@@ -3,8 +3,8 @@
 //! The server lists one row per tag; an [`Image`] is those rows gathered by digest, which is
 //! what a user means by one image.
 
+use crate::ImageListOutputItem;
 use serde::Serialize;
-use virtx_core::ImageListOutputItem;
 
 /// One image the server holds, and every ref on it, as the server spells each.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

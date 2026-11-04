@@ -5,9 +5,13 @@
   "license": "Apache-2.0",
   "main": "index.js",
   "types": "index.d.ts",
+  "bin": {
+    "virtx": "cli.js"
+  },
   "files": [
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "cli.js"
   ],
   "engines": {
     "node": ">= 18"

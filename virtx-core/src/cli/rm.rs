@@ -1,9 +1,9 @@
 //! `rm`: a ref untagged, or an image removed with every ref on it.
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{
+use crate::cli::{
     command::report,
     name::{Image, Named, familiar_ref, gather, image_id, lookup, repository},
     prompt::{confirm, emphasis},

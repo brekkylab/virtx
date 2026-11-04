@@ -1,9 +1,9 @@
 //! `push`: an image to the registry its ref names.
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{job, name::with_tag, registry::RegistryArgs};
+use crate::cli::{job, name::with_tag, registry::RegistryArgs};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct PushArgs {
@@ -28,7 +28,7 @@ pub(crate) async fn push(client: &Client, args: PushArgs) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
 

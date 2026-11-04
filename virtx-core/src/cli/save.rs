@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{
+use crate::cli::{
     name::{gather, lookup},
     transfer,
 };

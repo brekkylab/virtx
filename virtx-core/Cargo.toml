@@ -51,6 +51,12 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 # checked as it is read.
 tar = { version = "0.4", default-features = false, optional = true }
 sha2 = { version = "0.10", optional = true }
+# The `virtx` command's arguments.
+clap = { version = "4", features = ["derive", "env"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# `signal(SIGPIPE, SIG_DFL)`, so `virtx images | head` ends quietly.
+libc = { version = "0.2", optional = true }
 
 [build-dependencies]
 # Writes `include/virtx.h` from `src/ffi.rs`.
@@ -72,8 +78,9 @@ tokio = { version = "1", features = ["io-std"] }
 # the wire's client end, `server` its server end, and `ffi` the C ABI over a client, which is
 # what `libvirtx_core` is built for. `testing` adds the test server over both, which the
 # crate's tests, and the bindings' tests through the `test_server` example, run against:
-# `cargo test --features testing`.
-default = ["ffi"]
+# `cargo test --features testing`. `cli` adds the `virtx` command, which the bindings run
+# through `virtx_cli_main`.
+default = ["ffi", "cli"]
 client = [
     "dep:reqwest",
     "dep:hyper",
@@ -106,6 +113,7 @@ server = [
     "dep:tokio",
 ]
 ffi = ["client"]
+cli = ["client", "dep:clap", "dep:libc", "tokio/signal"]
 testing = [
     "client",
     "server",

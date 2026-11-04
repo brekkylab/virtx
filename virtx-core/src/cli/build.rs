@@ -5,11 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::{Client, Recipe};
 use anyhow::Context as _;
 use clap::Args;
-use virtx_core::{Client, Recipe};
 
-use crate::{job, name::with_tag};
+use crate::cli::{job, name::with_tag};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct BuildArgs {

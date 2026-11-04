@@ -1,9 +1,9 @@
 //! `inspect`: images as JSON.
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{
+use crate::cli::{
     command::report,
     name::{Image, gather, lookup},
 };

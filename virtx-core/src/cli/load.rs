@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
+use crate::Client;
 use clap::Args;
-use virtx_core::Client;
 
-use crate::{name::with_tag, transfer};
+use crate::cli::{name::with_tag, transfer};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct LoadArgs {

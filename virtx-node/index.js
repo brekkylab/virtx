@@ -169,6 +169,7 @@ class Library {
   constructor(file) {
     this.path = file
     const lib = koffi.load(file)
+    this.lib = lib
     for (const [name, [result, args]] of Object.entries(SIGNATURES)) {
       this[name] = lib.func(name, result, args)
     }
@@ -808,4 +809,6 @@ module.exports = {
   imageName,
   libraryPath,
   load,
+  // For `cli.js`, which runs the library's `virtx` command; not part of the client's API.
+  _library: library,
 }

@@ -1,10 +1,10 @@
 //! Following a transfer between the server and a file here: each blob's line on stderr, and
 //! Ctrl-C dropping it, which leaves nothing done.
 
+use crate::{Error, Event};
 use futures_util::{Stream, StreamExt as _};
-use virtx_core::{Error, Event};
 
-use crate::job::Interrupted;
+use crate::cli::job::Interrupted;
 
 /// Drive `stream` to its output, its progress on stderr unless `quiet`. Ctrl-C drops it, and
 /// fails with `undone`, what dropping it leaves.

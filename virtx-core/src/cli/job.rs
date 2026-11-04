@@ -2,8 +2,8 @@
 
 use std::fmt;
 
+use crate::{Client, ImageJob, ImageJobEntry};
 use futures_util::StreamExt as _;
-use virtx_core::{Client, ImageJob, ImageJobEntry};
 
 /// Ctrl-C interrupted the command, and what it was doing was undone, as said.
 #[derive(Debug)]
@@ -58,9 +58,9 @@ fn ended(digest: Option<String>, error: Option<String>) -> anyhow::Result<String
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 pub(crate) mod tests {
-    use virtx_core::{Auth, Recipe};
+    use crate::{Auth, Recipe};
 
     use super::*;
 
@@ -68,7 +68,7 @@ pub(crate) mod tests {
     pub(crate) async fn serve() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, virtx_core::testing::router()).await });
+        tokio::spawn(async move { axum::serve(listener, crate::testing::router()).await });
         url
     }
 

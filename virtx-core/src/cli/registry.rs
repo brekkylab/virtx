@@ -3,9 +3,9 @@
 
 use std::io::Read;
 
+use crate::RegistryAuth;
 use anyhow::Context as _;
 use clap::Args;
-use virtx_core::RegistryAuth;
 
 #[derive(Debug, Default, PartialEq, Args)]
 pub(crate) struct RegistryArgs {

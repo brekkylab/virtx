@@ -13,6 +13,7 @@ members = ["docread", "index", "mem", "storebase"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 # RFC 3339 timestamps. A row carries when it was last written, and the store is a file other

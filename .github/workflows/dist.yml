@@ -5,7 +5,7 @@
 #   virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
 #
 # Each platform's job uploads its archive under the sha (`cargo xtask upload`). The names a
-# whole release goes by -- `latest`, what `ensure_virtx` fetches when told no version, and a
+# whole release goes by -- `latest`, what a download that names no version gets, and a
 # tag -- are given by `verify`, once all four platforms' archives are up, and all four at
 # once, so no name ever holds some platforms of one release and some of another:
 #
@@ -60,7 +60,7 @@ on:
         type: boolean
         default: true
       latest:
-        description: Point every platform's latest at this commit (what ensure_virtx fetches by default)
+        description: Point every platform's latest at this commit (what a download that names no version gets)
         type: boolean
         default: false
 

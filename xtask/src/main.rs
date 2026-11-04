@@ -255,7 +255,7 @@ struct Upload {
     region: Option<String>,
     /// Whether to move this platform's `latest` to the release, and only when asked
     /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
-    /// `latest` changes what every `ensure_virtx` told no version fetches next.
+    /// `latest` changes what every download that names no version gets next.
     latest: bool,
     /// Whether the archive carries abin, and only when asked (`--with-abin`).
     abin: bool,
@@ -882,8 +882,8 @@ fn download(options: &Options) -> anyhow::Result<()> {
 /// one archive per platform under a directory named for the release.
 ///
 /// **One level for every name a release has.** `<ref>` is the sha of the commit it was built
-/// from, which this writes; or `latest`, which `--latest` writes as well, and which
-/// `ensure_virtx` fetches when told no version; or a tag, which the dist workflow writes
+/// from, which this writes; or `latest`, which `--latest` writes as well, and which a
+/// download that names no version gets; or a tag, which the dist workflow writes
 /// once every platform has its archive. A fetch is the same URL whichever name it is given,
 /// and a name is a directory of archives rather than a file naming one, so nothing reads one
 /// thing to find out where another is.
@@ -892,8 +892,8 @@ fn download(options: &Options) -> anyhow::Result<()> {
 /// is a HEAD away.
 const DIST_ROOT: &str = "virtx-uvm";
 
-/// The platforms a release is published for, as `std::env::consts` spells them -- which
-/// is what `ensure_virtx` builds its URL from. macOS is Apple silicon only and Windows
+/// The platforms a release is published for, as `std::env::consts` spells them, which is
+/// how an archive's name spells them. macOS is Apple silicon only and Windows
 /// x86_64 only for now.
 fn dist_platform() -> anyhow::Result<String> {
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
@@ -1065,10 +1065,6 @@ fn install(options: &Options) -> anyhow::Result<()> {
         built.display()
     );
     stage_bin(&built, &bin, &files, true)?;
-    // virtx's `ensure_virtx` replaces a `bin/` whose `.release` is not the release it wants,
-    // and leaves one that reads `local` alone.
-    fs::write(bin.join(".release"), "local")
-        .with_context(|| format!("marking {} as built here", bin.display()))?;
     eprintln!("xtask: installed to {}", bin.display());
     Ok(())
 }

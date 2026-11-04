@@ -2,6 +2,7 @@
 name = "virtx-exec-index"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # `index` is what a caller types, and the package name is not it: this is one program, and the
 # name it answers to is the one in its usage line and in everything it says about itself.

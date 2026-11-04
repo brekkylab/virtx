@@ -2,7 +2,7 @@
 name = "virtx-uvm-guest"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 # The agent inside each of virtx-uvm's machines. Its own workspace root: it is cross-compiled to
 # `*-unknown-linux-musl` by virtx-uvm's build script, which embeds it, and a member would be

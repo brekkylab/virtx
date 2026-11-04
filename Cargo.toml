@@ -47,7 +47,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 # 1.89 for `std::fs::File::lock`, which guards `index.json` against concurrent pulls.
 rust-version = "1.89"
 

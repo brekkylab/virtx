@@ -13,12 +13,13 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
-| `/snapshots/` | [HTTP](#snapshots) | Snapshot CRUD |
-| `/snapshots/{name}/files/` | [WebDAV](#files) | The files in a snapshot |
+| `/snapshots/` | [HTTP](#snapshots) | Snapshots: list, read, delete |
+| `/snapshots/{name}/files/` | [WebDAV](#files) | The files in a snapshot, read-only |
 | `/volumes/` | [HTTP](#volumes) | Volume CRUD |
 | `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
 | `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
 | `/sandboxes/` | [HTTP](#sandboxes) | Sandbox CRUD |
+| `/sandboxes/{id}/snapshot` | [HTTP](#snapshots) | Taking a snapshot of a sandbox |
 | `/sandboxes/{id}/jobs/` | [HTTP](#sandbox-jobs) | Sandbox jobs: read, signal, cancel |
 | `/sandboxes/{id}/jobs/exec/` | [HTTP](#sandbox-jobs) | Starting a process in a sandbox |
 | `/sandboxes/{id}/jobs/{job}/stdin` | [HTTP](#sandbox-jobs) | Writing to a process's stdin |
@@ -85,7 +86,7 @@ A `DELETE` answers `204 No Content` once what it names is gone.
 A request that fails is answered with an HTTP error status and a body:
 
 ```text
-{"error": {"code": "in_use", "message": "snapshot `dev` is held by a sandbox"}}
+{"error": {"code": "in_use", "message": "volume `data` is mounted by a sandbox"}}
 ```
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
@@ -182,28 +183,43 @@ Cancelling one stops it:
 
 The server MAY remove an image job that has ended, once a time it chooses has passed.
 
-`POST /images/prune` deletes each image no reference points at and no sandbox uses, and what only such images held, such as their layers.
+`POST /images/prune` deletes each image no reference points at and no sandbox or [snapshot](#snapshots) stands on, and what only such images held, such as their layers.
 `images` is the digest of each image it deleted, and `reclaimed` how many bytes that freed.
 It MAY leave what is too new to tell from what a running image job will point a reference at.
 
 ### Snapshots
 
-A snapshot is the upper layer of a sandbox's root filesystem, kept under a name.
-A sandbox started on one begins with the changes in it, and writes into it.
-Its files are reached at [`/snapshots/{name}/files/`](#files).
+A snapshot is a sandbox's root filesystem at one moment, kept under a name: the [image](#images) the sandbox stands on, and everything it had written over it by then.
+It is taken from a sandbox, whether its VM runs or has exited, and never changes after.
+Any number of sandboxes are started from one, at once or one after another: each begins as the snapshot is, and writes to a copy of its own, so none of them changes it.
+Its files are read at [`/snapshots/{name}/files/`](#files).
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /snapshots/` | | `200`, array of `{name, size, in_use}` |
-| `POST /snapshots/` | `{name?, disk_gib?}` | `201`, `{name, size, in_use}` |
-| `GET /snapshots/{name}` | | `200`, `{name, size, in_use}` |
+| `POST /sandboxes/{id}/snapshot` | `{name?}` | `201`, the snapshot |
+| `GET /snapshots/` | | `200`, array of snapshots |
+| `GET /snapshots/{name}` | | `200`, the snapshot |
 | `DELETE /snapshots/{name}` | | `204` |
 
-Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
-`disk_gib` is how much a sandbox standing on it may write over its image, in GiB; without it the server picks it, and `0` is refused.
-`size` is the bytes the upper layer takes on the server.
-`in_use` is whether a sandbox holds the snapshot now, from its `POST` until its `DELETE`.
-`DELETE` refuses a snapshot in use with `409`, `in_use`.
+A snapshot is `{name, image, sandbox, size, created_at}`:
+
+- `name` names it. Without `name` in the body the server picks one, and a name in use is refused with `409`, `exists`.
+- `image` is the digest of the image it stands on, as a sandbox's `image` is answered.
+- `sandbox` is the id of the sandbox it was taken from, which may since have been deleted.
+- `size` is the bytes it takes on the server, beyond its image.
+- `created_at` is when it was taken, as RFC 3339.
+
+`POST /sandboxes/{id}/snapshot` takes one of sandbox `{id}`, answered with its path, `/snapshots/{name}`, in `Location`:
+
+- It holds what the sandbox's processes had written to its root filesystem by the time it is answered, as one moment: as a disk is when its machine stops, with everything written flushed first. The server MAY pause the sandbox while it copies, and its processes then go on as they were.
+- It holds files, not processes: nothing that runs in the sandbox, nor what they hold in memory.
+- It holds the root filesystem alone: what the sandbox's [volumes](#volumes) hold stays in them.
+- Each snapshot of a sandbox is another, as the sandbox was then: one sandbox gives as many as are taken.
+
+`GET /snapshots/` takes `?sandbox={id}` for those taken from one sandbox, and `?image={digest}` for those standing on one image, each optional.
+
+A snapshot keeps the image it stands on: the server does not delete that image while the snapshot exists, whether a tag points at it or not, and refuses a `DELETE` of it by digest, as [Images](#images) says.
+`DELETE` of a snapshot removes it; sandboxes already started from it go on, each with its own copy.
 
 ### Volumes
 
@@ -247,25 +263,30 @@ The mount is a directory it creates, not the root and not inside another mount, 
 
 ### Sandboxes
 
-A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), with [volumes](#volumes) mounted into it.
+A sandbox is a VM booted from an image, or from a [snapshot](#snapshots) as it was taken, with [volumes](#volumes) mounted into it.
+What it writes to its root filesystem is its own, in a layer over its image, and goes with it; a snapshot keeps it.
 
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running}` |
-| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
+| `POST /sandboxes/` | `{image?, snapshot?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
 | `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running}` |
 | `DELETE /sandboxes/{id}` | | `204` |
+| `POST /sandboxes/{id}/snapshot` | `{name?}` | `201`, a [snapshot](#snapshots) of it |
 | `PUT /sandboxes/{id}/ports/{port}` | | `201`, `{port, url}`; `200` for one open already |
 
-- `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
+- The body names what it boots, `image` or `snapshot`, exactly one: both, or neither, is refused.
+- `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted, which for one started from a snapshot is the snapshot's.
+- `snapshot` is the snapshot, by name, it starts from: its root filesystem begins as the snapshot's is. In the answer, the snapshot it was started from, if it was, even once that is deleted.
+- `disk_gib` is how much it may write to its root filesystem over its image, in GiB; without it the server picks it, and `0` is refused. Started from a snapshot, what the snapshot holds counts toward it, and one too small to hold that is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
 - `running` is whether its VM is up now.
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its volumes, and the snapshots taken of it, stay, and every request naming it is answered `404`, `not_found`.
+A server that reclaims a sandbox MAY take a snapshot of it first, which is then one of its snapshots as any other is.
 One whose VM has exited is still held until then.
 
 #### Ports
@@ -350,11 +371,11 @@ Images are listed, tagged and removed with the specification's requests:
 | List images | `GET /images/oci/v2/_catalog`, then `GET /images/oci/v2/{name}/tags/list` |
 | Tag an image | `PUT /images/oci/v2/{name}/manifests/{tag}` with its manifest |
 | Untag a reference | `DELETE /images/oci/v2/{name}/manifests/{tag}` |
-| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it |
+| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it; refused with `409 Conflict` and the code `DENIED` for one a snapshot stands on |
 | Export an image | `GET` its manifest, and each blob it names |
 | Import an image | Push each blob, then `PUT` its manifest by tag |
 
-A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
+A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time -- but not one a [snapshot](#snapshots) stands on, which is kept while the snapshot is.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 
 The server copies images to and from other registries with [pull and push jobs](#image-jobs), which take that registry's credentials.
@@ -366,6 +387,7 @@ A request that fails is answered with the specification's error codes, in its `{
 
 The files in a volume are reached at `/volumes/{name}/files/`, and those in a snapshot at `/snapshots/{name}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
 The path after the root is the file's path in the volume or snapshot, each segment percent-encoded.
+A snapshot's files are those its sandbox had written over its image: one the sandbox deleted from the image is not among them.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -383,10 +405,10 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume or snapshot is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume or snapshot, and refuse any other with `502 Bad Gateway`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume, and refuse any other with `502 Bad Gateway`.
 - A request naming a volume or snapshot that does not exist is answered `404 Not Found`.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.
 
-A snapshot in use, held by a sandbox from its `POST` until its `DELETE` or its reclaiming, is answered `423 Locked` to every request, reads included: its files are the sandbox's until then.
+A snapshot never changes, so its files are read and not written: `PROPFIND` and `GET` are answered, and every request that would write, `PUT`, `MKCOL`, `DELETE`, `MOVE` and `COPY`, is refused with `405 Method Not Allowed`.

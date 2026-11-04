@@ -6,8 +6,9 @@
 //! and becomes a layer as it is. `ENV` and `WORKDIR` change only the config, which every
 //! later `RUN` runs under and the image keeps.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
-use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oci_spec::image::{Digest, ImageConfiguration};
@@ -15,7 +16,8 @@ use virtx_core::Step;
 
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
-use crate::machine::{self, Machine, MachineSpec, Report};
+use crate::machine::wire::MachineMessage;
+use crate::machine::{self, Machine, MachineConfig, MachineSpec};
 use crate::snapshot::{self, Snapshot};
 
 #[derive(Debug, thiserror::Error)]
@@ -60,7 +62,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// nothing, for a command that wrote nothing.
 ///
 /// A `RUN` runs through `/bin/sh -c`, in the config's working directory -- made if it is
-/// not there -- and in a machine as `spec` says, spawned as `exe` (see [`Machine::run`]).
+/// not there -- and in a machine as `spec` says, spawned as `vm` (see [`Machine::start`]).
 /// Each line it writes goes to `report`. One that exits with anything but 0 is
 /// [`Error::Failed`], and changes nothing.
 pub async fn build_step(
@@ -68,7 +70,7 @@ pub async fn build_step(
     image: &mut ImageConfiguration,
     layers: &mut Vec<Digest>,
     step: &Step,
-    exe: &Path,
+    vm: &[OsString],
     spec: &MachineSpec,
     mut report: impl FnMut(String) + Send,
 ) -> Result<()> {
@@ -105,17 +107,19 @@ pub async fn build_step(
         tokio::task::spawn_blocking(move || snapshots.create("layer", Snapshot::SIZE)).await??
     };
 
-    // From the root, as the guest's init would fail to go somewhere not there yet.
+    // From the root, as the guest's init would fail to go somewhere not there yet. Synced
+    // before it is done, since the machine is killed after and what the guest had not put on
+    // the snapshot would be lost.
     let workdir = config.working_dir().clone().unwrap_or_else(|| "/".into());
     config.set_working_dir(None);
     let cmd = [
         "/bin/sh",
         "-c",
-        r#"mkdir -p "$0" && cd "$0" && exec /bin/sh -c "$1""#,
+        r#"mkdir -p "$0" && cd "$0" && /bin/sh -c "$1"; code=$?; sync; exit $code"#,
         workdir.as_str(),
         command,
     ];
-    let machine = Machine {
+    let config = MachineConfig {
         rootfs,
         config,
         snapshot: Some(snapshot.clone()),
@@ -123,13 +127,58 @@ pub async fn build_step(
         volumes: Vec::new(),
         ports: Vec::new(),
     };
-    let code = machine
-        .run(exe, cmd.map(str::to_owned).to_vec(), None, |said| {
-            if let Report::Stdout(line) | Report::Stderr(line) = said {
-                report(line);
+    let vm = vm.to_vec();
+    let machine =
+        Arc::new(tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??);
+    // Killed when this is dropped before the command has ended -- a build cancelled -- which
+    // the thread waiting on the machine below would not see.
+    struct Kill(Arc<Machine>);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            self.0.kill();
+        }
+    }
+    let kill = Kill(Arc::clone(&machine));
+    let cmd = cmd.map(str::to_owned).to_vec();
+    let (lines, mut said) = tokio::sync::mpsc::unbounded_channel();
+    let ran = tokio::task::spawn_blocking(move || {
+        machine.exec(cmd)?;
+        let id = loop {
+            match machine.recv() {
+                Some(MachineMessage::Started(started)) => {
+                    break started.map_err(machine::Error::NotStarted)?;
+                }
+                Some(_) => {}
+                None => {
+                    return Err(machine::Error::Died(
+                        "the machine's process ended before the command started".into(),
+                    ));
+                }
             }
-        })
-        .await?;
+        };
+        loop {
+            match machine.recv() {
+                Some(
+                    MachineMessage::Stdout { id: of, line }
+                    | MachineMessage::Stderr { id: of, line },
+                ) if of == id => {
+                    let _ = lines.send(line);
+                }
+                Some(MachineMessage::Exited { id: of, code }) if of == id => return Ok(code),
+                Some(_) => {}
+                None => {
+                    return Err(machine::Error::Died(
+                        "the machine's process ended before the command did".into(),
+                    ));
+                }
+            }
+        }
+    });
+    while let Some(line) = said.recv().await {
+        report(line);
+    }
+    let code = ran.await??;
+    drop(kill);
     if code != 0 {
         return Err(Error::Failed {
             command: command.clone(),

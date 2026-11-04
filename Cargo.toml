@@ -20,11 +20,16 @@ members = ["virtx-uvm", "virtx-stdio-server", "virtx-http-server", "xtask"]
 # this root, and the ones in `virtx-abins/` inherit dependencies this workspace has no
 # reason to declare.
 #
+# `virtx-uvm-guest/` is the agent inside each machine, which `virtx-uvm`'s build script
+# cross-compiles to `*-unknown-linux-musl` and embeds -- a workspace root of its own for the
+# same reason as `virtx-abins/`.
+#
 # `virglrenderer-sys/` builds virglrenderer with meson, and is reached only through
 # rutabaga_gfx under the `gpu` feature. As a member a bare `cargo build` would run it.
 exclude = [
     "3rdparty/libkrun",
     "virtx-abins",
+    "virtx-uvm-guest",
 ]
 
 [workspace.package]

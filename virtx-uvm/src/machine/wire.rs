@@ -1,6 +1,11 @@
-//! The control channel between a server and each of its machines' processes: `ctlin`, which
-//! the server writes [`HostMessage`]s into, and `ctlout`, which it reads [`MachineMessage`]s
-//! from. The guest's own stdin, stdout and stderr are the process's, apart from this.
+//! The control channel between a server and each of its machines' processes: `ctrlin`, which
+//! the server writes [`HostMessage`]s into, and `ctrlout`, which it reads [`MachineMessage`]s
+//! from -- everything the two say to each other once the process is spawned.
+//!
+//! The same frames go on between the process and the agent in the guest, over the
+//! virtio-console port [`PORT_NAME`]: the process passes the host's on to the agent and the
+//! agent's back, so the channel runs end to end. The agent, built apart, includes this file by
+//! path.
 //!
 //! Each message is one frame: its length as four big-endian bytes, then the message as JSON.
 
@@ -12,25 +17,47 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// The largest frame either end reads.
 const MAX_FRAME: usize = 16 << 20;
 
+/// The name of the virtio-console port the channel runs on inside the machine.
+pub const PORT_NAME: &str = "virtx-ctrl";
+
 /// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostMessage {
-    /// End the machine. Nothing is synced first: the process just exits.
-    Stop,
+    /// Run `cmd` in the guest, beside whatever else runs there. Answered with
+    /// [`Started`](MachineMessage::Started) before the next `Exec` is, so the host that waits for
+    /// it before sending another knows which it answers.
+    Exec { cmd: Vec<String> },
+    /// Send `signal` to the process `id` and everything it started. Numbered as the guest's
+    /// Linux numbers it, which is not every host's: `SIGUSR1` is 10 there and 30 on macOS. Not
+    /// answered: what the process does with it, its [`Exited`](MachineMessage::Exited) says.
+    Signal { id: u32, signal: i32 },
+    /// Put what the guest has written on its disks, and end the machine. Not answered: its
+    /// process ends.
+    Shutdown,
 }
 
-/// What the machine's process tells the host, apart from the guest's own output.
+/// What the machine's process tells the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachineMessage {
-    /// Where on this host's loopback each published guest port is reached.
-    Published(Vec<(u16, SocketAddr)>),
-    /// A line the guest's console printed: the kernel's, or the init's before it ran the
-    /// command.
-    Console(String),
-    /// What libkrun logged of its own.
+    /// The machine has booted and the guest takes commands, with where on this host's loopback
+    /// each published guest port is reached. Once per machine.
+    Ready(Vec<(u16, SocketAddr)>),
+    /// The answer to the last [`Exec`](HostMessage::Exec): the guest's pid of the process it
+    /// started, the `id` everything said of it after is under, or why it could not be started.
+    Started(std::result::Result<u32, String>),
+    /// A line the process `id` wrote to its stdout, without its newline.
+    Stdout { id: u32, line: String },
+    /// A line the process `id` wrote to its stderr, without its newline.
+    Stderr { id: u32, line: String },
+    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. The last
+    /// thing said of it.
+    Exited { id: u32, code: i32 },
+    /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
+    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
+    /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
+    /// could not be built or broke, logged as an error as the process's last word -- so a
+    /// process that ends before [`Ready`](MachineMessage::Ready) has said why here.
     Log { level: String, message: String },
-    /// The machine could not be built, or broke once it was, and why. The last thing it says.
-    NotBuilt(String),
 }
 
 /// Write `message` as one frame.
@@ -77,9 +104,15 @@ mod tests {
     #[test]
     fn a_message_comes_out_as_it_went_in() {
         let sent = [
-            MachineMessage::Published(vec![(80, "127.0.0.1:49152".parse().unwrap())]),
-            MachineMessage::Console("hello".into()),
-            MachineMessage::NotBuilt("no".into()),
+            MachineMessage::Ready(vec![(80, "127.0.0.1:49152".parse().unwrap())]),
+            MachineMessage::Stdout {
+                id: 0,
+                line: "hello".into(),
+            },
+            MachineMessage::Log {
+                level: "ERROR".into(),
+                message: "no".into(),
+            },
         ];
         let mut wire = Vec::new();
         for message in &sent {

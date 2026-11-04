@@ -460,6 +460,10 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
             .cloned()
             .unwrap_or_default();
         let runnable = kinds.iter().any(|k| k == "bin" || k == "example");
+        // A test's binary spawns the package's own to be the VM, which needs the entitlement too.
+        if test && !is_test && runnable {
+            sign(Path::new(exe))?;
+        }
         if (test && is_test) || (!test && !is_test && runnable) {
             let manifest_dir = message["manifest_path"]
                 .as_str()

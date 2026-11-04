@@ -1,5 +1,5 @@
 //! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume or a snapshot
-//! over WebDAV at `/volumes/{name}/` and `/snapshots/{name}/`.
+//! over WebDAV at `/volumes/{name}/files/` and `/snapshots/{name}/files/`.
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their
 //! paths. A snapshot's are the ext4 image a machine writes: read whole into an
@@ -24,8 +24,8 @@ use crate::snapshot::{Error as SnapshotError, Store as SnapshotStore};
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
 
 /// Whether a sandbox holds the snapshot named, which no lock on its disk says: a sandbox
-/// holds its snapshot from its `sandbox.init` to its `sandbox.close`, and a machine's lock
-/// only while a command runs.
+/// holds its snapshot from its making to its removal, and a machine's lock only while the
+/// machine runs.
 pub type Held<'a> = &'a (dyn Fn(&str) -> bool + Sync);
 
 /// The files endpoints over one home's snapshots and volumes.
@@ -46,8 +46,8 @@ pub(crate) enum Root {
 impl fmt::Display for Root {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Root::Volume(name) => write!(f, "/volumes/{name}"),
-            Root::Snapshot(name) => write!(f, "/snapshots/{name}"),
+            Root::Volume(name) => write!(f, "/volumes/{name}/files"),
+            Root::Snapshot(name) => write!(f, "/snapshots/{name}/files"),
         }
     }
 }
@@ -62,7 +62,7 @@ impl Files {
         }
     }
 
-    /// Answer `request`, one to `/volumes/{name}` or `/snapshots/{name}` and what is under
+    /// Answer `request`, one to `/volumes/{name}/files` or `/snapshots/{name}/files` and what is under
     /// them; anything else is `404`.
     pub async fn handle(&self, request: Request<Body>, held: Held<'_>) -> Response {
         let path = request.uri().path().to_owned();

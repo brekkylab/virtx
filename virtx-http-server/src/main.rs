@@ -1,14 +1,13 @@
 //! `virtx-http-server` -- a virtx server over HTTP, to the users and projects its config names
-//! (see [`config`]): each request carries a user's token and names a project, and its methods
-//! are in that project's home. So are the files endpoints, `/volumes/` and `/snapshots/`,
-//! which a request reaches with the same token and project.
+//! (see [`config`]): each request carries a user's token and names a project, and the endpoints
+//! `virtx-core`'s `PROTOCOL.md` names answer it from that project's home.
 //!
-//! The images every project shares are at `/images/v2/`, as an OCI registry (see
+//! The images every project shares are at `/images/oci/v2/`, as an OCI registry (see
 //! [`virtx_uvm::RegistryServer`]), to any user.
 //!
-//! A sandbox's ports are at `/ports/<capability>` beside `/rpc`, each a WebSocket of the
+//! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
-//! `sandbox.init` answers, is all a connection needs, and gives no more than the one port.
+//! making the sandbox answers, is all a connection needs, and gives no more than the one port.
 //!
 //! `virtx-http-server token` makes a token, and says what the config keeps of it.
 //! `virtx-http-server vm …` is this binary spawned by itself to be a machine; see
@@ -16,7 +15,7 @@
 
 mod access;
 mod config;
-mod rpc;
+mod endpoints;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,17 +25,18 @@ use anyhow::Context as _;
 use axum::extract::Path;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
+use axum::routing::any;
 use clap::Parser;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower_http::cors::CorsLayer;
-use virtx_core::{CancelScope, Dispatcher, Server};
 use virtx_uvm::RegistryServer;
 
 use crate::access::Access;
 use crate::config::Config;
-use crate::rpc::Tunnel;
+use crate::endpoints::Tunnel;
 
 /// The WebSocket subprotocol a port's TCP is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
@@ -44,17 +44,20 @@ const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 /// How much of a port's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
 
-/// How often the images every project shares are pruned, as `image.prune` does.
+/// What this binary is spawned with to be a machine.
+const MACHINE_SUBCOMMAND: &str = "vm";
+
+/// How often the images every project shares are pruned, as `POST /images/prune` does.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// How long a sandbox is kept with no command run in it: over HTTP no client is ever known to
+/// How long a sandbox is kept with no job running in it: over HTTP no client is ever known to
 /// be gone, so one that stops naming its sandboxes is taken to be, and what they hold -- their
 /// snapshots -- let go.
 const IDLE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser)]
 enum Command {
-    /// Serve at the endpoint `/rpc`, and sandboxes' ports beside it, as `--config` says.
+    /// Serve the endpoints, and sandboxes' ports beside them, as `--config` says.
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -67,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     // Before any runtime: this process is about to become a machine and never come back.
     if std::env::args_os()
         .nth(1)
-        .is_some_and(|arg| arg == virtx_uvm::MACHINE_SUBCOMMAND)
+        .is_some_and(|arg| arg == MACHINE_SUBCOMMAND)
     {
         // Why it could not be is the host's already, told on the control channel; stderr is
         // the guest command's, and nothing of this process's goes there.
@@ -92,10 +95,7 @@ fn main() -> anyhow::Result<()> {
 #[tokio::main]
 async fn serve(config: Config) -> anyhow::Result<()> {
     let access = Arc::new(Access::new(&config)?);
-    let server = Server::new(Dispatcher::new(rpc::methods()));
-    let checked = Arc::clone(&access);
-    let reaching = Arc::clone(&access);
-    let registry = Arc::new(RegistryServer::new(access.images().clone(), "/images")?);
+    let registry = Arc::new(RegistryServer::new(access.images().clone(), "/images/oci")?);
     let reading = Arc::clone(&access);
     let images = move |request: axum::extract::Request| {
         let (registry, access) = (Arc::clone(&registry), Arc::clone(&reading));
@@ -106,35 +106,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                     .await
                     .map(axum::body::Body::new)
                     .into_response(),
-                Err(status) => status.into_response(),
+                Err(status) => refusal(status),
             }
         }
     };
-    let router = axum::Router::new()
-        .route(
-            "/rpc",
-            axum::routing::any(move |mut request: axum::extract::Request| {
-                let server = server.clone();
+    let checked = Arc::clone(&access);
+    let reaching = Arc::clone(&access);
+    let router = endpoints::router()
+        .layer(axum::middleware::from_fn(
+            move |mut request: axum::extract::Request, next: Next| {
                 let home = checked.home(request.headers());
                 async move {
                     match home {
-                        // A user cancels their own requests, in whichever project.
-                        Ok((user, home)) => {
+                        Ok((_, home)) => {
                             request.extensions_mut().insert(home);
-                            request.extensions_mut().insert(CancelScope(user));
-                            server.handle(request).await.into_response()
+                            next.run(request).await
                         }
-                        Err(status) => status.into_response(),
+                        Err(status) => refusal(status),
                     }
                 }
-            }),
-        )
-        .route("/images/v2", axum::routing::any(images.clone()))
-        .route("/images/v2/", axum::routing::any(images.clone()))
-        .route("/images/v2/{*rest}", axum::routing::any(images))
+            },
+        ))
+        .route("/images/oci/v2", any(images.clone()))
+        .route("/images/oci/v2/", any(images.clone()))
+        .route("/images/oci/v2/{*rest}", any(images))
         .route(
             "/ports/{capability}",
-            axum::routing::any(
+            any(
                 move |Path(capability): Path<String>,
                       headers: HeaderMap,
                       upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>| {
@@ -143,8 +141,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 },
             ),
         )
-        .route("/volumes/{*path}", files(&access))
-        .route("/snapshots/{*path}", files(&access))
         .layer(cors(&config.origins));
 
     let reaping = Arc::clone(&access);
@@ -164,7 +160,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         loop {
             every.tick().await;
             let images = images.clone();
-            match tokio::task::spawn_blocking(move || images.prune(rpc::PRUNE_GRACE)).await {
+            match tokio::task::spawn_blocking(move || images.prune(endpoints::PRUNE_GRACE)).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => eprintln!("pruning the images: {e}"),
                 Err(e) => eprintln!("pruning the images: {e}"),
@@ -175,9 +171,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("listening at {}", config.listen))?;
-    eprintln!("serving at http://{}/rpc", listener.local_addr()?);
-    // A command still running at the end ends with this process, whose machines are killed as
-    // their calls drop.
+    eprintln!("serving at http://{}/", listener.local_addr()?);
+    // A machine still running at the end shuts down with this process, as its control channel
+    // closes.
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -229,33 +225,31 @@ fn cors(origins: &[String]) -> CorsLayer {
         .max_age(Duration::from_secs(3600))
 }
 
-/// The files endpoints, each request answered from the home it reaches.
-fn files(access: &Arc<Access>) -> axum::routing::MethodRouter {
-    let access = Arc::clone(access);
-    axum::routing::any(move |request: axum::extract::Request| {
-        let home = access.home(request.headers());
-        async move {
-            match home {
-                Ok((_, home)) => {
-                    home.files
-                        .handle(request, &|name| home.holds_snapshot(name))
-                        .await
-                }
-                Err(status) => status.into_response(),
-            }
-        }
-    })
+/// A request [`Access`] refused with `status`, as the endpoints refuse one.
+fn refusal(status: StatusCode) -> Response {
+    let (code, message) = match status {
+        StatusCode::UNAUTHORIZED => ("unauthorized", "no token this server knows"),
+        StatusCode::FORBIDDEN => ("forbidden", "not a member of the project, or not from here"),
+        _ => (
+            "invalid",
+            "a request names its project in the virtx-project header",
+        ),
+    };
+    endpoints::refused(status, code, message).into_response()
 }
 
-/// A request to the port `capability` opens: `426` unless it opens a WebSocket, `400` unless of
-/// the subprotocol `virtx.tcp`, and `404` for a capability no sandbox here has -- one never
-/// answered, or of a sandbox gone.
+/// A request to the port `capability` opens: `403` from an `Origin` not let in, `426` unless it
+/// opens a WebSocket, `400` unless of the subprotocol `virtx.tcp`, and `404` for a capability no
+/// sandbox here has -- one never answered, or of a sandbox gone.
 fn port(
     access: &Access,
     capability: &str,
     headers: &HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
+    if let Err(status) = access.origin(headers) {
+        return refusal(status);
+    }
     let Ok(upgrade) = upgrade else {
         return StatusCode::UPGRADE_REQUIRED.into_response();
     };

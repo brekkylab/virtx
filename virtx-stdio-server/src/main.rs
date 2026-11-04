@@ -1,27 +1,30 @@
-//! `virtx-uvm` -- a virtx server over stdio: the RPC `virtx-core` names at `/rpc`, and the
-//! images as an OCI registry at `/images/v2/` (see [`virtx_uvm::RegistryServer`]) and the
-//! files of its snapshots and volumes at `/volumes/` and `/snapshots/`, answered on stdin
-//! and stdout to the client that spawned it, until it closes stdin. Everything this host
-//! keeps is that one client's.
+//! `virtx-uvm` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
+//! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
+//! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
+//! this host keeps is that one client's.
 //!
 //! `virtx-uvm vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
-mod rpc;
+mod endpoints;
 
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
-use http_body_util::BodyExt as _;
-use virtx_core::{Dispatcher, Server, serve_stdio};
+use axum::Extension;
+use tower::ServiceExt as _;
+use virtx_core::serve_stdio;
 use virtx_uvm::{ImageStore, RegistryServer};
 
-use crate::rpc::Home;
+use crate::endpoints::Home;
+
+/// What this binary is spawned with to be a machine.
+const MACHINE_SUBCOMMAND: &str = "vm";
 
 fn main() -> anyhow::Result<()> {
     // Before any runtime: this process is about to become a machine and never come back.
     if std::env::args_os()
         .nth(1)
-        .is_some_and(|arg| arg == virtx_uvm::MACHINE_SUBCOMMAND)
+        .is_some_and(|arg| arg == MACHINE_SUBCOMMAND)
     {
         // Why it could not be is the host's already, told on the control channel; stderr is
         // the guest command's, and nothing of this process's goes there.
@@ -36,28 +39,21 @@ async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let images = ImageStore::new(root.join("images"))?;
     let home = Arc::new(Home::new(images.clone(), &root)?);
-    let rpc = Server::new(Dispatcher::new(rpc::methods(&home)));
-    let registry = Arc::new(RegistryServer::new(images, "/images")?);
+    let api = endpoints::router().layer(Extension(home));
+    let registry = Arc::new(RegistryServer::new(images, "/images/oci")?);
     let handle = move |request: http::Request<_>| {
-        let (rpc, registry, home) = (rpc.clone(), Arc::clone(&registry), Arc::clone(&home));
+        let (api, registry) = (api.clone(), Arc::clone(&registry));
         async move {
             let path = request.uri().path();
-            if path == "/rpc" {
-                rpc.handle(request)
-                    .await
-                    .map(|body| body.map_err(|never| match never {}).boxed_unsync())
-            } else if path == "/images/v2" || path.starts_with("/images/v2/") {
-                registry.handle(request).await
+            if path == "/images/oci/v2" || path.starts_with("/images/oci/v2/") {
+                registry.handle(request).await.map(axum::body::Body::new)
             } else {
-                let request = request.map(axum::body::Body::new);
-                home.files
-                    .handle(request, &|name| home.holds_snapshot(name))
-                    .await
-                    .map(|body| body.map_err(io::Error::other).boxed_unsync())
+                let Ok(response) = api.oneshot(request).await;
+                response
             }
         }
     };
-    // The client is gone, and every sandbox was its: a command still running ends with this
-    // process, whose machines are killed as their calls drop.
+    // The client is gone, and every sandbox was its: each machine shuts down, its snapshot
+    // synced, as this one's end closes its control channel.
     Ok(serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await?)
 }

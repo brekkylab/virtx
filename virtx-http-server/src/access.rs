@@ -9,7 +9,7 @@ use http::{HeaderMap, StatusCode, header};
 use virtx_uvm::ImageStore;
 
 use crate::config::{Config, hashed};
-use crate::rpc::Home;
+use crate::endpoints::Home;
 
 /// The header a request names its project in.
 pub const PROJECT_HEADER: &str = "virtx-project";
@@ -55,9 +55,8 @@ impl Access {
         &self.images
     }
 
-    /// The user a request with `headers` is sent by: `403` from an `Origin` not let in, and
-    /// `401` without a token this server knows.
-    pub fn user(&self, headers: &HeaderMap) -> Result<String, StatusCode> {
+    /// `403` for a request with `headers` from an `Origin` not let in.
+    pub fn origin(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
         if let Some(origin) = headers.get(header::ORIGIN)
             && !self
                 .origins
@@ -66,6 +65,13 @@ impl Access {
         {
             return Err(StatusCode::FORBIDDEN);
         }
+        Ok(())
+    }
+
+    /// The user a request with `headers` is sent by: `403` from an `Origin` not let in, and
+    /// `401` without a token this server knows.
+    pub fn user(&self, headers: &HeaderMap) -> Result<String, StatusCode> {
+        self.origin(headers)?;
         headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())

@@ -290,7 +290,7 @@ A stopped sandbox starts at its `POST /sandboxes/{id}/start`, and when a job is 
 
 - Its VM boots again, from the image it stands on, over its disk as it was left.
 - Its files are as they were when it stopped. Its processes are not: nothing that ran in it before runs, until something starts it anew.
-- Its volumes are mounted again, and its ports opened again: at the same `url`s from a server reachable from other machines, and from one on the client's machine at loopback addresses that MAY differ, which `start` answers.
+- Its volumes are mounted again, and its ports opened again: at the same `url`s where the server can, and otherwise at others -- a server that runs it somewhere else this time, or one on the client's machine at other loopback addresses -- which `start` answers.
 
 `start` answers once it runs, and answers a running one as it is.
 A `GET`, a listing, and a connection to one of its ports do not start it.
@@ -307,7 +307,7 @@ Deleting one stops it first if it runs, and then removes its disk; its volumes s
 They are reserved when the sandbox is made, and kept through every stop and start until it is deleted. `0` and a port given twice are refused.
 A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
-A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, and kept from then on as those it was made with are. Opened again, it is answered `200` with where it was: the same `url`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
 
 The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 

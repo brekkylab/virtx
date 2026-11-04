@@ -880,6 +880,25 @@ async fn the_images_are_a_registry_beside_the_endpoints() {
     assert_eq!(listed[0].digest, digest);
 }
 
+/// A pull's digest is the image it tagged here, not the registry's index it chose from.
+/// Needs the network to pull alpine.
+#[tokio::test]
+#[ignore]
+async fn a_pull_answers_the_image_it_tagged() {
+    let server = Server::spawn("pull");
+    let job = server.client.pull_image("alpine:3.20", None).await.unwrap();
+    let mut log = server.client.image_job_log(&job.id, None);
+    let end = loop {
+        if let ImageJobEntry::End(end) = log.next().await.unwrap().unwrap().entry {
+            break end;
+        }
+    };
+    let digest = end.digest.unwrap_or_else(|| panic!("{:?}", end.error));
+    let listed = server.client.list_image().await.unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].digest, digest);
+}
+
 /// A prune takes an image no tag names once it is old, and what only it held, and leaves a
 /// tagged one.
 #[tokio::test]

@@ -573,9 +573,9 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         args.reference,
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth);
-            let (digest, image) = registry.pull(&reference, report).await?;
+            let (_, image) = registry.pull(&reference, report).await?;
             images.insert_tag(&reference, &image)?;
-            Ok(digest)
+            Ok(image)
         },
     ))
 }
@@ -911,7 +911,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
             let digest = digest
                 .parse::<Digest>()
                 .map_err(|e| invalid(format!("{digest}: {e}")))?;
-            // A registry's digest, as a pull or a push answers, names the image it copied.
+            // A registry's digest names the image pulled or pushed as it.
             home.images.get_image_origin(&digest)?.unwrap_or(digest)
         }
     };

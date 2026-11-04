@@ -54,6 +54,8 @@ from .image import (
 from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .sandbox import (
+    PortProtocol,
+    PortSpec,
     Sandbox,
     SandboxJob,
     SandboxJobEnd,
@@ -107,6 +109,8 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
+    "PortProtocol",
+    "PortSpec",
     "Progress",
     "Recipe",
     "RegistryAuth",

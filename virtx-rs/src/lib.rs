@@ -49,8 +49,9 @@ pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxState,
-    SandboxVolume, Step, VolumeMountListOutputItem,
+    MountSource, MountType, PortProtocol, PortSpec, Progress, Recipe, RegistryAuth,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry,
+    SandboxJobKind, SandboxPort, SandboxPortOpenArgs, SandboxState, SandboxVolume, Step,
+    VolumeMountListOutputItem,
 };
 pub use volume::Volume;

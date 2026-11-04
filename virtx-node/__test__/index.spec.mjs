@@ -276,6 +276,33 @@ test("a port opened after is kept in the sandbox's ports", async () => {
   }
 })
 
+test('a port says what it is for, and whether it is HTTP', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20', {
+      ports: [
+        5900,
+        { port: 5173, label: 'dev server', protocol: 'http' },
+        { port: 3000, label: 'api' },
+      ],
+    })
+    const [vnc, dev, api] = sandbox.ports
+    assert.deepEqual([vnc.port, vnc.label, vnc.protocol], [5900, undefined, undefined])
+    assert.deepEqual([dev.port, dev.label, dev.protocol], [5173, 'dev server', 'http'])
+    assert.deepEqual([api.port, api.label, api.protocol], [3000, 'api', undefined])
+
+    const web = await sandbox.openPort(8080, { label: 'docs', protocol: 'http' })
+    assert.deepEqual(web, { port: 8080, url: web.url, label: 'docs', protocol: 'http' })
+    assert.deepEqual(sandbox.ports.at(-1), web)
+    const renamed = await sandbox.openPort(8080, { label: 'manual' })
+    assert.deepEqual([renamed.label, renamed.protocol], ['manual', 'http'])
+    const plain = await sandbox.openPort(9000)
+    assert.deepEqual([plain.label, plain.protocol], [undefined, undefined])
+  } finally {
+    await client.close()
+  }
+})
+
 // What `await using` calls on leaving its block, called as it would be, so the test parses on a
 // Node without that syntax.
 test('a sandbox is deleted when disposed', { skip: !Symbol.asyncDispose }, async () => {

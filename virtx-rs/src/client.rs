@@ -15,8 +15,8 @@ use virtx_core::{
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
     ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
     Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, VolumeCreateArgs,
-    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs,
+    VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -692,7 +692,24 @@ impl Client {
     /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
     /// where it is reached from.
     pub fn open_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<SandboxPort> {
-        let args = json!({ "id": id.as_ref(), "port": port });
+        self.open_sandbox_port_with(id, port, &SandboxPortOpenArgs::default())
+    }
+
+    /// Open the port `port` in the sandbox `id` as `args` say -- what it is for, and whether it
+    /// is TCP or HTTP -- and answer where it is reached from. Opened already, it is answered as
+    /// it is, a `label` given renaming it.
+    pub fn open_sandbox_port_with(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+        args: &SandboxPortOpenArgs,
+    ) -> Call<SandboxPort> {
+        let args = json!({
+            "id": id.as_ref(),
+            "port": port,
+            "label": args.label,
+            "protocol": args.protocol,
+        });
         self.call(self.api.virtx_client_open_sandbox_port, args)
     }
 

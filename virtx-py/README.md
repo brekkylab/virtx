@@ -76,6 +76,8 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
 port = await sandbox.open_port(9000)  # kept in sandbox.ports too
 ```
 
+A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `PortSpec(5173, label="dev server", protocol="http")` in `ports`, beside plain numbers, or `open_port(5173, label="dev server", protocol="http")`. Each answered port has its `label` and `protocol` (`PortProtocol.TCP` unless said).
+
 A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python

@@ -986,9 +986,16 @@ class Sandbox extends Files {
     return this.client.stopSandbox(this.id)
   }
 
-  // Opens the TCP port `port` in it, as those it was made with are: where it is reached from.
-  async openPort(port) {
-    const opened = await this.client._call('virtx_client_open_sandbox_port', { id: this.id, port })
+  // Opens the port `port` in it, as those it was made with are, TCP unless `protocol` says
+  // `'http'`: where it is reached from, kept in `ports` in place of one for the same port.
+  // Opened already, it is answered as it is, `label` renaming it.
+  async openPort(port, { label, protocol } = {}) {
+    const opened = await this.client._call('virtx_client_open_sandbox_port', {
+      id: this.id,
+      port,
+      label,
+      protocol,
+    })
     this.ports = (this.ports ?? []).filter((known) => known.port !== port).concat([opened])
     return opened
   }

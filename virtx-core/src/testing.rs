@@ -670,7 +670,7 @@ async fn open_port(
     let asked: crate::SandboxPortOpenArgs = match serde_json::from_slice::<Option<_>>(&body) {
         Ok(asked) => asked.unwrap_or_default(),
         Err(_) if body.is_empty() => Default::default(),
-        Err(e) => return refuse(StatusCode::BAD_REQUEST, "invalid", &e.to_string()),
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, "invalid", e.to_string()),
     };
     let mut data = shared.lock().unwrap();
     let Some(held) = data.sandboxes.get_mut(&id) else {

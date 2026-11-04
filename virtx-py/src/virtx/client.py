@@ -28,7 +28,7 @@ from .image import (
     image_name,
 )
 from .job import StartedJob
-from .sandbox import Sandbox, SandboxPort, SandboxVolume
+from .sandbox import PortProtocol, PortSpec, Sandbox, SandboxPort, SandboxVolume
 from .volume import Volume
 
 if TYPE_CHECKING:
@@ -457,7 +457,7 @@ class Client:
         auto_delete_days: int | Literal["never"] | None = None,
         disk_gib: int | None = None,
         network: bool = True,
-        ports: Iterable[int] = (),
+        ports: Iterable[int | PortSpec | Mapping[str, Any]] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
         gpu: bool | None = None,
@@ -469,9 +469,10 @@ class Client:
         ``Sandbox.stop`` -- and starts again as it was left, until it is deleted: at
         ``Sandbox.remove``, when it stops if ``ephemeral``, or after ``auto_delete_days`` stopped
         and unused, ``"never"`` keeping it until then. ``name`` finds it again with
-        ``find_sandbox``. ``ports`` are TCP ports in it to open, each answered here and by
-        ``Sandbox.start`` with the ``url`` a ``PortForwarder`` reaches it by. Whatever is left
-        out the server picks."""
+        ``find_sandbox``. ``ports`` are ports in it to open -- a number for TCP, or a
+        ``PortSpec`` (or its ``{port, label?, protocol?}``) to say what it is for and whether it
+        is HTTP -- each answered here and by ``Sandbox.start`` with the ``url`` it is reached by.
+        Whatever is left out the server picks."""
         args = json.loads(
             _args(
                 image=image_name(image).to_dict(),
@@ -481,7 +482,7 @@ class Client:
                 auto_delete_days=None if auto_delete_days == "never" else auto_delete_days,
                 disk_gib=disk_gib,
                 network=network,
-                ports=list(ports),
+                ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
                 vcpus=vcpus,
                 memory_mib=memory_mib,
                 gpu=gpu,
@@ -515,13 +516,25 @@ class Client:
         ephemeral one, deleted with it. Answered once it has stopped."""
         return Sandbox.from_dict(self, await self._call("virtx_client_stop_sandbox", _args(id=id)))
 
-    async def open_sandbox_port(self, id: str, port: int) -> SandboxPort:
-        """Open the TCP port ``port`` in the sandbox ``id``, as those it was made with are, and
-        answer where it is reached from. A program in it listening on ``port`` already is
-        reached once it listens again."""
-        return SandboxPort.from_dict(
-            await self._call("virtx_client_open_sandbox_port", _args(id=id, port=port))
+    async def open_sandbox_port(
+        self,
+        id: str,
+        port: int,
+        *,
+        label: str | None = None,
+        protocol: PortProtocol | str | None = None,
+    ) -> SandboxPort:
+        """Open the port ``port`` in the sandbox ``id``, as those it was made with are, and
+        answer where it is reached from: TCP unless ``protocol`` says HTTP, ``label`` saying
+        what it is for. Opened already, it is answered as it is, ``label`` renaming it. A
+        program in it listening on ``port`` already is reached once it listens again."""
+        args = _args(
+            id=id,
+            port=port,
+            label=label,
+            protocol=None if protocol is None else PortProtocol(protocol).value,
         )
+        return SandboxPort.from_dict(await self._call("virtx_client_open_sandbox_port", args))
 
 
 DOMAIN = "virtx.sh"

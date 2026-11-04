@@ -194,9 +194,10 @@ impl SandboxCreateArgs {
         self
     }
 
-    /// Open the TCP port `port` in it, beside those given before.
-    pub fn port(mut self, port: u16) -> Self {
-        self.ports.push(port);
+    /// Open the port `port` in it, beside those given before: a number for TCP, or a
+    /// [`PortSpec`] to say what it is for and whether it is HTTP.
+    pub fn port(mut self, port: impl Into<PortSpec>) -> Self {
+        self.ports.push(port.into());
         self
     }
 
@@ -472,7 +473,7 @@ mod tests {
             .readonly_volume("b", "/a/b");
         let mut expected = SandboxCreateArgs::new("img:latest");
         expected.network = false;
-        expected.ports = vec![80, 443];
+        expected.ports = vec![80.into(), 443.into()];
         expected.vcpus = Some(2);
         expected.memory_mib = Some(512);
         expected.gpu = Some(true);

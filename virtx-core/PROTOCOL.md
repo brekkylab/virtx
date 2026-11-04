@@ -250,7 +250,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | `POST /sandboxes/{id}/start` | `{}` | `200`, the sandbox, with `ports` |
 | `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
-| `PUT /sandboxes/{id}/ports/{port}` | | `201`, `{port, url}`; `200` for one open already |
+| `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?}` | `201`, the port; `200` for one open already |
 
 A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at}`, and in the answer to its `POST` and to `start`, `ports` too:
 
@@ -303,18 +303,22 @@ Deleting one stops it first if it runs, and then removes its disk; its volumes s
 
 #### Ports
 
-`ports` in the body are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
+`ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?}` to say what it is for and how it is reached: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
+
+- `label` is what it is for, free text of up to 128 characters, answered with it.
+- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP refuses `http` with `400`, `invalid`.
+
 They are reserved when the sandbox is made, and kept through every stop and start until it is deleted. `0` and a port given twice are refused.
 A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
-A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, its body `{label?, protocol?}` as above -- `{}`, or none, for TCP named nothing -- and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed; a `label` given then is its label from then on, and a `protocol` other than the one it was opened with is refused with `409`, `exists`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
 
-The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?}` -- `protocol` left out for `tcp` -- in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
-- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; an `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.
 
 ### Sandbox jobs

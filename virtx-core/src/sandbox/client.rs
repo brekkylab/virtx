@@ -7,7 +7,7 @@ use futures_util::StreamExt as _;
 
 use super::{
     Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
+    SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -79,8 +79,9 @@ pub(crate) async fn open_port(
     client: &TransportClient,
     id: &str,
     port: u16,
+    args: &SandboxPortOpenArgs,
 ) -> Result<SandboxPort, Error> {
-    http::put(client, &format!("{}/ports/{port}", sandbox(id)), &()).await
+    http::put(client, &format!("{}/ports/{port}", sandbox(id)), args).await
 }
 
 /// Every job in the sandbox `id`.

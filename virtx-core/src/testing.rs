@@ -682,9 +682,11 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
     let ports: Vec<_> = args
         .ports
         .iter()
-        .map(|&port| SandboxPort {
-            port,
-            url: format!("http://127.0.0.1:{port}"),
+        .map(|spec| SandboxPort {
+            port: spec.port,
+            url: format!("http://127.0.0.1:{}", spec.port),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
         })
         .collect();
     data.sandboxes.insert(
@@ -748,20 +750,32 @@ async fn remove_sandbox(State(shared): State<Shared>, Path(id): Path<String>) ->
 async fn open_port(
     State(shared): State<Shared>,
     Path((id, port)): Path<(String, u16)>,
+    body: axum::body::Bytes,
 ) -> Response {
     if port == 0 {
         return refuse(StatusCode::BAD_REQUEST, "invalid", "port 0");
     }
+    // An empty body, or `null`, as a client before labels sent: TCP, named nothing.
+    let asked: crate::SandboxPortOpenArgs = match serde_json::from_slice::<Option<_>>(&body) {
+        Ok(asked) => asked.unwrap_or_default(),
+        Err(_) if body.is_empty() => Default::default(),
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, "invalid", &e.to_string()),
+    };
     let mut data = shared.lock().unwrap();
     let Some(held) = data.sandboxes.get_mut(&id) else {
         return not_found("such sandbox");
     };
-    if let Some(open) = held.ports.iter().find(|open| open.port == port) {
+    if let Some(open) = held.ports.iter_mut().find(|open| open.port == port) {
+        if asked.label.is_some() {
+            open.label = asked.label;
+        }
         return json(open);
     }
     let open = SandboxPort {
         port,
         url: format!("http://127.0.0.1:{port}"),
+        label: asked.label,
+        protocol: asked.protocol.unwrap_or_default(),
     };
     held.ports.push(open.clone());
     created(format!("/sandboxes/{id}/ports/{port}"), &open)

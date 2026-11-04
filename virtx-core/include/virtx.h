@@ -603,8 +603,9 @@ struct VirtxFuture *virtx_client_stop_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// Opens the TCP port `port` in the sandbox `id`, given `{"id": "...", "port": n}`. Answers
-// with `{"port": n, "url": "..."}`: where it is reached from now.
+// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
+// "protocol"?: "tcp" | "http"}`. Answers with `{"port": n, "url": "...", "label"?,
+// "protocol"?}`: where it is reached from now.
 //
 // # Safety
 //

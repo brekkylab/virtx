@@ -49,21 +49,28 @@ pub(crate) enum Named<'a> {
     },
     /// The image itself, by its ID or digest.
     Image(&'a Image),
+    /// The image in one repository, by `name@digest`: `repository` as the server spells it.
+    Digest {
+        image: &'a Image,
+        repository: &'a str,
+    },
 }
 
 impl<'a> Named<'a> {
     pub(crate) fn image(&self) -> &'a Image {
         match self {
-            Named::Ref { image, .. } | Named::Image(image) => image,
+            Named::Ref { image, .. } | Named::Image(image) | Named::Digest { image, .. } => image,
         }
     }
 
-    /// The reference the server takes for it: the ref, or `repository@digest` in the
-    /// repository of the image's first ref, since the server holds a digest per repository.
+    /// The reference the server takes for it: the ref, or `repository@digest`, in the
+    /// repository of the image's first ref for an image named by its ID, since the server holds
+    /// a digest per repository.
     pub(crate) fn reference(&self) -> String {
         match self {
             Named::Ref { reference, .. } => (*reference).to_string(),
             Named::Image(image) => format!("{}@{}", repository(&image.refs[0]), image.digest),
+            Named::Digest { image, repository } => format!("{repository}@{}", image.digest),
         }
     }
 }
@@ -72,8 +79,10 @@ impl<'a> Named<'a> {
 ///
 /// A hex string, with or without `sha256:`, that begins exactly one image's digest is that
 /// image, as an ID from `images` names one; one that begins several is refused rather than
-/// guessed. Anything else is a ref: the one spelled exactly so, else the one it spells with what
-/// `docker` fills in (`alpine` is `docker.io/library/alpine:latest`).
+/// guessed. `name@digest` is the image of that digest in that repository, the digest being the
+/// one the server lists, not a registry's. Anything else is a ref: the one spelled exactly so,
+/// else the one it spells with what `docker` fills in (`alpine` is
+/// `docker.io/library/alpine:latest`).
 pub(crate) fn lookup<'a>(name: &str, images: &'a [Image]) -> anyhow::Result<Named<'a>> {
     let prefix = name.strip_prefix("sha256:").unwrap_or(name);
     if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -91,6 +100,22 @@ pub(crate) fn lookup<'a>(name: &str, images: &'a [Image]) -> anyhow::Result<Name
             [] => {}
             _ => anyhow::bail!("{name} begins {} image IDs", matched.len()),
         }
+    }
+
+    if let Some((_, digest)) = name.split_once('@') {
+        let wanted = canonical_ref(name);
+        let found = images
+            .iter()
+            .filter(|image| image.digest == digest)
+            .find_map(|image| {
+                image
+                    .refs
+                    .iter()
+                    .map(|reference| repository(reference))
+                    .find(|repository| canonical_ref(&format!("{repository}@{digest}")) == wanted)
+                    .map(|repository| Named::Digest { image, repository })
+            });
+        return found.ok_or_else(|| anyhow::anyhow!("{name} is not an image the server holds"));
     }
 
     let refs = || {
@@ -262,9 +287,31 @@ mod tests {
             }
         );
         assert!(lookup("alpine", &images).is_err());
-        // A digest ref names no tag the server lists.
         assert!(lookup("app@foo", &images).is_err());
-        assert!(lookup("jq@sha256:bb", &images).is_err());
+    }
+
+    #[test]
+    fn a_digest_names_the_image_in_one_repository() {
+        let images = [
+            image("sha256:aa", &["alpine:3.20", "mine:1"]),
+            image("sha256:bb", &["docker.io/library/jq:latest"]),
+        ];
+        let found = lookup("docker.io/library/alpine@sha256:aa", &images).unwrap();
+        assert_eq!(
+            found,
+            Named::Digest {
+                image: &images[0],
+                repository: "alpine"
+            }
+        );
+        assert_eq!(found.reference(), "alpine@sha256:aa");
+        assert_eq!(
+            lookup("jq@sha256:bb", &images).unwrap().reference(),
+            "docker.io/library/jq@sha256:bb"
+        );
+        // The image is not in that repository, or no image has that digest.
+        assert!(lookup("jq@sha256:aa", &images).is_err());
+        assert!(lookup("alpine@sha256:a", &images).is_err());
     }
 
     #[test]

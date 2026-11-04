@@ -1,4 +1,4 @@
-//! `rm`: a ref untagged, or an image removed with every ref on it.
+//! `rm`: a ref untagged, or an image removed with every ref on it, or from one repository.
 
 use clap::Args;
 
@@ -14,7 +14,7 @@ pub(crate) struct RmArgs {
     #[arg(required = true, value_name = "IMAGE")]
     pub(crate) images: Vec<String>,
 
-    /// Remove an image named by its ID with several refs without asking.
+    /// Remove an image named by its ID or digest with several refs without asking.
     #[arg(short, long)]
     pub(crate) force: bool,
 }
@@ -29,8 +29,8 @@ enum Removal {
 }
 
 /// Remove what each name names, as `docker rmi` does: a ref is untagged, and the image goes
-/// with its last ref; an image named by its ID goes with every ref on it, after asking when it
-/// has several.
+/// with its last ref; an image named by its ID goes with every ref on it, and one named by
+/// `name@digest` with every ref in that repository, after asking when that is several.
 pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
     let images = gather(client.list_image().await?);
     // Every name is tried, and one failure fails the command at the end rather than leaving
@@ -46,28 +46,36 @@ pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
             }
         };
         let image = named.image();
-        if let Named::Image(_) = named
-            && image.refs.len() > 1
+        let untagged = untagged(&named);
+        let asked = match named {
+            Named::Ref { .. } => None,
+            Named::Image(image) => Some((
+                image_id(&image.digest).to_string(),
+                "remove the image and every ref?".to_string(),
+            )),
+            Named::Digest { image, repository } => {
+                let repository = familiar_ref(repository);
+                Some((
+                    format!("{repository}@{}", image_id(&image.digest)),
+                    format!("remove the image from {repository}, with these refs?"),
+                ))
+            }
+        };
+        if let Some((subject, question)) = asked
+            && untagged.len() > 1
             && !args.force
         {
-            eprintln!(
-                "{} has {} refs:",
-                emphasis(image_id(&image.digest), true),
-                image.refs.len()
-            );
-            for reference in &image.refs {
+            eprintln!("{} has {} refs:", emphasis(&subject, true), untagged.len());
+            for reference in &untagged {
                 eprintln!("  {}", familiar_ref(reference));
             }
-            if !confirm("remove the image and every ref?")? {
+            if !confirm(&question)? {
                 continue;
             }
         }
         match remove(client, &plan(&named)).await {
             Ok(()) => {
-                let (untagged, deleted) = match named {
-                    Named::Ref { reference, .. } => (vec![reference], image.refs.len() == 1),
-                    Named::Image(_) => (image.refs.iter().map(String::as_str).collect(), true),
-                };
+                let deleted = untagged.len() == image.refs.len();
                 for reference in untagged {
                     println!("Untagged: {}", familiar_ref(reference));
                 }
@@ -83,6 +91,23 @@ pub(crate) async fn rm(client: &Client, args: RmArgs) -> anyhow::Result<()> {
     }
     anyhow::ensure!(!failed, "not every image was removed");
     Ok(())
+}
+
+/// The refs removing `named` takes off its image.
+fn untagged<'a>(named: &Named<'a>) -> Vec<&'a str> {
+    match *named {
+        Named::Ref { reference, .. } => vec![reference],
+        Named::Image(image) => image.refs.iter().map(String::as_str).collect(),
+        Named::Digest {
+            image,
+            repository: repo,
+        } => image
+            .refs
+            .iter()
+            .map(String::as_str)
+            .filter(|reference| repository(reference) == repo)
+            .collect(),
+    }
 }
 
 async fn remove(client: &Client, plan: &[Removal]) -> anyhow::Result<()> {
@@ -114,6 +139,7 @@ fn plan(named: &Named) -> Vec<Removal> {
                 vec![by_digest(image, repo)]
             }
         }
+        Named::Digest { image, repository } => vec![by_digest(image, repository)],
         Named::Image(image) => {
             let mut repositories: Vec<&str> = Vec::new();
             for repo in image.refs.iter().map(|r| repository(r)) {
@@ -169,5 +195,16 @@ mod tests {
                 Removal::Remove("mine@sha256:aa".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_digest_takes_the_image_from_its_repository_alone() {
+        let shared = image(&["jq:1", "jq:latest", "mine:1"]);
+        let named = Named::Digest {
+            image: &shared,
+            repository: "jq",
+        };
+        assert_eq!(plan(&named), [Removal::Remove("jq@sha256:aa".into())]);
+        assert_eq!(untagged(&named), ["jq:1", "jq:latest"]);
     }
 }

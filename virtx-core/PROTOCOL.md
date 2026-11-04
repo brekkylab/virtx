@@ -252,6 +252,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
 | `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?}` | `201`, the port; `200` for one open already |
+| `DELETE /sandboxes/{id}/ports/{port}` | | `204` |
 
 A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at}`, and in the answer to its `POST` and to `start`, `ports` too:
 
@@ -318,6 +319,8 @@ They are reserved when the sandbox is made, and kept through every stop and star
 A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
 A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, its body `{label?, protocol?}` as above -- `{}`, or none, for TCP named nothing -- and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed; a `label` given then is its label from then on, and a `protocol` other than the one it was opened with is refused with `409`, `exists`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+
+A port is closed with `DELETE /sandboxes/{id}/ports/{port}`: its URL reaches it no more from then on, and it is not opened again as the sandbox starts; one not open is answered `404`, `not_found`. A server MAY refuse to close a port it opens in every sandbox, with `409`, `in_use`. To reach a port another way -- `http` rather than `tcp` -- it is closed and opened again, at another URL.
 
 The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?}` -- `protocol` left out for `tcp` -- in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 

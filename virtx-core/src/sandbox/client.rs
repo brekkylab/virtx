@@ -73,6 +73,11 @@ pub(crate) async fn remove(client: &TransportClient, id: &str) -> Result<(), Err
     http::delete(client, &sandbox(id)).await
 }
 
+/// Close the port `port` in the sandbox `id`: its URL reaches it no more.
+pub(crate) async fn close_port(client: &TransportClient, id: &str, port: u16) -> Result<(), Error> {
+    http::delete(client, &format!("{}/ports/{port}", sandbox(id))).await
+}
+
 /// Open the TCP port `port` in the sandbox `id`, as those it was made with are: where it is
 /// reached from.
 pub(crate) async fn open_port(

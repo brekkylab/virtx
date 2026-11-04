@@ -640,6 +640,16 @@ struct VirtxFuture *virtx_client_open_sandbox_port(struct VirtxClient *client,
                                                    const uint8_t *args,
                                                    size_t args_len);
 
+// Closes the port `port` in the sandbox `id`, given `{"id": "...", "port": n}`: its URL
+// reaches it no more. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_close_sandbox_port(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
+
 // Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
 // removed. Answers with `null`.
 //

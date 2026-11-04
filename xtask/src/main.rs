@@ -10,26 +10,33 @@ use anyhow::{Context, bail, ensure};
 
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
-       cargo xtask build    <host|abin|kernel>... [--debug]
+       cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask download <abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
+       cargo xtask check    [--client]
        cargo xtask upload   --bucket <name> [--profile <name>] [--region <region>]
                             [--latest] [--with-abin] [--allow-dirty] [--dry-run]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
-  init      initializes the repository, ready to build
+  init      checks out the submodules that are not, patches them, and adds the guest's
+            musl target -- ready to build the servers
   build     builds the components from source
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
-  upload    archives what install would put in <prefix>/bin, for this platform, and
-            publishes it to S3 for virtx's ensure_virtx to fetch
+  check     what a change has to pass before it is pushed: the format, clippy and the tests,
+            of the client always and of the servers once `init` has run
+  upload    archives the stdio server and the guest kernel, for this platform, and publishes
+            it to S3 for virtx to fetch
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
-  host      the console server, which is also the VM process, for this machine
-  abin      the executables every VM gets at /abin
-  kernel    the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
+components:
+  client        libvirtx_core, the library the Python, Node and Rust packages load
+  stdio-server  the server a client spawns, as the `virtx-uvm` binary; also the VM process
+  http-server   the server over HTTP, as the `virtx-http-server` binary
+  kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
+  abin          the executables every VM gets at /abin
 
   --force         (init) resets each patched submodule to its pinned commit first,
                   discarding any local changes in it
@@ -37,36 +44,63 @@ usage: cargo xtask init     [--force]
                   ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
                   ~/.cache otherwise)
   --debug         builds unoptimized
+  --target <triple>   (build) cross-compiles the client to <triple>; the servers and abin are
+                      built for this host and its guest only
+  --locked        (build) passes --locked to cargo
+  --client        (check) checks the client only, even where the servers could be checked
 
   --bucket <name>     (upload) the bucket to publish to (default: $VIRTX_DIST_BUCKET)
   --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
                       the environment's keys, or `default`)
   --region <region>   (upload) the bucket's region (default: the profile's)
-  --latest            (upload) also puts the archive under `latest`, which is what
-                      `ensure_virtx` fetches when told no version; without it `latest`
-                      holds whatever it held before
+  --latest            (upload) also puts the archive under `latest`, which is what virtx
+                      fetches when told no version; without it `latest` holds whatever it
+                      held before
   --with-abin         (upload) puts the abin that was built in the archive too; without it
                       the archive has no abin, and sessions from the release no /abin
   --allow-dirty       (upload) publishes from a tree with uncommitted changes, filed under
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
 
-const HOST_BINS: &[&str] = &["virtx-uvm"];
-/// The package `HOST_BINS` are built from.
-const HOST_PACKAGE: &str = "virtx-stdio-server";
+/// The client's packages, which `check` checks without the submodules patched.
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs"];
+/// The package the client library is built from.
+const CLIENT_PACKAGE: &str = "virtx-core";
+/// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
+const SERVER_PACKAGES: &[&str] = &[
+    "virtx-uvm",
+    "virtx-stdio-server",
+    "virtx-http-server",
+    "xtask",
+];
+/// Each server: its component, the package it is built from, and the binary it builds. The
+/// stdio server's binary keeps the name `virtx-uvm`, which is what a release archive carries
+/// and what a client spawns.
+const SERVERS: &[(Component, &str, &str)] = &[
+    (Component::StdioServer, "virtx-stdio-server", "virtx-uvm"),
+    (
+        Component::HttpServer,
+        "virtx-http-server",
+        "virtx-http-server",
+    ),
+];
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
-    Host,
-    Abin,
+    Client,
+    StdioServer,
+    HttpServer,
     Kernel,
+    Abin,
 }
 
 struct Options {
     components: Vec<Component>,
     prefix: Option<PathBuf>,
     debug: bool,
+    target: Option<String>,
+    locked: bool,
 }
 
 impl Options {
@@ -78,8 +112,16 @@ impl Options {
         if self.debug { "debug" } else { "release" }
     }
 
+    /// Where cargo builds this profile for this host. A client cross-compiled with `--target`
+    /// is under the triple's own directory instead, as cargo puts it.
     fn out(&self) -> PathBuf {
         target_path().join(self.profile())
+    }
+
+    fn servers(&self) -> impl Iterator<Item = &(Component, &'static str, &'static str)> {
+        SERVERS
+            .iter()
+            .filter(|(component, _, _)| self.has(*component))
     }
 }
 
@@ -106,6 +148,10 @@ fn main() -> anyhow::Result<()> {
                 !options.components.is_empty(),
                 "name what to build\n\n{USAGE}"
             );
+            ensure!(
+                options.target.is_none() || options.components == [Component::Client],
+                "--target cross-compiles the client alone\n\n{USAGE}"
+            );
             build(&options)
         }
         Some("download") => {
@@ -119,18 +165,33 @@ fn main() -> anyhow::Result<()> {
                 "name what to download\n\n{USAGE}"
             );
             ensure!(
-                !options.has(Component::Host),
-                "host is built and signed on this machine, not downloaded\n\n{USAGE}"
+                options
+                    .components
+                    .iter()
+                    .all(|c| matches!(c, Component::Kernel | Component::Abin)),
+                "only kernel and abin are downloaded; the client and the servers are built\n\n{USAGE}"
             );
             download(&options)
         }
         Some("install") => {
             let options = parse(args)?;
             ensure!(
-                options.components.is_empty(),
+                options.components.is_empty() && options.target.is_none(),
                 "install copies what build and download left; it takes only --prefix and --debug\n\n{USAGE}"
             );
             install(&options)
+        }
+        Some("check") => {
+            let client_only = match args.next() {
+                None => false,
+                Some(arg) if arg == "--client" => true,
+                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+            };
+            ensure!(
+                args.next().is_none(),
+                "check takes only --client\n\n{USAGE}"
+            );
+            check(client_only)
         }
         Some("upload") => upload(&parse_upload(args)?),
         Some("run") => run_target(args.collect(), false),
@@ -148,18 +209,31 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
         components: Vec::new(),
         prefix: None,
         debug: false,
+        target: None,
+        locked: false,
     };
     while let Some(arg) = args.next() {
         let component = match arg.to_str() {
-            Some("host") => Component::Host,
-            Some("abin") => Component::Abin,
+            Some("client") => Component::Client,
+            Some("stdio-server") => Component::StdioServer,
+            Some("http-server") => Component::HttpServer,
             Some("kernel") => Component::Kernel,
+            Some("abin") => Component::Abin,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
             }
             Some("--debug") => {
                 options.debug = true;
+                continue;
+            }
+            Some("--target") => {
+                let target = args.next().and_then(|t| t.into_string().ok());
+                options.target = Some(target.context("--target needs a triple")?);
+                continue;
+            }
+            Some("--locked") => {
+                options.locked = true;
                 continue;
             }
             _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
@@ -183,8 +257,7 @@ struct Upload {
     /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
     /// `latest` changes what every `ensure_virtx` told no version fetches next.
     latest: bool,
-    /// Whether the archive carries abin, and only when asked (`--with-abin`): abin is built
-    /// from the sibling virtx checkout, which a release of virtx-uvm alone need not match.
+    /// Whether the archive carries abin, and only when asked (`--with-abin`).
     abin: bool,
     allow_dirty: bool,
     dry_run: bool,
@@ -268,10 +341,9 @@ fn run(mut command: Command, what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init(force: bool) -> anyhow::Result<()> {
-    let root = root_path();
-    // 3rdparty/_patches/<submodule>/<what>.patch, applied submodule by submodule in name order.
-    let patches = root.join("3rdparty/_patches");
+/// 3rdparty/_patches/<submodule>/<what>.patch, submodule by submodule in name order.
+fn patches() -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let patches = root_path().join("3rdparty/_patches");
     let list = |dir: &Path| -> anyhow::Result<Vec<PathBuf>> {
         let mut paths: Vec<PathBuf> = fs::read_dir(dir)
             .with_context(|| format!("reading {}", dir.display()))?
@@ -292,7 +364,88 @@ fn init(force: bool) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(files)
+}
 
+/// Whether `patch` is applied to the submodule in `dir`: it applies in reverse.
+fn applied(dir: &Path, patch: &Path) -> anyhow::Result<bool> {
+    git_quiet(dir, &["apply", "--reverse", "--check"], patch)
+}
+
+fn git_quiet(dir: &Path, args: &[&str], patch: &Path) -> anyhow::Result<bool> {
+    Ok(Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .arg(patch)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("running git")?
+        .success())
+}
+
+/// The submodules' paths, as `.gitmodules` lists them.
+fn submodules() -> anyhow::Result<Vec<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root_path())
+        .args([
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            r"\.path$",
+        ])
+        .output()
+        .context("running git")?;
+    ensure!(out.status.success(), "reading .gitmodules failed");
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .collect())
+}
+
+/// Whether rustup has the guest's target for the toolchain this repository pins. `None` where
+/// there is no rustup to ask, and the build is left to say.
+fn has_guest_target() -> anyhow::Result<Option<bool>> {
+    let Ok(out) = Command::new("rustup")
+        .current_dir(root_path())
+        .args(["target", "list", "--installed"])
+        .output()
+    else {
+        return Ok(None);
+    };
+    let target = guest_target()?;
+    Ok(Some(
+        out.status.success()
+            && String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|t| t == target),
+    ))
+}
+
+fn init(force: bool) -> anyhow::Result<()> {
+    let root = root_path();
+
+    // Those not checked out yet. One already is, patched, is left to `--force`: updating it
+    // would fight its patches.
+    let missing: Vec<String> = submodules()?
+        .into_iter()
+        .filter(|path| !root.join(path).join(".git").exists())
+        .collect();
+    if !missing.is_empty() {
+        eprintln!("Checking out {}", missing.join(", "));
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["submodule", "update", "--init", "--"])
+            .args(&missing)
+            .status()
+            .context("running git")?;
+        ensure!(status.success(), "git submodule update failed");
+    }
+
+    let files = patches()?;
     eprintln!("Applying patches");
     let mut reset: Vec<String> = Vec::new();
     for (submodule, patch) in &files {
@@ -322,19 +475,9 @@ fn init(force: bool) -> anyhow::Result<()> {
             dir.join(".git").exists(),
             "{submodule} is not checked out; run: git submodule update --init"
         );
-        let git = |args: &[&str]| -> anyhow::Result<bool> {
-            Ok(Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(args)
-                .arg(patch)
-                .stderr(std::process::Stdio::null())
-                .status()
-                .context("running git")?
-                .success())
-        };
+        let git = |args: &[&str]| git_quiet(&dir, args, patch);
 
-        if git(&["apply", "--reverse", "--check"])? {
+        if applied(&dir, patch)? {
             eprintln!("  {submodule}: already patched");
             continue;
         }
@@ -347,12 +490,90 @@ fn init(force: bool) -> anyhow::Result<()> {
         ensure!(git(&["apply"])?, "{submodule}: git apply failed");
         eprintln!("  {submodule}: applied {name}");
     }
+
+    // The agent every machine runs is built for it, by `virtx-uvm`'s build script.
+    let target = guest_target()?;
+    if has_guest_target()? == Some(false) {
+        eprintln!("Adding {target}");
+        let status = Command::new("rustup")
+            .current_dir(&root)
+            .args(["target", "add", target])
+            .status()
+            .context("running rustup")?;
+        ensure!(status.success(), "rustup target add {target} failed");
+    }
+    Ok(())
+}
+
+/// Why the servers cannot be built here yet, if they cannot: what `init` does is not done.
+fn servers_unready() -> anyhow::Result<Option<String>> {
+    let root = root_path();
+    for (submodule, patch) in patches()? {
+        let dir = root.join("3rdparty").join(&submodule);
+        if !dir.join(".git").exists() || !applied(&dir, &patch)? {
+            return Ok(Some(format!("3rdparty/{submodule} is not patched")));
+        }
+    }
+    if has_guest_target()? == Some(false) {
+        return Ok(Some(format!("rustup has no {}", guest_target()?)));
+    }
+    Ok(None)
+}
+
+/// The gate a change passes before it is pushed. The client's half needs nothing but the
+/// toolchain; the servers' half needs `init`, and is skipped, saying so, until it has run. The
+/// servers' own tests boot machines, which takes a kernel and a signed binary: they are
+/// `cargo xtask test -p <server>`, run when a change reaches them.
+fn check(client_only: bool) -> anyhow::Result<()> {
+    let cargo_in_root = |args: &[&str], what: &str| -> anyhow::Result<()> {
+        eprintln!("xtask: {what}");
+        let mut command = cargo();
+        command.current_dir(root_path()).args(args);
+        let status = command.status().context("running cargo")?;
+        ensure!(status.success(), "{what} failed");
+        Ok(())
+    };
+    let packages = |list: &[&'static str]| -> Vec<&'static str> {
+        list.iter().flat_map(|p| ["-p", *p]).collect()
+    };
+
+    cargo_in_root(&["fmt", "--check"], "the format")?;
+
+    let client = packages(CLIENT_PACKAGES);
+    let mut clippy = vec!["clippy"];
+    clippy.extend(&client);
+    clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    cargo_in_root(&clippy, "clippy of the client")?;
+    cargo_in_root(
+        &["test", "-p", CLIENT_PACKAGE, "--features", "testing"],
+        "the tests of virtx-core",
+    )?;
+    cargo_in_root(&["test", "-p", "virtx-rs"], "the tests of virtx-rs")?;
+
+    if client_only {
+        eprintln!("xtask: the servers left out (--client)");
+        return Ok(());
+    }
+    if let Some(why) = servers_unready()? {
+        eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
+        return Ok(());
+    }
+    let servers = packages(SERVER_PACKAGES);
+    let mut clippy = vec!["clippy"];
+    clippy.extend(&servers);
+    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
+    cargo_in_root(&clippy, "clippy of the servers")?;
+    cargo_in_root(&["test", "-p", "virtx-uvm"], "the tests of virtx-uvm")?;
+    eprintln!("xtask: checked");
     Ok(())
 }
 
 fn build(options: &Options) -> anyhow::Result<()> {
-    if options.has(Component::Host) {
-        build_host(options)?;
+    if options.has(Component::Client) {
+        build_client(options)?;
+    }
+    if options.servers().next().is_some() {
+        build_servers(options)?;
     }
     if options.has(Component::Abin) {
         build_abin(options)?;
@@ -360,14 +581,48 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Kernel) {
         build_kernel()?;
     }
-    eprintln!("xtask: built into {}", options.out().display());
+    let out = match &options.target {
+        Some(target) => target_path().join(target).join(options.profile()),
+        None => options.out(),
+    };
+    eprintln!("xtask: built into {}", out.display());
     Ok(())
 }
 
-/// Always with the GPU. A host without a Vulkan loader still runs the build -- the boot opens
-/// the loader at run time and reports `gpu` only where it finds one -- so one build serves
-/// hosts with a GPU and without, and there is no second one to keep working.
-fn build_host(options: &Options) -> anyhow::Result<()> {
+/// The client library's file name on this host: `libvirtx_core.dylib`, `libvirtx_core.so`,
+/// `virtx_core.dll`.
+fn client_library() -> String {
+    format!(
+        "{}virtx_core{}",
+        env::consts::DLL_PREFIX,
+        env::consts::DLL_SUFFIX
+    )
+}
+
+/// The library alone, with the features its default is: no submodule patched, no kernel and
+/// nothing to sign.
+fn build_client(options: &Options) -> anyhow::Result<()> {
+    let mut cargo = cargo();
+    cargo
+        .current_dir(root_path())
+        .args(["build", "-p", CLIENT_PACKAGE, "--lib"]);
+    if let Some(target) = &options.target {
+        cargo.args(["--target", target]);
+    }
+    if !options.debug {
+        cargo.arg("--release");
+    }
+    if options.locked {
+        cargo.arg("--locked");
+    }
+    run(cargo, "the client")
+}
+
+/// The servers named, in one cargo run, each signed. Always with the GPU. A host without a
+/// Vulkan loader still runs the build -- the boot opens the loader at run time and reports
+/// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
+/// is no second one to keep working.
+fn build_servers(options: &Options) -> anyhow::Result<()> {
     let scripts = root_path().join("xtask/scripts");
     let mut deps = if cfg!(windows) {
         let mut ps = Command::new("powershell");
@@ -384,18 +639,26 @@ fn build_host(options: &Options) -> anyhow::Result<()> {
 
     let mut cargo = cargo();
     cargo.current_dir(root_path()).arg("build");
-    cargo.args(["-p", HOST_PACKAGE]);
-    cargo.args(["--features", &format!("{HOST_PACKAGE}/gpu")]);
+    for (_, package, _) in options.servers() {
+        cargo.args(["-p", package]);
+        cargo.args(["--features", &format!("{package}/gpu")]);
+    }
     if !options.debug {
         cargo.arg("--release");
     }
-    run(cargo, "host")?;
+    if options.locked {
+        cargo.arg("--locked");
+    }
+    run(cargo, "the servers")?;
 
-    sign(
-        &options
-            .out()
-            .join(format!("virtx-uvm{}", env::consts::EXE_SUFFIX)),
-    )
+    for (_, _, binary) in options.servers() {
+        sign(
+            &options
+                .out()
+                .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
+        )?;
+    }
+    Ok(())
 }
 
 fn sign(exe: &Path) -> anyhow::Result<()> {
@@ -694,7 +957,13 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
         "--with-abin, but no abin in {} -- run `cargo xtask build abin` first",
         built.display()
     );
-    stage_bin(&built, &stage, upload.abin)?;
+    let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
+    ensure!(
+        built.join(&stdio).is_file(),
+        "no {stdio} in {} -- run `cargo xtask build stdio-server` first",
+        built.display()
+    );
+    stage_bin(&built, &stage, &[stdio], upload.abin)?;
     if !upload.abin {
         eprintln!(
             "xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)"
@@ -781,7 +1050,21 @@ fn install(options: &Options) -> anyhow::Result<()> {
         None => cache_root(),
     };
     let bin = prefix.join("bin");
-    stage_bin(&options.out(), &bin, true)?;
+    let built = options.out();
+    let files: Vec<String> = std::iter::once(client_library())
+        .chain(
+            SERVERS
+                .iter()
+                .map(|(_, _, binary)| format!("{binary}{}", env::consts::EXE_SUFFIX)),
+        )
+        .filter(|file| built.join(file).is_file())
+        .collect();
+    ensure!(
+        !files.is_empty(),
+        "nothing built in {} -- run `cargo xtask build <component>` first",
+        built.display()
+    );
+    stage_bin(&built, &bin, &files, true)?;
     // virtx's `ensure_virtx` replaces a `bin/` whose `.release` is not the release it wants,
     // and leaves one that reads `local` alone.
     fs::write(bin.join(".release"), "local")
@@ -790,35 +1073,32 @@ fn install(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Put the set a `bin/` holds -- the host binary, the guest kernel, and abin if
-/// it was built and `abin` asks for it -- from `built` into `bin`. What `install` does, and
-/// what `upload` archives.
-fn stage_bin(built: &Path, bin: &Path, abin: bool) -> anyhow::Result<()> {
-    let host_exes: Vec<String> = HOST_BINS
-        .iter()
-        .map(|name| format!("{name}{}", env::consts::EXE_SUFFIX))
-        .collect();
-    for exe in &host_exes {
-        ensure!(
-            built.join(exe).is_file(),
-            "no {exe} in {} -- run `cargo xtask build host` first",
-            built.display()
-        );
-    }
-
-    // The guest kernel goes with them. libkrun resolves it by leaf name, and every
+/// Put the set a `bin/` holds -- the `files` named, the guest kernel when a server is among
+/// them, and abin if it was built and `abin` asks for it -- from `built` into `bin`. What
+/// `install` does, and what `upload` archives.
+fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::Result<()> {
+    // The guest kernel goes with a server. libkrun resolves it by leaf name, and every
     // platform looks beside the running binary before it looks anywhere else -- so a
     // binary installed next to it needs no PATH, no DYLD_FALLBACK_LIBRARY_PATH and no
     // wrapper to be run by hand.
-    let kernel = kernel_library()?;
+    let server = SERVERS
+        .iter()
+        .any(|(_, _, binary)| files.contains(&format!("{binary}{}", env::consts::EXE_SUFFIX)));
+    let kernel = if server {
+        Some(kernel_library()?)
+    } else {
+        None
+    };
 
     fs::create_dir_all(bin).with_context(|| format!("creating {}", bin.display()))?;
-    place(
-        &kernel,
-        &bin.join(kernel.file_name().expect("the kernel is a file")),
-    )?;
-    for exe in &host_exes {
-        place(&built.join(exe), &bin.join(exe))?;
+    if let Some(kernel) = kernel {
+        place(
+            &kernel,
+            &bin.join(kernel.file_name().expect("the kernel is a file")),
+        )?;
+    }
+    for file in files {
+        place(&built.join(file), &bin.join(file))?;
     }
     if abin && built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;

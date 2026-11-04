@@ -1,4 +1,4 @@
-# Build virtx-uvm for every platform it is published for, and upload each to the dist
+# Build the stdio server, `virtx-uvm`, for every platform it is published for, and upload each to the dist
 # bucket, all under the one commit this runs on. Every name a release has is one directory
 # of the same shape:
 #
@@ -9,18 +9,15 @@
 # tag -- are given by `verify`, once all four platforms' archives are up, and all four at
 # once, so no name ever holds some platforms of one release and some of another:
 #
-# | run                      | virtx it builds against      | named `latest`     | named for its tag |
-# |--------------------------|------------------------------|--------------------|-------------------|
-# | a tag pushed             | the same tag in virtx        | yes                | yes               |
-# | a dispatch               | `virtx-ref`, else `main`     | if `latest` is set | on a tag's ref    |
+# | run                      | named `latest`     | named for its tag |
+# |--------------------------|--------------------|-------------------|
+# | a tag pushed             | yes                | yes               |
+# | a dispatch               | if `latest` is set | on a tag's ref    |
 #
 # A push to a branch runs nothing: a build is either a release, or asked for.
 #
-# A tag is a release of both repositories at once: virtx-uvm speaks the protocol of the
-# virtx it is built with, so the tag has to exist in brekkylab/virtx too, and the checkout
-# fails if it does not. brekkylab/virtx's `packages` workflow, releasing the same tag,
-# refuses to run until `virtx-uvm/<tag>/` holds all four platforms, and pins its packages
-# to that tag.
+# The server and the client packages are one commit, and so speak one protocol: a tag runs
+# this and `packages` both.
 #
 # # Platforms
 #
@@ -58,9 +55,6 @@ on:
     tags: ["*"]
   workflow_dispatch:
     inputs:
-      virtx-ref:
-        description: The brekkylab/virtx ref to build against (empty is main, or the tag on a tag)
-        default: ""
       upload:
         description: Upload to the dist bucket
         type: boolean
@@ -82,8 +76,6 @@ env:
   BUCKET: virtx-dist
   AWS_REGION: us-east-1
   DIST_URL: https://virtx-dist.s3.us-east-1.amazonaws.com
-  # A dispatch's word first, then a tag's own name, then main -- see the table above.
-  VIRTX_REF: ${{ inputs.virtx-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
   # "true" on a pushed tag or a dispatch that asks; every other run leaves `latest` alone.
   LATEST: ${{ inputs.latest == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
   CARGO_TERM_COLOR: always
@@ -103,31 +95,20 @@ jobs:
             targets: linux macos
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    defaults:
-      run:
-        working-directory: virtx-uvm
     steps:
       # With the submodules, which only the kernel does not need: `cargo xtask` loads the
       # whole workspace, and that names crates in them.
       - uses: actions/checkout@v7
         with:
-          path: virtx-uvm
           submodules: true
-
-      # The workspace builds against brekkylab/virtx, as `../virtx`, and `cargo xtask` loads it.
-      - uses: actions/checkout@v7
-        with:
-          repository: brekkylab/virtx
-          ref: ${{ env.VIRTX_REF }}
-          path: virtx
 
       # A kernel is only its tag, its config and this script; the Makefile and configs come
       # from the libkrunfw clone, pinned by tag in the script.
       - uses: actions/cache@v6
         id: cache
         with:
-          path: virtx-uvm/build/krunfw
-          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('virtx-uvm/xtask/scripts/build-libkrunfw.sh') }}
+          path: build/krunfw
+          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
 
       - name: Kernel
         if: steps.cache.outputs.cache-hit != 'true'
@@ -140,13 +121,16 @@ jobs:
 
       - run: ls -la build/krunfw
 
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.arch }}-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: virtx-uvm
           key: abin-${{ matrix.arch }}
 
       - name: abin
@@ -214,32 +198,26 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: virtx-uvm
     steps:
       # Before any checkout: Windows' git converts to CRLF by default, and the submodule
       # patches, written against LF, then find no context to apply to.
       - name: Keep line endings as committed
-        working-directory: .
         run: git config --global core.autocrlf false
 
       - uses: actions/checkout@v7
         with:
-          path: virtx-uvm
           submodules: true
 
-      - uses: actions/checkout@v7
-        with:
-          repository: brekkylab/virtx
-          ref: ${{ env.VIRTX_REF }}
-          path: virtx
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.musl }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: virtx-uvm
           # Apart from anything built on the runner itself: C compiled against its newer
           # glibc's headers, restored here, would put that glibc back into the release.
           key: ${{ matrix.release }}${{ matrix.container && '-manylinux_2_28' || '' }}
@@ -284,8 +262,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            virtx-uvm/3rdparty/MoltenVK/Package
-          key: moltenvk-${{ hashFiles('virtx-uvm/.git/modules/3rdparty/MoltenVK/HEAD', 'virtx-uvm/3rdparty/_patches/MoltenVK/*.patch', 'virtx-uvm/xtask/scripts/build-deps.sh') }}
+            3rdparty/MoltenVK/Package
+          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', '3rdparty/_patches/MoltenVK/*.patch', 'xtask/scripts/build-deps.sh') }}
 
       - uses: actions/cache/restore@v6
         with:
@@ -311,7 +289,7 @@ jobs:
           ls -la target/release/abin
 
       - name: Build
-        run: cargo xtask build host
+        run: cargo xtask build stdio-server
 
       - name: virglrenderer's log (Windows, on failure)
         if: failure() && runner.os == 'Windows'

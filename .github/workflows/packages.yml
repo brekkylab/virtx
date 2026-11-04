@@ -158,9 +158,12 @@ jobs:
       # The oldest macOS the wheel's tag says it runs on.
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
+      # With the submodules: cargo loads the whole workspace, the servers' crates included,
+      # and they name crates in libkrun and rutabaga_gfx. Unpatched is enough for the client.
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.REF }}
+          submodules: true
 
       - id: toolchain
         shell: bash
@@ -180,7 +183,7 @@ jobs:
       - name: libvirtx_core
         shell: bash
         run: |
-          cargo build --release --locked -p virtx-core --lib --target ${{ matrix.target }}
+          cargo xtask build client --locked --target ${{ matrix.target }}
           mkdir -p dist/lib
           cp target/${{ matrix.target }}/release/${{ matrix.file }} dist/lib/
           ls -la dist/lib

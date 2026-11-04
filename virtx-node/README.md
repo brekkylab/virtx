@@ -1,6 +1,6 @@
 # virtx for Node
 
-A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with [koffi](https://koffi.dev): the package has no addon of its own, and carries the library for its platform beside `index.js`.
+A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with [koffi](https://koffi.dev): the package has no addon of its own, and the library for its platform comes in that platform's package, `@brekkylab/virtx-<platform>`, which npm installs as an optional dependency.
 
 ```js
 const { Client, Recipe } = require('@brekkylab/virtx')
@@ -51,7 +51,7 @@ for (const entry of await client.readDir(volume, 'in')) console.log(entry.name, 
 console.log((await client.readFile(volume, 'in/notes.txt')).toString())
 ```
 
-The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
+The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or a copy beside `index.js`, or the one in the platform's package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 
 ## Tests
 

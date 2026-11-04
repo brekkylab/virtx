@@ -1,0 +1,19 @@
+# A registry on localhost that holds only what this workflow packed of `@brekkylab`, so `npm
+# install @brekkylab/virtx` resolves its optional platform packages the way npmjs would. Its
+# other dependencies (koffi) come from npmjs.
+storage: ./verdaccio-storage
+auth:
+  htpasswd:
+    file: ./verdaccio-htpasswd
+    max_users: 10
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+packages:
+  '@brekkylab/*':
+    access: $all
+    publish: $authenticated
+  '**':
+    access: $all
+    proxy: npmjs
+log: { type: stdout, format: pretty, level: warn }

@@ -330,9 +330,12 @@ fn a_started_job_is_read_as_its_log() {
     let mut log = client
         .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
         .log();
+    assert!(log.job().is_none());
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
         entries.push(entry.unwrap().entry);
+        // The job is the log's once started, to act on mid-stream.
+        assert_eq!(log.job().unwrap().cmd, ["echo", "hi"]);
     }
     assert_eq!(
         entries,
@@ -353,6 +356,7 @@ fn a_started_job_is_read_as_its_log() {
     while let Some(entry) = block_on(future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx))) {
         entries.push(entry.unwrap().entry);
     }
+    assert_eq!(log.job().unwrap().cmd, ["echo", "b"]);
     assert_eq!(
         entries,
         [
@@ -368,6 +372,7 @@ fn a_started_job_is_read_as_its_log() {
     let refused = log.wait_next().unwrap().unwrap_err();
     assert!(refused.to_string().contains("422"), "{refused}");
     assert!(log.wait_next().is_none());
+    assert!(log.job().is_none());
 }
 
 /// Polls `future` on this thread until it is ready, parking between wakes.

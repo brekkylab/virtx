@@ -1,7 +1,7 @@
 'use strict'
 // A virtx client for Node, over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
-// reached with koffi: the package has no addon of its own, and carries the library for its
-// platform beside this file.
+// reached with koffi: the package has no addon of its own, and the library for its platform
+// comes in that platform's package, `@brekkylab/virtx-<platform>`, an optional dependency.
 //
 // One library per process: every client is made by the one first opened, which stays open until
 // the process ends. A client handed to another module is only good in the same library, so a
@@ -30,6 +30,14 @@ const FILE_NAME =
     : process.platform === 'darwin'
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
+
+// The package carrying the library for this platform, which npm installs only here.
+const PLATFORM_PACKAGE = {
+  'darwin-arm64': '@brekkylab/virtx-darwin-arm64',
+  'linux-x64': '@brekkylab/virtx-linux-x64-gnu',
+  'linux-arm64': '@brekkylab/virtx-linux-arm64-gnu',
+  'win32-x64': '@brekkylab/virtx-win32-x64-msvc',
+}[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
   constructor(message) {
@@ -245,12 +253,26 @@ function libraryPath() {
   return opened === null ? null : opened.path
 }
 
-// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else the one in this
-// package, else the platform's file name for the system's loader to look up.
+// The library in this platform's package, or `null` where it is not installed.
+function platformLibrary() {
+  try {
+    return path.join(path.dirname(require.resolve(`${PLATFORM_PACKAGE}/package.json`)), FILE_NAME)
+  } catch {
+    return null
+  }
+}
+
+// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else one beside this file,
+// else the one in this platform's package, else the platform's file name for the system's
+// loader to look up.
 function library() {
   if (opened === null) {
-    const bundled = path.join(__dirname, FILE_NAME)
-    load(process.env[LIBRARY_ENV] || (fs.existsSync(bundled) ? bundled : FILE_NAME))
+    const beside = path.join(__dirname, FILE_NAME)
+    load(
+      process.env[LIBRARY_ENV] ||
+        (fs.existsSync(beside) ? beside : PLATFORM_PACKAGE && platformLibrary()) ||
+        FILE_NAME,
+    )
   }
   return opened
 }

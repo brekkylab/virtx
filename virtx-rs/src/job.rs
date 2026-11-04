@@ -36,12 +36,13 @@ impl<J, E> StartedJob<J, E> {
     }
 }
 
-impl<J: 'static, E: 'static> StartedJob<J, E> {
+impl<J, E> StartedJob<J, E> {
     /// The job's log from its start, read once the job has started, until its `end` entry.
-    /// A failed start is its one item.
-    pub fn log(self) -> JobLog<E> {
+    /// A failed start is its one item. The job stays the log's, as [`JobLog::job`].
+    pub fn log(self) -> JobLog<J, E> {
         JobLog {
-            state: State::Starting(Box::new(self)),
+            state: State::Starting(self),
+            job: None,
         }
     }
 }
@@ -55,51 +56,53 @@ impl<J, E> Future for StartedJob<J, E> {
 }
 
 /// A started job's log as a [`StartedJob`] gives it: each `LogEntry` of `E`, or the error it
-/// failed with, polled as a `Stream` or waited on with [`wait_next`](Self::wait_next).
+/// failed with, polled as a `Stream` or waited on with [`wait_next`](Self::wait_next); and the
+/// job `J` itself once started, as [`job`](Self::job).
 /// Dropping it cancels a start not yet answered, and leaves a started job running.
 #[must_use = "a log dropped is not read"]
-pub struct JobLog<E> {
-    state: State<E>,
+pub struct JobLog<J, E> {
+    state: State<J, E>,
+    job: Option<J>,
 }
 
-enum State<E> {
-    Starting(Box<dyn Start<E>>),
+enum State<J, E> {
+    Starting(StartedJob<J, E>),
     Reading(Events<LogEntry<E>>),
     Done,
 }
 
-/// A `StartedJob` with its job type forgotten: what answers with the job's log.
-trait Start<E>: Send + Sync {
-    fn wait(self: Box<Self>) -> Result<Events<LogEntry<E>>, Error>;
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Events<LogEntry<E>>, Error>>;
-}
-
-impl<J, E> Start<E> for StartedJob<J, E> {
-    fn wait(self: Box<Self>) -> Result<Events<LogEntry<E>>, Error> {
-        let job = self.call.wait()?;
-        Ok((self.open)(&job))
+impl<J, E> JobLog<J, E> {
+    /// The job its start answered with, once the first entry has been read: `None` before
+    /// then, or if the start failed. Its id is what cancels, signals or writes to the job's
+    /// stdin while its log is read.
+    pub fn job(&self) -> Option<&J> {
+        self.job.as_ref()
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Events<LogEntry<E>>, Error>> {
-        Pin::new(&mut self.call)
-            .poll(cx)
-            .map(|job| job.map(|job| (self.open)(&job)))
+    /// Keep the job `job` its start answered with, and read its log from here on.
+    fn started(&mut self, open: &Open<J, E>, job: J) {
+        self.state = State::Reading(open(&job));
+        self.job = Some(job);
     }
 }
 
-impl<E> Unpin for JobLog<E> {}
+impl<J, E> Unpin for JobLog<J, E> {}
 
-impl<E: DeserializeOwned> JobLog<E> {
+impl<J, E: DeserializeOwned> JobLog<J, E> {
     /// Block this thread until the next entry, or `None` after the last, for a caller without
     /// an async runtime.
     pub fn wait_next(&mut self) -> Option<Result<LogEntry<E>, Error>> {
-        self.state = match mem::replace(&mut self.state, State::Done) {
-            State::Starting(start) => match start.wait() {
-                Ok(events) => State::Reading(events),
+        if let State::Starting(_) = self.state {
+            let State::Starting(StartedJob { call, open }) =
+                mem::replace(&mut self.state, State::Done)
+            else {
+                unreachable!()
+            };
+            match call.wait() {
+                Ok(job) => self.started(&open, job),
                 Err(error) => return Some(Err(error)),
-            },
-            state => state,
-        };
+            }
+        }
         match &mut self.state {
             State::Reading(events) => events.wait_next(),
             _ => None,
@@ -107,14 +110,19 @@ impl<E: DeserializeOwned> JobLog<E> {
     }
 }
 
-impl<E: DeserializeOwned> Stream for JobLog<E> {
+impl<J, E: DeserializeOwned> Stream for JobLog<J, E> {
     type Item = Result<LogEntry<E>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let State::Starting(start) = &mut self.state {
-            match start.poll(cx) {
+            match Pin::new(&mut start.call).poll(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(events)) => self.state = State::Reading(events),
+                Poll::Ready(Ok(job)) => {
+                    let State::Starting(start) = mem::replace(&mut self.state, State::Done) else {
+                        unreachable!()
+                    };
+                    self.started(&start.open, job);
+                }
                 Poll::Ready(Err(error)) => {
                     self.state = State::Done;
                     return Poll::Ready(Some(Err(error)));

@@ -8,7 +8,7 @@ Include the language you used virtx from, the package version, the host OS and i
 
 We aim to acknowledge a report within three working days and to describe the fix or the disagreement within fourteen. Fixes ship in a normal release, credited to the reporter unless they ask otherwise.
 
-Only the latest release on crates.io, PyPI and npm is supported. The console server binary that `ensure_virtx()` fetches is this project's too: a report about it comes here as well.
+Only the latest release on crates.io, PyPI and npm is supported. The server, `virtx-uvm` and `virtx-http-server`, is in this repository too: a report about it comes here as well.
 
 ## What counts
 

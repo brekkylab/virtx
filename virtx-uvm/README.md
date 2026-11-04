@@ -25,16 +25,16 @@ brew install lld meson ninja krunvm
 | `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
-| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build host`. |
+| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build stdio-server` and `http-server`. |
 
 ## Setup
 
 ```sh
-git submodule update --init
-cargo xtask init                        # patches the submodules (--force resets them first)
+cargo xtask init                        # checks out and patches the submodules, adds the musl
+                                        #    target (--force resets the submodules first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
-cargo xtask build host                  # -> target/release/ (builds MoltenVK and virglrenderer
-                                        #    first; add abin for /abin)
+cargo xtask build stdio-server          # -> target/release/virtx-uvm (builds MoltenVK and
+                                        #    virglrenderer first; add http-server, and abin for /abin)
 cargo xtask install                     # -> ~/.cache/virtx/bin, or --prefix <dir>
 ```
 
@@ -90,7 +90,7 @@ built, silently, since the GPU still came up.
 
 A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not
 sign, and a binary that creates a VM fails without it. The one exception is
-the one that matters for a console server: `cargo xtask build host` signs
+the one that matters for a console server: `cargo xtask build stdio-server` signs
 `virtx-uvm` once cargo has built it -- the one binary, since the process that
 becomes a VM is `virtx-uvm boot`, spawned by the server from its own file. A console server is started by
 whoever wants a session — a test, an agent runtime, a CLI — and `cargo xtask run`
@@ -594,7 +594,7 @@ cannot be re-enabled without reinstalling Windows.
 git submodule update --init
 cargo xtask init                        # patches the submodules
 cargo xtask build kernel                # guest kernel -> build/krunfw/
-cargo xtask build host                  # builds libepoxy and virglrenderer first
+cargo xtask build stdio-server          # builds libepoxy and virglrenderer first
 cargo xtask run --example run -- alpine:3.21 'uname -srm'
 ```
 
@@ -856,7 +856,7 @@ The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 ### virglrenderer on Windows
 
 ```powershell
-cargo xtask build host
+cargo xtask build stdio-server
 ```
 
 runs `xtask/scripts/build-deps.ps1`, which produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
@@ -1020,8 +1020,7 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 Every guest gets one directory of virtx's own executables at `/abin`, **first on a
 command's `PATH`**. Today that is `index` and `mem` -- the programs in
-[`virtx-abins/`](../virtx-abins), which are written in the sibling `virtx` checkout and built
-here for the machine that runs them.
+[`virtx-abins/`](../virtx-abins), built for the machine that runs them.
 
 `docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
 C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
@@ -1105,7 +1104,7 @@ scripts.
 `virtx-uvm` finds the other two by looking beside itself. A plain `cargo build`
 links the server and the boot but not the guest, which is a musl cross-build of its
 own workspace; `cargo xtask install` copies the whole set into `<prefix>/bin`. On macOS
-the boot needs the hypervisor entitlement, which `cargo xtask build host` puts on
+the boot needs the hypervisor entitlement, which `cargo xtask build stdio-server` puts on
 after cargo links it -- after rustc's own strip too, which would otherwise rewrite
 the signature. `cargo xtask run` and `cargo xtask test` sign whatever they run, which
 is what the examples and tests that create a VM themselves need.

@@ -8,17 +8,19 @@ virtx lets you run tasks in disposable Linux VMs from your own code.
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
 
-A virtx server runs the VMs, on your machine or another one, and this repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
+A virtx server runs the VMs, on your machine or another one. This repository is both ends: the client, one library, `libvirtx_core`, with packages for Python, Node and Rust over it, and the server, [`virtx-uvm`](virtx-uvm/README.md).
 What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md): plain HTTP, over TCP or over a server the client starts as a child process.
 
 ## Quickstart
 
 Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
-`Client.spawn("virtx-uvm")` starts the server, [`virtx-uvm`](https://github.com/brekkylab/virtx-uvm), and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
-No release of `virtx-uvm` speaks this protocol yet, so build it from that repository's `multi-process` branch, as its README says, and install it onto your `PATH`:
+`Client.spawn("virtx-uvm")` starts the server, `virtx-uvm`, and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+The server is in this repository. Build it, as [`CONTRIBUTING.md`](CONTRIBUTING.md) says, and install it onto your `PATH`:
 
 ```sh
-cargo xtask install --prefix ~/.local   # in virtx-uvm, once built: -> ~/.local/bin/virtx-uvm
+cargo xtask init
+cargo xtask build kernel stdio-server
+cargo xtask install --prefix ~/.local   # -> ~/.local/bin/virtx-uvm, beside its kernel
 ```
 
 ### Python

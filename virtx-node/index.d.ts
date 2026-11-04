@@ -59,7 +59,7 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-export type ImageJobKind = 'pull' | 'push' | 'build'
+export type ImageJobKind = 'pull' | 'push' | 'build' | 'commit'
 
 /** A build, pull or push the server runs. */
 export interface ImageJob {
@@ -114,13 +114,6 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-export interface SnapshotListOutputItem {
-  name: string
-  size: number
-  /** Whether a sandbox holds it now, from its `createSandbox` until its `removeSandbox`. */
-  inUse: boolean
-}
-
 export interface VolumeListOutputItem {
   name: string
   /** The bytes the volume's files take on the server. */
@@ -162,8 +155,8 @@ export interface VolumeMountListOutputItem {
   mountType: MountType
 }
 
-/** Whose files a request names: a volume's, or a snapshot's. A snapshot in use, held by a sandbox, refuses every request. */
-export type FileRoot = { volume: string } | { snapshot: string }
+/** Whose files a request names: a volume's. */
+export type FileRoot = { volume: string }
 
 /** What a file or directory is. */
 export interface Metadata {
@@ -183,14 +176,28 @@ export interface DirEntry {
   metadata: Metadata
 }
 
+/**
+ * A sandbox, running or stopped. Its disk -- what it writes over its image -- outlives its VM: it
+ * stops when unused or told to, and starts again as it was left, under the same id, until it is
+ * deleted.
+ */
 export interface Sandbox {
   id: string
-  /** The digest of the image it was made from. */
+  /** The name it was given, which `findSandbox` finds it by. */
+  name?: string
+  /** The digest of the image it stands on: what it boots every time it starts. */
   image: string
-  snapshot?: string
-  /** Whether its VM is up now. */
-  running: boolean
-  /** Only as `createSandbox` answers it, if it was given some. */
+  /** `'stopped'`: its VM down and its disk kept; a job started in it, or `startSandbox`, starts it. */
+  state: 'running' | 'stopped'
+  /** Whether it is deleted when it stops, rather than kept. */
+  ephemeral: boolean
+  /** How long it runs unused before it stops. */
+  autoStopMinutes: number
+  /** How long it is kept stopped and unused before it is deleted; absent, until it is deleted. */
+  autoDeleteDays?: number
+  /** When it was last used, as RFC 3339. */
+  usedAt: string
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
   ports?: SandboxPort[]
 }
 
@@ -202,7 +209,15 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  snapshot?: string
+  /** A name to find it again by, with `findSandbox`. */
+  name?: string
+  /** Delete it when it stops, rather than keep it. */
+  ephemeral?: boolean
+  autoStopMinutes?: number
+  /** `'never'` keeps it until it is deleted. */
+  autoDeleteDays?: number | 'never'
+  /** How much it may write over its image, in GiB. */
+  diskGib?: number
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -306,6 +321,8 @@ export class Client {
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  /** Start making an image of `sandbox` -- its image, with what it has written as one more layer -- to point `reference` at: how a sandbox is kept to start others from. */
+  commitImage(sandbox: string, reference: string): StartedJob<ImageJob, ImageJobEntry>
   listImageJob(): Promise<ImageJob[]>
   getImageJob(id: string): Promise<ImageJob>
   /** Cancel the job if it runs, and forget it. */
@@ -324,13 +341,8 @@ export class Client {
   downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>
   /** Upload the image in the OCI image layout archive at `path`, and point the tag `reference` (`name:tag`) at it: the archive's only image, or the one it names by that tag. Its events are a line of log a blob, then what it uploaded. */
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
-  /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
+  /** Delete each image no tag points at and no sandbox stands on, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<SnapshotListOutputItem[]>
-  /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<SnapshotListOutputItem>
-  getSnapshot(name: string): Promise<SnapshotListOutputItem>
-  removeSnapshot(name: string): Promise<void>
   listVolume(): Promise<VolumeListOutputItem[]>
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<VolumeListOutputItem>
@@ -376,7 +388,15 @@ export class Client {
   listSandbox(): Promise<Sandbox[]>
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
-  /** Stop the sandbox, end its jobs and forget it. */
+  /** The sandbox named `name`, if one is. */
+  findSandbox(name: string): Promise<Sandbox | undefined>
+  /** Start it if it is stopped; answered once it runs, with where its ports are now. A job started in a stopped sandbox starts it too. */
+  startSandbox(id: string): Promise<Sandbox>
+  /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
+  stopSandbox(id: string): Promise<Sandbox>
+  /** Open the TCP port `port` in it, as those it was made with are; where it is reached from. */
+  openSandboxPort(id: string, port: number): Promise<SandboxPort>
+  /** Delete the sandbox: stopped first if it runs, and its disk removed. Its volumes stay. */
   removeSandbox(id: string): Promise<void>
   listSandboxJob(sandbox: string): Promise<SandboxJob[]>
   /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */

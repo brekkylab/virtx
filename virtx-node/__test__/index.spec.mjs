@@ -127,8 +127,6 @@ test('the files of a volume are written, listed, moved and read back', async () 
     await client.removeFile(volume, 'dir')
     await assert.rejects(client.statFile(volume, 'dir'), /404/)
     assert.equal((await client.readFile(volume, 'c.txt')).toString(), 'hello world')
-
-    await assert.rejects(client.readDir({ snapshot: 'locked' }, ''), /423/)
   } finally {
     await client.close()
   }
@@ -141,17 +139,34 @@ async function entries(log) {
   return read
 }
 
-test('a snapshot is created, got and removed', async () => {
+test('a sandbox stops, starts again, is found by its name and committed', async () => {
   const client = Client.spawn(testServer)
   try {
-    const snapshot = await client.createSnapshot('made', 1)
-    assert.equal(snapshot.name, 'made')
-    assert.equal(snapshot.inUse, false)
-    assert.deepEqual(await client.getSnapshot('made'), snapshot)
-    assert.ok((await client.listSnapshot()).some((s) => s.name === 'made'))
-    assert.equal((await client.getSnapshot('locked')).inUse, true)
-    await client.removeSnapshot('made')
-    await assert.rejects(client.getSnapshot('made'), /404/)
+    const made = await client.createSandbox('alpine:3.20', { name: 'work', ports: [8000] })
+    assert.equal(made.state, 'running')
+    assert.equal(made.name, 'work')
+    assert.equal(made.ephemeral, false)
+    assert.equal(made.autoStopMinutes, 15)
+    assert.equal(made.autoDeleteDays, 30)
+    assert.equal((await client.findSandbox('work')).id, made.id)
+    assert.equal(await client.findSandbox('nobody'), undefined)
+    await assert.rejects(client.createSandbox('alpine:3.20', { name: 'work' }), /409/)
+
+    assert.equal((await client.stopSandbox(made.id)).state, 'stopped')
+    const started = await client.startSandbox(made.id)
+    assert.equal(started.state, 'running')
+    assert.deepEqual(started.ports, made.ports)
+
+    const kept = await client.createSandbox('alpine:3.20', { autoDeleteDays: 'never' })
+    assert.equal(kept.autoDeleteDays, undefined)
+    const gone = await client.createSandbox('alpine:3.20', { ephemeral: true })
+    await client.stopSandbox(gone.id)
+    await assert.rejects(client.getSandbox(gone.id), /404/)
+
+    const job = await client.commitImage(made.id, 'mine:v1')
+    assert.equal(job.kind, 'commit')
+    await client.removeSandbox(made.id)
+    await assert.rejects(client.getSandbox(made.id), /404/)
   } finally {
     await client.close()
   }
@@ -173,7 +188,7 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
   const client = Client.spawn(testServer)
   try {
     const sandbox = await client.createSandbox('alpine:3.20')
-    assert.equal(sandbox.running, true)
+    assert.equal(sandbox.state, 'running')
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
     const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])

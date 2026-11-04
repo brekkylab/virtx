@@ -31,6 +31,6 @@ pub use virtx_core::{
     ImageJobKind, ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry,
     Metadata, MountSource, MountType, Progress, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs,
     SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEnd, SandboxJobEntry, SandboxJobKind,
-    SandboxPort, SandboxVolume, SnapshotListOutputItem, Step, VolumeListOutputItem,
+    SandboxPort, SandboxState, SandboxVolume, Step, VolumeListOutputItem,
     VolumeMountListOutputItem,
 };

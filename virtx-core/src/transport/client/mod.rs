@@ -47,7 +47,7 @@ enum Connection {
 }
 
 impl Connection {
-    /// Send `request`, whose URI is a path under the server's base, such as `/snapshots/`. An
+    /// Send `request`, whose URI is a path under the server's base, such as `/volumes/`. An
     /// `Err` says why no response came.
     async fn send(&self, request: http::Request<Body>) -> Result<http::Response<Body>, String> {
         match self {
@@ -116,7 +116,7 @@ impl TransportClient {
     }
 
     /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/snapshots/`, names. An `Err` says why no response came, or that the server refused the
+    /// `/volumes/`, names. An `Err` says why no response came, or that the server refused the
     /// headers with a `401` or a `403`, which every endpoint's are alike.
     ///
     /// A request whose body is known and small ([`REPLAYABLE`]) -- every resource's, and a

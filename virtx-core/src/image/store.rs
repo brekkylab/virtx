@@ -46,6 +46,22 @@ pub enum ImageJobKind {
     Push,
     /// Builds a recipe, and points a reference at what it builds.
     Build,
+    /// Makes an image of a sandbox -- its image, with what it has written as one more layer --
+    /// and points a reference at it.
+    Commit,
+}
+
+/// What a commit takes: `POST /images/jobs/commit/`'s body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageCommitArgs {
+    /// The sandbox, by id: running, as it is when the job starts, or stopped, as it was left.
+    pub sandbox: String,
+
+    /// The reference to point at the image, as `name:tag`.
+    ///
+    /// A reference already in use is moved to this image.
+    pub reference: String,
 }
 
 /// What a build takes: `POST /images/jobs/build/`'s body.

@@ -33,6 +33,28 @@ pub(crate) async fn list(client: &TransportClient) -> Result<Vec<Sandbox>, Error
     http::get(client, "/sandboxes/").await
 }
 
+/// The sandbox named `name`, if one is.
+pub(crate) async fn find(client: &TransportClient, name: &str) -> Result<Option<Sandbox>, Error> {
+    let found: Vec<Sandbox> =
+        http::get(client, &format!("/sandboxes/?name={}", segment(name))).await?;
+    Ok(found.into_iter().next())
+}
+
+/// Start the sandbox `id`, if it is stopped: answered once it runs, with where its ports are.
+pub(crate) async fn start(client: &TransportClient, id: &str) -> Result<Sandbox, Error> {
+    http::post(client, &format!("{}/start", sandbox(id)), &Empty {}).await
+}
+
+/// Stop the sandbox `id`, if it runs: answered once it has stopped, its disk kept -- or, for
+/// an ephemeral one, deleted.
+pub(crate) async fn stop(client: &TransportClient, id: &str) -> Result<Sandbox, Error> {
+    http::post(client, &format!("{}/stop", sandbox(id)), &Empty {}).await
+}
+
+/// `{}`: the body `start` and `stop` take.
+#[derive(serde::Serialize)]
+struct Empty {}
+
 /// Make a sandbox as `args` says.
 pub(crate) async fn create(
     client: &TransportClient,
@@ -46,7 +68,7 @@ pub(crate) async fn get(client: &TransportClient, id: &str) -> Result<Sandbox, E
     http::get(client, &sandbox(id)).await
 }
 
-/// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+/// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes stay.
 pub(crate) async fn remove(client: &TransportClient, id: &str) -> Result<(), Error> {
     http::delete(client, &sandbox(id)).await
 }

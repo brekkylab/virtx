@@ -9,7 +9,7 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 
 use super::{TransportClient, http, serve_stdio};
-use crate::{Auth, Error, snapshot::SnapshotListOutputItem};
+use crate::{Auth, Error, volume::VolumeListOutputItem};
 
 /// `router` served over an in-memory HTTP/2 connection, as stdio serves, and a client of it.
 pub(crate) fn piped(router: Router) -> TransportClient {
@@ -187,9 +187,8 @@ async fn the_endpoints_are_under_the_base_url_with_or_without_its_slash() {
     let url = serve(Router::new().nest("/base", crate::testing::router())).await;
     for base in [format!("{url}base"), format!("{url}base/")] {
         let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
-        let snapshots: Vec<SnapshotListOutputItem> =
-            http::get(&client, "/snapshots/").await.unwrap();
-        assert!(snapshots.iter().any(|snapshot| snapshot.name == "s"));
+        let volumes: Vec<VolumeListOutputItem> = http::get(&client, "/volumes/").await.unwrap();
+        assert!(volumes.iter().any(|volume| volume.name == "s"));
     }
 }
 
@@ -200,7 +199,7 @@ async fn a_request_to_no_server_fails() {
     drop(listener);
     let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
     for _ in 0..2 {
-        let error = http::get::<Vec<SnapshotListOutputItem>>(&client, "/snapshots/")
+        let error = http::get::<Vec<VolumeListOutputItem>>(&client, "/volumes/")
             .await
             .unwrap_err();
         assert!(matches!(error, Error::Transport(_)), "{error:?}");
@@ -210,7 +209,7 @@ async fn a_request_to_no_server_fails() {
 #[tokio::test]
 async fn a_refusal_reads_its_code_and_message() {
     for client in clients().await {
-        let error = http::get::<SnapshotListOutputItem>(&client, "/snapshots/nothing")
+        let error = http::get::<VolumeListOutputItem>(&client, "/volumes/nothing")
             .await
             .unwrap_err();
         let Error::Status(404, message) = &error else {
@@ -227,7 +226,7 @@ async fn a_server_that_exits_fails_every_request() {
     let client = TransportClient::spawn(tokio::process::Command::new("true")).unwrap();
     for _ in 0..2 {
         assert!(
-            http::get::<Vec<SnapshotListOutputItem>>(&client, "/snapshots/")
+            http::get::<Vec<VolumeListOutputItem>>(&client, "/volumes/")
                 .await
                 .is_err()
         );
@@ -246,7 +245,7 @@ async fn serve_returns_once_its_client_is_gone() {
     };
     let served = tokio::spawn(serve_stdio(handle, input, output));
     let client = TransportClient::over(client);
-    let _: Vec<SnapshotListOutputItem> = http::get(&client, "/snapshots/").await.unwrap();
+    let _: Vec<VolumeListOutputItem> = http::get(&client, "/volumes/").await.unwrap();
     client.close().await;
     served.await.unwrap().unwrap();
 }

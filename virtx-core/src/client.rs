@@ -1,6 +1,6 @@
 //! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
-//! made by the module of what it names: [`image`](crate::image), [`snapshot`](crate::snapshot),
-//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a snapshot
+//! made by the module of what it names: [`image`](crate::image),
+//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume
 //! over WebDAV.
 
 use std::{io, path::PathBuf};
@@ -13,7 +13,7 @@ use tokio::process::Command;
 use crate::{
     Auth, Error,
     image::{
-        self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
+        self, Event, ImageBuildArgs, ImageCommitArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
     },
@@ -21,7 +21,6 @@ use crate::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
         SandboxJobEntry, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
     },
-    snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
@@ -187,41 +186,26 @@ impl Client {
         Box::pin(oci::upload(&self.inner, path.into(), reference.into()))
     }
 
-    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
+    /// Start making an image of the sandbox `sandbox` -- its image, with what it has written
+    /// as one more layer -- to point `reference` at. Of a running one, it is as it is when the
+    /// job starts; of a stopped one, as it was left. Its log is
+    /// [`image_job_log`](Self::image_job_log)'s.
+    pub async fn commit_image(
+        &self,
+        sandbox: impl Into<String>,
+        reference: impl Into<String>,
+    ) -> Result<ImageJob, Error> {
+        let args = ImageCommitArgs {
+            sandbox: sandbox.into(),
+            reference: reference.into(),
+        };
+        image::client::commit(&self.inner, &args).await
+    }
+
+    /// Delete each image no tag points at and no sandbox stands on, and what only such images
+    /// held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
         image::client::prune(&self.inner).await
-    }
-
-    /// Every snapshot the server holds.
-    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
-        snapshot::client::list(&self.inner).await
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub async fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        snapshot::client::create(&self.inner, &args).await
-    }
-
-    /// The snapshot `name`.
-    pub async fn get_snapshot(
-        &self,
-        name: impl AsRef<str>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        snapshot::client::get(&self.inner, name.as_ref()).await
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub async fn remove_snapshot(&self, name: impl AsRef<str>) -> Result<(), Error> {
-        snapshot::client::remove(&self.inner, name.as_ref()).await
     }
 
     /// Every volume the server holds.
@@ -396,7 +380,25 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// The sandbox named `name`, without its ports, if one is.
+    pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
+        sandbox::client::find(&self.inner, name.as_ref()).await
+    }
+
+    /// Start the sandbox `id` if it is stopped -- its VM booted over its disk as it was left --
+    /// and answer it once it runs, with where its ports are now. A job started in a stopped
+    /// sandbox starts it too.
+    pub async fn start_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
+        sandbox::client::start(&self.inner, id.as_ref()).await
+    }
+
+    /// Stop the sandbox `id` if it runs: its jobs end, and its disk is kept -- or, for an
+    /// ephemeral one, deleted with it. Answered once it has stopped.
+    pub async fn stop_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
+        sandbox::client::stop(&self.inner, id.as_ref()).await
+    }
+
+    /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes stay.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
@@ -513,7 +515,7 @@ mod tests {
     use super::*;
     use crate::{
         image::{ImageJobEnd, ImageJobKind},
-        sandbox::SandboxJobEnd,
+        sandbox::{SandboxJobEnd, SandboxState},
         transport::tests::clients,
         volume::MountType,
     };
@@ -551,34 +553,6 @@ mod tests {
 
     fn end(code: i32) -> SandboxJobEntry {
         SandboxJobEntry::End(SandboxJobEnd { code })
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_is_made_read_and_removed() {
-        for client in each().await {
-            let made = client.create_snapshot(Some("dev"), Some(8)).await.unwrap();
-            assert_eq!(
-                made,
-                SnapshotListOutputItem {
-                    name: "dev".into(),
-                    size: 0,
-                    in_use: false,
-                }
-            );
-            assert_eq!(client.get_snapshot("dev").await.unwrap(), made);
-            assert!(client.list_snapshot().await.unwrap().contains(&made));
-            let named = client.create_snapshot(None::<String>, None).await.unwrap();
-            assert_ne!(named.name, "dev");
-
-            let (status, message) = refusal(client.create_snapshot(Some("dev"), None).await);
-            assert_eq!(status, 409);
-            assert!(message.starts_with("exists: "), "{message}");
-            assert_eq!(refusal(client.remove_snapshot("locked").await).0, 409);
-
-            client.remove_snapshot("dev").await.unwrap();
-            assert_eq!(refusal(client.get_snapshot("dev").await).0, 404);
-            client.close().await;
-        }
     }
 
     #[tokio::test]
@@ -632,32 +606,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sandbox_holds_its_snapshot_until_it_is_removed() {
+    async fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
         for client in each().await {
-            client.create_snapshot(Some("work"), None).await.unwrap();
             let mut args = SandboxCreateArgs::new("alpine:3.20");
-            args.snapshot = Some("work".into());
+            args.name = Some("work".into());
             args.ports = vec![3000];
             let sandbox = client.create_sandbox(&args).await.unwrap();
-            assert_eq!(sandbox.snapshot.as_deref(), Some("work"));
-            assert!(sandbox.running);
+            assert_eq!(sandbox.name.as_deref(), Some("work"));
+            assert_eq!(sandbox.state, SandboxState::Running);
+            assert!(!sandbox.ephemeral);
             assert_eq!(sandbox.ports.len(), 1);
             assert_eq!(sandbox.ports[0].port, 3000);
 
-            // Ports are answered at making only.
+            // Ports are answered at making and starting only.
             let read = client.get_sandbox(&sandbox.id).await.unwrap();
             assert!(read.ports.is_empty());
             assert!(client.list_sandbox().await.unwrap().contains(&read));
+            assert_eq!(client.find_sandbox("work").await.unwrap(), Some(read));
+            assert_eq!(client.find_sandbox("nobody").await.unwrap(), None);
+            assert_eq!(refusal(client.create_sandbox(&args).await).0, 409);
 
-            assert!(client.get_snapshot("work").await.unwrap().in_use);
-            let root = FileRoot::Snapshot("work".into());
-            assert_eq!(refusal(client.read_dir(&root, "").await).0, 423);
-            assert_eq!(refusal(client.remove_snapshot("work").await).0, 409);
+            let stopped = client.stop_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(stopped.state, SandboxState::Stopped);
+            let started = client.start_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(started.state, SandboxState::Running);
+            assert_eq!(started.ports, sandbox.ports);
+
+            // A job started in a stopped one starts it.
+            client.stop_sandbox(&sandbox.id).await.unwrap();
+            client
+                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+                .await
+                .unwrap();
+            let read = client.get_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(read.state, SandboxState::Running);
 
             client.remove_sandbox(&sandbox.id).await.unwrap();
             assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
-            assert!(!client.get_snapshot("work").await.unwrap().in_use);
-            client.remove_snapshot("work").await.unwrap();
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ephemeral_sandbox_goes_when_it_stops() {
+        for client in each().await {
+            let mut args = SandboxCreateArgs::new("alpine:3.20");
+            args.ephemeral = true;
+            args.auto_delete_days = Some(None);
+            let sandbox = client.create_sandbox(&args).await.unwrap();
+            assert!(sandbox.ephemeral);
+            assert_eq!(sandbox.auto_delete_days, None);
+            client.stop_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_is_committed_to_an_image() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let job = client.commit_image(&sandbox.id, "mine:v1").await.unwrap();
+            assert_eq!(job.kind, ImageJobKind::Commit);
+            assert_eq!(job.reference, "mine:v1");
+            let ended = client.get_image_job(&job.id).await.unwrap();
+            assert_eq!(ended.digest.as_deref(), Some("sha256:0"));
+            let refused = client.commit_image("nobody", "mine:v2").await.unwrap();
+            let ended = client.get_image_job(&refused.id).await.unwrap();
+            assert!(ended.error.is_some());
+            client.remove_sandbox(&sandbox.id).await.unwrap();
             client.close().await;
         }
     }
@@ -1012,16 +1032,15 @@ pub(crate) mod ffi {
             retain, share, write,
         },
         image::{
-            ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
-            ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+            ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs,
+            ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
         sandbox::{SandboxCreateArgs, SandboxExecArgs},
-        snapshot::SnapshotCreateArgs,
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
 
-    /// What names a snapshot or a volume: `{"name": "..."}`.
+    /// What names a volume or a sandbox: `{"name": "..."}`.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Name {
@@ -1290,7 +1309,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
+    /// `client` is as in `virtx_client_list_volume`. `args` is `args_len` readable bytes, not
     /// read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
@@ -1361,7 +1380,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is as in `virtx_client_list_volume`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image_job(
         client: *mut VirtxClient,
@@ -1451,7 +1470,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is as in `virtx_client_list_volume`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
@@ -1588,13 +1607,36 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Deletes each image no tag points at and no sandbox uses, and what only such images held.
-    /// Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
+    /// Starts making an image of a sandbox -- its image, with what it has written as one more
+    /// layer -- to point a reference at, given `{"sandbox": "...", "reference": "name:tag"}`.
+    /// Answers with the job, as `virtx_client_build_image` does.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_commit_image(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ImageCommitArgs>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let args = args?;
+            client
+                .commit_image(args.sandbox, args.reference)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Deletes each image no tag points at and no sandbox stands on, and what only such images
+    /// held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
     /// and the bytes freed.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is as in `virtx_client_list_volume`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_prune_image(
         client: *mut VirtxClient,
@@ -1603,7 +1645,7 @@ pub(crate) mod ffi {
             .future(|client| async move { client.prune_image().await.map_err(|e| e.to_string()) })
     }
 
-    /// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
+    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
     ///
     /// Every value here is JSON. A request that takes arguments takes them as `args`, the
     /// `args_len` bytes of one object.
@@ -1611,84 +1653,6 @@ pub(crate) mod ffi {
     /// # Safety
     ///
     /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_snapshot(
-        client: *mut VirtxClient,
-    ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_snapshot().await.map_err(|e| e.to_string()) })
-    }
-
-    /// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
-    /// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
-    /// with the snapshot, as `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_create_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SnapshotCreateArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client
-                .create_snapshot(args.name, args.disk_gib)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// Answers with the snapshot `name`, given `{"name": "..."}`, as
-    /// `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_get_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .get_snapshot(args?.name)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
-    /// `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_remove_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_snapshot(args?.name)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
-    ///
-    /// # Safety
-    ///
-    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
@@ -1834,8 +1798,8 @@ pub(crate) mod ffi {
         })
     }
 
-    /// The files of a volume or a snapshot: what is at `path`, given
-    /// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+    /// The files of a volume: what is at `path`, given `{"volume": "...", "path": "..."}`, the
+    /// path
     /// relative to its root as `dir/file.txt`. Answers with
     /// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
     /// the Unix epoch and `etag` as the server spells it, each only if the server says.
@@ -2103,7 +2067,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Moves what is at `from` to `to` in the same volume or snapshot, given
+    /// Moves what is at `from` to `to` in the same volume, given
     /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
     /// and false without it: whether to replace what is at `to`, which is otherwise refused.
     /// Answers with `null`.
@@ -2160,12 +2124,14 @@ pub(crate) mod ffi {
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
-    /// `snapshot` only for one that has one.
+    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "state": "running",
+    /// "ephemeral": bool, "auto_stop_minutes": n, "auto_delete_days": n, "used_at": "..."}, ...]`,
+    /// `name` only for one that has one, `state` `"running"` or `"stopped"`, and
+    /// `auto_delete_days` `null` for one kept until it is deleted.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is as in `virtx_client_list_volume`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_sandbox(
         client: *mut VirtxClient,
@@ -2175,9 +2141,11 @@ pub(crate) mod ffi {
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
+    /// `{"image": {...}, "name": "...", "ephemeral": bool, "auto_stop_minutes": n,
+    /// "auto_delete_days": n, "disk_gib": n, "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
+    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`,
+    /// `auto_delete_days` `null` to keep it until it is deleted, the image as
     /// `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, and
@@ -2222,8 +2190,100 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
-    /// with `null`.
+    /// Answers with the sandbox named `name`, given `{"name": "..."}`, as
+    /// `virtx_client_list_sandbox` answers each, or `null` if none is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_find_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .find_sandbox(args?.name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Starts the sandbox `id` if it is stopped, given `{"id": "..."}`. Answers once it runs,
+    /// as `virtx_client_create_sandbox` does, with where its ports are now.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_start_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .start_sandbox(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Stops the sandbox `id` if it runs, given `{"id": "..."}`: its jobs end, and its disk is
+    /// kept -- or, for an ephemeral one, deleted with it. Answers once it has stopped, as
+    /// `virtx_client_list_sandbox` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_stop_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Id>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            client
+                .stop_sandbox(args?.id)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Opens the TCP port `port` in the sandbox `id`, given `{"id": "...", "port": n}`. Answers
+    /// with `{"port": n, "url": "..."}`: where it is reached from now.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_open_sandbox_port(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct IdPort {
+            id: String,
+            port: u16,
+        }
+        let args = unsafe { json::<IdPort>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let args = args?;
+            client
+                .open_sandbox_port(args.id, args.port)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
+    /// removed. Answers with `null`.
     ///
     /// # Safety
     ///

@@ -117,6 +117,7 @@ class ImageJobKind(str, Enum):
     PULL = "pull"
     PUSH = "push"
     BUILD = "build"
+    COMMIT = "commit"
 
 
 @dataclass(frozen=True)

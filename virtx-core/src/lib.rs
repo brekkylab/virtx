@@ -19,7 +19,6 @@ mod error;
 mod ffi;
 mod image;
 mod sandbox;
-mod snapshot;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod transport;
@@ -32,6 +31,5 @@ pub use client::Client;
 pub use error::Error;
 pub use image::*;
 pub use sandbox::*;
-pub use snapshot::*;
 pub use transport::*;
 pub use volume::*;

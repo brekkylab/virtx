@@ -10,7 +10,7 @@ import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from .files import DirEntry, FileRoot, Metadata
@@ -29,8 +29,14 @@ from .image import (
     image_name,
 )
 from .job import LogEntry, StartedJob
-from .sandbox import Sandbox, SandboxJob, SandboxJobEntry, SandboxVolume, sandbox_job_entry
-from .snapshot import SnapshotListOutputItem
+from .sandbox import (
+    Sandbox,
+    SandboxJob,
+    SandboxJobEntry,
+    SandboxPort,
+    SandboxVolume,
+    sandbox_job_entry,
+)
 from .volume import MountSource, VolumeListOutputItem, VolumeMountListOutputItem
 
 if TYPE_CHECKING:
@@ -318,6 +324,15 @@ class Client:
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
         )
 
+    def commit_image(self, sandbox: str, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Make an image of ``sandbox`` -- its image, with what it has written as one more layer
+        -- to point ``reference`` at: how a sandbox is kept to start others from. Of a running
+        one, as it is when the job starts; of a stopped one, as it was left. Awaited, the job;
+        iterated, its log, as ``image_job_log``'s. Sent when first awaited or iterated."""
+        return self._image_job(
+            "virtx_client_commit_image", _args(sandbox=sandbox, reference=reference)
+        )
+
     def pull_image(
         self, reference: str, auth: RegistryAuth | None = None
     ) -> StartedJob[ImageJob, ImageJobEntry]:
@@ -406,30 +421,6 @@ class Client:
         """Delete each image no tag points at and no sandbox uses, and what only such images
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
-
-    async def list_snapshot(self) -> list[SnapshotListOutputItem]:
-        """Every snapshot the server holds."""
-        items = await self._call("virtx_client_list_snapshot")
-        return [SnapshotListOutputItem.from_dict(item) for item in items]
-
-    async def create_snapshot(
-        self, name: str | None = None, disk_gib: int | None = None
-    ) -> SnapshotListOutputItem:
-        """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
-        without either the server picks it."""
-        output = await self._call(
-            "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
-        )
-        return SnapshotListOutputItem.from_dict(output)
-
-    async def get_snapshot(self, name: str) -> SnapshotListOutputItem:
-        """The snapshot ``name``."""
-        output = await self._call("virtx_client_get_snapshot", _args(name=name))
-        return SnapshotListOutputItem.from_dict(output)
-
-    async def remove_snapshot(self, name: str) -> None:
-        """Delete the snapshot ``name`` and its upper layer."""
-        await self._call("virtx_client_remove_snapshot", _args(name=name))
 
     async def list_volume(self) -> list[VolumeListOutputItem]:
         """Every volume the server holds."""
@@ -567,7 +558,11 @@ class Client:
         self,
         image: str | ImageName,
         *,
-        snapshot: str | None = None,
+        name: str | None = None,
+        ephemeral: bool = False,
+        auto_stop_minutes: int | None = None,
+        auto_delete_days: int | Literal["never"] | None = None,
+        disk_gib: int | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
@@ -576,35 +571,67 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, standing on ``snapshot`` if given. ``ports`` are TCP
-        ports in it to open, reserved as it is made and answered here only, each with the
-        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
-        return Sandbox.from_dict(
-            await self._call(
-                "virtx_client_create_sandbox",
-                _args(
-                    image=image_name(image).to_dict(),
-                    snapshot=snapshot,
-                    network=network,
-                    ports=list(ports),
-                    vcpus=vcpus,
-                    memory_mib=memory_mib,
-                    gpu=gpu,
-                    gpu_memory_mib=gpu_memory_mib,
-                    volumes=[
-                        v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
-                    ],
-                ),
+        """Make a sandbox of ``image``, running. It is kept when it stops -- after
+        ``auto_stop_minutes`` unused, or at ``stop_sandbox`` -- and starts again as it was left,
+        until it is deleted: at ``remove_sandbox``, when it stops if ``ephemeral``, or after
+        ``auto_delete_days`` stopped and unused, ``"never"`` keeping it until then. ``name``
+        finds it again with ``find_sandbox``. ``ports`` are TCP ports in it to open, each
+        answered here and by ``start_sandbox`` with the ``url`` a ``PortForwarder`` reaches it
+        by. Whatever is left out the server picks."""
+        args = json.loads(
+            _args(
+                image=image_name(image).to_dict(),
+                name=name,
+                ephemeral=ephemeral or None,
+                auto_stop_minutes=auto_stop_minutes,
+                auto_delete_days=None if auto_delete_days == "never" else auto_delete_days,
+                disk_gib=disk_gib,
+                network=network,
+                ports=list(ports),
+                vcpus=vcpus,
+                memory_mib=memory_mib,
+                gpu=gpu,
+                gpu_memory_mib=gpu_memory_mib,
+                volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
             )
+        )
+        if auto_delete_days == "never":
+            args["auto_delete_days"] = None
+        return Sandbox.from_dict(
+            await self._call("virtx_client_create_sandbox", json.dumps(args).encode())
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
-        """The sandbox ``id``, without its ports."""
+        """The sandbox ``id``, running or stopped, without its ports."""
         return Sandbox.from_dict(await self._call("virtx_client_get_sandbox", _args(id=id)))
 
+    async def find_sandbox(self, name: str) -> Sandbox | None:
+        """The sandbox named ``name``, without its ports, if one is."""
+        found = await self._call("virtx_client_find_sandbox", _args(name=name))
+        return None if found is None else Sandbox.from_dict(found)
+
+    async def start_sandbox(self, id: str) -> Sandbox:
+        """Start the sandbox ``id`` if it is stopped -- its VM booted over its disk as it was
+        left -- and answer it once it runs, with where its ports are now. A job started in a
+        stopped sandbox starts it too."""
+        return Sandbox.from_dict(await self._call("virtx_client_start_sandbox", _args(id=id)))
+
+    async def stop_sandbox(self, id: str) -> Sandbox:
+        """Stop the sandbox ``id`` if it runs: its jobs end, and its disk is kept -- or, for an
+        ephemeral one, deleted with it. Answered once it has stopped."""
+        return Sandbox.from_dict(await self._call("virtx_client_stop_sandbox", _args(id=id)))
+
+    async def open_sandbox_port(self, id: str, port: int) -> SandboxPort:
+        """Open the TCP port ``port`` in the sandbox ``id``, as those it was made with are, and
+        answer where it is reached from. A program in it listening on ``port`` already is
+        reached once it listens again."""
+        return SandboxPort.from_dict(
+            await self._call("virtx_client_open_sandbox_port", _args(id=id, port=port))
+        )
+
     async def remove_sandbox(self, id: str) -> None:
-        """Stop the sandbox ``id``, end its jobs, and forget it, keeping its snapshot and
-        volumes."""
+        """Delete the sandbox ``id``: stopped first if it runs, and its disk removed. Its
+        volumes stay."""
         await self._call("virtx_client_remove_sandbox", _args(id=id))
 
     async def list_sandbox_job(self, sandbox: str) -> list[SandboxJob]:

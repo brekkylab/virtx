@@ -10,12 +10,12 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use virtx_core::{
     Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
-    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
-    ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJob, SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountListOutputItem,
+    FileWriteArgs, ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImageDownloadOutput,
+    ImageJob, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs,
+    ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry,
+    Metadata, MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJob, SandboxJobEntry, SandboxPort, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -352,44 +352,27 @@ impl Client {
         )
     }
 
-    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
+    /// Start making an image of the sandbox `sandbox` -- its image, with what it has written
+    /// as one more layer -- to point `reference` at: how a sandbox is kept to start others
+    /// from. Of a running one, as it is when the job starts; of a stopped one, as it was left.
+    pub fn commit_image(
+        &self,
+        sandbox: impl Into<String>,
+        reference: impl Into<String>,
+    ) -> StartedJob<ImageJob, ImageJobEntry> {
+        let args = ImageCommitArgs {
+            sandbox: sandbox.into(),
+            reference: reference.into(),
+        };
+        self.image_job(self.call(self.api.virtx_client_commit_image, args))
+    }
+
+    /// Delete each image no tag points at and no sandbox stands on, and what only such images
+    /// held.
     pub fn prune_image(&self) -> Call<ImagePruneOutput> {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_prune_image)(self.raw)
         })
-    }
-
-    /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<SnapshotListOutputItem>> {
-        Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_snapshot)(self.raw)
-        })
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Call<SnapshotListOutputItem> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        self.call(self.api.virtx_client_create_snapshot, args)
-    }
-
-    /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<SnapshotListOutputItem> {
-        let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_get_snapshot, args)
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
-        let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
     /// Every volume the server holds.
@@ -594,7 +577,7 @@ impl Client {
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
-    /// here only.
+    /// here and by [`start_sandbox`](Self::start_sandbox) only.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
         self.call(self.api.virtx_client_create_sandbox, args)
     }
@@ -605,7 +588,36 @@ impl Client {
         self.call(self.api.virtx_client_get_sandbox, args)
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// The sandbox named `name`, without its ports, if one is.
+    pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
+        let args = json!({ "name": name.as_ref() });
+        self.call(self.api.virtx_client_find_sandbox, args)
+    }
+
+    /// Start the sandbox `id` if it is stopped -- its VM booted over its disk as it was left --
+    /// and answer it once it runs, with where its ports are now. A job started in a stopped
+    /// sandbox starts it too.
+    pub fn start_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_start_sandbox, args)
+    }
+
+    /// Stop the sandbox `id` if it runs: its jobs end, and its disk is kept -- or, for an
+    /// ephemeral one, deleted with it.
+    pub fn stop_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
+        let args = json!({ "id": id.as_ref() });
+        self.call(self.api.virtx_client_stop_sandbox, args)
+    }
+
+    /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
+    /// where it is reached from.
+    pub fn open_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<SandboxPort> {
+        let args = json!({ "id": id.as_ref(), "port": port });
+        self.call(self.api.virtx_client_open_sandbox_port, args)
+    }
+
+    /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes
+    /// stay.
     pub fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)

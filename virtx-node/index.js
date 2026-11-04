@@ -88,10 +88,7 @@ const SIGNATURES = {
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_list_snapshot: PLAIN,
-  virtx_client_create_snapshot: WITH_ARGS,
-  virtx_client_get_snapshot: WITH_ARGS,
-  virtx_client_remove_snapshot: WITH_ARGS,
+  virtx_client_commit_image: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_get_volume: WITH_ARGS,
@@ -115,6 +112,10 @@ const SIGNATURES = {
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
+  virtx_client_find_sandbox: WITH_ARGS,
+  virtx_client_start_sandbox: WITH_ARGS,
+  virtx_client_stop_sandbox: WITH_ARGS,
+  virtx_client_open_sandbox_port: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -254,13 +255,17 @@ function library() {
   return opened
 }
 
+// What is sent as `null`, where leaving a member out would mean something else.
+const NULL = Symbol('null')
+
 // camelCase keys to the wire's snake_case, and back, through plain objects and arrays.
 function rekey(value, key) {
   if (Array.isArray(value)) return value.map((item) => rekey(item, key))
   if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return value
   const rekeyed = {}
   for (const [name, item] of Object.entries(value)) {
-    if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
+    if (item === NULL) rekeyed[key(name)] = null
+    else if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
   }
   return rekeyed
 }
@@ -549,6 +554,11 @@ class Client {
     return this._imageJob('virtx_client_pull_image', { reference, auth })
   }
 
+  // Starts making an image of the sandbox: the job, and its log as `imageJobLog`'s.
+  commitImage(sandbox, reference) {
+    return this._imageJob('virtx_client_commit_image', { sandbox, reference })
+  }
+
   pushImage(reference, auth) {
     return this._imageJob('virtx_client_push_image', { reference, auth })
   }
@@ -600,22 +610,6 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  listSnapshot() {
-    return this._call('virtx_client_list_snapshot')
-  }
-
-  createSnapshot(name, diskGib) {
-    return this._call('virtx_client_create_snapshot', { name, diskGib })
-  }
-
-  getSnapshot(name) {
-    return this._call('virtx_client_get_snapshot', { name })
-  }
-
-  async removeSnapshot(name) {
-    await this._call('virtx_client_remove_snapshot', { name })
-  }
-
   listVolume() {
     return this._call('virtx_client_list_volume')
   }
@@ -644,7 +638,7 @@ class Client {
     await this._call('virtx_client_remove_volume_mount', { volume, path: at })
   }
 
-  // What is at `path` in `root`, `{ volume }` or `{ snapshot }`, the path relative to its root
+  // What is at `path` in `root`, `{ volume }`, the path relative to its root
   // as `dir/file.txt`.
   statFile(root, at) {
     return this._call('virtx_client_stat_file', { ...root, path: at })
@@ -729,14 +723,38 @@ class Client {
   }
 
   createSandbox(image, options = {}) {
-    return this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
+    const autoDeleteDays = options.autoDeleteDays === 'never' ? NULL : options.autoDeleteDays
+    return this._call('virtx_client_create_sandbox', {
+      ...options,
+      autoDeleteDays,
+      image: imageName(image),
+    })
   }
 
   getSandbox(id) {
     return this._call('virtx_client_get_sandbox', { id })
   }
 
-  // Stops the sandbox, ends its jobs and forgets it.
+  // The sandbox named `name`, or `undefined` if none is.
+  async findSandbox(name) {
+    return (await this._call('virtx_client_find_sandbox', { name })) ?? undefined
+  }
+
+  // Starts it if it is stopped; answered once it runs, with where its ports are now.
+  startSandbox(id) {
+    return this._call('virtx_client_start_sandbox', { id })
+  }
+
+  // Stops it if it runs, its disk kept -- or, for an ephemeral one, deleted with it.
+  stopSandbox(id) {
+    return this._call('virtx_client_stop_sandbox', { id })
+  }
+
+  openSandboxPort(id, port) {
+    return this._call('virtx_client_open_sandbox_port', { id, port })
+  }
+
+  // Deletes the sandbox: stopped first if it runs, and its disk removed.
   async removeSandbox(id) {
     await this._call('virtx_client_remove_sandbox', { id })
   }

@@ -3,7 +3,8 @@
 use futures_util::Stream;
 
 use super::{
-    ImageBuildArgs, ImageJob, ImageJobEntry, ImagePruneOutput, ImagePullArgs, ImagePushArgs,
+    ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEntry, ImagePruneOutput, ImagePullArgs,
+    ImagePushArgs,
 };
 use crate::{
     Error,
@@ -34,6 +35,14 @@ pub(crate) async fn push(
     args: &ImagePushArgs,
 ) -> Result<ImageJob, Error> {
     http::post(client, "/images/jobs/push/", args).await
+}
+
+/// Start a commit as `args` says.
+pub(crate) async fn commit(
+    client: &TransportClient,
+    args: &ImageCommitArgs,
+) -> Result<ImageJob, Error> {
+    http::post(client, "/images/jobs/commit/", args).await
 }
 
 /// Start a build as `args` says.

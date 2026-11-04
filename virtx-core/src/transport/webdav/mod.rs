@@ -1,5 +1,5 @@
-//! The files of a volume or a snapshot, which `PROTOCOL.md`'s Files has a server serve with
-//! WebDAV (RFC 4918) under `/volumes/{name}/files/` or `/snapshots/{name}/files/`: what each
+//! The files of a volume, which `PROTOCOL.md`'s Files has a server serve with WebDAV
+//! (RFC 4918) under `/volumes/{name}/files/`: what each
 //! request names, and what a `PROPFIND` reads into. The client's end is [`client`].
 //!
 //! A path is relative to the root, `/`-separated, as `dir/file.txt`; the empty path is the
@@ -10,13 +10,12 @@ pub(crate) mod client;
 
 use serde::{Deserialize, Serialize};
 
-/// Whose files: a volume's, or a snapshot's. As JSON, `{"volume": "name"}` or
-/// `{"snapshot": "name"}`.
+/// Whose files: a volume's. As JSON, `{"volume": "name"}`, kept a tagged root so another kind
+/// can be one later.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileRoot {
     Volume(String),
-    Snapshot(String),
 }
 
 /// What names one path: its root, flattened beside it, and the path. As JSON,
@@ -125,17 +124,17 @@ mod tests {
     fn a_root_is_tagged_by_its_kind() {
         let root = FileRoot::Volume("v".into());
         assert_eq!(serde_json::to_value(&root).unwrap(), json!({"volume": "v"}));
-        let decoded: FileRoot = serde_json::from_value(json!({"snapshot": "s"})).unwrap();
-        assert_eq!(decoded, FileRoot::Snapshot("s".into()));
+        let decoded: FileRoot = serde_json::from_value(json!({"volume": "s"})).unwrap();
+        assert_eq!(decoded, FileRoot::Volume("s".into()));
     }
 
     #[test]
     fn a_path_s_root_is_beside_it() {
         let args = FilePathArgs {
-            root: FileRoot::Snapshot("s".into()),
+            root: FileRoot::Volume("s".into()),
             path: "a/b".into(),
         };
-        let value = json!({"snapshot": "s", "path": "a/b"});
+        let value = json!({"volume": "s", "path": "a/b"});
         assert_eq!(serde_json::to_value(&args).unwrap(), value);
         assert_eq!(serde_json::from_value::<FilePathArgs>(value).unwrap(), args);
         let read: FileReadArgs =

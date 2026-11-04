@@ -6,7 +6,7 @@
 virtx lets you run tasks in disposable Linux VMs from your own code.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all.
-Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
+Whatever a VM installs or changes is kept while the sandbox is, across its stops, and gone when you remove it -- unless it wrote it to a volume, or you committed it to an image.
 
 A virtx server runs the VMs, on your machine or another one, and this repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
 What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md): plain HTTP, over TCP or over a server the client starts as a child process.
@@ -156,13 +156,12 @@ codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 
 | | What it is | Made and read with |
 |---|---|---|
-| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
-| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox` |
-| **Snapshot** | The writable layer of a sandbox's root filesystem, kept under a name | `create_snapshot`, `get_snapshot`, `list_snapshot`, `remove_snapshot`; its files over WebDAV |
+| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`, `commit_image` (of a sandbox); listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
+| **Sandbox** | A VM booted from an image, with volumes mounted into it and a disk of its own: it stops when unused and starts again as it was left, until it is deleted | `create_sandbox`, `get_sandbox`, `find_sandbox`, `list_sandbox`, `start_sandbox`, `stop_sandbox`, `remove_sandbox`, `exec_sandbox` |
 | **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
 
 Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
-Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
+Building, pulling, pushing and committing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
 
 ## Jobs and their logs
 
@@ -190,14 +189,20 @@ async for entry in run:
     print(entry)
 ```
 
-## Snapshots and volumes
+## What a sandbox keeps, and volumes
 
-A sandbox made on a snapshot starts with the changes in it and writes into it, so what one sandbox installed the next one finds.
-While a sandbox holds it, its files are the sandbox's: reading them, and removing the snapshot, are refused until the sandbox is removed.
+A sandbox keeps what it writes. It stops after `auto_stop_minutes` unused, or at `stop_sandbox`, and its disk is kept; a command started in it, or `start_sandbox`, starts it again as it was left, under the same id -- its files, not its processes. It is deleted at `remove_sandbox`, when it stops if made `ephemeral`, or after `auto_delete_days` stopped and unused. A `name` finds it again without keeping its id.
 
 ```python
-await client.create_snapshot("dev")
-sandbox = await client.create_sandbox("jq:latest", snapshot="dev")
+sandbox = await client.create_sandbox("jq:latest", name="dev")
+...
+sandbox = await client.find_sandbox("dev")  # tomorrow: what it installed is there
+```
+
+To start others from what a sandbox made, commit it to an image: its image, with what it wrote as one more layer, which any number of sandboxes boot.
+
+```python
+await client.commit_image(sandbox.id, "dev:v1")
 ```
 
 A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go.
@@ -211,7 +216,7 @@ sandbox = await client.create_sandbox(
 )
 ```
 
-The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it:
+The files of a volume are read and written from the client, without a sandbox, each request naming its root and a path in it:
 
 ```python
 from virtx import Volume

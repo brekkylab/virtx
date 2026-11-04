@@ -5,7 +5,7 @@ description: Run a task in a disposable Linux micro-VM from Python, Node.js or R
 
 # virtx
 
-A **sandbox** is a Linux micro-VM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot, **snapshots** that carry a root filesystem's changes from one sandbox to the next, and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox is gone when you remove it, and nothing it did outlives it but what it wrote to a snapshot or a volume. So "run this somewhere disposable" is a few requests, not an environment you set up.
+A **sandbox** is a Linux micro-VM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot -- built, pulled, or committed from a sandbox -- and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox keeps its own disk across its stops, and is gone when you remove it: nothing it did outlives it but what it wrote to a volume, or what was committed to an image. So "run this somewhere disposable" is a few requests, not an environment you set up.
 
 virtx works under any AI agent: a sandbox is a tool like any other, and the steps below are the same whether a program or a model drives it. For an agent, the best choice is [Ailoy](https://github.com/brekkylab/ailoy), which is built on virtx: each agent gets a sandbox of its own, and its skill covers the rest.
 
@@ -45,7 +45,9 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 |---|---|
 | files it shares with the host or later sandboxes | a volume, made with `create_volume`, in `volumes` as `SandboxVolume(volume, path, readonly)` |
 | files it must not change | the same, with `readonly=True` |
-| what it installs kept for the next sandbox | a snapshot, made with `create_snapshot`, as `snapshot=` |
+| what it installs kept for later | nothing: a sandbox keeps its disk when it stops; `name=` finds it again with `find_sandbox` |
+| what it installs, for other sandboxes to start from | `commit_image(sandbox.id, "name:tag")`, then sandboxes of that image |
+| nothing kept once done | `ephemeral=True`, deleted when it stops |
 | a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)` |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
@@ -75,10 +77,10 @@ async for entry in client.exec_sandbox(sandbox.id, ["sh", "-c", "jq --version"],
 
 Look at the volume, with `read_file` or `read_dir`, or at the log's lines, rather than at the exit code alone: a command that printed "done" but wrote outside every volume has written nothing that outlives the sandbox. If a file is missing, the usual causes are a path outside the volumes, a read-only volume, or a step the image needed and lacked.
 
-Remove the sandbox with `remove_sandbox` when the task is done, in a `finally`: it stays until removed, holding its snapshot, whose files are refused until then.
+Remove the sandbox with `remove_sandbox` when the task is done, in a `finally`, or make it `ephemeral=True`: otherwise it is kept, stopped, after it goes unused, holding its disk.
 
 ## Where to read more
 
-- [`README.md`](../../README.md): the three Quickstarts, jobs, snapshots and volumes, ports, images and the GPU.
+- [`README.md`](../../README.md): the three Quickstarts, jobs, what a sandbox keeps and volumes, ports, images and the GPU.
 - [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
 - [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.

@@ -20,7 +20,7 @@ use std::{io::Read, net::TcpStream};
 use virtx_rs::{
     Auth, Client, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
     PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd,
-    SandboxJobEntry, SnapshotListOutputItem,
+    SandboxJobEntry, SandboxState,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -166,24 +166,25 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         client.read_file(&volume, "c.txt", 0, None).wait().unwrap(),
         b"hello world"
     );
-
-    let locked = FileRoot::Snapshot("locked".into());
-    let refused = client.read_dir(&locked, "").wait().unwrap_err();
-    assert!(refused.to_string().contains("423"), "{refused}");
 }
 
-fn a_snapshot_is_created_got_and_removed() {
+fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
     let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
-    let created = client.create_snapshot(Some("t"), None).wait().unwrap();
-    assert_eq!(
-        (created.name.as_str(), created.in_use),
-        ("t", false),
-        "{created:?}"
-    );
-    let got: SnapshotListOutputItem = client.get_snapshot("t").wait().unwrap();
-    assert_eq!(got, created);
-    client.remove_snapshot("t").unwrap_wait();
-    let gone = client.get_snapshot("t").wait().unwrap_err();
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.name = Some("work".into());
+    let made = client.create_sandbox(&args).wait().unwrap();
+    assert_eq!(made.state, SandboxState::Running);
+    let found = client.find_sandbox("work").wait().unwrap().unwrap();
+    assert_eq!(found.id, made.id);
+    assert_eq!(client.find_sandbox("nobody").wait().unwrap(), None);
+    let stopped = client.stop_sandbox(&made.id).wait().unwrap();
+    assert_eq!(stopped.state, SandboxState::Stopped);
+    let started = client.start_sandbox(&made.id).wait().unwrap();
+    assert_eq!(started.state, SandboxState::Running);
+    let job = client.commit_image(&made.id, "mine:v1").wait().unwrap();
+    assert_eq!(job.kind, ImageJobKind::Commit);
+    client.remove_sandbox(&made.id).unwrap_wait();
+    let gone = client.get_sandbox(&made.id).wait().unwrap_err();
     assert!(gone.to_string().contains("404"), "{gone}");
 }
 
@@ -498,7 +499,7 @@ fn main() -> ExitCode {
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
         the_files_of_a_volume_are_written_listed_moved_and_read_back,
-        a_snapshot_is_created_got_and_removed,
+        a_sandbox_stops_starts_again_and_is_found_by_its_name,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,

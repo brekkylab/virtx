@@ -1,5 +1,6 @@
-"""Sandboxes: a VM booted from an image, standing on a snapshot, with volumes mounted into it;
-and the processes run in one, each a job whose log is its output."""
+"""Sandboxes: a VM booted from an image, with volumes mounted into it and a disk of its own that
+outlives the VM -- it stops when unused or told to, and starts again as it was left, under the
+same id, until it is deleted; and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
@@ -37,30 +38,61 @@ class SandboxVolume:
         return {"volume": self.volume, "path": self.path, "readonly": self.readonly}
 
 
+class SandboxState(str, Enum):
+    """Whether a sandbox's VM is up."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    """Its VM is down and its disk kept: a job started in it, or ``start_sandbox``, starts it."""
+
+
 @dataclass(frozen=True)
 class Sandbox:
-    """One sandbox the server holds."""
+    """One sandbox the server holds, running or stopped."""
 
     id: str
 
+    name: str | None
+    """The name it was given, which ``find_sandbox`` finds it by."""
+
     image: str
-    """The digest of the image it booted, as ``algorithm:hex``."""
+    """The digest of the image it stands on, as ``algorithm:hex``: what it boots every time it
+    starts, whatever its tag points at by then."""
 
-    snapshot: str | None
-    """The snapshot it stands on, if it has one."""
+    state: SandboxState
 
-    running: bool
+    ephemeral: bool
+    """Whether it is deleted when it stops, rather than kept."""
+
+    auto_stop_minutes: int
+    """How long it runs unused before it stops."""
+
+    auto_delete_days: int | None
+    """How long it is kept stopped and unused before it is deleted; ``None`` keeps it until it
+    is deleted."""
+
+    used_at: str
+    """When it was last used, as RFC 3339."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` only."""
+    """Its opened ports: answered by ``create_sandbox`` and ``start_sandbox`` only."""
+
+    @property
+    def running(self) -> bool:
+        """Whether its VM is up."""
+        return self.state == SandboxState.RUNNING
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> Sandbox:
         return cls(
             value["id"],
+            value.get("name"),
             value["image"],
-            value.get("snapshot"),
-            value["running"],
+            SandboxState(value["state"]),
+            value["ephemeral"],
+            value["auto_stop_minutes"],
+            value.get("auto_delete_days"),
+            value["used_at"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
         )
 

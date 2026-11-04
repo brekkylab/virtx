@@ -6,8 +6,8 @@ or the system loader's search for its file name. So every module in a process ca
 requests through the one library, and hand a ``Client`` between them as the ``VirtxClient*`` it
 is, with ``Client.as_raw``, ``Client.into_raw`` and ``Client.from_raw``.
 
-Requests take and answer the types of ``virtx.image``, ``virtx.snapshot``, ``virtx.volume``,
-``virtx.sandbox`` and ``virtx.files``, and plain values elsewhere: what the wire calls a map is a
+Requests take and answer the types of ``virtx.image``, ``virtx.volume``, ``virtx.sandbox`` and
+``virtx.files``, and plain values elsewhere: what the wire calls a map is a
 ``dict``.
 
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
@@ -17,8 +17,8 @@ yields the job's log, as ``image_job_log`` or ``sandbox_job_log`` does, each a `
 numbered for ``after`` to resume from, until its end entry. A download or upload of an image yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
-The files of a volume or a snapshot are read and written through the client too, each request
-naming its root as a ``Volume`` or a ``Snapshot``: ``client.read_file(Volume("v"), "a.txt")``.
+The files of a volume are read and written through the client too, each request naming its root
+as a ``Volume``: ``client.read_file(Volume("v"), "a.txt")``.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
 ``create_sandbox`` answered for it: an address on this machine's loopback.
@@ -26,7 +26,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
 from .client import DOMAIN, Auth, Client, CommandAuth, Event, Output, Progress
-from .files import DirEntry, FileRoot, Metadata, Snapshot, Volume
+from .files import DirEntry, FileRoot, Metadata, Volume
 from .image import (
     BasicAuth,
     BearerAuth,
@@ -55,11 +55,11 @@ from .sandbox import (
     SandboxJobEntry,
     SandboxJobKind,
     SandboxPort,
+    SandboxState,
     SandboxVolume,
     Stderr,
     Stdout,
 )
-from .snapshot import SnapshotListOutputItem
 from .volume import (
     GdriveSource,
     MountSource,
@@ -111,9 +111,8 @@ __all__ = [
     "SandboxJobEntry",
     "SandboxJobKind",
     "SandboxPort",
+    "SandboxState",
     "SandboxVolume",
-    "Snapshot",
-    "SnapshotListOutputItem",
     "StartedJob",
     "Stderr",
     "Stdout",

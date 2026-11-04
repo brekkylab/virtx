@@ -361,7 +361,7 @@ mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`, and `args` as in
+    /// `client` is as in `virtx_client_list_volume`, and `args` as in
     /// `virtx_client_build_image`. `forwarder` and `out` are writable. Not called from a `wake`,
     /// which runs on the runtime this blocks on.
     #[unsafe(no_mangle)]

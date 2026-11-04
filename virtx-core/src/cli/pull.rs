@@ -1,8 +1,8 @@
 //! `pull`: an image from a registry, tagged on the server as it is named.
 
-use crate::Client;
 use clap::Args;
 
+use crate::Client;
 use crate::cli::{job, name::with_tag, registry::RegistryArgs};
 
 #[derive(Debug, PartialEq, Args)]

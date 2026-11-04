@@ -1,8 +1,8 @@
 use std::ffi::OsString;
 
-use crate::Client;
 use clap::{Parser, Subcommand};
 
+use crate::Client;
 use crate::cli::{
     build::{self, BuildArgs},
     inspect::{self, InspectArgs},

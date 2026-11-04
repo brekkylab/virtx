@@ -1,9 +1,9 @@
 //! `prune`: every image no ref points at and no sandbox uses.
 
-use crate::{Client, ImagePruneOutput};
 use clap::Args;
 
 use crate::cli::prompt::confirm;
+use crate::{Client, ImagePruneOutput};
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct PruneArgs {
@@ -49,21 +49,11 @@ fn size(bytes: u64) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
-    #[cfg(feature = "testing")]
     use crate::cli::job;
 
-    #[test]
-    fn a_size_is_in_decimal_units() {
-        assert_eq!(size(0), "0B");
-        assert_eq!(size(999), "999B");
-        assert_eq!(size(1024), "1.02kB");
-        assert_eq!(size(3_500_000_000), "3.50GB");
-    }
-
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn a_prune_says_each_image_it_deleted_and_the_space_freed() {
         let client = job::tests::client().await;

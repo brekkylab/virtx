@@ -2,8 +2,9 @@
 
 use std::fmt;
 
-use crate::{Client, ImageJob, ImageJobEntry};
 use futures_util::StreamExt as _;
+
+use crate::{Client, ImageJob, ImageJobEntry};
 
 /// Ctrl-C interrupted the command, and what it was doing was undone, as said.
 #[derive(Debug)]

@@ -3,10 +3,11 @@
 
 use std::{io, path::PathBuf};
 
-use crate::{Auth, Client};
 use anyhow::Context as _;
 use clap::Args;
 use tokio::process::Command;
+
+use crate::{Auth, Client};
 
 /// The server's program, as virtx-uvm installs it.
 const PROGRAM: &str = "virtx-uvm";

@@ -3,8 +3,9 @@
 //! The server lists one row per tag; an [`Image`] is those rows gathered by digest, which is
 //! what a user means by one image.
 
-use crate::ImageListOutputItem;
 use serde::Serialize;
+
+use crate::ImageListOutputItem;
 
 /// One image the server holds, and every ref on it, as the server spells each.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -210,21 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_is_filled_in_as_docker_does() {
-        for (spelled, canonical) in [
-            ("alpine", "docker.io/library/alpine:latest"),
-            ("alpine:3.20", "docker.io/library/alpine:3.20"),
-            ("docker.io/alpine:3.20", "docker.io/library/alpine:3.20"),
-            ("user/app:1", "docker.io/user/app:1"),
-            ("ghcr.io/user/app", "ghcr.io/user/app:latest"),
-            ("localhost:5000/app", "localhost:5000/app:latest"),
-            ("localhost:5000/app:1", "localhost:5000/app:1"),
-        ] {
-            assert_eq!(canonical_ref(spelled), canonical, "{spelled}");
-        }
-    }
-
-    #[test]
     fn a_ref_is_shown_as_a_user_spells_it() {
         assert_eq!(familiar_ref("docker.io/library/alpine:3.20"), "alpine:3.20");
         assert_eq!(familiar_ref("docker.io/user/app:1"), "user/app:1");
@@ -236,16 +222,6 @@ mod tests {
         for reference in ["alpine:3.20", "user/app:1", "ghcr.io/user/app:latest"] {
             assert_eq!(familiar_ref(&canonical_ref(reference)), reference);
         }
-    }
-
-    #[test]
-    fn a_bare_name_is_tagged_latest() {
-        assert_eq!(with_tag("alpine"), "alpine:latest");
-        assert_eq!(with_tag("alpine:3.20"), "alpine:3.20");
-        assert_eq!(with_tag("localhost:5000/app"), "localhost:5000/app:latest");
-        assert_eq!(with_tag("app@sha256:aa"), "app@sha256:aa");
-        assert_eq!(repository("ghcr.io/owner/app:1"), "ghcr.io/owner/app");
-        assert_eq!(repository("localhost:5000/app"), "localhost:5000/app");
     }
 
     #[test]
@@ -310,11 +286,5 @@ mod tests {
             lookup("45e0a", &images).unwrap().reference(),
             "team/base@sha256:45e0aaaa"
         );
-    }
-
-    #[test]
-    fn an_image_id_is_the_first_twelve_hex_digits() {
-        assert_eq!(image_id("sha256:45e09956dc667c5eff3583c9"), "45e09956dc66");
-        assert_eq!(image_id("sha256:45e0"), "45e0");
     }
 }

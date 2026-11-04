@@ -3,9 +3,10 @@
 
 use std::io::Read;
 
-use crate::RegistryAuth;
 use anyhow::Context as _;
 use clap::Args;
+
+use crate::RegistryAuth;
 
 #[derive(Debug, Default, PartialEq, Args)]
 pub(crate) struct RegistryArgs {

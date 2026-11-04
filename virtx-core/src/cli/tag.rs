@@ -1,8 +1,8 @@
 //! `tag`: a ref pointed at an image.
 
-use crate::Client;
 use clap::Args;
 
+use crate::Client;
 use crate::cli::name::{gather, lookup, with_tag};
 
 #[derive(Debug, PartialEq, Args)]

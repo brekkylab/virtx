@@ -1,8 +1,8 @@
 //! `inspect`: images as JSON.
 
-use crate::Client;
 use clap::Args;
 
+use crate::Client;
 use crate::cli::{
     command::report,
     name::{Image, gather, lookup},

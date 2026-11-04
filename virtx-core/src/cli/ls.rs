@@ -2,9 +2,9 @@
 
 use std::fmt::Write as _;
 
-use crate::Client;
 use clap::Args;
 
+use crate::Client;
 use crate::cli::name::{Image, gather, image_id};
 
 #[derive(Debug, PartialEq, Args)]

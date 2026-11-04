@@ -61,8 +61,8 @@ mod ffi {
         let argv: Vec<OsString> = (0..argc)
             .map(|i| os_string(unsafe { CStr::from_ptr(*argv.add(i)) }))
             .collect();
-        // The host's own SIGINT handler would run after the command's, which chains to it:
-        // Node's raises the signal again, and never lets the command see it end.
+        // The command's Ctrl-C handler chains to the one it replaces, and the host's may not
+        // return: Node's re-raises SIGINT, so the job would never be cancelled.
         #[cfg(unix)]
         // SAFETY: `signal` is process-wide and may be called from any thread at any time.
         unsafe {

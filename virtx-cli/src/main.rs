@@ -1,5 +1,4 @@
-//! `virtx`, as a binary of its own: the command is `virtx_core::cli`, which `libvirtx_core`
-//! also carries for the Python and Node packages.
+//! `virtx` as a binary of its own; the command is `virtx_core::cli`.
 
 use std::process::ExitCode;
 

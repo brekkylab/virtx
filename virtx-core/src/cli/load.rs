@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use crate::Client;
 use clap::Args;
 
+use crate::Client;
 use crate::cli::{name::with_tag, transfer};
 
 #[derive(Debug, PartialEq, Args)]

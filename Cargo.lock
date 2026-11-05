@@ -3378,6 +3378,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "dav-server",
+ "flate2",
  "futures-util",
  "http",
  "http-body",

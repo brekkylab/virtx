@@ -21,7 +21,7 @@ mod library;
 mod portforward;
 
 pub use call::{Call, Events};
-pub use client::Client;
+pub use client::{Client, ensure_virtx};
 pub use error::Error;
 pub use job::{JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};

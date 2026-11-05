@@ -1,23 +1,19 @@
-# Build the stdio server, `virtx-uvm`, for every platform it is published for, and upload each to the dist
-# bucket, all under the one commit this runs on. Every name a release has is one directory
-# of the same shape:
+# Build the stdio server, `virtx-uvm`, for every platform it is published for, and attach
+# the archives to the GitHub release of the tag this runs on, one per platform:
 #
-#   virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz      <ref>: a sha, a tag, or `latest`
+#   virtx-uvm-<os>-<arch>.tar.gz      with SHA256SUMS over all of them
 #
-# Each platform's job uploads its archive under the sha (`cargo xtask upload`). The names a
-# whole release goes by -- `latest`, what a download that names no version gets, and a
-# tag -- are given by `verify`, once all four platforms' archives are up, and all four at
-# once, so no name ever holds some platforms of one release and some of another:
+# The release is created as a draft if the tag has none, and the archives are attached
+# only once every platform has built, so a release never holds some platforms and not
+# others. Publishing it is a person's step, after this has finished: `packages` runs on the
+# published release, and what a client of that version fetches is what hangs here.
 #
-# | run                      | named `latest`     | named for its tag |
-# |--------------------------|--------------------|-------------------|
-# | a tag pushed             | yes                | yes               |
-# | a dispatch               | if `latest` is set | on a tag's ref    |
-#
-# A push to a branch runs nothing: a build is either a release, or asked for.
+# A push to a branch runs nothing: a build is either a release, or asked for. A dispatch
+# on a tag attaches to that tag's release the same way, so a release can be rebuilt without
+# retagging; a dispatch on anything else keeps the archives as a workflow artifact, to try.
 #
 # The server and the client packages are one commit, and so speak one protocol: a tag runs
-# this and `packages` both.
+# this and, once its release is published, `packages`.
 #
 # # Platforms
 #
@@ -43,26 +39,12 @@
 # it would need 2.39. What they link is that glibc and nothing else a distribution ships at
 # its own version -- no OpenSSL (oci-client is rustls on Linux), no libdrm, and Vulkan only
 # opened at run time. `The glibc floor` checks both, after every build.
-#
-# # What it needs
-#
-# - `AWS_ROLE_ARN`: the role `aws-actions/configure-aws-credentials` assumes over OIDC,
-#   trusted for this repository and allowed `s3:PutObject` under `virtx-uvm/` only.
 name: dist
 
 on:
   push:
     tags: ["*"]
   workflow_dispatch:
-    inputs:
-      upload:
-        description: Upload to the dist bucket
-        type: boolean
-        default: true
-      latest:
-        description: Point every platform's latest at this commit (what a download that names no version gets)
-        type: boolean
-        default: false
 
 concurrency:
   group: dist
@@ -70,14 +52,8 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  BUCKET: virtx-dist
-  AWS_REGION: us-east-1
-  DIST_URL: https://virtx-dist.s3.us-east-1.amazonaws.com
-  # "true" on a pushed tag or a dispatch that asks; every other run leaves `latest` alone.
-  LATEST: ${{ inputs.latest == true || (github.event_name == 'push' && github.ref_type == 'tag') }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -153,42 +129,31 @@ jobs:
           key: handoff-${{ matrix.arch }}-${{ github.run_id }}
           enableCrossOsArchive: true
 
-  # Which platforms this run builds: all of them, unless the commit says
-  # `[dist:<release>]`, as a change that touches one platform's build does to try it
-  # without rebuilding, and re-uploading, the other three.
-  plan:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      all: ${{ steps.plan.outputs.all }}
-    steps:
-      - id: plan
-        env:
-          MESSAGE: ${{ github.event.head_commit.message }}
-          REF_TYPE: ${{ github.ref_type }}
-          PLATFORMS: >-
-            [{"release": "macos-aarch64", "runner": "macos-15", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "linux-x86_64", "runner": "ubuntu-24.04", "container": "quay.io/pypa/manylinux_2_28_x86_64", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}, {"release": "linux-aarch64", "runner": "ubuntu-24.04-arm", "container": "quay.io/pypa/manylinux_2_28_aarch64", "kernel": "aarch64", "musl": "aarch64-unknown-linux-musl"}, {"release": "windows-x86_64", "runner": "windows-2025", "kernel": "x86_64", "musl": "x86_64-unknown-linux-musl"}]
-        run: |
-          # A tag is a release, and a release is every platform, whatever its commit says.
-          only=$(printf '%s' "$MESSAGE" | grep -oE '\[dist:[a-z0-9_-]+\]' | sed -E 's/\[dist:(.*)\]/\1/' | head -1)
-          if [ "$REF_TYPE" = tag ]; then only=""; fi
-          if [ -n "$only" ]; then
-            matrix=$(printf '%s' "$PLATFORMS" | jq -c --arg only "$only" '[.[] | select(.release == $only)]')
-            all=false
-          else
-            matrix=$(printf '%s' "$PLATFORMS" | jq -c .)
-            all=true
-          fi
-          echo "building: $(printf '%s' "$matrix" | jq -r '[.[].release] | join(" ")')"
-          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
-          echo "all=$all" >> "$GITHUB_OUTPUT"
-
   dist:
     name: dist (${{ matrix.release }})
-    needs: [plan, guest-parts]
+    needs: guest-parts
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix:
+        include:
+          - release: macos-aarch64
+            runner: macos-15
+            kernel: aarch64
+            musl: aarch64-unknown-linux-musl
+          - release: linux-x86_64
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            kernel: x86_64
+            musl: x86_64-unknown-linux-musl
+          - release: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            kernel: aarch64
+            musl: aarch64-unknown-linux-musl
+          - release: windows-x86_64
+            runner: windows-2025
+            kernel: x86_64
+            musl: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     # The Linux releases' glibc floor -- see above. None for macOS and Windows.
     container: ${{ matrix.container }}
@@ -221,9 +186,9 @@ jobs:
           key: ${{ matrix.release }}${{ matrix.container && '-manylinux_2_28' || '' }}
 
       # In the manylinux_2_28 container, as root: AlmaLinux's packages, and the image's own
-      # Python for meson, virglrenderer's generators and the aws CLI the upload runs. The
-      # image sets PKG_CONFIG_PATH, and `.cargo/config.toml`'s [env] does not override a set
-      # variable, so virglrenderer's goes in front of it here.
+      # Python for meson and virglrenderer's generators. The image sets PKG_CONFIG_PATH, and
+      # `.cargo/config.toml`'s [env] does not override a set variable, so virglrenderer's
+      # goes in front of it here.
       - name: Toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -231,7 +196,7 @@ jobs:
           # it is decompressed the way it was compressed.
           dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
           py=/opt/python/cp312-cp312/bin
-          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako awscli
+          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako
           echo "$py" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
@@ -342,71 +307,77 @@ jobs:
           done
           exit ${fail:-0}
 
-      - name: Assume the publishing role
-        if: github.event_name != 'workflow_dispatch' || inputs.upload
-        uses: aws-actions/configure-aws-credentials@v6
+      - name: Archive
+        run: cargo xtask archive --with-abin
+
+      # Through the cache, as the handoff above: one entry per platform and run, which
+      # `release` restores.
+      - uses: actions/cache/save@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          path: target/release/dist/virtx-uvm-${{ matrix.release }}.tar.gz
+          key: dist-${{ matrix.release }}-${{ github.run_id }}
+          enableCrossOsArchive: true
 
-      - name: Upload
-        run: |
-          # `inputs` is empty on a push, which uploads; only a dispatch can say not to.
-          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.upload }}" != true ]; then flags=--dry-run; fi
-          # By sha only. `latest` and a tag are names for a whole release, which `verify`
-          # gives it once every platform's archive is up. With the abin put in place above.
-          cargo xtask upload --bucket "$BUCKET" --region "$AWS_REGION" --with-abin ${flags:-}
-
-  verify:
-    needs: [plan, dist]
-    if: needs.plan.outputs.all == 'true' && (github.event_name != 'workflow_dispatch' || inputs.upload)
+  # Every platform's archive, together: `needs` makes this wait for all four and skips it
+  # if any failed, so nothing is attached until the whole set is there.
+  release:
+    needs: dist
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      # Every platform's archive for this commit, under its sha.
-      - name: Every platform has this commit's release
-        run: |
-          fail=0
-          for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            archive="$DIST_URL/virtx-uvm/$GITHUB_SHA/virtx-uvm-$release.tar.gz"
-            size=$(curl -fsSI "$archive" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
-            printf '%-15s %s bytes\n' "$release" "${size:-missing}"
-            [ -n "$size" ] || fail=1
-          done
-          exit $fail
-
-      # Then the release's names, all four platforms at once and only now that all four are
-      # there: `latest` when asked, and the tag on a tag. Copied within the bucket, as the
-      # same bytes, with the sha they were built from kept on each; and read back.
-      - name: Assume the publishing role
-        if: env.LATEST == 'true' || github.ref_type == 'tag'
-        uses: aws-actions/configure-aws-credentials@v6
+      - uses: actions/cache/restore@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          path: target/release/dist/virtx-uvm-macos-aarch64.tar.gz
+          key: dist-macos-aarch64-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: target/release/dist/virtx-uvm-linux-x86_64.tar.gz
+          key: dist-linux-x86_64-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: target/release/dist/virtx-uvm-linux-aarch64.tar.gz
+          key: dist-linux-aarch64-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: target/release/dist/virtx-uvm-windows-x86_64.tar.gz
+          key: dist-windows-x86_64-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
 
-      - name: Name the release
-        if: env.LATEST == 'true' || github.ref_type == 'tag'
+      - name: SHA256SUMS
+        working-directory: target/release/dist
         run: |
-          names=""
-          [ "$LATEST" = true ] && names="latest"
-          [ "${{ github.ref_type }}" = tag ] && names="$names $GITHUB_REF_NAME"
-          for name in $names; do
-            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-              archive="virtx-uvm-$release.tar.gz"
-              aws s3 cp --only-show-errors \
-                "s3://$BUCKET/virtx-uvm/$GITHUB_SHA/$archive" "s3://$BUCKET/virtx-uvm/$name/$archive" \
-                --metadata-directive REPLACE --metadata "sha=$GITHUB_SHA" \
-                --content-type application/gzip --cache-control no-cache
-            done
-          done
-          fail=0
-          for name in $names; do
-            for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-              sha=$(curl -fsSI "$DIST_URL/virtx-uvm/$name/virtx-uvm-$release.tar.gz" \
-                | awk 'tolower($1)=="x-amz-meta-sha:"{print $2}' | tr -d '\r')
-              printf 'virtx-uvm/%s/%-35s sha=%s\n' "$name" "virtx-uvm-$release.tar.gz" "${sha:-missing}"
-              [ "$sha" = "$GITHUB_SHA" ] || fail=1
-            done
-          done
-          exit $fail
+          sha256sum virtx-uvm-*.tar.gz | tee SHA256SUMS
+          ls -la
+
+      # The tag's release, a draft if it has none yet. `--clobber`: a rebuilt release
+      # replaces what an earlier run attached.
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        working-directory: target/release/dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '"release exists, draft: " + (.isDraft | tostring)' \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber virtx-uvm-*.tar.gz SHA256SUMS
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
+
+      - name: Keep as an artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: virtx-uvm-${{ github.sha }}
+          path: |
+            target/release/dist/virtx-uvm-*.tar.gz
+            target/release/dist/SHA256SUMS
+          retention-days: 3

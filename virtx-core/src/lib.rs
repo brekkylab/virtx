@@ -14,6 +14,8 @@ mod auth;
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
+mod ensure;
+#[cfg(feature = "client")]
 mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
@@ -28,6 +30,8 @@ mod volume;
 pub use auth::Auth;
 #[cfg(feature = "client")]
 pub use client::Client;
+#[cfg(feature = "client")]
+pub use ensure::{cache_root, ensure_virtx};
 #[cfg(feature = "client")]
 pub use error::Error;
 pub use image::*;

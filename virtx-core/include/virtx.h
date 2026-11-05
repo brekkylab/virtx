@@ -69,17 +69,33 @@ extern "C" {
 #endif // __cplusplus
 
 // Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-// stdout, and write the client, held once, to `client`.
+// stdout, and write the client, held once, to `client`. A null `program` is `virtx-uvm`,
+// the server of this library's version, fetched first if this host has none -- see
+// `virtx_ensure_virtx`, which does that fetch alone.
 //
 // # Safety
 //
-// `program` and each of the `args_len` pointers in `args` are NUL-terminated UTF-8. `client`
-// is writable. `error` is null or writable.
+// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
+// is. `client` is writable. `error` is null or writable.
 int virtx_client_spawn(const char *program,
                        const char *const *args,
                        size_t args_len,
                        struct VirtxClient **client,
                        struct VirtxBytes *error);
+
+// Fetch `virtx-uvm`, the server of this library's version, into this host's cache if it
+// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
+// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
+// why written to `out`.
+//
+// The server is kept one directory per version, so a library that is upgraded fetches
+// its own. `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another
+// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
+//
+// # Safety
+//
+// `out` is writable.
+int virtx_ensure_virtx(struct VirtxBytes *out);
 
 // Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":

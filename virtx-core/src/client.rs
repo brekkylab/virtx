@@ -958,8 +958,8 @@ pub(crate) mod ffi {
     use crate::{
         Auth,
         ffi::{
-            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, failure, json, release,
-            retain, share, write,
+            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure, json,
+            release, retain, share, write,
         },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
@@ -1034,12 +1034,14 @@ pub(crate) mod ffi {
     pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-    /// stdout, and write the client, held once, to `client`.
+    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-uvm`,
+    /// the server of this library's version, fetched first if this host has none -- see
+    /// `virtx_ensure_virtx`, which does that fetch alone.
     ///
     /// # Safety
     ///
-    /// `program` and each of the `args_len` pointers in `args` are NUL-terminated UTF-8. `client`
-    /// is writable. `error` is null or writable.
+    /// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
+    /// is. `client` is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_spawn(
         program: *const c_char,
@@ -1054,15 +1056,58 @@ pub(crate) mod ffi {
                     .to_str()
                     .map_err(|e| e.to_string())
             };
-            let mut command = Command::new(utf8(program)?);
-            for i in 0..args_len {
-                command.arg(utf8(unsafe { *args.add(i) })?);
-            }
+            let program = if program.is_null() {
+                None
+            } else {
+                Some(utf8(program)?.to_string())
+            };
+            let args = (0..args_len)
+                .map(|i| utf8(unsafe { *args.add(i) }).map(str::to_string))
+                .collect::<Result<Vec<_>, _>>()?;
             Runtime::open(|| {
+                let mut command = match program {
+                    Some(program) => Command::new(program),
+                    // On the runtime being opened, which this thread is not a worker of.
+                    None => Command::new(
+                        tokio::runtime::Handle::current()
+                            .block_on(crate::ensure_virtx())
+                            .map_err(|e| format!("fetching the server: {e:#}"))?,
+                    ),
+                };
+                command.args(args);
                 Client::spawn(command).map_err(|e| format!("starting the server: {e}"))
             })
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
+    }
+
+    /// Fetch `virtx-uvm`, the server of this library's version, into this host's cache if it
+    /// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
+    /// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
+    /// why written to `out`.
+    ///
+    /// The server is kept one directory per version, so a library that is upgraded fetches
+    /// its own. `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another
+    /// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
+    ///
+    /// # Safety
+    ///
+    /// `out` is writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_ensure_virtx(out: *mut VirtxBytes) -> c_int {
+        let fetched = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|runtime| {
+                runtime
+                    .block_on(crate::ensure_virtx())
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .map(|path| path.to_string_lossy().into_owned());
+        let (status, bytes) = encode(fetched);
+        unsafe { write(out, bytes) };
+        status
     }
 
     /// `ptr` as a `&str`.

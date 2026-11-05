@@ -11,23 +11,20 @@ use anyhow::{Context, bail, ensure};
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
-       cargo xtask download <abin|kernel>... [--debug]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
-       cargo xtask upload   --bucket <name> [--profile <name>] [--region <region>]
-                            [--latest] [--with-abin] [--allow-dirty] [--dry-run]
+       cargo xtask archive  [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
   init      checks out the submodules that are not, and adds the guest's musl target --
             ready to build the servers
   build     builds the components from source
-  download  downloads the components prebuilt
-  install   installs what was built or downloaded into <prefix>/bin
+  install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
-  upload    archives the stdio server and the guest kernel, for this platform, and publishes
-            it to S3 for virtx to fetch
+  archive   archives the stdio server and the guest kernel, for this platform, as a release
+            carries them: target/release/dist/virtx-uvm-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
@@ -48,19 +45,8 @@ components:
                       built for this host and its guest only
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
-
-  --bucket <name>     (upload) the bucket to publish to (default: $VIRTX_DIST_BUCKET)
-  --profile <name>    (upload) the aws CLI profile (default: the CLI's own -- $AWS_PROFILE,
-                      the environment's keys, or `default`)
-  --region <region>   (upload) the bucket's region (default: the profile's)
-  --latest            (upload) also puts the archive under `latest`, which is what virtx
-                      fetches when told no version; without it `latest` holds whatever it
-                      held before
-  --with-abin         (upload) puts the abin that was built in the archive too; without it
-                      the archive has no abin, and sessions from the release no /abin
-  --allow-dirty       (upload) publishes from a tree with uncommitted changes, filed under
-                      `<sha>-dirty` rather than the sha
-  --dry-run           (upload) archives, says what it would upload, and stops";
+  --with-abin     (archive) puts the abin that was built in the archive too; without it
+                  the archive has no abin, and sessions from the release no /abin";
 
 /// The client's packages, which `check` checks before `init` has run.
 const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs"];
@@ -154,30 +140,11 @@ fn main() -> anyhow::Result<()> {
             );
             build(&options)
         }
-        Some("download") => {
-            let options = parse(args)?;
-            ensure!(
-                options.prefix.is_none(),
-                "--prefix is for install\n\n{USAGE}"
-            );
-            ensure!(
-                !options.components.is_empty(),
-                "name what to download\n\n{USAGE}"
-            );
-            ensure!(
-                options
-                    .components
-                    .iter()
-                    .all(|c| matches!(c, Component::Kernel | Component::Abin)),
-                "only kernel and abin are downloaded; the client and the servers are built\n\n{USAGE}"
-            );
-            download(&options)
-        }
         Some("install") => {
             let options = parse(args)?;
             ensure!(
                 options.components.is_empty() && options.target.is_none(),
-                "install copies what build and download left; it takes only --prefix and --debug\n\n{USAGE}"
+                "install copies what build left; it takes only --prefix and --debug\n\n{USAGE}"
             );
             install(&options)
         }
@@ -193,7 +160,18 @@ fn main() -> anyhow::Result<()> {
             );
             check(client_only)
         }
-        Some("upload") => upload(&parse_upload(args)?),
+        Some("archive") => {
+            let abin = match args.next() {
+                None => false,
+                Some(arg) if arg == "--with-abin" => true,
+                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+            };
+            ensure!(
+                args.next().is_none(),
+                "archive takes only --with-abin\n\n{USAGE}"
+            );
+            archive(abin)
+        }
         Some("run") => run_target(args.collect(), false),
         Some("test") => run_target(args.collect(), true),
         Some("-h" | "--help") | None => {
@@ -243,56 +221,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
         }
     }
     Ok(options)
-}
-
-/// Where `upload` publishes to, and how.
-///
-/// Its own flags rather than [`Options`]: nothing here names a component or a profile, and
-/// none of it means anything to another task.
-struct Upload {
-    bucket: String,
-    profile: Option<String>,
-    region: Option<String>,
-    /// Whether to move this platform's `latest` to the release, and only when asked
-    /// (`--latest`): an upload adds a sha anyone can fetch by name, and harms nobody; moving
-    /// `latest` changes what every download that names no version gets next.
-    latest: bool,
-    /// Whether the archive carries abin, and only when asked (`--with-abin`).
-    abin: bool,
-    allow_dirty: bool,
-    dry_run: bool,
-}
-
-fn parse_upload(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Upload> {
-    let mut bucket = env::var("VIRTX_DIST_BUCKET").ok().filter(|b| !b.is_empty());
-    let mut upload = Upload {
-        bucket: String::new(),
-        profile: None,
-        region: None,
-        latest: false,
-        abin: false,
-        allow_dirty: false,
-        dry_run: false,
-    };
-    fn value(flag: &str, args: &mut impl Iterator<Item = OsString>) -> anyhow::Result<String> {
-        args.next()
-            .and_then(|v| v.into_string().ok())
-            .with_context(|| format!("{flag} needs a value"))
-    }
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            Some("--bucket") => bucket = Some(value("--bucket", &mut args)?),
-            Some("--profile") => upload.profile = Some(value("--profile", &mut args)?),
-            Some("--region") => upload.region = Some(value("--region", &mut args)?),
-            Some("--latest") => upload.latest = true,
-            Some("--with-abin") => upload.abin = true,
-            Some("--allow-dirty") => upload.allow_dirty = true,
-            Some("--dry-run") => upload.dry_run = true,
-            _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
-        }
-    }
-    upload.bucket = bucket.context("name a bucket with --bucket or $VIRTX_DIST_BUCKET")?;
-    Ok(upload)
 }
 
 fn root_path() -> PathBuf {
@@ -791,29 +719,6 @@ fn build_kernel() -> anyhow::Result<()> {
     ensure!(status.success(), "building the guest kernel failed");
     Ok(())
 }
-fn download(options: &Options) -> anyhow::Result<()> {
-    if options.has(Component::Abin) {
-        todo!("download abin");
-    }
-    if options.has(Component::Kernel) {
-        todo!("download kernel");
-    }
-    Ok(())
-}
-
-/// Where a release is filed in the bucket: `virtx-uvm/<ref>/virtx-uvm-<os>-<arch>.tar.gz`,
-/// one archive per platform under a directory named for the release.
-///
-/// **One level for every name a release has.** `<ref>` is the sha of the commit it was built
-/// from, which this writes; or `latest`, which `--latest` writes as well, and which a
-/// download that names no version gets; or a tag, which the dist workflow writes
-/// once every platform has its archive. A fetch is the same URL whichever name it is given,
-/// and a name is a directory of archives rather than a file naming one, so nothing reads one
-/// thing to find out where another is.
-///
-/// Every archive carries the sha it was built from as `x-amz-meta-sha`, so what a name holds
-/// is a HEAD away.
-const DIST_ROOT: &str = "virtx-uvm";
 
 /// The platforms a release is published for, as `std::env::consts` spells them, which is
 /// how an archive's name spells them. macOS is Apple silicon only and Windows
@@ -830,53 +735,24 @@ fn dist_platform() -> anyhow::Result<String> {
     Ok(format!("{os}-{arch}"))
 }
 
-/// Archive the set `install` would put in `bin/` and publish it.
-///
-/// The git sha of HEAD names the release, as it does abin's, and nothing downstream checks
-/// the bytes against it -- so a tree with uncommitted changes is refused unless asked for,
-/// and then filed under `<sha>-dirty` so the path does not claim to be the commit. What it
-/// cannot check is that the build is *of* HEAD: it archives whatever `build` left.
-fn upload(upload: &Upload) -> anyhow::Result<()> {
+/// Archive the set `install` would put in `bin/`, as a release carries it:
+/// `target/release/dist/virtx-uvm-<os>-<arch>.tar.gz`, which the dist workflow attaches to
+/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
+/// which commit that was.
+fn archive(abin: bool) -> anyhow::Result<()> {
     let platform = dist_platform()?;
-    let root = root_path();
-
-    let git = |args: &[&str]| -> anyhow::Result<String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .context("running git")?;
-        ensure!(out.status.success(), "git {} failed", args.join(" "));
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let sha = git(&["rev-parse", "HEAD"])?;
-    // Untracked files are left out: an editor's swap file is not a change to the build.
-    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
-    ensure!(
-        !dirty || upload.allow_dirty,
-        "the working tree has uncommitted changes; commit them, or --allow-dirty"
-    );
-    let version = if dirty {
-        format!("{sha}-dirty")
-    } else {
-        sha.clone()
-    };
-    if git(&["branch", "-r", "--contains", &sha])?.is_empty() {
-        eprintln!("xtask: warning: {sha} is on no remote branch; nobody else can check it out");
-    }
 
     // Staged under the release profile's own directory, and emptied first: a file a
     // previous build had and this one does not must not ride along.
     let dist = target_path().join("release").join("dist");
-    let name = format!("{DIST_ROOT}-{platform}");
+    let name = format!("virtx-uvm-{platform}");
     let stage = dist.join(&name);
     if stage.exists() {
         fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
     }
     let built = target_path().join("release");
     ensure!(
-        !upload.abin || built.join("abin").is_dir(),
+        !abin || built.join("abin").is_dir(),
         "--with-abin, but no abin in {} -- run `cargo xtask build abin` first",
         built.display()
     );
@@ -886,8 +762,8 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
         "no {stdio} in {} -- run `cargo xtask build server-stdio` first",
         built.display()
     );
-    stage_bin(&built, &stage, &[stdio], upload.abin)?;
-    if !upload.abin {
+    stage_bin(&built, &stage, &[stdio], abin)?;
+    if !abin {
         eprintln!(
             "xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)"
         );
@@ -913,57 +789,7 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
         .status()
         .context("running tar")?;
     ensure!(status.success(), "archiving {} failed", stage.display());
-
-    let prefix = format!("s3://{}/{DIST_ROOT}", upload.bucket);
-    let archive_key = format!("{prefix}/{version}/{archive}");
-    let latest_key = format!("{prefix}/latest/{archive}");
-    if upload.dry_run {
-        eprintln!(
-            "xtask: would upload {} to {archive_key}",
-            dist.join(&archive).display()
-        );
-        if upload.latest {
-            eprintln!("xtask: would upload it to {latest_key} too");
-        } else {
-            eprintln!("xtask: would leave {latest_key} as it is (--latest replaces it)");
-        }
-        return Ok(());
-    }
-
-    let aws = |from: &Path, to: &str, cache: &str| -> anyhow::Result<()> {
-        let mut aws = Command::new("aws");
-        aws.args(["s3", "cp", "--only-show-errors", "--cache-control", cache])
-            .args(["--content-type", "application/gzip"])
-            .args(["--metadata", &format!("sha={version}")]);
-        if let Some(profile) = &upload.profile {
-            aws.args(["--profile", profile]);
-        }
-        if let Some(region) = &upload.region {
-            aws.args(["--region", region]);
-        }
-        let status = aws
-            .arg(from)
-            .arg(to)
-            .status()
-            .context("running the aws CLI -- is it installed?")?;
-        ensure!(status.success(), "uploading {to} failed");
-        Ok(())
-    };
-    // The archive under its sha never changes, so it may be cached forever; `latest` is a
-    // name that moves, so it may not be, and is written second, so that the sha's archive is
-    // there by the time it names it.
-    aws(
-        &dist.join(&archive),
-        &archive_key,
-        "public, max-age=31536000, immutable",
-    )?;
-    eprintln!("xtask: uploaded {archive_key}");
-    if upload.latest {
-        aws(&dist.join(&archive), &latest_key, "no-cache")?;
-        eprintln!("xtask: {latest_key} is now {version}");
-    } else {
-        eprintln!("xtask: left {latest_key} as it is (--latest replaces it)");
-    }
+    eprintln!("xtask: archived {}", dist.join(&archive).display());
     Ok(())
 }
 
@@ -994,7 +820,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
 
 /// Put the set a `bin/` holds -- the `files` named, the guest kernel when a server is among
 /// them, and abin if it was built and `abin` asks for it -- from `built` into `bin`. What
-/// `install` does, and what `upload` archives.
+/// `install` does, and what `archive` archives.
 fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::Result<()> {
     // The guest kernel goes with a server. libkrun resolves it by leaf name, and every
     // platform looks beside the running binary before it looks anywhere else -- so a

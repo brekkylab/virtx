@@ -14,13 +14,15 @@ What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-cor
 ## Quickstart
 
 Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
-`Client.spawn("virtx-uvm")` starts the server, `virtx-uvm`, and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
-The server is in this repository. Build it, as [`CONTRIBUTING.md`](CONTRIBUTING.md) says, and install it onto your `PATH`:
+`Client.spawn()` starts the server, `virtx-uvm`, and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+The server is released with the client, so a client fetches the one of its own version the first time it is asked for, from this repository's releases into a cache, and `Client.spawn("virtx-uvm")` runs one you installed yourself instead.
+To build it, as [`CONTRIBUTING.md`](CONTRIBUTING.md) says, and have a client use that build:
 
 ```sh
 cargo xtask init
 cargo xtask build kernel server-stdio
 cargo xtask install --prefix ~/.local   # -> ~/.local/bin/virtx-uvm, beside its kernel
+export VIRTX_UVM=~/.local/bin/virtx-uvm  # what Client.spawn() starts, in place of a fetch
 ```
 
 ### Python
@@ -36,7 +38,7 @@ from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdou
 
 
 async def main() -> None:
-    with Client.spawn("virtx-uvm") as client:
+    with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
         async for entry in client.build_image(recipe, "jq:latest"):
             match entry.entry:
@@ -71,7 +73,7 @@ npm install @brekkylab/virtx
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 async function main() {
-  const client = Client.spawn('virtx-uvm')
+  const client = Client.spawn()
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
     for await (const entry of client.buildImage(recipe, 'jq:latest')) {
@@ -116,7 +118,7 @@ use virtx_rs::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn("virtx-uvm", [] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     let mut log = client.build_image(recipe, "jq:latest").log();

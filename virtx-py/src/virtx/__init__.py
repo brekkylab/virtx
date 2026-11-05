@@ -25,7 +25,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 """
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
-from .client import Client, Event, Output, Progress
+from .client import Client, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, FileRoot, Metadata, Snapshot, Volume
 from .image import (
     BasicAuth,

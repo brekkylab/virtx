@@ -52,6 +52,9 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 # checked as it is read.
 tar = { version = "0.4", default-features = false, optional = true }
 sha2 = { version = "0.10", optional = true }
+# The server's release archive, fetched when this host has none, is a tar.gz, checked against
+# the release's SHA256SUMS.
+flate2 = { version = "1", optional = true }
 
 [build-dependencies]
 # Writes `include/virtx.h` from `src/ffi.rs`.
@@ -91,6 +94,7 @@ client = [
     "dep:tokio",
     "dep:tokio-tungstenite",
     "dep:tar",
+    "dep:flate2",
     "dep:sha2",
     "dep:roxmltree",
     "dep:httpdate",

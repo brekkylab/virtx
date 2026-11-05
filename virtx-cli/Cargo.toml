@@ -1,0 +1,15 @@
+[package]
+name = "virtx-cli"
+version = "0.1.2"
+edition = "2024"
+description = "The `virtx` command: build and manage a virtx server's images from a shell."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "virtx"
+path = "src/main.rs"
+
+[dependencies]
+# The command itself, without the C ABI: a binary has no other module to share one library with.
+virtx-core = { path = "../virtx-core", default-features = false, features = ["cli"] }

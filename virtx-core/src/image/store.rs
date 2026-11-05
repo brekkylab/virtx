@@ -26,8 +26,8 @@ pub struct ImageJob {
     /// Whether it runs still.
     pub running: bool,
 
-    /// Once it has succeeded, the digest of the manifest it copied or built, as
-    /// `algorithm:hex`.
+    /// Once it has succeeded, as `algorithm:hex`: the digest of the image a pull or build left
+    /// here, or of the manifest a push put on the registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
 

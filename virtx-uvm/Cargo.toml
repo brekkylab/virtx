@@ -56,11 +56,17 @@ libc = { workspace = true }
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
-# guest's root. Vendored.
-krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }
-krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["direct"] }
+# guest's root. Our fork, at a commit on its `virtx` branch; what each commit there is for is
+# in README.md. To work on libkrun from a local clone, override the source outside the
+# repository, in `~/.cargo/config.toml`:
+#     [patch."https://github.com/brekkylab/libkrun"]
+#     libkrun = { path = "../libkrun/src/libkrun" }
+#     krun-init-blob = { path = "../libkrun/init/init-blob" }
+#     krun-display = { path = "../libkrun/src/display" }
+krun = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "libkrun", features = ["blk"] }
+krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "krun-init-blob", features = ["direct"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
+krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic

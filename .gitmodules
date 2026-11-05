@@ -1,30 +1,21 @@
-[submodule "libkrun"]
-	path = 3rdparty/libkrun
-	# `cargo xtask init` patches this tree in place; cargo needs the real
-	# path, so the patch cannot live in an exported copy.
-	ignore = dirty
-	url = https://github.com/libkrun/libkrun.git
+# Each submodule is a fork under brekkylab, pinned to a commit on its `virtx` branch: the
+# upstream commit it tracks, then one commit per change of ours. `git log upstream..virtx` in
+# a submodule lists them; virtx-uvm/README.md says what each is for.
 [submodule "virglrenderer"]
 	path = 3rdparty/virglrenderer
-	ignore = dirty
-	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
-[submodule "rutabaga_gfx"]
-	path = 3rdparty/rutabaga_gfx
-	# `cargo xtask init` patches this tree in place; cargo needs the real
-	# path, so the patch cannot live in an exported copy.
-	ignore = dirty
-	url = https://github.com/magma-gpu/rutabaga_gfx.git
+	url = https://github.com/brekkylab/virglrenderer.git
+	branch = virtx
 [submodule "3rdparty/libepoxy"]
 	path = 3rdparty/libepoxy
-	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer
-	# requires epoxy unconditionally, and Windows has no package manager here.
-	url = https://github.com/anholt/libepoxy.git
-	ignore = dirty
+	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer requires epoxy
+	# unconditionally, and Windows has no package manager here.
+	url = https://github.com/brekkylab/libepoxy.git
+	branch = virtx
 [submodule "MoltenVK"]
 	path = 3rdparty/MoltenVK
-	url = https://github.com/KhronosGroup/MoltenVK.git
-	ignore = dirty
+	url = https://github.com/brekkylab/MoltenVK.git
+	branch = virtx
 [submodule "SPIRV-Cross"]
 	path = 3rdparty/SPIRV-Cross
-	url = https://github.com/KhronosGroup/SPIRV-Cross.git
-	ignore = dirty
+	url = https://github.com/brekkylab/SPIRV-Cross.git
+	branch = virtx

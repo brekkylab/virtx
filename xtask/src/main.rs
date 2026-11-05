@@ -19,8 +19,8 @@ usage: cargo xtask init     [--force]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
 
-  init      checks out the submodules that are not, patches them, and adds the guest's
-            musl target -- ready to build the servers
+  init      checks out the submodules that are not, and adds the guest's musl target --
+            ready to build the servers
   build     builds the components from source
   download  downloads the components prebuilt
   install   installs what was built or downloaded into <prefix>/bin
@@ -38,8 +38,8 @@ components:
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables every VM gets at /abin
 
-  --force         (init) resets each patched submodule to its pinned commit first,
-                  discarding any local changes in it
+  --force         (init) resets every submodule to its pinned commit first, discarding
+                  any local changes in it
   --prefix <dir>  where to install (default: $VIRTX_HOME, else virtx under
                   ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, $XDG_CACHE_HOME or
                   ~/.cache otherwise)
@@ -62,7 +62,7 @@ components:
                       `<sha>-dirty` rather than the sha
   --dry-run           (upload) archives, says what it would upload, and stops";
 
-/// The client's packages, which `check` checks without the submodules patched.
+/// The client's packages, which `check` checks before `init` has run.
 const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs"];
 /// The package the client library is built from.
 const CLIENT_PACKAGE: &str = "virtx-core";
@@ -341,49 +341,6 @@ fn run(mut command: Command, what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 3rdparty/_patches/<submodule>/<what>.patch, submodule by submodule in name order.
-fn patches() -> anyhow::Result<Vec<(String, PathBuf)>> {
-    let patches = root_path().join("3rdparty/_patches");
-    let list = |dir: &Path| -> anyhow::Result<Vec<PathBuf>> {
-        let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-            .with_context(|| format!("reading {}", dir.display()))?
-            .map(|entry| entry.map(|e| e.path()))
-            .collect::<Result<_, _>>()?;
-        paths.sort();
-        Ok(paths)
-    };
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
-    for dir in list(&patches)? {
-        if !dir.is_dir() {
-            continue;
-        }
-        let submodule = dir.file_name().unwrap().to_string_lossy().into_owned();
-        for patch in list(&dir)? {
-            if patch.extension().is_some_and(|ext| ext == "patch") {
-                files.push((submodule.clone(), patch));
-            }
-        }
-    }
-    Ok(files)
-}
-
-/// Whether `patch` is applied to the submodule in `dir`: it applies in reverse.
-fn applied(dir: &Path, patch: &Path) -> anyhow::Result<bool> {
-    git_quiet(dir, &["apply", "--reverse", "--check"], patch)
-}
-
-fn git_quiet(dir: &Path, args: &[&str], patch: &Path) -> anyhow::Result<bool> {
-    Ok(Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .arg(patch)
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("running git")?
-        .success())
-}
-
 /// The submodules' paths, as `.gitmodules` lists them.
 fn submodules() -> anyhow::Result<Vec<String>> {
     let out = Command::new("git")
@@ -427,68 +384,36 @@ fn has_guest_target() -> anyhow::Result<Option<bool>> {
 fn init(force: bool) -> anyhow::Result<()> {
     let root = root_path();
 
-    // Those not checked out yet. One already is, patched, is left to `--force`: updating it
-    // would fight its patches.
-    let missing: Vec<String> = submodules()?
-        .into_iter()
-        .filter(|path| !root.join(path).join(".git").exists())
+    // Those not checked out yet; with --force, every one, reset to its pinned commit.
+    let submodules = submodules()?;
+    let update: Vec<&String> = submodules
+        .iter()
+        .filter(|path| force || !root.join(path).join(".git").exists())
         .collect();
-    if !missing.is_empty() {
-        eprintln!("Checking out {}", missing.join(", "));
-        let status = Command::new("git")
-            .arg("-C")
+    if !update.is_empty() {
+        let what = if force { "Resetting" } else { "Checking out" };
+        let names: Vec<&str> = update.iter().map(|p| p.as_str()).collect();
+        eprintln!("{what} {}", names.join(", "));
+        let mut git = Command::new("git");
+        git.arg("-C")
             .arg(&root)
-            .args(["submodule", "update", "--init", "--"])
-            .args(&missing)
-            .status()
-            .context("running git")?;
+            .args(["submodule", "update", "--init"]);
+        if force {
+            git.arg("--force");
+        }
+        let status = git.arg("--").args(&names).status().context("running git")?;
         ensure!(status.success(), "git submodule update failed");
-    }
-
-    let files = patches()?;
-    eprintln!("Applying patches");
-    let mut reset: Vec<String> = Vec::new();
-    for (submodule, patch) in &files {
-        let submodule = submodule.as_str();
-        let name = patch.file_name().unwrap().to_string_lossy();
-        let dir = root.join("3rdparty").join(submodule);
-        if force && !reset.iter().any(|done| done == submodule) {
-            eprintln!("  {submodule}: resetting to its pinned commit");
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(["submodule", "update", "--init", "--force", "--"])
-                .arg(format!("3rdparty/{submodule}"))
-                .status()
-                .context("running git")?;
-            ensure!(status.success(), "{submodule}: git submodule update failed");
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["clean", "-fdq"])
-                .status()
-                .context("running git")?;
-            ensure!(status.success(), "{submodule}: git clean failed");
-            reset.push(submodule.to_string());
+        if force {
+            for path in &names {
+                let status = Command::new("git")
+                    .arg("-C")
+                    .arg(root.join(path))
+                    .args(["clean", "-fdq"])
+                    .status()
+                    .context("running git")?;
+                ensure!(status.success(), "{path}: git clean failed");
+            }
         }
-        ensure!(
-            dir.join(".git").exists(),
-            "{submodule} is not checked out; run: git submodule update --init"
-        );
-        let git = |args: &[&str]| git_quiet(&dir, args, patch);
-
-        if applied(&dir, patch)? {
-            eprintln!("  {submodule}: already patched");
-            continue;
-        }
-        ensure!(
-            git(&["apply", "--check"])?,
-            "{submodule}: patch does not apply -- the submodule has moved or has other local \
-             changes. `cargo xtask init --force` resets it, or refresh {}.",
-            patch.display()
-        );
-        ensure!(git(&["apply"])?, "{submodule}: git apply failed");
-        eprintln!("  {submodule}: applied {name}");
     }
 
     // The agent every machine runs is built for it, by `virtx-uvm`'s build script.
@@ -508,10 +433,9 @@ fn init(force: bool) -> anyhow::Result<()> {
 /// Why the servers cannot be built here yet, if they cannot: what `init` does is not done.
 fn servers_unready() -> anyhow::Result<Option<String>> {
     let root = root_path();
-    for (submodule, patch) in patches()? {
-        let dir = root.join("3rdparty").join(&submodule);
-        if !dir.join(".git").exists() || !applied(&dir, &patch)? {
-            return Ok(Some(format!("3rdparty/{submodule} is not patched")));
+    for path in submodules()? {
+        if !root.join(&path).join(".git").exists() {
+            return Ok(Some(format!("{path} is not checked out")));
         }
     }
     if has_guest_target()? == Some(false) {
@@ -599,8 +523,7 @@ fn client_library() -> String {
     )
 }
 
-/// The library alone, with the features its default is: no submodule patched, no kernel and
-/// nothing to sign.
+/// The library alone, with the features its default is: no kernel and nothing to sign.
 fn build_client(options: &Options) -> anyhow::Result<()> {
     let mut cargo = cargo();
     cargo

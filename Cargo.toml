@@ -10,8 +10,8 @@
 # users and projects its config names. `xtask` builds, signs and packs them.
 #
 # A bare `cargo build` or `cargo test` builds the client alone: the server needs the
-# submodules patched (`cargo xtask init`), a guest kernel and a musl target, which a change to
-# the client should not.
+# submodules checked out (`cargo xtask init`), a guest kernel and a musl target, which a change
+# to the client should not.
 [workspace]
 resolver = "3"
 members = [
@@ -24,10 +24,6 @@ members = [
 ]
 default-members = ["virtx-core", "virtx-rs"]
 
-# `3rdparty/libkrun/` is the vendored libkrun submodule, which is its own cargo
-# workspace. Without this, cargo would auto-adopt the path dependencies as
-# members and collide with that workspace.
-#
 # `virtx-abins/` is a workspace root of its own: it is cross-compiled to
 # `*-unknown-linux-musl`, and a member would be built for the host by a bare
 # `cargo build` -- for a target that has no host to run on. Listed here and not merely
@@ -39,7 +35,6 @@ default-members = ["virtx-core", "virtx-rs"]
 # cross-compiles to `*-unknown-linux-musl` and embeds -- a workspace root of its own for the
 # same reason as `virtx-abins/`.
 exclude = [
-    "3rdparty/libkrun",
     "virtx-abins",
     "virtx-uvm-guest",
 ]
@@ -64,7 +59,8 @@ tokio = "1"
 
 # rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
 # 2026-09-02) and routes macOS to a stub backend that panics at runtime.
-# Track the repo until a release carries it.
+# Track our fork of the repo, at a commit on its `virtx` branch, until a release carries it;
+# magma-gpu lives in the same repo. This reaches libkrun's `rutabaga_gfx = "0.1.85"` too.
 [patch.crates-io]
-rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
-magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }
+rutabaga_gfx = { git = "https://github.com/brekkylab/rutabaga_gfx", rev = "94c49875" }
+magma-gpu = { git = "https://github.com/brekkylab/rutabaga_gfx", rev = "94c49875" }

@@ -158,12 +158,9 @@ jobs:
       # The oldest macOS the wheel's tag says it runs on.
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      # With the submodules: cargo loads the whole workspace, the servers' crates included,
-      # and they name crates in libkrun and rutabaga_gfx. Unpatched is enough for the client.
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.REF }}
-          submodules: true
 
       - id: toolchain
         shell: bash

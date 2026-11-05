@@ -7,11 +7,5 @@
     "virtx-core/client",
     "virtx-core/server",
     "virtx-core/ffi"
-  ],
-
-  // The submodules carry patches in their working trees on purpose (see
-  // `cargo xtask init`). Git is told to ignore that via `ignore = dirty`
-  // in .gitmodules, but VS Code does not honour it and would otherwise list
-  // each submodule as its own repository with permanent uncommitted changes.
-  "git.detectSubmodules": false
+  ]
 }

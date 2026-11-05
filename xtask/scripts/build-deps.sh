@@ -37,7 +37,7 @@ if [ "$(uname -s)" = Darwin ]; then
     SPIRV_Cross_pin="$(cat "$MoltenVK_src/ExternalRevisions/SPIRV-Cross_repo_revision")"
     if [ "$(git -C "$SPIRV_Cross_src" rev-parse HEAD)" != "$SPIRV_Cross_pin" ]; then
         echo "3rdparty/SPIRV-Cross is not at the revision MoltenVK pins ($SPIRV_Cross_pin)." >&2
-        echo "Move the submodule there and refresh its patches." >&2
+        echo "Rebase the fork's virtx branch onto that revision and pin it." >&2
         exit 1
     fi
 

@@ -51,7 +51,7 @@
 //!
 //! The device the guest enumerates reports the same size: venus caps every heap, and
 //! `VK_EXT_memory_budget`'s budgets, at `VKR_HEAP_SIZE_MAX` (see
-//! `3rdparty/_patches/virglrenderer/heap-limit.patch`), which is set here from the
+//! virglrenderer's `heap-limit` commit), which is set here from the
 //! window. Otherwise the guest sees the host device's whole heap -- 19 GB on an 18 GB Mac
 //! -- sizes itself to that, and learns the truth from a mapping that fails; ncnn copies
 //! out of the null pointer it gets back.

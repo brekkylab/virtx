@@ -17,7 +17,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
 - `virtx-server-stdio/` and `virtx-server-http/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-uvm` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs every VM gets at `/abin`.
-- `3rdparty/` — libkrun, rutabaga_gfx, virglrenderer and their kin as submodules, and `_patches/`, which `cargo xtask init` applies to them.
+- `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the `packages` workflow runs to pack and smoke-test the client's packages. `.github/workflows/dist.yml` builds and publishes the server.
 
@@ -26,8 +26,8 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 Every step is `cargo xtask`; `cargo xtask --help` lists them.
 
 ```bash
-git clone --recurse-submodules https://github.com/brekkylab/virtx   # cargo loads the whole workspace, which names crates in 3rdparty/
-cargo xtask init                                  # patches the submodules and adds the guest's musl target; the servers need it
+git clone https://github.com/brekkylab/virtx
+cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
 cargo xtask build client                          # libvirtx_core
 cargo xtask build kernel server-stdio server-http # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
 cargo xtask install                               # what was built, into $VIRTX_HOME/bin
@@ -38,8 +38,7 @@ cargo xtask test -p virtx-server-stdio            # the servers' own tests, whic
 ```
 
 - Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
-- A change to the client needs only the submodules checked out; `cargo xtask check --client` checks it alone. A change to the servers needs `init`, and a change that reaches a VM runs `cargo xtask test` for the server it touches.
-- The format check is `cargo fmt --check`, the workspace's members only: `--all` reaches into the patched submodules.
+- A change to the client needs nothing of `init`; `cargo xtask check --client` checks it alone. A change to the servers needs `init`, and a change that reaches a VM runs `cargo xtask test` for the server it touches.
 - A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the surface the behaviour lives in: `virtx-core`'s in-module tests and `tests/`, the servers' `tests/`, `virtx-py/tests/` and `virtx-node/__test__/`.
 
 ## Comments and docs

@@ -7,14 +7,12 @@ Thanks for your interest in improving **virtx**. This repository is both ends of
 The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on the first `cargo` call. Every build step is `cargo xtask`.
 
 ```bash
-git clone --recurse-submodules https://github.com/brekkylab/virtx
+git clone https://github.com/brekkylab/virtx
 cd virtx
 cargo xtask build client                     # libvirtx_core, all a change to the client needs
 ```
 
-The submodules are needed even for the client: cargo loads the whole workspace, and the server's crates name crates in `3rdparty/`. A clone made without them gets them with `git submodule update --init`.
-
-The server takes more of the host. `cargo xtask init` patches the submodules and adds the guest's musl target, and [`virtx-uvm/README.md`](virtx-uvm/README.md) lists what else each host needs. Then:
+The server takes more of the host. `cargo xtask init` checks out the submodules under `3rdparty/`, the GPU libraries the server is built with, and adds the guest's musl target; [`virtx-uvm/README.md`](virtx-uvm/README.md) lists what else each host needs. Then:
 
 ```bash
 cargo xtask init

@@ -96,8 +96,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      # With the submodules, which only the kernel does not need: `cargo xtask` loads the
-      # whole workspace, and that names crates in them.
       - uses: actions/checkout@v7
         with:
           submodules: true
@@ -199,8 +197,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # Before any checkout: Windows' git converts to CRLF by default, and the submodule
-      # patches, written against LF, then find no context to apply to.
+      # Before any checkout: Windows' git converts to CRLF by default, and the GPU libraries'
+      # builds under 3rdparty/ run shell scripts written against LF.
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
@@ -253,17 +251,17 @@ jobs:
           where.exe pkg-config.exe
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
-      - name: Patch the submodules
+      - name: Add the guest's musl target
         run: cargo xtask init
 
-      # MoltenVK takes most of a macOS build, and changes only with its submodule and patches.
+      # MoltenVK takes most of a macOS build, and changes only with its submodule.
       - name: MoltenVK cache
         if: runner.os == 'macOS'
         uses: actions/cache@v6
         with:
           path: |
             3rdparty/MoltenVK/Package
-          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', '3rdparty/_patches/MoltenVK/*.patch', 'xtask/scripts/build-deps.sh') }}
+          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', 'xtask/scripts/build-deps.sh') }}
 
       - uses: actions/cache/restore@v6
         with:

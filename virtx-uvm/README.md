@@ -6,13 +6,19 @@ write to. [`virtx-server-stdio`](../virtx-server-stdio/) and
 [`virtx-server-http`](../virtx-server-http/) serve it on `virtx-core`'s protocol, over stdio
 and over HTTP; a client reaches a machine through one of them, never through this crate.
 
-libkrun is vendored as a submodule and linked as an rlib, so there is no
-`libkrun.so`/`libkrun.dylib` to ship and no C ABI in the middle — `virtx-uvm`
-depends on the `libkrun` crate directly.
+libkrun is linked as an rlib, so there is no `libkrun.so`/`libkrun.dylib` to ship and no
+C ABI in the middle — `virtx-uvm` depends on the `libkrun` crate directly.
 
 > libkrun 2.0 is still under active development and its API is not stable. The
-> `libkrun` submodule is pinned to a specific commit for that reason; bump it
+> dependency is pinned to a specific commit for that reason; bump it
 > deliberately, not automatically.
+
+Every upstream project changed here is a fork under brekkylab, pinned to a commit on its
+`virtx` branch: the upstream commit it tracks, then one commit per change of ours. `git log`
+in a fork shows them on top of the upstream commit, and the sections below describe them one
+by one, each headed by the name its commit's title starts with. libkrun and rutabaga_gfx are
+Rust crates, which cargo fetches as git dependencies named in `Cargo.toml`; the rest are
+submodules under `3rdparty/`, built by `xtask/scripts/build-deps.sh` and `.ps1`.
 
 ## Requirements
 
@@ -34,8 +40,8 @@ brew install lld meson ninja krunvm
 ## Setup
 
 ```sh
-cargo xtask init                        # checks out and patches the submodules, adds the musl
-                                        #    target (--force resets the submodules first)
+cargo xtask init                        # checks out the submodules, adds the musl target
+                                        #    (--force resets the submodules first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
 cargo xtask build server-stdio          # -> target/release/virtx-uvm (builds MoltenVK and
                                         #    virglrenderer first; add server-http too)
@@ -76,7 +82,7 @@ installed](#the-guest-kernel-is-built-not-installed). Worth not adding one: a se
 enough to find the kernel was also wide enough to let the virglrenderer that krunkit's tap
 installs stand in for the one `build/` had built, silently, since the GPU still came up.
 
-## Machines — `3rdparty/_patches/libkrun/overlay-root.patch`
+## Machines — libkrun commit `overlay-root`
 
 [`fstree::erofs`](src/fstree/erofs/) makes an image's layers into a disk: one
 read-only EROFS filesystem -- the layers merged into a metadata image that points into
@@ -118,7 +124,7 @@ left that mount under no path by the time the workload exits, so the status was
 dropped and the host always saw 0. The init now holds a descriptor on the
 virtiofs root across the pivot and sends the ioctl to that.
 
-## Volumes — `3rdparty/_patches/libkrun/session-mounts.patch`
+## Volumes — libkrun commit `session-mounts`
 
 A sandbox can be given volumes, each one a virtio-fs share, and one more for each remote store
 mounted in the volume (see [`volume`](src/volume/)).
@@ -155,7 +161,7 @@ Nothing here is a sandbox of the host's filesystem by itself. libkrun's own READ
 that a virtio-fs share offers no protection against a guest reaching other directories on the
 same host filesystem, and read-only bounds what a guest may write, not what it may read.
 
-## The network — `3rdparty/_patches/libkrun/tsi.patch`
+## The network — libkrun commit `tsi`
 
 A machine's network is libkrun's Transparent Socket Impersonation: the guest kernel hands every
 socket its own stack cannot answer to a vsock device, and libkrun opens the host socket that
@@ -243,11 +249,10 @@ it**, nor `VK_KHR_cooperative_matrix`; `VK_KHR_shader_float16_int8` (fp16) is
 available. Metal itself has had bfloat since MSL 3.1. Upstream SPIRV-Cross now
 translates bfloat16 and cooperative matrices, element-wise operations included,
 but only as a single 8x8 `simdgroup_matrix` with literal dimensions. Both are
-patched in here (`MoltenVK/cooperative-matrix-bfloat16.patch`,
-`SPIRV-Cross/cooperative-matrix-bfloat16.patch`), on Apple7 and later: MoltenVK
-reports the extensions and 8x8 and 16x16 shapes, and SPIRV-Cross emits a matrix
-as `spvCoopMatrix<T, R, C>`, a grid of 8x8 tiles, keeping upstream's
-element-wise emission but looping it over every tile.
+patched in here, by a commit `cooperative-matrix-bfloat16` on each fork, on Apple7 and
+later: MoltenVK reports the extensions and 8x8 and 16x16 shapes, and SPIRV-Cross emits a
+matrix as `spvCoopMatrix<T, R, C>`, a grid of 8x8 tiles, keeping upstream's element-wise
+emission but looping it over every tile.
 
 **The guest needs Mesa 26.0 or later.** Venus passes neither extension through
 before that: Debian trixie's 25.0 shows the device without them, and
@@ -265,11 +270,11 @@ multiple of 8. And a failed conversion does not fail `vkCreateComputePipelines`
 loudly enough for ncnn: it loads the net and the guest aborts at dispatch, with
 the reason only on the machine process's stderr, which is the server's.
 
-Nothing upstream supports this combination yet, so three dependencies are
-patched. Each patch is small and self-contained; the reasoning is worth keeping
-because none of it is obvious from the symptoms.
+Nothing upstream supports this combination yet, so three forks carry a commit for it.
+Each is small and self-contained; the reasoning is worth keeping because none of it is
+obvious from the symptoms.
 
-### virglrenderer — `3rdparty/_patches/virglrenderer/macos.patch`
+### virglrenderer commit `macos`
 
 The submodule is pinned to upstream main (`e0a1caf`), not to a release. 1.3.0 —
 the minimum rutabaga_gfx accepts — forced the render server on with venus and
@@ -307,7 +312,7 @@ name, and Homebrew's `lib` is not on its default search path. Linux does the
 opposite: `-Dvulkan-dload=true`, so `virtx-uvm` starts on a host with no
 Vulkan loader, and offers a GPU only where it finds one.
 
-### virglrenderer on Linux — `3rdparty/_patches/virglrenderer/linux-host-memory.patch`
+### virglrenderer commit `linux-host-memory`, for Linux
 
 A guest maps host-visible memory through the fd its `VkDeviceMemory` exports:
 the host `mmap`s it into the guest's window. A dma_buf or a shm fd can be
@@ -327,12 +332,8 @@ them and nothing else the host has can be mapped. The shm is freed in
 `vkr_device_remove_object`, after the memory imported from it, on both the
 `vkFreeMemory` and the device-teardown path.
 
-Every patch here is applied on every host, so this one leaves the hunks of the
-others alone: `cargo xtask init` recognises an applied patch by reversing it
-against the whole stack.
-
-`xtask/scripts/build-deps.sh` handles all of it. It builds the submodule, as
-`cargo xtask init` patched it, into `build/virglrenderer-build/` and installs
+`xtask/scripts/build-deps.sh` handles all of it. It builds the submodule into
+`build/virglrenderer-build/` and installs
 to `build/virglrenderer/`. venus-protocol is a meson subproject
 that is not in that tree; meson clones it at configure time, so the first build
 needs the network, and its codegen needs Mako alongside the PyYAML gallium
@@ -342,12 +343,12 @@ library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
 environment wins — if you set one, add `build/virglrenderer/lib/pkgconfig` to it.
 
-### rutabaga_gfx — `3rdparty/_patches/rutabaga_gfx/virgl-renderer.patch`
+### rutabaga_gfx commit `virgl-renderer`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as
 soon as anything asks for a descriptor. A Darwin backend built on Mach ports
 landed upstream on 2026-09-02 but has not been released, so `[patch.crates-io]`
-points at the submodule instead.
+points at our fork instead.
 
 That backend widened `RawDescriptor` to `i64`, and `virgl_renderer.rs` was not
 updated with it at first; upstream fixed it in `c9bae3a`, and macOS needs
@@ -362,7 +363,7 @@ none of which exist on Windows. On Windows `export_blob` has to report `Unsuppor
 exports blobs through, and `map()` has to fall back to
 `virgl_renderer_resource_get_map_ptr()`.
 
-### libkrun — `3rdparty/_patches/libkrun/gpu.patch`
+### libkrun commit `gpu`
 
 One patch for both hosts, because they share the files. The macOS half:
 
@@ -413,11 +414,6 @@ had to be written rather than widened:
   `resource_flush`, matched `RutabagaError::Unsupported` — a variant that does
   not exist and never did. Unsupported arrives wrapped, as
   `RutabagaError::MagmaGpuError(RutabagaUnsupported)`.
-
-These two are Rust crates that cargo resolves by path, so their patches cannot
-live in an exported copy the way virglrenderer's does — `cargo xtask init`
-applies them to the submodule working trees, and both submodules are marked
-`ignore = dirty` in `.gitmodules`. Running the script twice is a no-op.
 
 ## Windows (WHP)
 
@@ -527,8 +523,7 @@ cannot be re-enabled without reinstalling Windows.
 ### Setup
 
 ```powershell
-git submodule update --init
-cargo xtask init                        # patches the submodules
+cargo xtask init                        # checks out the submodules, adds the musl target
 cargo xtask build kernel                # guest kernel -> build/krunfw/
 cargo xtask build server-stdio          # builds libepoxy and virglrenderer first
 cargo xtask test -p virtx-server-stdio
@@ -590,7 +585,7 @@ to 4 KiB rather than 64 KiB to match WHP's page granularity.
 Expect 10–20 minutes on the first run; it is a full kernel build. `LIBKRUNFW_REBUILD=1`
 builds again over what is already there.
 
-### libkrun — `3rdparty/_patches/libkrun/macos-krunfw-path.patch`
+### libkrun commit `macos-krunfw-path`
 
 One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
 beside the binary that opens it.**
@@ -613,7 +608,7 @@ What this replaces is an environment variable that whoever runs the binary had t
 which a wrapper can do for `cargo xtask run` and nothing can do for an installed binary
 someone runs by hand.
 
-### libkrun — `3rdparty/_patches/libkrun/windows-virtiofs.patch`
+### libkrun commit `windows-virtiofs`
 
 Four bugs in the Windows virtio-fs passthrough, all invisible to a CI job that
 never boots a guest. The first two are on the path every `execve` takes.
@@ -699,10 +694,10 @@ with a message and no errno — reached the log as `ERROR_ACCESS_DENIED`, and th
 message it was carrying was dropped on the way.
 
 
-### libkrun — `3rdparty/_patches/libkrun/windows-vsock.patch`
+### libkrun commit `windows-vsock`
 
 Three stalls in TSI, which is the whole of a machine's network — see
-[The network](#the-network--3rdparty_patcheslibkruntsipatch).
+[The network](#the-network--libkrun-commit-tsi).
 All of them are credit mistaken for something else, and all of them are made
 permanent by the same property of this epoll: it is
 `WSAEventSelect`-backed, so re-arming interest does not re-announce bytes that
@@ -827,7 +822,7 @@ follow from that: meson resolves `python3` off `PATH` — a native-file
 `[binaries] python3` entry does *not* steer the python module — and a Windows
 venv never creates that name, so the script makes one.
 
-### libkrun — `3rdparty/_patches/libkrun/x86_64-mptable.patch`
+### libkrun commit `x86_64-mptable`
 
 The twelfth virtio-mmio device on an x86_64 guest got an interrupt line nothing
 had told the kernel about, and the machine stopped there without saying so.
@@ -866,7 +861,7 @@ the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
 ceiling. macOS is aarch64, where the interrupt controller is a GIC and
 `IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
 
-### virglrenderer — `3rdparty/_patches/virglrenderer/windows.patch`
+### virglrenderer commit `windows`
 
 Built on a Windows host at `8167744` with no further fixes, and carried to
 `e0a1caf` unchanged: `xtask/scripts/build-deps.ps1` compiles and installs it, a `--features gpu` build
@@ -1013,14 +1008,9 @@ virtx-uvm-guest/            the agent in every machine, which runs the commands 
                             embedded in it
 virtx-abins/                the programs for /abin -- index and mem, with docread beside them
                             -- and a SKILLS.md each; its own workspace, built for musl
-3rdparty/libkrun/           submodule: libkrun, pinned
-3rdparty/rutabaga_gfx/      submodule: rutabaga_gfx, pinned (via [patch.crates-io])
-3rdparty/virglrenderer/     submodule: upstream virglrenderer, pinned
-3rdparty/MoltenVK/          submodule: MoltenVK, with SPIRV-Cross; macOS builds only
-3rdparty/libepoxy/          submodule: pinned to 1.5.10; Windows builds only
-3rdparty/_patches/          applied to the submodules above by `cargo xtask init`; see
-                            "Machines", "Volumes", "The network", "The gpu feature" and
-                            "Windows (WHP)"
+3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch
+3rdparty/MoltenVK/          fork of MoltenVK, with SPIRV-Cross; macOS builds only
+3rdparty/libepoxy/          fork of libepoxy at 1.5.10, unchanged; Windows builds only
 xtask/                      every build, check and release step as `cargo xtask`;
                             xtask/scripts/ has what it runs -- the guest kernel's and the GPU
                             libraries' builds, the musl sysroot fetch, and the musl cc/ar that

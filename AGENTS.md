@@ -15,7 +15,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-core/` — the methods' args and outputs (`image/`, `sandbox/`, `snapshot/`, `volume/`), the client and server ends of the transport (`transport/`, plain HTTP over TCP or over a child's stdio), the C ABI (`ffi/`, declared by `include/virtx.h`, which the build writes), and the in-memory test server (`testing.rs`, served by `examples/test_server.rs`) every package's tests run against.
 - `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`.
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
-- `virtx-stdio-server/` and `virtx-http-server/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-uvm` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in.
+- `virtx-server-stdio/` and `virtx-server-http/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-uvm` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs every VM gets at `/abin`.
 - `3rdparty/` — libkrun, rutabaga_gfx, virglrenderer and their kin as submodules, and `_patches/`, which `cargo xtask init` applies to them.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
@@ -29,10 +29,10 @@ Every step is `cargo xtask`; `cargo xtask --help` lists them.
 git clone --recurse-submodules https://github.com/brekkylab/virtx   # cargo loads the whole workspace, which names crates in 3rdparty/
 cargo xtask init                                  # patches the submodules and adds the guest's musl target; the servers need it
 cargo xtask build client                          # libvirtx_core
-cargo xtask build kernel stdio-server http-server # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
+cargo xtask build kernel server-stdio server-http # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
 cargo xtask install                               # what was built, into $VIRTX_HOME/bin
 cargo xtask check                                 # the gate: format, clippy and tests, of the client always and of the servers once `init` has run
-cargo xtask test -p virtx-stdio-server            # the servers' own tests, which boot VMs
+cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python
 (cd virtx-node && npm install && npm test)        # Node
 ```

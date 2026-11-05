@@ -44,7 +44,7 @@ impl Served {
         let path = home.join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
 
-        let mut process = Command::new(env!("CARGO_BIN_EXE_virtx-http-server"))
+        let mut process = Command::new(env!("CARGO_BIN_EXE_virtx-server-http"))
             .arg("serve")
             .arg("--config")
             .arg(&path)

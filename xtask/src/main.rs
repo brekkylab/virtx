@@ -33,8 +33,8 @@ usage: cargo xtask init     [--force]
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
-  stdio-server  the server a client spawns, as the `virtx-uvm` binary; also the VM process
-  http-server   the server over HTTP, as the `virtx-http-server` binary
+  server-stdio  the server a client spawns, as the `virtx-uvm` binary; also the VM process
+  server-http   the server over HTTP, as the `virtx-server-http` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables every VM gets at /abin
 
@@ -69,19 +69,19 @@ const CLIENT_PACKAGE: &str = "virtx-core";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
 const SERVER_PACKAGES: &[&str] = &[
     "virtx-uvm",
-    "virtx-stdio-server",
-    "virtx-http-server",
+    "virtx-server-stdio",
+    "virtx-server-http",
     "xtask",
 ];
 /// Each server: its component, the package it is built from, and the binary it builds. The
 /// stdio server's binary keeps the name `virtx-uvm`, which is what a release archive carries
 /// and what a client spawns.
 const SERVERS: &[(Component, &str, &str)] = &[
-    (Component::StdioServer, "virtx-stdio-server", "virtx-uvm"),
+    (Component::ServerStdio, "virtx-server-stdio", "virtx-uvm"),
     (
-        Component::HttpServer,
-        "virtx-http-server",
-        "virtx-http-server",
+        Component::ServerHttp,
+        "virtx-server-http",
+        "virtx-server-http",
     ),
 ];
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
@@ -89,8 +89,8 @@ const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
     Client,
-    StdioServer,
-    HttpServer,
+    ServerStdio,
+    ServerHttp,
     Kernel,
     Abin,
 }
@@ -215,8 +215,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
     while let Some(arg) = args.next() {
         let component = match arg.to_str() {
             Some("client") => Component::Client,
-            Some("stdio-server") => Component::StdioServer,
-            Some("http-server") => Component::HttpServer,
+            Some("server-stdio") => Component::ServerStdio,
+            Some("server-http") => Component::ServerHttp,
             Some("kernel") => Component::Kernel,
             Some("abin") => Component::Abin,
             Some("--prefix") => {
@@ -960,7 +960,7 @@ fn upload(upload: &Upload) -> anyhow::Result<()> {
     let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
     ensure!(
         built.join(&stdio).is_file(),
-        "no {stdio} in {} -- run `cargo xtask build stdio-server` first",
+        "no {stdio} in {} -- run `cargo xtask build server-stdio` first",
         built.display()
     );
     stage_bin(&built, &stage, &[stdio], upload.abin)?;

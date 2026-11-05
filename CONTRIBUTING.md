@@ -18,7 +18,7 @@ The server takes more of the host. `cargo xtask init` patches the submodules and
 
 ```bash
 cargo xtask init
-cargo xtask build kernel stdio-server        # the guest kernel and the `virtx-uvm` server
+cargo xtask build kernel server-stdio        # the guest kernel and the `virtx-uvm` server
 cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-uvm, beside its kernel
 ```
 
@@ -26,7 +26,7 @@ cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-uvm, beside
 
 ```bash
 cargo xtask check                            # format, clippy and tests: the client always, the servers once `init` has run
-cargo xtask test -p virtx-stdio-server       # the servers' own tests, which boot VMs
+cargo xtask test -p virtx-server-stdio       # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)               # Python
 (cd virtx-node && npm install && npm test)   # Node
 ```

@@ -19,7 +19,7 @@ The server is in this repository. Build it, as [`CONTRIBUTING.md`](CONTRIBUTING.
 
 ```sh
 cargo xtask init
-cargo xtask build kernel stdio-server
+cargo xtask build kernel server-stdio
 cargo xtask install --prefix ~/.local   # -> ~/.local/bin/virtx-uvm, beside its kernel
 ```
 

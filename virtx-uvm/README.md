@@ -2,8 +2,8 @@
 
 The server's machinery, on [libkrun](https://github.com/libkrun/libkrun) 2.0: images and the
 disks made of them, machines booted from those disks, and the snapshots and volumes they
-write to. [`virtx-stdio-server`](../virtx-stdio-server/) and
-[`virtx-http-server`](../virtx-http-server/) serve it on `virtx-core`'s protocol, over stdio
+write to. [`virtx-server-stdio`](../virtx-server-stdio/) and
+[`virtx-server-http`](../virtx-server-http/) serve it on `virtx-core`'s protocol, over stdio
 and over HTTP; a client reaches a machine through one of them, never through this crate.
 
 libkrun is vendored as a submodule and linked as an rlib, so there is no
@@ -29,7 +29,7 @@ brew install lld meson ninja krunvm
 | `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
-| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build stdio-server` and `http-server`. |
+| `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build server-stdio` and `server-http`. |
 
 ## Setup
 
@@ -37,21 +37,21 @@ brew install lld meson ninja krunvm
 cargo xtask init                        # checks out and patches the submodules, adds the musl
                                         #    target (--force resets the submodules first)
 cargo xtask build kernel                # the guest kernel -> build/krunfw/
-cargo xtask build stdio-server          # -> target/release/virtx-uvm (builds MoltenVK and
-                                        #    virglrenderer first; add http-server too)
+cargo xtask build server-stdio          # -> target/release/virtx-uvm (builds MoltenVK and
+                                        #    virglrenderer first; add server-http too)
 cargo xtask install                     # -> $VIRTX_HOME/bin, or --prefix <dir>
 ```
 
 ## Running
 
 A server is started by whoever wants a sandbox: a client spawns `virtx-uvm` and speaks to it
-over its stdin and stdout, or reaches a `virtx-http-server` over HTTP. The repository's
+over its stdin and stdout, or reaches a `virtx-server-http` over HTTP. The repository's
 [README](../README.md) has a client's side; the servers' own tests are the quickest way to boot
 machines from here:
 
 ```sh
-cargo xtask test -p virtx-stdio-server    # spawns the built binary, as a client does
-cargo xtask test -p virtx-http-server
+cargo xtask test -p virtx-server-stdio    # spawns the built binary, as a client does
+cargo xtask test -p virtx-server-http
 ```
 
 `KRUN_LOG=debug` (also `info`, `warn`, `trace`) turns on libkrun's own logging, which a
@@ -64,8 +64,8 @@ is needed, but Hypervisor.framework refuses to start without the entitlement. A 
 server binary it spawns, too, since that binary spawns itself to be each machine.
 
 A plain `cargo run` or `cargo test` -- an IDE's Run button included -- does not sign, and a
-binary that creates a VM fails without it. `cargo xtask build stdio-server` and
-`http-server` sign what they build, since a server is started by whoever wants a sandbox --
+binary that creates a VM fails without it. `cargo xtask build server-stdio` and
+`server-http` sign what they build, since a server is started by whoever wants a sandbox --
 a test, an agent runtime, a CLI -- and `cargo xtask run` is not on that path: the binary that
 calls `hv_vm_create` has to come out of the build already entitled. A plain `cargo build`
 leaves it unsigned.
@@ -424,7 +424,7 @@ applies them to the submodule working trees, and both submodules are marked
 An x86_64 Windows host boots a microVM over the Windows Hypervisor Platform:
 
 ```powershell
-cargo xtask test -p virtx-stdio-server
+cargo xtask test -p virtx-server-stdio
 ```
 
 The guest kernel there is `libkrunfw.dll`'s, which is 6.12.109 on x86_64 at the
@@ -530,8 +530,8 @@ cannot be re-enabled without reinstalling Windows.
 git submodule update --init
 cargo xtask init                        # patches the submodules
 cargo xtask build kernel                # guest kernel -> build/krunfw/
-cargo xtask build stdio-server          # builds libepoxy and virglrenderer first
-cargo xtask test -p virtx-stdio-server
+cargo xtask build server-stdio          # builds libepoxy and virglrenderer first
+cargo xtask test -p virtx-server-stdio
 ```
 
 The kernel first, because a build of `virtx-uvm` stops without one -- it is
@@ -784,7 +784,7 @@ The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 ### virglrenderer on Windows
 
 ```powershell
-cargo xtask build stdio-server
+cargo xtask build server-stdio
 ```
 
 runs `xtask/scripts/build-deps.ps1`, which produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
@@ -1003,11 +1003,11 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
 virtx-uvm/                  this crate: images, the disks made of them, machines and booting
                             them, snapshots, volumes and their remote stores, and the WebDAV
                             files endpoints
-virtx-stdio-server/         the server over stdio, as the `virtx-uvm` binary -- and, as
+virtx-server-stdio/         the server over stdio, as the `virtx-uvm` binary -- and, as
                             `virtx-uvm vm`, spawned by itself, the process that becomes a VM;
                             signed on macOS
-virtx-http-server/          the same server over HTTP, to the users and projects its config
-                            names; also a VM's process, as `virtx-http-server vm`
+virtx-server-http/          the same server over HTTP, to the users and projects its config
+                            names; also a VM's process, as `virtx-server-http vm`
 virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
                             own workspace, built for musl by this crate's build script and
                             embedded in it

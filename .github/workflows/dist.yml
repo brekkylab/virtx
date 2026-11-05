@@ -289,7 +289,7 @@ jobs:
           ls -la target/release/abin
 
       - name: Build
-        run: cargo xtask build stdio-server
+        run: cargo xtask build server-stdio
 
       - name: virglrenderer's log (Windows, on failure)
         if: failure() && runner.os == 'Windows'

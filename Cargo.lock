@@ -3384,7 +3384,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "virtx-http-server"
+name = "virtx-rs"
+version = "0.1.2"
+dependencies = [
+ "futures-core",
+ "libloading",
+ "serde",
+ "serde_json",
+ "virtx-core",
+]
+
+[[package]]
+name = "virtx-server-http"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3405,18 +3416,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "virtx-rs"
-version = "0.1.2"
-dependencies = [
- "futures-core",
- "libloading",
- "serde",
- "serde_json",
- "virtx-core",
-]
-
-[[package]]
-name = "virtx-stdio-server"
+name = "virtx-server-stdio"
 version = "0.1.0"
 dependencies = [
  "anyhow",

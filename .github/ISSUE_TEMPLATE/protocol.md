@@ -5,7 +5,7 @@ title: ''
 labels: protocol
 ---
 
-<!-- Both ends of the protocol live in this repository: the types and transports in `virtx-core/`, the servers in `virtx-stdio-server/` and `virtx-http-server/`. A change to the wire is agreed here first, then made to both ends in one pull request. CONTRIBUTING.md has the rule. -->
+<!-- Both ends of the protocol live in this repository: the types and transports in `virtx-core/`, the servers in `virtx-server-stdio/` and `virtx-server-http/`. A change to the wire is agreed here first, then made to both ends in one pull request. CONTRIBUTING.md has the rule. -->
 
 **What the client cannot say today** — the gap, as a user of one of the packages meets it, and what they do instead.
 

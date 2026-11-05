@@ -132,6 +132,7 @@ required-features = ["testing"]
 # server the environment names.
 [[test]]
 name = "e2e"
+path = "tests/e2e/main.rs"
 harness = false
 required-features = ["testing"]
 

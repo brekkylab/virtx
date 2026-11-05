@@ -1,5 +1,5 @@
-//! Snapshots and volumes: held by the sandboxes made on them until those are removed, their
-//! files kept, and a volume's mounts.
+//! Snapshots and volumes: held by the sandboxes made on them until those are removed, a volume
+//! by each of several at once, their files kept, and a volume's mounts.
 
 use virtx_core::{
     Error, FileRoot, MountSource, MountType, SandboxCreateArgs, SandboxVolume,
@@ -11,8 +11,45 @@ use crate::harness::{ALPINE, Made, Run, alpine, refused, sandbox, unique};
 scenarios![storage:
     Any a_sandbox_holds_its_snapshot_until_it_is_removed,
     Any a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed,
+    Any a_volume_two_sandboxes_mount_is_held_until_both_go,
     Test a_mount_shows_its_type_and_not_its_credentials,
 ];
+
+async fn a_volume_two_sandboxes_mount_is_held_until_both_go(run: Run) {
+    let client = run.client().await;
+    let volume = unique("volume");
+    run.made(Made::Volume(volume.clone()));
+    client.create_volume(Some(&volume)).await.unwrap();
+    let root = FileRoot::Volume(volume.clone());
+    client
+        .write_file(&root, "kept.txt", "kept", None)
+        .await
+        .unwrap();
+    alpine(&client).await;
+    let mounting = |readonly| SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: volume.clone(),
+            path: "/data".into(),
+            readonly,
+        }],
+        ..SandboxCreateArgs::new(ALPINE)
+    };
+    let (writing, reading) = (mounting(false), mounting(true));
+    let (writer, reader) = tokio::join!(
+        run.create_sandbox(&client, &writing),
+        run.create_sandbox(&client, &reading)
+    );
+
+    let in_use = (409, "in_use".to_owned());
+    assert_eq!(refused(client.remove_volume(&volume).await), in_use);
+    client.remove_sandbox(&writer.id).await.unwrap();
+    // The other mounts it still.
+    assert_eq!(refused(client.remove_volume(&volume).await), in_use);
+    client.remove_sandbox(&reader.id).await.unwrap();
+    assert_eq!(client.read_text(&root, "kept.txt").await.unwrap(), "kept");
+    client.remove_volume(&volume).await.unwrap();
+    client.close().await;
+}
 
 async fn a_sandbox_holds_its_snapshot_until_it_is_removed(run: Run) {
     let client = run.client().await;

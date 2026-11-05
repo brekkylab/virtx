@@ -1,11 +1,12 @@
 //! An image's life: pulled or built, listed, tagged, downloaded and uploaded back, untagged,
-//! pushed and pruned.
+//! pushed and pruned, and jobs at once on one reference or beside a prune.
 
 use futures_util::TryStreamExt;
-use virtx_core::{ImageJobEnd, ImageJobEntry, RegistryAuth, SandboxCreateArgs};
+use virtx_core::{ImageJobEnd, ImageJobEntry, Recipe, RegistryAuth, SandboxCreateArgs, Step};
 
 use crate::harness::{
-    ALPINE, Made, Run, alpine, build, image_end, output, refused, tags, temporary, unique,
+    ALPINE, Made, Run, alpine, build, image_digest, image_end, output, refused, tags, temporary,
+    unique,
 };
 
 scenarios![images:
@@ -13,10 +14,80 @@ scenarios![images:
     Any a_build_points_its_reference_at_what_it_built,
     Any an_image_downloaded_uploads_back_as_it_was,
     Any untagging_takes_that_tag_alone,
+    Any jobs_tagging_one_reference_at_once_leave_it_on_one_of_theirs,
     Prune a_prune_keeps_what_a_tag_or_a_sandbox_holds,
+    Prune a_prune_while_a_build_runs_takes_nothing_it_built,
     Test a_push_ends_with_the_digest_it_sent_and_shows_no_credentials,
     Test a_cancelled_image_job_changes_no_tag,
 ];
+
+/// A recipe from [`ALPINE`] whose step writes `text`, so its image is no other's.
+fn writing(text: &str) -> Recipe {
+    Recipe::new(ALPINE).step(Step::run(format!("echo {text} > /built")))
+}
+
+async fn jobs_tagging_one_reference_at_once_leave_it_on_one_of_theirs(run: Run) {
+    let client = run.client().await;
+    let (first, second) = tokio::join!(
+        client.pull_image(ALPINE, None),
+        client.pull_image(ALPINE, None)
+    );
+    let first = image_digest(&client, &first.unwrap().id).await;
+    let second = image_digest(&client, &second.unwrap().id).await;
+    assert_eq!(first, second);
+    assert_eq!(tags(&client).await.get(ALPINE), Some(&first));
+
+    let reference = format!("{}:latest", unique("both"));
+    run.made(Made::Tag(reference.clone()));
+    let (one, two) = tokio::join!(
+        client.build_image(writing("one"), &reference),
+        client.build_image(writing("two"), &reference)
+    );
+    let one = image_digest(&client, &one.unwrap().id).await;
+    let two = image_digest(&client, &two.unwrap().id).await;
+    assert_ne!(one, two);
+    // Whichever ended last moved the tag last.
+    let tagged = tags(&client).await.get(&reference).cloned();
+    assert!(
+        tagged == Some(one.clone()) || tagged == Some(two.clone()),
+        "{reference} is on {tagged:?}, not {one} or {two}"
+    );
+    client.remove_image(&reference).await.unwrap();
+    client.close().await;
+}
+
+async fn a_prune_while_a_build_runs_takes_nothing_it_built(run: Run) {
+    let client = run.client().await;
+    alpine(&client).await;
+    let reference = format!("{}:latest", unique("pruned"));
+    run.made(Made::Tag(reference.clone()));
+    let job = client
+        .build_image(writing(&reference), &reference)
+        .await
+        .unwrap();
+    // Another server builds for a while, and prunes while it does; the test server's build
+    // has ended by now, so against it the two do not meet.
+    client.prune_image().await.unwrap();
+    let end = image_end(&client, &job.id).await;
+    match end.digest {
+        // What it built is whole: every blob of it is there to download.
+        Some(digest) => {
+            assert_eq!(tags(&client).await.get(&reference), Some(&digest));
+            let path = temporary("pruned.tar");
+            let downloaded = output(client.download_image(&reference, &path)).await;
+            assert_eq!(downloaded.digest, digest);
+            std::fs::remove_file(&path).unwrap();
+            client.remove_image(&reference).await.unwrap();
+        }
+        // A server may fail it, but then it tags nothing.
+        None => assert!(
+            !tags(&client).await.contains_key(&reference),
+            "failed, {:?}, and tagged still",
+            end.error
+        ),
+    }
+    client.close().await;
+}
 
 async fn a_pull_ends_with_the_digest_its_reference_points_at(run: Run) {
     let client = run.client().await;

@@ -1,21 +1,67 @@
-//! A sandbox's life: booted from what a build tagged or refused an image not there, torn down
-//! under its work, and gone with the server its client closes.
+//! A sandbox's life: booted from what a build tagged or refused an image not there, several
+//! made at once, torn down under its work, and gone with the server its client closes.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry};
 
 use crate::harness::{
-    ALPINE, Made, Run, build, end, exec, refused, sandbox, sandbox_log, sleep, unique,
+    ALPINE, Made, Run, alpine, build, end, exec, refused, sandbox, sandbox_log, sleep, unique,
 };
 
 scenarios![sandboxes:
     Any a_sandbox_boots_the_image_a_build_tagged,
     Any a_sandbox_of_an_image_not_there_is_refused,
+    Any sandboxes_made_at_once_are_each_their_own,
     Any removing_a_sandbox_ends_its_jobs_and_the_logs_read,
     Spawned closing_the_client_ends_its_server,
 ];
+
+async fn sandboxes_made_at_once_are_each_their_own(run: Run) {
+    let client = run.client().await;
+    alpine(&client).await;
+    let args = SandboxCreateArgs::new(ALPINE);
+    let made = join_all((0..3).map(|_| run.create_sandbox(&client, &args))).await;
+    let ids: Vec<_> = made.into_iter().map(|sandbox| sandbox.id).collect();
+    assert_eq!(
+        ids.iter().collect::<BTreeSet<_>>().len(),
+        ids.len(),
+        "{ids:?}"
+    );
+    let listed: Vec<_> = client
+        .list_sandbox()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|sandbox| sandbox.id)
+        .collect();
+    for id in &ids {
+        assert!(listed.contains(id), "{listed:?}");
+    }
+
+    // Each runs a command at once with the others, and its log is that command's alone.
+    let echoes: Vec<_> = ids.iter().map(|id| exec(&["echo", id])).collect();
+    let jobs = join_all(
+        ids.iter()
+            .zip(&echoes)
+            .map(|(id, echo)| client.exec_sandbox(id, echo)),
+    )
+    .await;
+    for (id, job) in ids.iter().zip(jobs) {
+        assert_eq!(
+            sandbox_log(&client, id, &job.unwrap().id).await,
+            [SandboxJobEntry::Stdout(id.clone()), end(0)]
+        );
+    }
+    for id in &ids {
+        client.remove_sandbox(id).await.unwrap();
+    }
+    client.close().await;
+}
 
 async fn a_sandbox_boots_the_image_a_build_tagged(run: Run) {
     let client = run.client().await;

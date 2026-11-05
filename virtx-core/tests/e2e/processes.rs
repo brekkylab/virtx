@@ -1,5 +1,8 @@
 //! A process's life in a sandbox: its output, its stdin, its end by signal, timeout or
-//! removal, its log read again, several side by side, and a command that cannot start.
+//! removal, or both at once, its log read again, several side by side, and a command that
+//! cannot start.
+
+use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use virtx_core::{
@@ -12,11 +15,57 @@ scenarios![processes:
     Any a_process_writes_its_output_then_ends,
     Any stdin_written_comes_back_until_it_is_closed,
     Any a_signal_a_timeout_or_a_removal_ends_a_process,
+    Any a_timeout_and_a_signal_at_once_end_a_process_once,
     Any processes_in_a_sandbox_run_side_by_side,
     Any a_log_read_again_starts_after_the_entry_it_names,
     Any a_command_that_cannot_start_makes_no_job,
     Test a_log_past_the_limit_is_truncated_but_keeps_its_end,
 ];
+
+async fn a_timeout_and_a_signal_at_once_end_a_process_once(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
+    // Beside them, a process neither is for, which is left running.
+    let bystander = client.exec_sandbox(&id, &sleep()).await.unwrap();
+    let timed = SandboxExecArgs {
+        timeout_ms: Some(100),
+        ..sleep()
+    };
+    // The signal comes from before the timeout runs out to after it, a round each.
+    for delay in (50..=150).step_by(10) {
+        let job = client.exec_sandbox(&id, &timed).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        let signalled = client.signal_sandbox_job(&id, &job.id, "SIGTERM").await;
+        let log = sandbox_log(&client, &id, &job.id).await;
+        let ends = log
+            .iter()
+            .filter(|entry| matches!(entry, SandboxJobEntry::End(_)))
+            .count();
+        let Some(SandboxJobEntry::End(ended)) = log.last() else {
+            panic!("after {delay} ms, a log with no end: {log:?}")
+        };
+        assert_eq!(ends, 1, "after {delay} ms: {log:?}");
+        let read = client.get_sandbox_job(&id, &job.id).await.unwrap();
+        assert_eq!(read.code, Some(ended.code), "after {delay} ms");
+        match signalled {
+            // Sent, which the timeout may yet beat.
+            Ok(()) => assert!(
+                [128 + 9, 128 + 15].contains(&ended.code),
+                "after {delay} ms: {}",
+                ended.code
+            ),
+            // Refused, the timeout having ended it first.
+            refusal => {
+                assert_eq!(refused(refusal), (409, "ended".into()), "after {delay} ms");
+                assert_eq!(ended.code, 128 + 9, "after {delay} ms");
+            }
+        }
+    }
+    let bystander = client.get_sandbox_job(&id, &bystander.id).await.unwrap();
+    assert!(bystander.running);
+    client.remove_sandbox(&id).await.unwrap();
+    client.close().await;
+}
 
 async fn a_process_writes_its_output_then_ends(run: Run) {
     let client = run.client().await;

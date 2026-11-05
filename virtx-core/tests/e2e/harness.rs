@@ -262,7 +262,7 @@ pub(crate) async fn image_end(client: &Client, id: &str) -> ImageJobEnd {
 }
 
 /// The digest the image job `id` ended with, which it fails without.
-async fn image_digest(client: &Client, id: &str) -> String {
+pub(crate) async fn image_digest(client: &Client, id: &str) -> String {
     let end = image_end(client, id).await;
     end.digest
         .unwrap_or_else(|| panic!("{id} failed: {:?}", end.error))

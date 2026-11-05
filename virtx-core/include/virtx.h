@@ -68,6 +68,14 @@ typedef struct VirtxWaker {
 extern "C" {
 #endif // __cplusplus
 
+// Run `virtx` with the `argc` arguments in `argv`, its program name first, and answer its
+// exit code. It blocks until the command ends, and takes the process's Ctrl-C meanwhile.
+//
+// # Safety
+//
+// Each of the `argc` pointers in `argv` is NUL-terminated.
+int virtx_cli_main(const char *const *argv, size_t argc);
+
 // Start `program` with `args_len` arguments from `args` as the server, over its stdin and
 // stdout, and write the client, held once, to `client`. A null `program` is `virtx-uvm`,
 // the server of this library's version, fetched first if this host has none -- see

@@ -7,10 +7,14 @@
 //!
 //! The types every request takes and answers are always built; the wire's client end, and
 //! [`Client`] over it, is the `client` feature, its server end the `server` feature, and the C
-//! ABI over a client the `ffi` feature, on by default with `client`. A crate that reaches the library through the C ABI
-//! takes the types alone, with `default-features = false`; a server takes `server`.
+//! ABI over a client the `ffi` feature, on by default with `client`. The `virtx` command,
+//! [`cli`], is the `cli` feature, also on by default so that `libvirtx_core` carries it. A crate
+//! that reaches the library through the C ABI takes the types alone, with
+//! `default-features = false`; a server takes `server`.
 
 mod auth;
+#[cfg(feature = "cli")]
+pub mod cli;
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]

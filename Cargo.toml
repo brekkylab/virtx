@@ -15,6 +15,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "virtx-cli",
     "virtx-core",
     "virtx-rs",
     "virtx-uvm",

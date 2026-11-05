@@ -3369,6 +3369,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
 
 [[package]]
+name = "virtx-cli"
+version = "0.1.2"
+dependencies = [
+ "virtx-core",
+]
+
+[[package]]
 name = "virtx-core"
 version = "0.1.2"
 dependencies = [
@@ -3377,6 +3384,7 @@ dependencies = [
  "axum",
  "bytes",
  "cbindgen",
+ "clap",
  "dav-server",
  "flate2",
  "futures-util",
@@ -3386,6 +3394,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "hyper-util",
+ "libc",
  "percent-encoding",
  "reqwest",
  "roxmltree",

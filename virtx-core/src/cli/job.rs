@@ -85,7 +85,14 @@ pub(crate) mod tests {
             .build_image(Recipe::new("alpine:3.20"), "jq:latest")
             .await
             .unwrap();
-        assert_eq!(follow(&client, &job, true).await.unwrap(), "sha256:0");
+        let digest = follow(&client, &job, true).await.unwrap();
+        let listed = client.list_image().await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|image| image.reference == "jq:latest" && image.digest == digest),
+            "{listed:?}"
+        );
     }
 
     #[tokio::test]

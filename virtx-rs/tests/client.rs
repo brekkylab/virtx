@@ -249,6 +249,7 @@ fn an_image_build_is_a_job_with_a_log() {
         .wait()
         .unwrap();
     assert_eq!(job.kind, ImageJobKind::Build);
+    let built = job.digest.clone().unwrap();
     let mut log = client.image_job_log(&job.id, None);
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
@@ -259,13 +260,13 @@ fn an_image_build_is_a_job_with_a_log() {
         [
             ImageJobEntry::Log("pulling alpine:3.20".into()),
             ImageJobEntry::End(ImageJobEnd {
-                digest: Some("sha256:0".into()),
+                digest: Some(built.clone()),
                 error: None,
             }),
         ]
     );
     let done = client.get_image_job(&job.id).wait().unwrap();
-    assert_eq!(done.digest.as_deref(), Some("sha256:0"), "{done:?}");
+    assert_eq!(done.digest, Some(built), "{done:?}");
     assert!(
         client
             .list_image_job()
@@ -287,12 +288,18 @@ fn a_started_job_is_read_as_its_log() {
     while let Some(entry) = log.wait_next() {
         entries.push(entry.unwrap().entry);
     }
+    let listed = client.list_image().wait().unwrap();
+    let built = listed
+        .iter()
+        .find(|image| image.reference == "t:latest")
+        .map(|image| image.digest.clone());
+    assert!(built.is_some(), "{listed:?}");
     assert_eq!(
         entries,
         [
             ImageJobEntry::Log("pulling alpine:3.20".into()),
             ImageJobEntry::End(ImageJobEnd {
-                digest: Some("sha256:0".into()),
+                digest: built,
                 error: None,
             }),
         ]

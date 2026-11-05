@@ -1,25 +1,30 @@
-//! The test server: every endpoint of `PROTOCOL.md` but the images' registry, in memory, as an
-//! axum router for the crate's own tests and for the `test_server` example the bindings' tests
+//! The test server: every endpoint of `PROTOCOL.md`, in memory, as an axum router for the
+//! crate's own tests, its end-to-end tests, and the `test_server` example the bindings' tests
 //! spawn.
 //!
-//! It starts with the volume `v`, the snapshot `s`, and the snapshot `locked`, held by the
-//! sandbox `holder`, so its files answer `423` to everything. Each volume and snapshot is a
-//! filesystem of its own.
+//! It starts with the image `alpine:3.20`, the volume `v`, the snapshot `s`, and the snapshot
+//! `locked`, held by the sandbox `holder`, so its files answer `423` to everything. Each volume
+//! and snapshot is a filesystem of its own. An image is a config and a layer of a few bytes, not
+//! one anything boots: its digest is of those bytes.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
 //! - A build logs `pulling <base>`, and fails for the base `missing`; a pull logs
-//!   `pulling <reference>` and fails for `missing`; a push logs `pushing <reference> as <auth>`,
-//!   the type of its credentials or `anonymous`. Each succeeds with `sha256:0`, but for the base
-//!   or reference `hang`, which runs until it is cancelled. A prune deletes `sha256:0`, of 1024
-//!   bytes.
+//!   `pulling <reference>` and fails for `missing`. Each points its reference at an image made
+//!   from its recipe or its reference, so a pull of `alpine:3.20` is the image it starts with. A
+//!   push logs `pushing <reference> as <auth>`, the type of its credentials or `anonymous`, and
+//!   ends with the digest its reference points at, or fails for a reference that points at
+//!   none. A base or reference `hang` runs until it is cancelled, and changes no tag.
+//! - A prune deletes what no tag points at and no sandbox boots, as `PROTOCOL.md` says.
 //! - In a sandbox, `echo` writes its arguments as a line to stdout, `fail` writes `failed` to
 //!   stderr and ends with 1, `lines n` writes `line 1` up to `line n`, `cat` writes each line of
 //!   its stdin back until it is closed, and `sleep` runs until it is signalled, cancelled or timed
 //!   out. Any other command is not started.
 
+pub(crate) mod registry;
+
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     sync::{Arc, Mutex},
     time::Duration,
@@ -39,10 +44,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use sse_stream::{Sse, SseBody};
 use tokio::sync::watch;
 
+use self::registry::Registry;
 use crate::{
     image::{
         ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-        ImagePruneOutput, ImagePullArgs, ImagePushArgs, RegistryAuth,
+        ImagePullArgs, ImagePushArgs, RegistryAuth,
     },
     sandbox::{
         Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEnd, SandboxJobEntry,
@@ -198,12 +204,15 @@ impl SandboxJobState {
 
 struct SandboxState {
     sandbox: Sandbox,
+    /// The volumes it mounts, by name.
+    volumes: Vec<String>,
     jobs: BTreeMap<String, Arc<SandboxJobState>>,
 }
 
 #[derive(Default)]
 struct Data {
     next: u64,
+    registry: Registry,
     snapshots: BTreeMap<String, DavHandler>,
     volumes: BTreeMap<String, (DavHandler, BTreeMap<String, VolumeMountListOutputItem>)>,
     sandboxes: BTreeMap<String, SandboxState>,
@@ -242,9 +251,11 @@ fn dav(prefix: &str) -> DavHandler {
         .build_handler()
 }
 
-/// Every endpoint but the images' registry, with `v`, `s` and `locked` in it.
+/// Every endpoint, with `alpine:3.20`, `v`, `s` and `locked` in it.
 pub fn router() -> Router {
     let mut data = Data::default();
+    data.registry.state().mounts = true;
+    let alpine = data.registry.image("alpine", Some("3.20"), "alpine:3.20");
     data.volumes
         .insert("v".into(), (dav("/volumes/v/files"), BTreeMap::new()));
     for name in ["s", "locked"] {
@@ -256,16 +267,18 @@ pub fn router() -> Router {
         SandboxState {
             sandbox: Sandbox {
                 id: "holder".into(),
-                image: "sha256:0".into(),
+                image: alpine,
                 snapshot: Some("locked".into()),
                 running: true,
                 ports: Vec::new(),
             },
+            volumes: Vec::new(),
             jobs: BTreeMap::new(),
         },
     );
     let shared: Shared = Arc::new(Mutex::new(data));
     Router::new()
+        .route("/images/oci/v2/{*path}", any(images))
         .route("/images/jobs/", get(list_image_jobs))
         .route("/images/jobs/{id}/", post(start_image_job))
         .route(
@@ -368,6 +381,12 @@ fn events<E: Serialize + Clone + Send + 'static>(
     response
 }
 
+/// Answers a request under `/images/oci/v2/` from the registry.
+async fn images(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
+    let registry = shared.lock().unwrap().registry.clone();
+    registry.handle(request).await.map(axum::body::Body::new)
+}
+
 async fn list_image_jobs(State(shared): State<Shared>) -> Response {
     let data = shared.lock().unwrap();
     let jobs: Vec<_> = data
@@ -383,26 +402,38 @@ async fn start_image_job(
     Path(kind): Path<String>,
     request: Bytes,
 ) -> Response {
-    let (kind, reference, line, fails) = match kind.as_str() {
+    let registry = shared.lock().unwrap().registry.clone();
+    // What it ends with: a digest, or why it failed; `None` for one that runs until cancelled.
+    let (kind, reference, line, outcome) = match kind.as_str() {
         "build" => match body::<ImageBuildArgs>(&request) {
             Ok(args) => {
                 let base = args.recipe.base.clone();
-                let fails = base == "missing";
                 let line = format!("pulling {base}");
-                let reference = if base == "hang" {
-                    "hang".into()
-                } else {
-                    args.reference
+                let (reference, outcome) = match base.as_str() {
+                    "hang" => ("hang".into(), None),
+                    "missing" => {
+                        let why = format!("no image {}", args.reference);
+                        (args.reference, Some(Err(why)))
+                    }
+                    _ => {
+                        let content = serde_json::to_string(&args.recipe).unwrap();
+                        let made = registry.make(&args.reference, &content);
+                        (args.reference, Some(made))
+                    }
                 };
-                (ImageJobKind::Build, reference, line, fails)
+                (ImageJobKind::Build, reference, line, outcome)
             }
             Err(refused) => return refused,
         },
         "pull" => match body::<ImagePullArgs>(&request) {
             Ok(args) => {
                 let line = format!("pulling {}", args.reference);
-                let fails = args.reference == "missing";
-                (ImageJobKind::Pull, args.reference, line, fails)
+                let outcome = match args.reference.as_str() {
+                    "hang" => None,
+                    "missing" => Some(Err(format!("no image {}", args.reference))),
+                    reference => Some(registry.make(reference, reference)),
+                };
+                (ImageJobKind::Pull, args.reference, line, outcome)
             }
             Err(refused) => return refused,
         },
@@ -414,7 +445,17 @@ async fn start_image_job(
                     Some(RegistryAuth::Bearer { .. }) => "bearer",
                 };
                 let line = format!("pushing {} as {auth}", args.reference);
-                (ImageJobKind::Push, args.reference, line, false)
+                let outcome = match args.reference.as_str() {
+                    "hang" => None,
+                    reference => Some(
+                        registry
+                            .resolve(&ImageName::Tag {
+                                tag: reference.to_owned(),
+                            })
+                            .ok_or_else(|| format!("no image {reference}")),
+                    ),
+                };
+                (ImageJobKind::Push, args.reference, line, outcome)
             }
             Err(refused) => return refused,
         },
@@ -436,16 +477,16 @@ async fn start_image_job(
     state
         .log
         .push(ImageJobEntry::Log(line), ImageJobEntry::Truncated {});
-    if fails {
-        state.end(ImageJobEnd {
-            digest: None,
-            error: Some(format!("no image {reference}")),
-        });
-    } else if reference != "hang" {
-        state.end(ImageJobEnd {
-            digest: Some("sha256:0".into()),
+    match outcome {
+        Some(Ok(digest)) => state.end(ImageJobEnd {
+            digest: Some(digest),
             error: None,
-        });
+        }),
+        Some(Err(why)) => state.end(ImageJobEnd {
+            digest: None,
+            error: Some(why),
+        }),
+        None => {}
     }
     data.image_jobs.insert(id.clone(), Arc::clone(&state));
     let job = state.job.lock().unwrap().clone();
@@ -483,11 +524,14 @@ async fn image_job_events(
     events(log, &headers)
 }
 
-async fn prune() -> Response {
-    json(&ImagePruneOutput {
-        images: vec!["sha256:0".into()],
-        reclaimed: 1024,
-    })
+async fn prune(State(shared): State<Shared>) -> Response {
+    let data = shared.lock().unwrap();
+    let used: BTreeSet<String> = data
+        .sandboxes
+        .values()
+        .map(|state| state.sandbox.image.clone())
+        .collect();
+    json(&data.registry.prune(&used))
 }
 
 async fn list_snapshots(State(shared): State<Shared>) -> Response {
@@ -604,10 +648,19 @@ async fn get_volume(State(shared): State<Shared>, Path(name): Path<String>) -> R
 }
 
 async fn remove_volume(State(shared): State<Shared>, Path(name): Path<String>) -> Response {
-    match shared.lock().unwrap().volumes.remove(&name) {
-        Some(_) => StatusCode::NO_CONTENT.into_response(),
-        None => not_found("such volume"),
+    let mut data = shared.lock().unwrap();
+    if !data.volumes.contains_key(&name) {
+        return not_found("such volume");
     }
+    if data.sandboxes.values().any(|s| s.volumes.contains(&name)) {
+        return refuse(
+            StatusCode::CONFLICT,
+            "in_use",
+            format!("volume `{name}` is mounted by a sandbox"),
+        );
+    }
+    data.volumes.remove(&name);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn list_mounts(State(shared): State<Shared>, Path(name): Path<String>) -> Response {
@@ -733,11 +786,23 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
             );
         }
     }
-    let id = data.id("sb");
-    let image = match args.image {
-        ImageName::Digest { digest } => digest,
-        ImageName::Tag { .. } => "sha256:0".into(),
+    let mut paths = BTreeSet::new();
+    for mount in &args.volumes {
+        if !data.volumes.contains_key(&mount.volume) {
+            return not_found("such volume");
+        }
+        if !paths.insert(&mount.path) {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                format!("two volumes at `{}`", mount.path),
+            );
+        }
+    }
+    let Some(image) = data.registry.resolve(&args.image) else {
+        return not_found("such image");
     };
+    let id = data.id("sb");
     let sandbox = Sandbox {
         id: id.clone(),
         image,
@@ -749,6 +814,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
         id.clone(),
         SandboxState {
             sandbox: sandbox.clone(),
+            volumes: args.volumes.iter().map(|v| v.volume.clone()).collect(),
             jobs: BTreeMap::new(),
         },
     );

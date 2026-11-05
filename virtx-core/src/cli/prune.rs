@@ -52,13 +52,15 @@ fn size(bytes: u64) -> String {
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
-    use crate::cli::job;
 
-    #[tokio::test]
-    async fn a_prune_says_each_image_it_deleted_and_the_space_freed() {
-        let client = job::tests::client().await;
+    #[test]
+    fn a_prune_says_each_image_it_deleted_and_the_space_freed() {
+        let pruned = ImagePruneOutput {
+            images: vec!["sha256:0".into()],
+            reclaimed: 1024,
+        };
         assert_eq!(
-            report(&client.prune_image().await.unwrap()),
+            report(&pruned),
             "Deleted: sha256:0\nTotal reclaimed space: 1.02kB\n"
         );
     }

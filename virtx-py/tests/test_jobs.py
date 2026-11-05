@@ -107,9 +107,10 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_serve
         job = await client.build_image(Recipe("alpine:3.20").run("true"), "built:latest")
         assert isinstance(job, ImageJob)
         assert (job.kind, job.reference) == (ImageJobKind.BUILD, "built:latest")
+        assert job.digest is not None
         log = [entry.entry async for entry in client.image_job_log(job.id)]
-        assert log == [Log("pulling alpine:3.20"), ImageJobEnd(digest="sha256:0")]
-        assert (await client.get_image_job(job.id)).digest == "sha256:0"
+        assert log == [Log("pulling alpine:3.20"), ImageJobEnd(digest=job.digest)]
+        assert (await client.get_image_job(job.id)).digest == job.digest
         assert job.id in [item.id for item in await client.list_image_job()]
         await client.remove_image_job(job.id)
         with pytest.raises(VirtxError, match="404"):
@@ -130,9 +131,10 @@ async def test_a_failed_pull_ends_its_log_with_its_error(test_server: str) -> No
 async def test_a_build_iterated_yields_its_log_to_its_end(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         log = [entry async for entry in client.build_image(Recipe("alpine:3.20"), "it:latest")]
+        built = {item.reference: item.digest for item in await client.list_image()}["it:latest"]
         assert log == [
             LogEntry(1, Log("pulling alpine:3.20")),
-            LogEntry(2, ImageJobEnd("sha256:0")),
+            LogEntry(2, ImageJobEnd(built)),
         ]
 
 
@@ -151,6 +153,7 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: s
         job = await build
         assert await build == job
         log = [entry.entry async for entry in build]
-        assert log[-1] == ImageJobEnd(digest="sha256:0")
-        assert (await client.get_image_job(job.id)).digest == "sha256:0"
+        assert job.digest is not None
+        assert log[-1] == ImageJobEnd(digest=job.digest)
+        assert (await client.get_image_job(job.id)).digest == job.digest
         assert len(await client.list_image_job()) == before + 1

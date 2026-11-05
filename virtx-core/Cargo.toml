@@ -128,6 +128,13 @@ name = "stdio"
 harness = false
 required-features = ["testing"]
 
+# Scenarios across a real transport, against the test server as a child process of itself or a
+# server the environment names.
+[[test]]
+name = "e2e"
+harness = false
+required-features = ["testing"]
+
 # The test server over stdio, which the bindings' tests spawn.
 [[example]]
 name = "test_server"

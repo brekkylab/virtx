@@ -209,3 +209,52 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod against_the_test_server {
+    use super::*;
+    use crate::cli::job::tests::{client, tags};
+
+    fn args(images: &[&str], force: bool) -> RmArgs {
+        RmArgs {
+            images: images.iter().map(|image| image.to_string()).collect(),
+            force,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ref_is_untagged_and_the_image_goes_from_a_repository_with_its_last_ref() {
+        let client = client().await;
+        let alpine = tags(&client).await["alpine:3.20"].clone();
+        for target in ["alpine:stable", "mine:1"] {
+            client.tag_image("alpine:3.20", target).await.unwrap();
+        }
+        rm(&client, args(&["alpine:stable", "mine:1"], false))
+            .await
+            .unwrap();
+        let tags = tags(&client).await;
+        assert_eq!(tags.get("alpine:3.20"), Some(&alpine));
+        assert!(!tags.contains_key("alpine:stable"), "{tags:?}");
+        assert!(!tags.contains_key("mine:1"), "{tags:?}");
+    }
+
+    #[tokio::test]
+    async fn an_image_named_by_its_id_goes_with_every_ref_on_it() {
+        let client = client().await;
+        let alpine = tags(&client).await["alpine:3.20"].clone();
+        client.tag_image("alpine:3.20", "mine:1").await.unwrap();
+        // Forced, as asking would read stdin.
+        rm(&client, args(&[image_id(&alpine)], true)).await.unwrap();
+        let tags = tags(&client).await;
+        assert!(!tags.values().any(|digest| *digest == alpine), "{tags:?}");
+    }
+
+    #[tokio::test]
+    async fn every_name_is_tried_and_one_not_there_fails_the_command() {
+        let client = client().await;
+        client.tag_image("alpine:3.20", "mine:1").await.unwrap();
+        let removed = rm(&client, args(&["missing:1", "mine:1"], false)).await;
+        assert!(removed.is_err());
+        assert!(!tags(&client).await.contains_key("mine:1"));
+    }
+}

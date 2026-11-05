@@ -26,3 +26,24 @@ pub(crate) async fn pull(client: &Client, args: PullArgs) -> anyhow::Result<()> 
     println!("{reference} {digest}");
     Ok(())
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::cli::{
+        job::tests::{client, tags},
+        registry::RegistryArgs,
+    };
+
+    #[tokio::test]
+    async fn a_name_with_no_tag_is_pulled_as_latest() {
+        let client = client().await;
+        let args = PullArgs {
+            image: "alpine".into(),
+            quiet: true,
+            registry: RegistryArgs::default(),
+        };
+        pull(&client, args).await.unwrap();
+        assert!(tags(&client).await.contains_key("alpine:latest"));
+    }
+}

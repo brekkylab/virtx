@@ -2,7 +2,7 @@
 //! as it is, a client leaving takes nothing from them, and their writes to one file at once
 //! each land whole or not at all.
 //!
-//! The clients have the same credentials, none against the test server and `VIRTX_E2E_TOKEN`
+//! The clients have the same credentials, the test server's made-up token and project, or none
 //! against the one at the URL: what is shared here is shared by right. Whether a client with
 //! other credentials is kept from a sandbox is not tested.
 

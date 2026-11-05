@@ -3,10 +3,13 @@
 //!
 //! The server is the [`testing`](virtx_core::testing) one: by default this test binary, run
 //! again as a child process over stdio, or with `VIRTX_E2E_TCP=1` served on the loopback over
-//! TCP. `VIRTX_E2E_SERVER` names a server to spawn instead, its arguments split on whitespace,
-//! and `VIRTX_E2E_URL` one to connect to, with `VIRTX_E2E_TOKEN` its bearer token. Against those
-//! only the scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves to the
-//! server, run no command but `echo`, `cat` and `sleep`, and name what they make uniquely. The
+//! TCP. Over TCP it lets a request through only with a token and a project header the harness
+//! makes up, as a server for many would, so a scenario fails where the client leaves either off
+//! a request of any kind. `VIRTX_E2E_SERVER` names a server to spawn instead, its arguments
+//! split on whitespace, and `VIRTX_E2E_URL` one to connect to, which is sent no credentials:
+//! every token here is one the harness makes up, never one given it. Against those only the
+//! scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves to the server,
+//! run no command but `echo`, `cat` and `sleep`, and name what they make uniquely. The
 //! scenarios of several clients share one server: the one at the URL, or else a test server
 //! over TCP; a spawned server carries one client, so they are passed by.
 //!
@@ -33,6 +36,7 @@ use virtx_core::{serve_stdio, testing::router};
 
 #[macro_use]
 mod harness;
+mod access;
 mod images;
 mod processes;
 mod sandboxes;
@@ -67,6 +71,7 @@ fn main() -> ExitCode {
         processes::SCENARIOS,
         sandboxes::SCENARIOS,
         shared::SCENARIOS,
+        access::SCENARIOS,
     ];
 
     let prune = std::env::var("VIRTX_E2E_ALLOW_PRUNE").is_ok_and(|v| v == "1");
@@ -82,6 +87,7 @@ fn main() -> ExitCode {
             Needs::Spawned => server.is_spawned(),
             Needs::Prune => server.is_test() || prune,
             Needs::Shared => server.is_shared(),
+            Needs::Credentials => server.wants_credentials(),
         };
         if !runs {
             eprintln!("test {name} ... ignored");

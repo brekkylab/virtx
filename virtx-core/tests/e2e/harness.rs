@@ -9,8 +9,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use axum::{
+    middleware::{self, Next},
+    response::{IntoResponse as _, Response},
+};
 use futures_util::{Stream, StreamExt, TryStreamExt};
-use http::HeaderMap;
+use http::{HeaderMap, StatusCode, header};
 use virtx_core::{
     Auth, Client, Error, Event, ImageJobEnd, ImageJobEntry, Recipe, Sandbox, SandboxCreateArgs,
     SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Step, testing::router,
@@ -22,6 +26,34 @@ pub(crate) const SERVE: &str = "VIRTX_E2E_SERVE";
 /// The image every scenario that boots a sandbox pulls first.
 pub(crate) const ALPINE: &str = "alpine:3.20";
 
+/// The bearer token the test server over TCP takes, made up here and no one's.
+const TOKEN: &str = "e2e-token";
+
+/// The header the test server over TCP takes a request's project from, as a server for many
+/// would, and the one project it lets a request reach.
+pub(crate) const PROJECT_HEADER: &str = "e2e-project";
+const PROJECT: &str = "e2e";
+
+/// A server clients reach over TCP: its base URL, and the credentials and headers it wants.
+#[derive(Clone)]
+pub(crate) struct Reach {
+    url: String,
+    pub(crate) auth: Auth,
+    pub(crate) headers: HeaderMap,
+}
+
+impl Reach {
+    /// A client of it, with what it wants.
+    pub(crate) fn client(&self) -> Client {
+        self.with(self.auth.clone(), self.headers.clone())
+    }
+
+    /// A client of it, with `auth` and `headers` instead.
+    pub(crate) fn with(&self, auth: Auth, headers: HeaderMap) -> Client {
+        Client::connect(&self.url, auth, headers).unwrap()
+    }
+}
+
 /// The server each scenario gets a client of.
 #[derive(Clone)]
 pub(crate) enum Server {
@@ -31,8 +63,8 @@ pub(crate) enum Server {
     TestTcp,
     /// A server spawned from this argv.
     Spawn(Vec<String>),
-    /// A server at this URL, and the credentials it wants.
-    Url(String, Auth),
+    /// A server at a URL.
+    Url(Reach),
 }
 
 impl Server {
@@ -42,11 +74,8 @@ impl Server {
             return Server::Spawn(command.split_whitespace().map(Into::into).collect());
         }
         if let Some(url) = var("VIRTX_E2E_URL") {
-            let auth = match var("VIRTX_E2E_TOKEN") {
-                Some(token) => Auth::Bearer { token },
-                None => Auth::None,
-            };
-            return Server::Url(url, auth);
+            let (auth, headers) = (Auth::None, HeaderMap::new());
+            return Server::Url(Reach { url, auth, headers });
         }
         if var("VIRTX_E2E_TCP").is_some() {
             return Server::TestTcp;
@@ -70,6 +99,13 @@ impl Server {
         !matches!(self, Server::Spawn(_))
     }
 
+    /// Whether it refuses a request without valid credentials: the test server over TCP does,
+    /// with ones the harness makes up. A server at a URL is reached with none, and over stdio
+    /// a server takes none.
+    pub(crate) fn wants_credentials(&self) -> bool {
+        matches!(self, Server::Test | Server::TestTcp)
+    }
+
     /// A client of a server of its own, or of the one at the URL.
     async fn client(&self) -> Client {
         match self {
@@ -78,37 +114,69 @@ impl Server {
                 command.env(SERVE, "1");
                 Client::spawn(command).unwrap()
             }
-            Server::TestTcp => {
-                Client::connect(&serve().await, Auth::None, HeaderMap::new()).unwrap()
-            }
+            Server::TestTcp => serve().await.client(),
             Server::Spawn(argv) => {
                 let mut command = tokio::process::Command::new(&argv[0]);
                 command.args(&argv[1..]);
                 Client::spawn(command).unwrap()
             }
-            Server::Url(url, auth) => Client::connect(url, auth.clone(), HeaderMap::new()).unwrap(),
+            Server::Url(reach) => reach.client(),
         }
     }
 
-    /// `N` clients of one server: the one at the URL, or else a test server served on the
-    /// loopback over TCP, even where the other scenarios have it over stdio, which carries one
-    /// client.
-    async fn clients<const N: usize>(&self) -> [Client; N] {
-        let (url, auth) = match self {
-            Server::Test | Server::TestTcp => (serve().await, Auth::None),
-            Server::Url(url, auth) => (url.clone(), auth.clone()),
+    /// One server several clients reach: the one at the URL, or else a test server served on
+    /// the loopback over TCP, even where the other scenarios have it over stdio, which carries
+    /// one client.
+    async fn reach(&self) -> Reach {
+        match self {
+            Server::Test | Server::TestTcp => serve().await,
+            Server::Url(reach) => reach.clone(),
             Server::Spawn(_) => panic!("a spawned server answers its own client alone"),
-        };
-        std::array::from_fn(|_| Client::connect(&url, auth.clone(), HeaderMap::new()).unwrap())
+        }
     }
 }
 
-/// The test server, served on the loopback over TCP, and its base URL.
-async fn serve() -> String {
+/// The test server, served on the loopback over TCP behind [`gate`], and how to reach it.
+async fn serve() -> Reach {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, router()).await });
-    url
+    let router = router().layer(middleware::from_fn(gate));
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let mut headers = HeaderMap::new();
+    headers.insert(PROJECT_HEADER, PROJECT.parse().unwrap());
+    let auth = Auth::Bearer {
+        token: TOKEN.into(),
+    };
+    Reach { url, auth, headers }
+}
+
+/// Lets a request through only with [`TOKEN`] and [`PROJECT`], as a server for many would: one
+/// without the token is answered `401`, and one with it reaching another project `403`. So each
+/// scenario against it fails where the client leaves either off a request of any kind.
+async fn gate(request: axum::extract::Request, next: Next) -> Response {
+    let headers = request.headers();
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if token != Some(&format!("Bearer {TOKEN}")) {
+        return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "no valid token");
+    }
+    let project = headers.get(PROJECT_HEADER).and_then(|v| v.to_str().ok());
+    if project != Some(PROJECT) {
+        return refuse(StatusCode::FORBIDDEN, "forbidden", "not this project's");
+    }
+    next.run(request).await
+}
+
+/// `status`, with the error body `PROTOCOL.md` gives it.
+fn refuse(status: StatusCode, code: &str, message: &str) -> Response {
+    let body = serde_json::json!({ "error": { "code": code, "message": message } });
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 /// What a scenario made on the server, to remove once it ends.
@@ -140,7 +208,14 @@ impl Run {
 
     /// `N` clients of one server, for a scenario that [`Needs::Shared`] it.
     pub(crate) async fn clients<const N: usize>(&self) -> [Client; N] {
-        self.server.clients().await
+        let reach = self.server.reach().await;
+        std::array::from_fn(|_| reach.client())
+    }
+
+    /// One server several clients reach, for a scenario that [`Needs::Shared`] it or
+    /// [`Needs::Credentials`].
+    pub(crate) async fn reach(&self) -> Reach {
+        self.server.reach().await
     }
 
     pub(crate) fn is_test(&self) -> bool {
@@ -202,6 +277,9 @@ pub(crate) enum Needs {
     Prune,
     /// One server several clients reach, as [`Server::is_shared`] says.
     Shared,
+    /// One that refuses a request without valid credentials, as
+    /// [`Server::wants_credentials`] says.
+    Credentials,
 }
 
 /// A scenario: its name, `<group>::<scenario>`, what it needs of the server, and itself.

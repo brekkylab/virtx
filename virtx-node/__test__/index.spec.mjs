@@ -4,7 +4,9 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import net from 'node:net'
+import os from 'node:os'
 import path from 'node:path'
 import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -285,6 +287,65 @@ test('a started job awaited and iterated is one job', async () => {
     const jobs = await client.listImageJob()
     assert.equal(jobs.length, before + 1)
     assert.equal((await client.getImageJob(job.id)).digest, job.digest)
+  } finally {
+    await client.close()
+  }
+})
+
+// Every tag on the server's images, with the digest it points at.
+async function tags(client) {
+  return Object.fromEntries((await client.listImage()).map((image) => [image.reference, image.digest]))
+}
+
+test('an image is tagged, downloaded, removed and uploaded back', async () => {
+  const client = Client.spawn(testServer)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'virtx-node-'))
+  try {
+    const digest = (await tags(client))['alpine:3.20']
+    await client.tagImage('alpine:3.20', 'copy:1')
+    assert.equal((await tags(client))['copy:1'], digest)
+
+    const archive = path.join(dir, 'copy.tar')
+    assert.deepEqual((await entries(client.downloadImage('copy:1', archive))).at(-1), { output: { digest } })
+    await client.removeImage('copy:1')
+    assert.ok(!('copy:1' in (await tags(client))))
+    assert.deepEqual((await entries(client.uploadImage(archive, 'copy:1'))).at(-1), { output: { digest } })
+    assert.equal((await tags(client))['copy:1'], digest)
+
+    await client.untagImage('copy:1')
+    assert.ok(!('copy:1' in (await tags(client))))
+  } finally {
+    await client.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a push ends with the digest its reference points at', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const digest = (await tags(client))['alpine:3.20']
+    const log = await entries(client.pushImage('alpine:3.20', { type: 'bearer', token: 'secret' }))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ log: 'pushing alpine:3.20 as bearer' }, { end: { digest } }],
+    )
+    const missing = await client.pushImage('nothing:here')
+    assert.equal(missing.error, 'no image nothing:here')
+  } finally {
+    await client.close()
+  }
+})
+
+test('a mount is made, listed and removed', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const source = { type: 'notion', apiKey: 'secret' }
+    const mount = await client.createVolumeMount('v', 'notion', source)
+    assert.deepEqual(mount, { path: 'notion', mountType: 'notion' })
+    assert.deepEqual(await client.listVolumeMount('v'), [mount])
+    await assert.rejects(client.createVolumeMount('v', 'notion', source), /409/)
+    await client.removeVolumeMount('v', 'notion')
+    assert.deepEqual(await client.listVolumeMount('v'), [])
   } finally {
     await client.close()
   }

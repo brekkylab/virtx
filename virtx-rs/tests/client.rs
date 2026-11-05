@@ -18,9 +18,10 @@ use futures_core::Stream;
 use std::{io::Read, net::TcpStream};
 
 use virtx_rs::{
-    Auth, Client, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
-    PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry,
-    SnapshotListOutputItem,
+    Auth, Client, Error, Event, Events, FileRoot, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    LogEntry, MountSource, MountType, PortForwarder, Recipe, RegistryAuth, SandboxCreateArgs,
+    SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, SnapshotListOutputItem,
+    VolumeMountListOutputItem,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -441,6 +442,97 @@ fn a_header_that_cannot_be_sent_is_refused_when_set() {
     assert!(error.to_string().contains("not a name"), "{error}");
 }
 
+/// The digest the tag `reference` points at, if it is there.
+fn tagged(client: &Client, reference: &str) -> Option<String> {
+    let images = client.list_image().wait().unwrap();
+    images
+        .into_iter()
+        .find(|image| image.reference == reference)
+        .map(|image| image.digest)
+}
+
+/// What a stream of the client's own, such as a download, gave last.
+fn output<T: serde::de::DeserializeOwned>(mut events: Events<Event<T, String>>) -> T {
+    while let Some(event) = events.wait_next() {
+        if let Event::Output(output) = event.unwrap() {
+            return output;
+        }
+    }
+    panic!("a stream ended without its output")
+}
+
+fn an_image_is_tagged_downloaded_removed_and_uploaded_back() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let digest = tagged(&client, "alpine:3.20").unwrap();
+    client.tag_image("alpine:3.20", "copy:1").unwrap_wait();
+    assert_eq!(tagged(&client, "copy:1").as_ref(), Some(&digest));
+
+    let path = env::temp_dir().join(format!("virtx-rs-{}-copy.tar", std::process::id()));
+    assert_eq!(
+        output(client.download_image("copy:1", &path)).digest,
+        digest
+    );
+    client.remove_image("copy:1").unwrap_wait();
+    assert_eq!(tagged(&client, "copy:1"), None);
+    assert_eq!(output(client.upload_image(&path, "copy:1")).digest, digest);
+    assert_eq!(tagged(&client, "copy:1").as_ref(), Some(&digest));
+
+    client.untag_image("copy:1").unwrap_wait();
+    assert_eq!(tagged(&client, "copy:1"), None);
+    std::fs::remove_file(&path).unwrap();
+}
+
+fn a_push_ends_with_the_digest_its_reference_points_at() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let digest = tagged(&client, "alpine:3.20");
+    let auth = RegistryAuth::Bearer {
+        token: "secret".into(),
+    };
+    let mut log = client.push_image("alpine:3.20", Some(auth)).log();
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        entries.push(entry.unwrap().entry);
+    }
+    assert_eq!(
+        entries,
+        [
+            ImageJobEntry::Log("pushing alpine:3.20 as bearer".into()),
+            ImageJobEntry::End(ImageJobEnd {
+                digest,
+                error: None,
+            }),
+        ]
+    );
+    let missing = client.push_image("nothing:here", None).wait().unwrap();
+    assert_eq!(missing.error.as_deref(), Some("no image nothing:here"));
+}
+
+fn a_mount_is_made_listed_and_removed() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let source = || MountSource::Notion {
+        api_key: "secret".into(),
+    };
+    let mount = client
+        .create_volume_mount("v", "notion", source())
+        .wait()
+        .unwrap();
+    assert_eq!(
+        mount,
+        VolumeMountListOutputItem {
+            path: "notion".into(),
+            mount_type: MountType::Notion,
+        }
+    );
+    assert_eq!(client.list_volume_mount("v").wait().unwrap(), [mount]);
+    let again = client
+        .create_volume_mount("v", "notion", source())
+        .wait()
+        .unwrap_err();
+    assert!(again.to_string().contains("409"), "{again}");
+    client.remove_volume_mount("v", "notion").unwrap_wait();
+    assert!(client.list_volume_mount("v").wait().unwrap().is_empty());
+}
+
 fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
     // Nothing listens there: each connection to the forwarder is closed.
     let client =
@@ -477,6 +569,9 @@ fn main() -> ExitCode {
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,
+        an_image_is_tagged_downloaded_removed_and_uploaded_back,
+        a_push_ends_with_the_digest_its_reference_points_at,
+        a_mount_is_made_listed_and_removed,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

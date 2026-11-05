@@ -64,6 +64,12 @@ impl Server {
         matches!(self, Server::Test | Server::Spawn(_))
     }
 
+    /// Whether several clients can reach one server: any but a spawned one, which answers its
+    /// own client alone.
+    pub(crate) fn is_shared(&self) -> bool {
+        !matches!(self, Server::Spawn(_))
+    }
+
     /// A client of a server of its own, or of the one at the URL.
     async fn client(&self) -> Client {
         match self {
@@ -82,6 +88,18 @@ impl Server {
             }
             Server::Url(url, auth) => Client::connect(url, auth.clone(), HeaderMap::new()).unwrap(),
         }
+    }
+
+    /// `N` clients of one server: the one at the URL, or else a test server served on the
+    /// loopback over TCP, even where the other scenarios have it over stdio, which carries one
+    /// client.
+    async fn clients<const N: usize>(&self) -> [Client; N] {
+        let (url, auth) = match self {
+            Server::Test | Server::TestTcp => (serve().await, Auth::None),
+            Server::Url(url, auth) => (url.clone(), auth.clone()),
+            Server::Spawn(_) => panic!("a spawned server answers its own client alone"),
+        };
+        std::array::from_fn(|_| Client::connect(&url, auth.clone(), HeaderMap::new()).unwrap())
     }
 }
 
@@ -118,6 +136,11 @@ impl Run {
 
     pub(crate) async fn client(&self) -> Client {
         self.server.client().await
+    }
+
+    /// `N` clients of one server, for a scenario that [`Needs::Shared`] it.
+    pub(crate) async fn clients<const N: usize>(&self) -> [Client; N] {
+        self.server.clients().await
     }
 
     pub(crate) fn is_test(&self) -> bool {
@@ -177,6 +200,8 @@ pub(crate) enum Needs {
     /// The test server, or one `VIRTX_E2E_ALLOW_PRUNE=1` lets it prune: a prune deletes every
     /// image nothing holds, not only the scenario's.
     Prune,
+    /// One server several clients reach, as [`Server::is_shared`] says.
+    Shared,
 }
 
 /// A scenario: its name, `<group>::<scenario>`, what it needs of the server, and itself.

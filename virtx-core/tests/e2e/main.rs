@@ -6,7 +6,9 @@
 //! TCP. `VIRTX_E2E_SERVER` names a server to spawn instead, its arguments split on whitespace,
 //! and `VIRTX_E2E_URL` one to connect to, with `VIRTX_E2E_TOKEN` its bearer token. Against those
 //! only the scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves to the
-//! server, run no command but `echo`, `cat` and `sleep`, and name what they make uniquely.
+//! server, run no command but `echo`, `cat` and `sleep`, and name what they make uniquely. The
+//! scenarios of several clients share one server: the one at the URL, or else a test server
+//! over TCP; a spawned server carries one client, so they are passed by.
 //!
 //! Against another server, what a scenario made is removed once it ends, passed or not, and a
 //! `sleep` it started is killed at its timeout if it is not. Each name it removes is its own,
@@ -34,6 +36,7 @@ mod harness;
 mod images;
 mod processes;
 mod sandboxes;
+mod shared;
 mod storage;
 
 use harness::{Needs, Run, SERVE, Server};
@@ -63,6 +66,7 @@ fn main() -> ExitCode {
         storage::SCENARIOS,
         processes::SCENARIOS,
         sandboxes::SCENARIOS,
+        shared::SCENARIOS,
     ];
 
     let prune = std::env::var("VIRTX_E2E_ALLOW_PRUNE").is_ok_and(|v| v == "1");
@@ -77,6 +81,7 @@ fn main() -> ExitCode {
             Needs::Test => server.is_test(),
             Needs::Spawned => server.is_spawned(),
             Needs::Prune => server.is_test() || prune,
+            Needs::Shared => server.is_shared(),
         };
         if !runs {
             eprintln!("test {name} ... ignored");

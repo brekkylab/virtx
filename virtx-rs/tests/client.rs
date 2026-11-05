@@ -550,6 +550,9 @@ fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
 }
 
 fn main() -> ExitCode {
+    // Built before the library is opened: building it relinks `libvirtx_core`, and Windows
+    // cannot write a library a process has open.
+    test_server();
     virtx_rs::load(library()).unwrap();
 
     macro_rules! tests {

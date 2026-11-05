@@ -313,3 +313,149 @@ impl fmt::Display for Step {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// Why `content` is refused.
+    fn refused(content: &str) -> String {
+        Recipe::from_dockerfile(content).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_dockerfile_reads_into_its_base_and_its_steps_in_order() {
+        let read = Recipe::from_dockerfile(
+            "FROM alpine:3.20\nRUN apk add jq\nENV TZ=UTC\nWORKDIR /work\nRUN jq --version\n",
+        )
+        .unwrap();
+        let declared = Recipe::new("alpine:3.20")
+            .step("apk add jq")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/work"))
+            .step("jq --version");
+        assert_eq!(read, declared);
+    }
+
+    #[test]
+    fn an_instruction_is_read_in_any_case() {
+        let read = Recipe::from_dockerfile("from alpine\nRun true\nworkdir /w").unwrap();
+        assert_eq!(
+            read,
+            Recipe::new("alpine").step("true").step(Step::workdir("/w"))
+        );
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_dropped_and_continued_lines_joined() {
+        let read = Recipe::from_dockerfile(
+            "# a comment\n\nFROM alpine\nRUN apk add \\\n    # git, for the clone\n    git \\\n    jq\n",
+        )
+        .unwrap();
+        assert_eq!(read.steps, [Step::run("apk add git jq")]);
+    }
+
+    #[test]
+    fn a_dockerfile_ending_mid_continuation_is_still_read_whole() {
+        assert_eq!(
+            refused("FROM alpine\nRUN \\\n"),
+            "Dockerfile:2: RUN names no command"
+        );
+    }
+
+    #[test]
+    fn env_takes_each_pair_and_strips_one_pair_of_quotes() {
+        let read = Recipe::from_dockerfile(
+            "FROM alpine\nENV A=1 MESSAGE=\"hello world\" TZ='Asia/Seoul' B=\"\"x\"\"",
+        )
+        .unwrap();
+        assert_eq!(
+            read.steps,
+            [
+                Step::env("A", "1"),
+                Step::env("MESSAGE", "hello world"),
+                Step::env("TZ", "Asia/Seoul"),
+                Step::env("B", "\"x\""),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_a_build_would_not_follow_is_refused_at_its_line() {
+        for (content, why) in [
+            ("FROM a\nFROM b", "Dockerfile:2: a second FROM"),
+            ("FROM a AS build", "Dockerfile:1: a named stage"),
+            ("FROM a as build", "Dockerfile:1: a named stage"),
+            ("FROM", "Dockerfile:1: FROM names no image"),
+            ("RUN true\nFROM a", "Dockerfile:1: RUN before any FROM"),
+            ("FROM a\nENV", "Dockerfile:2: ENV names no variable"),
+            (
+                "FROM a\nENV JAVA_OPTS -Dfoo=bar",
+                "Dockerfile:2: ENV with a bare word (JAVA_OPTS)",
+            ),
+            (
+                "FROM a\nWORKDIR",
+                "Dockerfile:2: WORKDIR names no directory",
+            ),
+            (
+                "FROM a\nCMD [\"sh\"]",
+                "Dockerfile:2: CMD is not one of FROM, RUN, ENV and WORKDIR",
+            ),
+            // A continued instruction is at the line it starts on, and those after it count on.
+            (
+                "FROM a\nRUN a \\\n  b\nUSER me",
+                "Dockerfile:4: USER is not one of",
+            ),
+            ("# nothing\n", "this Dockerfile has no FROM"),
+        ] {
+            let refused = refused(content);
+            assert!(refused.starts_with(why), "{content:?}: {refused}");
+        }
+    }
+
+    #[test]
+    fn a_recipe_is_written_with_its_version_and_reads_back_as_it_was() {
+        let recipe = Recipe::new("alpine:3.20")
+            .step("true")
+            .step(Step::env("A", "1"))
+            .step(Step::workdir("/w"));
+        let written = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(
+            written,
+            json!({
+                "v": 1,
+                "base": "alpine:3.20",
+                "steps": [{"run": "true"}, {"env": {"key": "A", "value": "1"}}, {"workdir": "/w"}],
+            })
+        );
+        assert_eq!(serde_json::from_value::<Recipe>(written).unwrap(), recipe);
+    }
+
+    #[test]
+    fn a_recipe_of_another_version_or_none_is_refused() {
+        let other = serde_json::from_value::<Recipe>(json!({"v": 2, "base": "a", "steps": []}))
+            .unwrap_err()
+            .to_string();
+        assert!(other.contains("format 2"), "{other}");
+        let unversioned = serde_json::from_value::<Recipe>(json!({"base": "a", "steps": []}));
+        assert!(unversioned.is_err());
+    }
+
+    #[test]
+    fn a_recipe_with_an_empty_base_is_refused() {
+        let empty = serde_json::from_value::<Recipe>(json!({"v": 1, "base": "", "steps": []}))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("names no base"), "{empty}");
+    }
+
+    #[test]
+    fn a_step_shows_as_its_dockerfile_instruction() {
+        assert_eq!(Step::run("apk add jq").to_string(), "RUN apk add jq");
+        assert_eq!(Step::env("TZ", "UTC").to_string(), "ENV TZ=UTC");
+        assert_eq!(Step::workdir("/work").to_string(), "WORKDIR /work");
+        assert_eq!(Step::from(String::from("true")), Step::run("true"));
+    }
+}

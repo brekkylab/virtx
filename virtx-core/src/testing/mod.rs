@@ -4,8 +4,9 @@
 //!
 //! It starts with the image `alpine:3.20`, the volume `v`, the snapshot `s`, and the snapshot
 //! `locked`, held by the sandbox `holder`, so its files answer `423` to everything. Each volume
-//! and snapshot is a filesystem of its own. An image is a config and a layer of a few bytes, not
-//! one anything boots: its digest is of those bytes.
+//! and snapshot is a filesystem of its own, whose requests are answered one at a time, each once
+//! its body has all arrived, so a write lands whole. An image is a config and a layer of a few
+//! bytes, not one anything boots: its digest is of those bytes.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
@@ -217,6 +218,8 @@ struct Data {
     volumes: BTreeMap<String, (DavHandler, BTreeMap<String, VolumeMountListOutputItem>)>,
     sandboxes: BTreeMap<String, SandboxState>,
     image_jobs: BTreeMap<String, Arc<ImageJobState>>,
+    /// Held while a request to any volume's or snapshot's files is answered.
+    files: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Data {
@@ -725,17 +728,37 @@ fn root_name(request: &axum::extract::Request) -> String {
         .into_owned()
 }
 
+/// Answers `request` from `dav` once its body has all arrived, and whole, while `files` is held:
+/// a write lands whole or not at all, its `If-Match` checked against what it writes over, and a
+/// read is of what one write left.
+async fn answer_files(
+    dav: DavHandler,
+    files: Arc<tokio::sync::Mutex<()>>,
+    request: axum::extract::Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let _held = files.lock().await;
+    let request = http::Request::from_parts(parts, axum::body::Body::from(body));
+    let (parts, body) = dav.handle(request).await.into_parts();
+    match axum::body::to_bytes(axum::body::Body::new(body), usize::MAX).await {
+        Ok(body) => Response::from_parts(parts, axum::body::Body::from(body)),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// Answers a request under `/volumes/{name}/files/` from that volume's filesystem.
 async fn volume_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
     let name = root_name(&request);
-    let dav = shared
-        .lock()
-        .unwrap()
-        .volumes
-        .get(&name)
-        .map(|(dav, _)| dav.clone());
+    let (dav, files) = {
+        let data = shared.lock().unwrap();
+        let dav = data.volumes.get(&name).map(|(dav, _)| dav.clone());
+        (dav, Arc::clone(&data.files))
+    };
     match dav {
-        Some(dav) => dav.handle(request).await.map(axum::body::Body::new),
+        Some(dav) => answer_files(dav, files, request).await,
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -744,15 +767,15 @@ async fn volume_files(State(shared): State<Shared>, request: axum::extract::Requ
 /// `423` while a sandbox holds it.
 async fn snapshot_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
     let name = root_name(&request);
-    let dav = {
+    let (dav, files) = {
         let data = shared.lock().unwrap();
         if data.in_use(&name) {
             return StatusCode::LOCKED.into_response();
         }
-        data.snapshots.get(&name).cloned()
+        (data.snapshots.get(&name).cloned(), Arc::clone(&data.files))
     };
     match dav {
-        Some(dav) => dav.handle(request).await.map(axum::body::Body::new),
+        Some(dav) => answer_files(dav, files, request).await,
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }

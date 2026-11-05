@@ -1,5 +1,6 @@
-//! One sandbox, several clients: what one makes, starts or removes there the others see as it
-//! is, and a client leaving takes nothing from them.
+//! One server, several clients: what one makes, starts or removes in a sandbox the others see
+//! as it is, a client leaving takes nothing from them, and their writes to one file at once
+//! each land whole or not at all.
 //!
 //! The clients have the same credentials, none against the test server and `VIRTX_E2E_TOKEN`
 //! against the one at the URL: what is shared here is shared by right. Whether a client with
@@ -7,10 +8,13 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
-use virtx_core::{LogEntry, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
+use virtx_core::{
+    Client, Error, FileRoot, LogEntry, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
+};
 
-use crate::harness::{ALPINE, Run, end, exec, refused, sandbox, sandbox_log, sleep};
+use crate::harness::{ALPINE, Made, Run, end, exec, refused, sandbox, sandbox_log, sleep, unique};
 
 scenarios![shared:
     Shared a_sandbox_one_client_made_another_uses,
@@ -19,7 +23,73 @@ scenarios![shared:
     Shared a_sandbox_one_client_removes_is_gone_for_the_other,
     Shared of_two_removals_at_once_one_takes_the_sandbox,
     Shared a_client_leaving_leaves_its_sandbox_to_the_other,
+    Shared writes_of_one_file_at_once_each_land_whole,
+    Shared of_two_writes_over_one_etag_one_lands,
 ];
+
+/// A volume of the scenario's own, by name, and its files' root.
+async fn volume(run: &Run, client: &Client) -> (String, FileRoot) {
+    let name = unique("volume");
+    run.made(Made::Volume(name.clone()));
+    client.create_volume(Some(&name)).await.unwrap();
+    (name.clone(), FileRoot::Volume(name))
+}
+
+/// `len` bytes of `byte`: large enough a body arrives in parts, which a server that writes
+/// each as it comes mixes with another's.
+fn filled(byte: u8, len: usize) -> Bytes {
+    Bytes::from(vec![byte; len])
+}
+
+async fn writes_of_one_file_at_once_each_land_whole(run: Run) {
+    let [a, b] = run.clients().await;
+    let (name, root) = volume(&run, &a).await;
+    let (from_a, from_b) = (filled(b'a', 4 << 20), filled(b'b', 4 << 20));
+    for round in 0..5 {
+        let (by_a, by_b) = tokio::join!(
+            a.write_file(&root, "both", from_a.clone(), None),
+            b.write_file(&root, "both", from_b.clone(), None),
+        );
+        by_a.unwrap();
+        by_b.unwrap();
+        let read = b.read_file(&root, "both", 0, None).await.unwrap();
+        assert!(
+            read == from_a || read == from_b,
+            "round {round}: {} bytes, of both writes",
+            read.len()
+        );
+    }
+    a.remove_volume(&name).await.unwrap();
+    a.close().await;
+    b.close().await;
+}
+
+async fn of_two_writes_over_one_etag_one_lands(run: Run) {
+    let [a, b] = run.clients().await;
+    let (name, root) = volume(&run, &a).await;
+    let (from_a, from_b) = (filled(b'a', 1 << 20), filled(b'b', 1 << 20));
+    for round in 0..20 {
+        a.write_file(&root, "read", format!("round {round}"), None)
+            .await
+            .unwrap();
+        let etag = b.stat_file(&root, "read").await.unwrap().etag;
+        let etag = etag.expect("a file's etag");
+        let (by_a, by_b) = tokio::join!(
+            a.write_file(&root, "read", from_a.clone(), Some(&etag)),
+            b.write_file(&root, "read", from_b.clone(), Some(&etag)),
+        );
+        let landed = match (by_a, by_b) {
+            (Ok(()), Err(Error::Status(412, _))) => &from_a,
+            (Err(Error::Status(412, _)), Ok(())) => &from_b,
+            (by_a, by_b) => panic!("round {round}, over one etag: {by_a:?} and {by_b:?}"),
+        };
+        let read = a.read_file(&root, "read", 0, None).await.unwrap();
+        assert!(read == *landed, "round {round}: not the write that landed");
+    }
+    a.remove_volume(&name).await.unwrap();
+    a.close().await;
+    b.close().await;
+}
 
 async fn a_sandbox_one_client_made_another_uses(run: Run) {
     let [maker, user] = run.clients().await;

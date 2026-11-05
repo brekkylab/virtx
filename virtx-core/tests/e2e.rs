@@ -8,6 +8,12 @@
 //! only the scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves to the
 //! server, run no command but `echo`, `cat` and `sleep`, and name what they make uniquely.
 //!
+//! Against another server, what a scenario made is removed once it ends, passed or not, and a
+//! `sleep` it started is killed at its timeout if it is not. Each name it removes is its own,
+//! `e2e-...`; the one thing it changes that is not is the tag `alpine:3.20`, which a pull moves
+//! to what its registry has now. A prune deletes every image nothing holds, so the scenario that
+//! prunes runs against another server only with `VIRTX_E2E_ALLOW_PRUNE=1`.
+//!
 //! Without libtest's harness, which writes its own lines to stdout: over stdio, stdout is the
 //! server's HTTP/2 connection and nothing else. An argument runs the scenarios whose names hold
 //! it.
@@ -19,6 +25,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     process::ExitCode,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -28,7 +35,7 @@ use hyper::service::Service as _;
 use hyper_util::service::TowerToHyperService;
 use virtx_core::{
     Auth, Client, Error, Event, FileRoot, ImageJobEnd, ImageJobEntry, LogEntry, MountSource,
-    MountType, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd,
+    MountType, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd,
     SandboxJobEntry, SandboxVolume, Step, VolumeMountListOutputItem, serve_stdio,
     testing::{LOG_LIMIT, router},
 };
@@ -105,6 +112,67 @@ impl Server {
     }
 }
 
+/// What a scenario made on the server, to remove once it ends.
+enum Made {
+    Sandbox(String),
+    Volume(String),
+    Snapshot(String),
+    Tag(String),
+}
+
+/// One scenario's server, and what the scenario has made there.
+#[derive(Clone)]
+struct Run {
+    server: Server,
+    made: Arc<Mutex<Vec<Made>>>,
+}
+
+impl Run {
+    async fn client(&self) -> Client {
+        self.server.client().await
+    }
+
+    fn is_test(&self) -> bool {
+        self.server.is_test()
+    }
+
+    /// Keep `made` to remove once the scenario ends. A name is the scenario's own, from
+    /// [`unique`], so what is removed is never what was there before it.
+    fn made(&self, made: Made) {
+        if let Made::Volume(name) | Made::Snapshot(name) | Made::Tag(name) = &made {
+            assert!(name.starts_with("e2e-"), "{name} is not a scenario's own");
+        }
+        self.made.lock().unwrap().push(made);
+    }
+
+    async fn create_sandbox(&self, client: &Client, args: &SandboxCreateArgs) -> Sandbox {
+        let sandbox = client.create_sandbox(args).await.unwrap();
+        self.made(Made::Sandbox(sandbox.id.clone()));
+        sandbox
+    }
+
+    /// Remove what the scenario made and did not remove, whether it passed or not: sandboxes
+    /// first, since each holds its snapshot and the volumes it mounts. What is gone already
+    /// is passed over.
+    async fn clean(&self, client: &Client) {
+        let mut made = std::mem::take(&mut *self.made.lock().unwrap());
+        made.sort_by_key(|made| match made {
+            Made::Sandbox(_) => 0,
+            Made::Volume(_) => 1,
+            Made::Snapshot(_) => 2,
+            Made::Tag(_) => 3,
+        });
+        for made in made {
+            let _ = match &made {
+                Made::Sandbox(id) => client.remove_sandbox(id).await,
+                Made::Volume(name) => client.remove_volume(name).await,
+                Made::Snapshot(name) => client.remove_snapshot(name).await,
+                Made::Tag(reference) => client.remove_image(reference).await,
+            };
+        }
+    }
+}
+
 /// A name no other scenario, or run, gives: `e2e-<what>-<8 hex digits>`.
 fn unique(what: &str) -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -155,7 +223,8 @@ async fn alpine(client: &Client) -> String {
 
 /// `reference` built from [`ALPINE`] with a step of its own, so its image is no other's, and
 /// its digest.
-async fn build(client: &Client, reference: &str) -> String {
+async fn build(run: &Run, client: &Client, reference: &str) -> String {
+    run.made(Made::Tag(reference.into()));
     let recipe = Recipe::new(ALPINE).step(Step::run(format!("echo {reference} > /built")));
     let job = client.build_image(recipe, reference).await.unwrap();
     image_digest(client, &job.id).await
@@ -181,6 +250,14 @@ fn exec(cmd: &[&str]) -> SandboxExecArgs {
     SandboxExecArgs::new(cmd.iter().copied())
 }
 
+/// A `sleep` that outlives no scenario: killed at its timeout if the scenario dies first.
+fn sleep() -> SandboxExecArgs {
+    SandboxExecArgs {
+        timeout_ms: Some(120_000),
+        ..exec(&["sleep", "1000"])
+    }
+}
+
 /// The entries of the job `job`'s log in `sandbox`, to its end.
 async fn sandbox_log(client: &Client, sandbox: &str, job: &str) -> Vec<SandboxJobEntry> {
     client
@@ -196,13 +273,13 @@ fn end(code: i32) -> SandboxJobEntry {
 }
 
 /// A sandbox made from `args`, of [`ALPINE`] pulled first.
-async fn sandbox(client: &Client, args: SandboxCreateArgs) -> String {
+async fn sandbox(run: &Run, client: &Client, args: SandboxCreateArgs) -> String {
     alpine(client).await;
-    client.create_sandbox(&args).await.unwrap().id
+    run.create_sandbox(client, &args).await.id
 }
 
-async fn a_pull_ends_with_the_digest_its_reference_points_at(server: Server) {
-    let client = server.client().await;
+async fn a_pull_ends_with_the_digest_its_reference_points_at(run: Run) {
+    let client = run.client().await;
     let job = client.pull_image(ALPINE, None).await.unwrap();
     let digest = image_end(&client, &job.id).await.digest.expect("pulled");
     let read = client.get_image_job(&job.id).await.unwrap();
@@ -212,23 +289,22 @@ async fn a_pull_ends_with_the_digest_its_reference_points_at(server: Server) {
     client.close().await;
 }
 
-async fn a_build_points_its_reference_at_what_it_built(server: Server) {
-    let client = server.client().await;
+async fn a_build_points_its_reference_at_what_it_built(run: Run) {
+    let client = run.client().await;
     let reference = format!("{}:latest", unique("build"));
-    let digest = build(&client, &reference).await;
+    let digest = build(&run, &client, &reference).await;
     assert_eq!(tags(&client).await.get(&reference), Some(&digest));
     client.remove_image(&reference).await.unwrap();
     client.close().await;
 }
 
-async fn a_sandbox_boots_the_image_a_build_tagged(server: Server) {
-    let client = server.client().await;
+async fn a_sandbox_boots_the_image_a_build_tagged(run: Run) {
+    let client = run.client().await;
     let reference = format!("{}:latest", unique("boot"));
-    let digest = build(&client, &reference).await;
-    let sandbox = client
-        .create_sandbox(&SandboxCreateArgs::new(reference.as_str()))
-        .await
-        .unwrap();
+    let digest = build(&run, &client, &reference).await;
+    let sandbox = run
+        .create_sandbox(&client, &SandboxCreateArgs::new(reference.as_str()))
+        .await;
     assert_eq!(sandbox.image, digest);
     let job = client
         .exec_sandbox(&sandbox.id, &exec(&["echo", "hi"]))
@@ -243,20 +319,24 @@ async fn a_sandbox_boots_the_image_a_build_tagged(server: Server) {
     client.close().await;
 }
 
-async fn a_sandbox_of_an_image_not_there_is_refused(server: Server) {
-    let client = server.client().await;
+async fn a_sandbox_of_an_image_not_there_is_refused(run: Run) {
+    let client = run.client().await;
     let missing = format!("{}:latest", unique("missing"));
     let made = client
         .create_sandbox(&SandboxCreateArgs::new(missing.as_str()))
         .await;
+    if let Ok(sandbox) = &made {
+        run.made(Made::Sandbox(sandbox.id.clone()));
+    }
     assert_eq!(refused(made), (404, "not_found".into()));
     client.close().await;
 }
 
-async fn an_image_downloaded_uploads_back_as_it_was(server: Server) {
-    let client = server.client().await;
+async fn an_image_downloaded_uploads_back_as_it_was(run: Run) {
+    let client = run.client().await;
     let digest = alpine(&client).await;
     let reference = format!("{}:copy", unique("copy"));
+    run.made(Made::Tag(reference.clone()));
     client.tag_image(ALPINE, &reference).await.unwrap();
     let path = temporary("image.tar");
 
@@ -274,11 +354,13 @@ async fn an_image_downloaded_uploads_back_as_it_was(server: Server) {
     client.close().await;
 }
 
-async fn untagging_takes_that_tag_alone(server: Server) {
-    let client = server.client().await;
+async fn untagging_takes_that_tag_alone(run: Run) {
+    let client = run.client().await;
     let digest = alpine(&client).await;
     let name = unique("tag");
     let (kept, untagged) = (format!("{name}:kept"), format!("{name}:untagged"));
+    run.made(Made::Tag(kept.clone()));
+    run.made(Made::Tag(untagged.clone()));
     client.tag_image(ALPINE, &kept).await.unwrap();
     client.tag_image(ALPINE, &untagged).await.unwrap();
 
@@ -291,19 +373,18 @@ async fn untagging_takes_that_tag_alone(server: Server) {
     client.close().await;
 }
 
-async fn a_prune_keeps_what_a_tag_or_a_sandbox_holds(server: Server) {
-    let client = server.client().await;
+async fn a_prune_keeps_what_a_tag_or_a_sandbox_holds(run: Run) {
+    let client = run.client().await;
     let alpine = alpine(&client).await;
     let (loose, booted) = (
         format!("{}:latest", unique("loose")),
         format!("{}:latest", unique("booted")),
     );
-    let loose_digest = build(&client, &loose).await;
-    let booted_digest = build(&client, &booted).await;
-    let sandbox = client
-        .create_sandbox(&SandboxCreateArgs::new(booted.as_str()))
-        .await
-        .unwrap();
+    let loose_digest = build(&run, &client, &loose).await;
+    let booted_digest = build(&run, &client, &booted).await;
+    let sandbox = run
+        .create_sandbox(&client, &SandboxCreateArgs::new(booted.as_str()))
+        .await;
     client.untag_image(&loose).await.unwrap();
     client.untag_image(&booted).await.unwrap();
 
@@ -312,13 +393,13 @@ async fn a_prune_keeps_what_a_tag_or_a_sandbox_holds(server: Server) {
     assert!(!pruned.images.contains(&booted_digest), "{pruned:?}");
     // A server may leave what is too new to tell from what a job will tag: only the test
     // server is sure to take it now.
-    if server.is_test() {
+    if run.is_test() {
         assert!(pruned.images.contains(&loose_digest), "{pruned:?}");
         assert!(pruned.reclaimed > 0);
     }
 
     client.remove_sandbox(&sandbox.id).await.unwrap();
-    if server.is_test() {
+    if run.is_test() {
         let pruned = client.prune_image().await.unwrap();
         assert_eq!(pruned.images, [booted_digest]);
     }
@@ -326,8 +407,8 @@ async fn a_prune_keeps_what_a_tag_or_a_sandbox_holds(server: Server) {
     client.close().await;
 }
 
-async fn a_push_ends_with_the_digest_it_sent_and_shows_no_credentials(server: Server) {
-    let client = server.client().await;
+async fn a_push_ends_with_the_digest_it_sent_and_shows_no_credentials(run: Run) {
+    let client = run.client().await;
     let digest = alpine(&client).await;
     let auth = RegistryAuth::Bearer {
         token: "e2e-secret".into(),
@@ -354,12 +435,14 @@ async fn a_push_ends_with_the_digest_it_sent_and_shows_no_credentials(server: Se
     client.close().await;
 }
 
-async fn a_sandbox_holds_its_snapshot_until_it_is_removed(server: Server) {
-    let client = server.client().await;
+async fn a_sandbox_holds_its_snapshot_until_it_is_removed(run: Run) {
+    let client = run.client().await;
     let name = unique("snapshot");
+    run.made(Made::Snapshot(name.clone()));
     let snapshot = client.create_snapshot(Some(&name), None).await.unwrap();
     assert!(!snapshot.in_use);
     let id = sandbox(
+        &run,
         &client,
         SandboxCreateArgs {
             snapshot: Some(name.clone()),
@@ -386,9 +469,10 @@ async fn a_sandbox_holds_its_snapshot_until_it_is_removed(server: Server) {
     client.close().await;
 }
 
-async fn a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed(server: Server) {
-    let client = server.client().await;
+async fn a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed(run: Run) {
+    let client = run.client().await;
     let volume = unique("volume");
+    run.made(Made::Volume(volume.clone()));
     client.create_volume(Some(&volume)).await.unwrap();
     let root = FileRoot::Volume(volume.clone());
     client
@@ -406,10 +490,15 @@ async fn a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed(server: Serve
         ..SandboxCreateArgs::new(ALPINE)
     };
     alpine(&client).await;
-    let (status, _) = refused(client.create_sandbox(&twice).await);
+    let made = client.create_sandbox(&twice).await;
+    if let Ok(sandbox) = &made {
+        run.made(Made::Sandbox(sandbox.id.clone()));
+    }
+    let (status, _) = refused(made);
     assert!((400..500).contains(&status), "{status}");
 
     let id = sandbox(
+        &run,
         &client,
         SandboxCreateArgs {
             volumes: vec![mount("/data")],
@@ -428,9 +517,9 @@ async fn a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed(server: Serve
     client.close().await;
 }
 
-async fn a_process_writes_its_output_then_ends(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn a_process_writes_its_output_then_ends(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let job = client
         .exec_sandbox(&id, &exec(&["echo", "a", "b"]))
         .await
@@ -447,9 +536,9 @@ async fn a_process_writes_its_output_then_ends(server: Server) {
     client.close().await;
 }
 
-async fn stdin_written_comes_back_until_it_is_closed(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn stdin_written_comes_back_until_it_is_closed(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let args = SandboxExecArgs {
         stdin: true,
         ..exec(&["cat"])
@@ -479,10 +568,10 @@ async fn stdin_written_comes_back_until_it_is_closed(server: Server) {
     client.close().await;
 }
 
-async fn a_signal_a_timeout_or_a_removal_ends_a_process(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
-    let sleep = exec(&["sleep", "1000"]);
+async fn a_signal_a_timeout_or_a_removal_ends_a_process(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
+    let sleep = sleep();
 
     let signalled = client.exec_sandbox(&id, &sleep).await.unwrap();
     client
@@ -514,10 +603,10 @@ async fn a_signal_a_timeout_or_a_removal_ends_a_process(server: Server) {
     client.close().await;
 }
 
-async fn processes_in_a_sandbox_run_side_by_side(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
-    let sleep = exec(&["sleep", "1000"]);
+async fn processes_in_a_sandbox_run_side_by_side(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
+    let sleep = sleep();
     let first = client.exec_sandbox(&id, &sleep).await.unwrap();
     let second = client.exec_sandbox(&id, &sleep).await.unwrap();
     let echo = client
@@ -545,9 +634,9 @@ async fn processes_in_a_sandbox_run_side_by_side(server: Server) {
     client.close().await;
 }
 
-async fn a_log_read_again_starts_after_the_entry_it_names(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn a_log_read_again_starts_after_the_entry_it_names(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let job = client
         .exec_sandbox(&id, &exec(&["echo", "hi"]))
         .await
@@ -568,9 +657,9 @@ async fn a_log_read_again_starts_after_the_entry_it_names(server: Server) {
     client.close().await;
 }
 
-async fn a_command_that_cannot_start_makes_no_job(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn a_command_that_cannot_start_makes_no_job(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let started = client
         .exec_sandbox(&id, &exec(&["e2e-no-such-command"]))
         .await;
@@ -580,13 +669,10 @@ async fn a_command_that_cannot_start_makes_no_job(server: Server) {
     client.close().await;
 }
 
-async fn removing_a_sandbox_ends_its_jobs_and_the_logs_read(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
-    let job = client
-        .exec_sandbox(&id, &exec(&["sleep", "1000"]))
-        .await
-        .unwrap();
+async fn removing_a_sandbox_ends_its_jobs_and_the_logs_read(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
+    let job = client.exec_sandbox(&id, &sleep()).await.unwrap();
     // The log is being read when the sandbox goes: its stream ends, whatever it ends with.
     let reading = client
         .sandbox_job_log(&id, &job.id, None)
@@ -602,17 +688,17 @@ async fn removing_a_sandbox_ends_its_jobs_and_the_logs_read(server: Server) {
     client.close().await;
 }
 
-async fn closing_the_client_ends_its_server(server: Server) {
-    let client = server.client().await;
-    sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn closing_the_client_ends_its_server(run: Run) {
+    let client = run.client().await;
+    sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let started = Instant::now();
     client.close().await;
     // The server exits once its stdin closes, well before it would be killed.
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-async fn a_cancelled_image_job_changes_no_tag(server: Server) {
-    let client = server.client().await;
+async fn a_cancelled_image_job_changes_no_tag(run: Run) {
+    let client = run.client().await;
     let before = tags(&client).await;
     let job = client.pull_image("hang", None).await.unwrap();
     assert!(job.running);
@@ -622,9 +708,9 @@ async fn a_cancelled_image_job_changes_no_tag(server: Server) {
     client.close().await;
 }
 
-async fn a_log_past_the_limit_is_truncated_but_keeps_its_end(server: Server) {
-    let client = server.client().await;
-    let id = sandbox(&client, SandboxCreateArgs::new(ALPINE)).await;
+async fn a_log_past_the_limit_is_truncated_but_keeps_its_end(run: Run) {
+    let client = run.client().await;
+    let id = sandbox(&run, &client, SandboxCreateArgs::new(ALPINE)).await;
     let job = client
         .exec_sandbox(&id, &exec(&["lines", "20"]))
         .await
@@ -636,9 +722,10 @@ async fn a_log_past_the_limit_is_truncated_but_keeps_its_end(server: Server) {
     client.close().await;
 }
 
-async fn a_mount_shows_its_type_and_not_its_credentials(server: Server) {
-    let client = server.client().await;
+async fn a_mount_shows_its_type_and_not_its_credentials(run: Run) {
+    let client = run.client().await;
     let volume = unique("mounted");
+    run.made(Made::Volume(volume.clone()));
     client.create_volume(Some(&volume)).await.unwrap();
     let source = || MountSource::Notion {
         api_key: "e2e-secret".into(),
@@ -678,16 +765,19 @@ enum Needs {
     Test,
     /// A server process of its own.
     Spawned,
+    /// The test server, or one `VIRTX_E2E_ALLOW_PRUNE=1` lets it prune: a prune deletes every
+    /// image nothing holds, not only the scenario's.
+    Prune,
 }
 
-type Scenario = fn(Server) -> Pin<Box<dyn Future<Output = ()>>>;
+type Scenario = fn(Run) -> Pin<Box<dyn Future<Output = ()>>>;
 
 macro_rules! scenarios {
     ($($needs:ident $scenario:ident),* $(,)?) => {
         [$((
             stringify!($scenario),
             Needs::$needs,
-            (|server| -> Pin<Box<dyn Future<Output = ()>>> { Box::pin($scenario(server)) })
+            (|run| -> Pin<Box<dyn Future<Output = ()>>> { Box::pin($scenario(run)) })
                 as Scenario,
         )),*]
     };
@@ -720,7 +810,7 @@ fn main() -> ExitCode {
         Any a_sandbox_of_an_image_not_there_is_refused,
         Any an_image_downloaded_uploads_back_as_it_was,
         Any untagging_takes_that_tag_alone,
-        Any a_prune_keeps_what_a_tag_or_a_sandbox_holds,
+        Prune a_prune_keeps_what_a_tag_or_a_sandbox_holds,
         Any a_sandbox_holds_its_snapshot_until_it_is_removed,
         Any a_sandbox_holds_the_volumes_it_mounts_until_it_is_removed,
         Any a_process_writes_its_output_then_ends,
@@ -737,6 +827,7 @@ fn main() -> ExitCode {
         Test a_mount_shows_its_type_and_not_its_credentials,
     ];
 
+    let prune = std::env::var("VIRTX_E2E_ALLOW_PRUNE").is_ok_and(|v| v == "1");
     let (mut passed, mut ignored, mut failed) = (0, 0, Vec::new());
     for (name, needs, scenario) in scenarios {
         if !filters.is_empty() && !filters.iter().any(|f| name.contains(f.as_str())) {
@@ -746,16 +837,33 @@ fn main() -> ExitCode {
             Needs::Any => true,
             Needs::Test => server.is_test(),
             Needs::Spawned => server.is_spawned(),
+            Needs::Prune => server.is_test() || prune,
         };
         if !runs {
             eprintln!("test {name} ... ignored");
             ignored += 1;
             continue;
         }
-        let server = server.clone();
+        let run = Run {
+            server: server.clone(),
+            made: Arc::default(),
+        };
         let ran = panic::catch_unwind(AssertUnwindSafe(|| {
-            runtime.block_on(async { tokio::time::timeout(limit, scenario(server)).await })
+            runtime.block_on(async { tokio::time::timeout(limit, scenario(run.clone())).await })
         }));
+        // The test server's state goes with its process; another server keeps what it is left.
+        if !server.is_test() {
+            let cleaned = panic::catch_unwind(AssertUnwindSafe(|| {
+                runtime.block_on(async {
+                    let client = run.client().await;
+                    tokio::time::timeout(limit, run.clean(&client)).await.ok();
+                    client.close().await;
+                })
+            }));
+            if cleaned.is_err() {
+                eprintln!("test {name}: what it made could not all be removed");
+            }
+        }
         match ran {
             Ok(Ok(())) => {
                 eprintln!("test {name} ... ok");

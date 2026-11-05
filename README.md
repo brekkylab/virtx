@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
-    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
   </picture>
 </p>
 

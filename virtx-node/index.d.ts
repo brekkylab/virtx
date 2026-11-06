@@ -130,16 +130,18 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-export interface SnapshotListOutputItem {
+/** What the server answers about a snapshot. */
+export interface SnapshotInfo {
   name: string
   size: number
-  /** Whether a sandbox holds it now, from its `createSandbox` until its `removeSandbox`. */
+  /** Whether a sandbox held it when it was answered, from its `createSandbox` until its `removeSandbox`. */
   inUse: boolean
 }
 
-export interface VolumeListOutputItem {
+/** What the server answers about a volume. */
+export interface VolumeInfo {
   name: string
-  /** The bytes the volume's files take on the server. */
+  /** The bytes the volume's files took on the server when it was answered. */
   size: number
 }
 
@@ -199,15 +201,100 @@ export interface DirEntry {
   metadata: Metadata
 }
 
-export interface Sandbox {
+/**
+ * The files of a `Volume`, a `Snapshot` or a `Sandbox`: each request the client's of the same name,
+ * at its `root`, with a path relative to it as `dir/file.txt`.
+ */
+export class Files {
+  protected constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  /** Whose files they are, for the client's files requests. */
+  readonly root: FileRoot
+  statFile(path: string): Promise<Metadata>
+  exists(path: string): Promise<boolean>
+  isFile(path: string): Promise<boolean>
+  isDir(path: string): Promise<boolean>
+  readDir(path: string): Promise<DirEntry[]>
+  /** The file at `path`, from `offset`, `length` bytes of it or all that is left. */
+  readFile(path: string, offset?: number, length?: number): Promise<Buffer>
+  readText(path: string): Promise<string>
+  writeFile(path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
+  createDir(path: string): Promise<void>
+  createDirAll(path: string): Promise<void>
+  removeFile(path: string, missingOk?: boolean): Promise<void>
+  renameFile(from: string, to: string, overwrite?: boolean): Promise<void>
+  copyFile(from: string, to: string, overwrite?: boolean): Promise<void>
+}
+
+/**
+ * A volume the server holds, as making it or asking for it answered, and the client that reaches
+ * it: its files and the mounts in it. Dropping it leaves the volume; `remove` removes it.
+ */
+export class Volume extends Files implements VolumeInfo {
+  private constructor()
+  name: string
+  size: number
+  readonly root: { volume: string }
+  /** The mounts in it, without their credentials. */
+  mounts(): Promise<VolumeMountListOutputItem[]>
+  /** Mount `source` at `path` in it, a directory the mount creates. */
+  mount(path: string, source: MountSource): Promise<VolumeMountListOutputItem>
+  /** Take away the mount at `path`, leaving its source as it is. */
+  unmount(path: string): Promise<void>
+  /** Delete it and everything in it. */
+  remove(): Promise<void>
+}
+
+/**
+ * A snapshot the server holds, as making it or asking for it answered, and the client that
+ * reaches it: its files, refused with a `423` while a sandbox holds it. Dropping it leaves the
+ * snapshot; `remove` removes it.
+ */
+export class Snapshot extends Files implements SnapshotInfo {
+  private constructor()
+  name: string
+  size: number
+  inUse: boolean
+  readonly root: { snapshot: string }
+  /** Delete it and its upper layer; refused with a `409` while a sandbox holds it. */
+  remove(): Promise<void>
+}
+
+/** What the server answers about a sandbox. */
+export interface SandboxInfo {
   id: string
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
-  /** Whether its VM is up now. */
+  /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
+}
+
+/**
+ * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
+ * it, to run processes in it and read and write its files. Dropping it leaves the sandbox; `remove`
+ * removes it.
+ */
+export class Sandbox extends Files implements SandboxInfo {
+  private constructor()
+  id: string
+  image: string
+  snapshot?: string
+  running: boolean
+  ports?: SandboxPort[]
+  /** Its files, its root as its processes see it, as `etc/hostname`. */
+  readonly root: { sandbox: string }
+  /** Start `cmd` in it, as `Client.execSandbox` does. */
+  exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
+  /** Every job in it. */
+  jobs(): Promise<SandboxJob[]>
+  /** The job `id` in it. */
+  job(id: string): Promise<SandboxJob>
+  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  remove(): Promise<void>
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */
@@ -218,7 +305,8 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  snapshot?: string
+  /** The snapshot it stands on, or its name. */
+  snapshot?: string | Snapshot
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -226,7 +314,8 @@ export interface SandboxCreateOptions {
   memoryMib?: number
   gpu?: boolean
   gpuMemoryMib?: number
-  volumes?: { volume: string; path: string; readonly?: boolean }[]
+  /** Each volume, or its name, and where it is mounted. */
+  volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
 }
 
 export interface SandboxExecOptions {
@@ -236,8 +325,8 @@ export interface SandboxExecOptions {
   timeoutMs?: number
 }
 
-/** A process started in a sandbox. */
-export interface SandboxJob {
+/** What the server answers about a process started in a sandbox. */
+export interface SandboxJobInfo {
   id: string
   kind: 'exec'
   pid: number
@@ -245,6 +334,35 @@ export interface SandboxJob {
   running: boolean
   /** Its exit code, once it has ended. */
   code?: number
+}
+
+/**
+ * A process started in a sandbox, as starting it or asking for it answered, and the client and
+ * sandbox that reach it: what signals it, writes to its stdin and reads its log. Dropping it
+ * leaves the job; `remove` removes it.
+ */
+export class SandboxJob implements SandboxJobInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  /** The id of the sandbox it runs in. */
+  readonly sandboxId: string
+  id: string
+  kind: 'exec'
+  pid: number
+  cmd: string[]
+  running: boolean
+  code?: number
+  /** It as the server has it now. */
+  get(): Promise<SandboxJob>
+  /** Send `signal`, a name such as `'SIGTERM'`, to its process and every one it started. */
+  signal(signal: string): Promise<void>
+  /** Write `data` to its stdin, then close it if `eof`; resolves once it is written. */
+  writeStdin(data?: string, eof?: boolean): Promise<void>
+  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  log(after?: number): AsyncGenerator<SandboxJobEntry>
+  /** Cancel it if it runs, killing its process, and forget it. */
+  remove(): Promise<void>
 }
 
 /** An entry of a sandbox job's log, numbered by `id`; `end` is the last. */
@@ -336,15 +454,15 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<SnapshotListOutputItem[]>
+  listSnapshot(): Promise<Snapshot[]>
   /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<SnapshotListOutputItem>
-  getSnapshot(name: string): Promise<SnapshotListOutputItem>
+  createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
+  getSnapshot(name: string): Promise<Snapshot>
   removeSnapshot(name: string): Promise<void>
-  listVolume(): Promise<VolumeListOutputItem[]>
+  listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
-  createVolume(name?: string): Promise<VolumeListOutputItem>
-  getVolume(name: string): Promise<VolumeListOutputItem>
+  createVolume(name?: string): Promise<Volume>
+  getVolume(name: string): Promise<Volume>
   removeVolume(name: string): Promise<void>
   listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
   createVolumeMount(volume: string, path: string, source: MountSource): Promise<VolumeMountListOutputItem>

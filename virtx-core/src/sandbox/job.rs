@@ -52,13 +52,26 @@ pub struct SandboxExecArgs {
 }
 
 impl SandboxExecArgs {
-    /// `cmd`, with an empty stdin and no limit.
+    /// `cmd`, with an empty stdin and no limit; [`stdin`](Self::stdin) and
+    /// [`timeout_ms`](Self::timeout_ms) chain after it.
     pub fn new(cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             cmd: cmd.into_iter().map(Into::into).collect(),
             stdin: false,
             timeout_ms: None,
         }
+    }
+
+    /// Whether the client writes to its stdin.
+    pub fn stdin(mut self, stdin: bool) -> Self {
+        self.stdin = stdin;
+        self
+    }
+
+    /// Kill it after `ms` milliseconds.
+    pub fn timeout_ms(mut self, ms: u64) -> Self {
+        self.timeout_ms = Some(ms);
+        self
     }
 }
 
@@ -140,5 +153,11 @@ mod tests {
     fn an_exec_says_only_what_it_asked_for() {
         let value = serde_json::to_value(SandboxExecArgs::new(["true"])).unwrap();
         assert_eq!(value, json!({"cmd": ["true"]}));
+        let value =
+            serde_json::to_value(SandboxExecArgs::new(["cat"]).stdin(true).timeout_ms(5)).unwrap();
+        assert_eq!(
+            value,
+            json!({"cmd": ["cat"], "stdin": true, "timeout_ms": 5})
+        );
     }
 }

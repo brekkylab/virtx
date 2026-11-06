@@ -13,13 +13,14 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
     ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
     ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountListOutputItem,
+    MountSource, Recipe, RegistryAuth, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SnapshotCreateArgs,
+    SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
+    VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error,
+    Error, Sandbox, SandboxJob, Snapshot, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -342,9 +343,16 @@ impl Client {
     }
 
     /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<SnapshotListOutputItem>> {
-        Call::new(self.api, unsafe {
+    pub fn list_snapshot(&self) -> Call<Vec<Snapshot>> {
+        let client = self.clone();
+        let call: Call<Vec<SnapshotInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_snapshot)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Snapshot::new(client.clone(), info))
+                .collect()
         })
     }
 
@@ -354,18 +362,27 @@ impl Client {
         &self,
         name: Option<impl Into<String>>,
         disk_gib: Option<u32>,
-    ) -> Call<SnapshotListOutputItem> {
+    ) -> Call<Snapshot> {
         let args = SnapshotCreateArgs {
             name: name.map(Into::into),
             disk_gib,
         };
-        self.call(self.api.virtx_client_create_snapshot, args)
+        let client = self.clone();
+        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_create_snapshot, args);
+        call.map(move |info| Snapshot::new(client.clone(), info))
+    }
+
+    /// The snapshot `info` describes, reached through this client, without asking the server.
+    pub fn snapshot(&self, info: SnapshotInfo) -> Snapshot {
+        Snapshot::new(self.clone(), info)
     }
 
     /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<SnapshotListOutputItem> {
+    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<Snapshot> {
         let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_get_snapshot, args)
+        let client = self.clone();
+        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_get_snapshot, args);
+        call.map(move |info| Snapshot::new(client.clone(), info))
     }
 
     /// Delete the snapshot `name` and its upper layer.
@@ -375,24 +392,40 @@ impl Client {
     }
 
     /// Every volume the server holds.
-    pub fn list_volume(&self) -> Call<Vec<VolumeListOutputItem>> {
-        Call::new(self.api, unsafe {
+    pub fn list_volume(&self) -> Call<Vec<Volume>> {
+        let client = self.clone();
+        let call: Call<Vec<VolumeInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_volume)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Volume::new(client.clone(), info))
+                .collect()
         })
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
-    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<VolumeListOutputItem> {
+    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<Volume> {
         let args = VolumeCreateArgs {
             name: name.map(Into::into),
         };
-        self.call(self.api.virtx_client_create_volume, args)
+        let client = self.clone();
+        let call: Call<VolumeInfo> = self.call(self.api.virtx_client_create_volume, args);
+        call.map(move |info| Volume::new(client.clone(), info))
+    }
+
+    /// The volume `info` describes, reached through this client, without asking the server.
+    pub fn volume(&self, info: VolumeInfo) -> Volume {
+        Volume::new(self.clone(), info)
     }
 
     /// The volume `name`.
-    pub fn get_volume(&self, name: impl AsRef<str>) -> Call<VolumeListOutputItem> {
+    pub fn get_volume(&self, name: impl AsRef<str>) -> Call<Volume> {
         let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_get_volume, args)
+        let client = self.clone();
+        let call: Call<VolumeInfo> = self.call(self.api.virtx_client_get_volume, args);
+        call.map(move |info| Volume::new(client.clone(), info))
     }
 
     /// Delete the volume `name` and everything in it.
@@ -570,21 +603,38 @@ impl Client {
 
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
-        Call::new(self.api, unsafe {
+        let client = self.clone();
+        let call: Call<Vec<SandboxInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_sandbox)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Sandbox::new(client.clone(), info))
+                .collect()
         })
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
-        self.call(self.api.virtx_client_create_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// The sandbox `info` describes, reached through this client, without asking the server: for
+    /// one another module over the same library holds.
+    pub fn sandbox(&self, info: SandboxInfo) -> Sandbox {
+        Sandbox::new(self.clone(), info)
     }
 
     /// The sandbox `id`, without its ports.
     pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
         let args = json!({ "id": id.as_ref() });
-        self.call(self.api.virtx_client_get_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_get_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
@@ -595,8 +645,17 @@ impl Client {
 
     /// Every job in the sandbox `id`.
     pub fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
+        let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref() });
-        self.call(self.api.virtx_client_list_sandbox_job, args)
+        let client = self.clone();
+        let call: Call<Vec<SandboxJobInfo>> =
+            self.call(self.api.virtx_client_list_sandbox_job, args);
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| SandboxJob::new(client.clone(), sandbox.clone(), info))
+                .collect()
+        })
     }
 
     /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
@@ -615,16 +674,26 @@ impl Client {
             "timeout_ms": args.timeout_ms,
         });
         let client = self.clone();
+        let call: Call<SandboxJobInfo> = self.call(self.api.virtx_client_exec_sandbox, args);
         StartedJob::new(
-            self.call(self.api.virtx_client_exec_sandbox, args),
-            Box::new(move |job: &SandboxJob| client.sandbox_job_log(&sandbox, &job.id, None)),
+            call.map(move |info| SandboxJob::new(client.clone(), sandbox.clone(), info)),
+            Box::new(|job: &SandboxJob| job.log(None)),
         )
+    }
+
+    /// The job `info` describes in the sandbox `id`, reached through this client, without
+    /// asking the server.
+    pub fn sandbox_job(&self, id: impl Into<String>, info: SandboxJobInfo) -> SandboxJob {
+        SandboxJob::new(self.clone(), id.into(), info)
     }
 
     /// The job `job` in the sandbox `id`.
     pub fn get_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<SandboxJob> {
+        let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
-        self.call(self.api.virtx_client_get_sandbox_job, args)
+        let client = self.clone();
+        let call: Call<SandboxJobInfo> = self.call(self.api.virtx_client_get_sandbox_job, args);
+        call.map(move |info| SandboxJob::new(client.clone(), sandbox.clone(), info))
     }
 
     /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
@@ -707,7 +776,7 @@ impl Client {
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 
-    fn call<T: DeserializeOwned>(
+    fn call<T: DeserializeOwned + 'static>(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,

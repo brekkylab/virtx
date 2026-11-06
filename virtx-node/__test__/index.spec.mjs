@@ -130,17 +130,76 @@ test('the files of a volume are written, listed, moved and read back', async () 
 test("a sandbox's files are its own and go with it", async () => {
   const client = Client.spawn(testServer)
   try {
-    const { id } = await client.createSandbox('alpine:3.20')
-    const root = { sandbox: id }
-    await client.createDirAll(root, 'work/dir')
-    await client.writeFile(root, 'work/dir/a.txt', 'hello')
-    assert.equal(await client.readText(root, 'work/dir/a.txt'), 'hello')
+    const sandbox = await client.createSandbox('alpine:3.20')
+    assert.deepEqual(sandbox.root, { sandbox: sandbox.id })
+    await sandbox.createDirAll('work/dir')
+    await sandbox.writeFile('work/dir/a.txt', 'hello')
+    assert.equal(await sandbox.readText('work/dir/a.txt'), 'hello')
+    assert.deepEqual(await sandbox.readFile('work/dir/a.txt', 1, 3), Buffer.from('ell'))
     assert.deepEqual(
-      (await client.readDir(root, 'work/dir')).map((entry) => entry.name),
+      (await client.readDir(sandbox.root, 'work/dir')).map((entry) => entry.name),
       ['a.txt'],
     )
-    await client.removeSandbox(id)
-    await assert.rejects(client.readDir(root, ''), { status: 404 })
+    await sandbox.removeFile('work/dir/a.txt')
+    await sandbox.remove()
+    await assert.rejects(sandbox.readFile(''), { status: 404 })
+  } finally {
+    await client.close()
+  }
+})
+
+test('a volume carries its client to its files and mounts', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const volume = await client.createVolume('w')
+    assert.ok(volume instanceof virtx.Volume && volume instanceof virtx.Files)
+    assert.equal(volume.client, client)
+    assert.deepEqual({ ...volume }, { name: 'w', size: 0 })
+    assert.deepEqual(volume.root, { volume: 'w' })
+    await volume.createDirAll('in/dir')
+    await volume.writeFile('in/a.txt', 'hello')
+    await volume.renameFile('in/a.txt', 'in/b.txt')
+    await volume.copyFile('in/b.txt', 'c.txt')
+    assert.equal(await volume.readText('c.txt'), 'hello')
+    assert.equal(await volume.isDir('in/dir'), true)
+    assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), ['b.txt', 'dir'])
+
+    const mount = await volume.mount('notion', { type: 'notion', apiKey: 'k' })
+    assert.deepEqual(mount, { path: 'notion', mountType: 'notion' })
+    assert.deepEqual(await volume.mounts(), [mount])
+    await volume.unmount('notion')
+    assert.deepEqual(await volume.mounts(), [])
+
+    const got = await client.getVolume('w')
+    assert.deepEqual(got, volume)
+    assert.ok((await client.listVolume()).some((v) => v.name === 'w'))
+    await volume.remove()
+    await assert.rejects(got.statFile('c.txt'), { status: 404 })
+  } finally {
+    await client.close()
+  }
+})
+
+test('a snapshot carries its client to its files', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const snapshot = await client.createSnapshot('t')
+    await snapshot.writeFile('a.txt', 'kept')
+    assert.equal(await (await client.getSnapshot('t')).readText('a.txt'), 'kept')
+    await snapshot.remove()
+    await assert.rejects(client.getSnapshot('t'), { status: 404 })
+
+    const handed = await client.createSnapshot('handed')
+    const sandbox = await client.createSandbox('alpine:3.20', {
+      snapshot: handed,
+      volumes: [{ volume: await client.getVolume('v'), path: '/data', readonly: true }],
+    })
+    assert.equal(sandbox.snapshot, 'handed')
+    await sandbox.remove()
+
+    const locked = await client.getSnapshot('locked')
+    assert.equal(locked.inUse, true)
+    await assert.rejects(locked.readDir(''), { status: 423 })
   } finally {
     await client.close()
   }
@@ -188,24 +247,28 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
     assert.equal(sandbox.running, true)
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
-    const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])
+    const job = await sandbox.exec(['echo', 'hi'])
+    assert.ok(job instanceof virtx.SandboxJob)
+    assert.equal(job.sandboxId, sandbox.id)
     assert.equal(job.kind, 'exec')
     assert.deepEqual(job.cmd, ['echo', 'hi'])
-    const log = await entries(client.sandboxJobLog(sandbox.id, job.id))
+    const log = await entries(job.log())
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ stdout: 'hi' }, { end: { code: 0 } }],
     )
     // Read again after the first entry, from the second.
     assert.deepEqual(await entries(client.sandboxJobLog(sandbox.id, job.id, log[0].id)), log.slice(1))
+    assert.equal((await job.get()).code, 0)
     assert.equal((await client.getSandboxJob(sandbox.id, job.id)).code, 0)
+    assert.ok((await sandbox.jobs()).some((j) => j.id === job.id))
     assert.ok((await client.listSandboxJob(sandbox.id)).some((j) => j.id === job.id))
 
     const failed = await client.execSandbox(sandbox.id, ['fail'])
     const end = (await entries(client.sandboxJobLog(sandbox.id, failed.id))).at(-1)
     assert.deepEqual(end.end, { code: 1 })
 
-    await client.removeSandboxJob(sandbox.id, job.id)
+    await (await sandbox.job(job.id)).remove()
     await assert.rejects(client.getSandboxJob(sandbox.id, job.id), { status: 404 })
     await client.removeSandbox(sandbox.id)
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
@@ -217,20 +280,27 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
 test('a job reads its stdin and is signalled', async () => {
   const client = Client.spawn(testServer)
   try {
-    const { id: sandbox } = await client.createSandbox('alpine:3.20')
-    const cat = await client.execSandbox(sandbox, ['cat'], { stdin: true })
-    await client.writeSandboxJobStdin(sandbox, cat.id, 'one\n')
-    await client.writeSandboxJobStdin(sandbox, cat.id, 'two\n', true)
-    const log = await entries(client.sandboxJobLog(sandbox, cat.id))
+    const sandbox = await client.createSandbox('alpine:3.20')
+    const cat = await sandbox.exec(['cat'], { stdin: true })
+    await cat.writeStdin('one\n')
+    await cat.writeStdin('two\n', true)
+    const log = await entries(cat.log())
     assert.deepEqual(
       log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
       ['one', 'two'],
     )
 
-    const sleep = await client.execSandbox(sandbox, ['sleep'])
-    await client.signalSandboxJob(sandbox, sleep.id, 'SIGTERM')
-    const end = (await entries(client.sandboxJobLog(sandbox, sleep.id))).at(-1)
+    const sleep = await sandbox.exec(['sleep'])
+    await sleep.signal('SIGTERM')
+    const end = (await entries(sleep.log())).at(-1)
     assert.ok('end' in end)
+    assert.equal((await sleep.get()).running, false)
+
+    // The client's requests by id reach the same jobs.
+    const again = await client.execSandbox(sandbox.id, ['cat'], { stdin: true })
+    await client.writeSandboxJobStdin(sandbox.id, again.id, 'three\n', true)
+    const first = (await entries(client.sandboxJobLog(sandbox.id, again.id)))[0]
+    assert.equal(first.stdout, 'three')
   } finally {
     await client.close()
   }

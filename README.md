@@ -88,7 +88,7 @@ async def main() -> None:
         sandbox = await client.create_sandbox("jq:latest")
         try:
             cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-            async for entry in client.exec_sandbox(sandbox.id, cmd):
+            async for entry in sandbox.exec(cmd):
                 match entry.entry:
                     case Stdout(line) | Stderr(line):
                         print(line)
@@ -122,7 +122,7 @@ async function main() {
     const sandbox = await client.createSandbox('jq:latest')
     try {
       const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
-      for await (const entry of client.execSandbox(sandbox.id, cmd)) {
+      for await (const entry of sandbox.exec(cmd)) {
         if ('stdout' in entry) console.log(entry.stdout)
         else if ('stderr' in entry) console.error(entry.stderr)
         else if ('end' in entry) console.log('exited', entry.end.code)
@@ -172,9 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .wait()?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let mut log = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(cmd))
-        .log();
+    let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
     while let Some(entry) = log.wait_next() {
         match entry?.entry {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
@@ -182,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
-    client.remove_sandbox(&sandbox.id).wait()?;
+    sandbox.remove().wait()?;
     Ok(())
 }
 ```
@@ -199,11 +197,18 @@ codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 | | What it is | Made and read with |
 |---|---|---|
 | **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
-| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox` |
+| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox`; its files over WebDAV |
 | **Snapshot** | The writable layer of a sandbox's root filesystem, kept under a name | `create_snapshot`, `get_snapshot`, `list_snapshot`, `remove_snapshot`; its files over WebDAV |
 | **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
 
 Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
+A sandbox, a snapshot and a volume are answered as a `Sandbox`, a `Snapshot` and a `Volume` that carry their client, so each is all a caller hands on, and `remove` removes it:
+
+- All three are `Files`: `stat_file`, `exists`, `is_file`, `is_dir`, `read_dir`, `read_file`, `read_text`, `write_file`, `create_dir`, `create_dir_all`, `remove_file`, `rename_file` and `copy_file` act on their files, and `root` names those files for the client's own files requests. In Rust, `use virtx_rs::Files` brings them into scope.
+- A `Sandbox` runs a process with `exec`, and lists its jobs with `jobs` and gets one with `job`.
+- A `Volume` lists its mounts with `mounts`, and adds one with `mount` and takes it away with `unmount`.
+- A process in a sandbox is a `SandboxJob` that carries its client and sandbox: `get`, `signal`, `write_stdin`, `log` and `remove` act on it.
+
 Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
 
 ## Jobs and their logs
@@ -214,20 +219,20 @@ A build, pull or push, and every command in a sandbox, is a job the server runs 
 - Iterated (`async for` in Python, `for await` in Node, `.log()` in Rust), it is the job's log, an entry at a time until its last, `end`, which says how it ended: an image's digest or why it failed, a process's exit code.
 - Awaited (`.wait()` in Rust, too), it is the job itself, whose `id` names it to every other request.
 
-One value awaited and iterated starts one job. Its log can be read again any time with `image_job_log` or `sandbox_job_log`.
+One value awaited and iterated starts one job. Its log can be read again any time with `image_job_log`, or a sandbox job's `log`.
 
 - Every entry has an `id`, its number in the log. A reader whose stream dropped asks for the log `after` the last one it saw, and picks up there.
 - Any number of readers read one log, each from its start or from wherever they ask.
 - A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes.
 - A process's output is a line per entry, `stdout` or `stderr`, without its line ending.
-- Leaving the loop leaves the job running. `remove_image_job` and `remove_sandbox_job` cancel one that runs, killing a process and its children, and forget it.
+- Leaving the loop leaves the job running. `remove_image_job` and a sandbox job's `remove` cancel one that runs, killing a process and its children, and forget it.
 
-A process started with `stdin` takes what `write_sandbox_job_stdin` writes, the next write sent once the one before is answered, until one closes it with `eof`. `signal_sandbox_job` sends it a signal such as `SIGTERM`, and `timeout_ms` kills it when it runs out.
+A process started with `stdin` takes what its job's `write_stdin` writes, the next write sent once the one before is answered, until one closes it with `eof`. Its `signal` sends it a signal such as `SIGTERM`, and `timeout_ms` kills it when it runs out.
 
 ```python
-run = client.exec_sandbox(sandbox.id, ["cat"], stdin=True)
+run = sandbox.exec(["cat"], stdin=True)
 job = await run
-await client.write_sandbox_job_stdin(sandbox.id, job.id, "hello\n", eof=True)
+await job.write_stdin("hello\n", eof=True)
 async for entry in run:
     print(entry)
 ```
@@ -238,33 +243,33 @@ A sandbox made on a snapshot starts with the changes in it and writes into it, s
 While a sandbox holds it, its files are the sandbox's: reading them, and removing the snapshot, are refused until the sandbox is removed.
 
 ```python
-await client.create_snapshot("dev")
-sandbox = await client.create_sandbox("jq:latest", snapshot="dev")
+snapshot = await client.create_snapshot("dev")
+sandbox = await client.create_sandbox("jq:latest", snapshot=snapshot)
 ```
 
-A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go.
+A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go. A snapshot or a volume is named by its handle or its name; in Rust, `SandboxCreateArgs::new("jq:latest").snapshot(snapshot.name()).readonly_volume(volume.name(), "/data")`.
 
 ```python
 from virtx import SandboxVolume
 
-await client.create_volume("data")
+volume = await client.create_volume("data")
 sandbox = await client.create_sandbox(
-    "jq:latest", volumes=[SandboxVolume(volume="data", path="/data", readonly=False)]
+    "jq:latest", volumes=[SandboxVolume(volume, "/data", readonly=False)]
 )
 ```
 
-The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, with the root `SandboxFiles(sandbox.id)`:
+The files of a volume or a snapshot are read and written from the client, without a sandbox, through the volume or snapshot, with a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, as `sandbox.read_text("etc/hostname")`:
 
 ```python
-from virtx import Volume
-
-volume = Volume("data")
-await client.create_dir_all(volume, "in")
-await client.write_file(volume, "in/notes.txt", b"ship the release")
-for entry in await client.read_dir(volume, "in"):
+volume = await client.get_volume("data")
+await volume.create_dir_all("in")
+await volume.write_file("in/notes.txt", b"ship the release")
+for entry in await volume.read_dir("in"):
     print(entry.name, entry.metadata.size)
-print(await client.read_text(volume, "in/notes.txt"))
+print(await volume.read_text("in/notes.txt"))
 ```
+
+The client's own files requests take the root instead: `client.read_text(volume.root, "in/notes.txt")`, or `VolumeFiles("data")` in Python and `{ volume: 'data' }` in Node for a name alone.
 
 A write can name the `etag` a read gave, so it goes only over the file it read. Files move with `rename_file` and `copy_file`, and go with `remove_file`.
 

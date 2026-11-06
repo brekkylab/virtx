@@ -18,6 +18,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-server-stdio/` and `virtx-server-http/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-uvm` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs every VM gets at `/abin`.
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
+- `tests/` — the end-to-end suites: each package and its CLI against `virtx-uvm`, run by `cargo xtask e2e`.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the `packages` workflow runs to pack and smoke-test the client's packages. `.github/workflows/dist.yml` builds the server for every platform and attaches the archives to the tag's GitHub release.
 
@@ -35,11 +36,12 @@ cargo xtask check                                 # the gate: format, clippy and
 cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python
 (cd virtx-node && npm install && npm test)        # Node
+cargo xtask e2e                                   # each package and its CLI against the real server, booting VMs: tests/
 ```
 
 - Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - A change to the client needs nothing of `init`; `cargo xtask check --client` checks it alone. A change to the servers needs `init`, and a change that reaches a VM runs `cargo xtask test` for the server it touches.
-- A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the surface the behaviour lives in: `virtx-core`'s in-module tests and `tests/`, the servers' `tests/`, `virtx-py/tests/` and `virtx-node/__test__/`.
+- A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the surface the behaviour lives in: `virtx-core`'s in-module tests and `tests/`, the servers' `tests/`, `virtx-py/tests/` and `virtx-node/__test__/`; a behaviour of a package against the real server, in `tests/` at the root.
 
 ## Comments and docs
 

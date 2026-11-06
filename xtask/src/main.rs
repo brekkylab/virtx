@@ -16,6 +16,7 @@ usage: cargo xtask init     [--force]
        cargo xtask archive  [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
+       cargo xtask e2e
 
   init      checks out the submodules that are not, and adds the guest's musl target --
             ready to build the servers
@@ -27,6 +28,8 @@ usage: cargo xtask init     [--force]
             carries them: target/release/dist/virtx-uvm-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
+  e2e       the Python, Node and Rust packages and their CLIs against the stdio server built
+            now, booting VMs: the suites under tests/
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
@@ -49,7 +52,7 @@ components:
                   the archive has no abin, and sessions from the release no /abin";
 
 /// The client's packages, which `check` checks before `init` has run.
-const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs", "virtx-cli"];
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs", "virtx-cli", "virtx-e2e"];
 /// The package the client library is built from.
 const CLIENT_PACKAGE: &str = "virtx-core";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
@@ -174,6 +177,10 @@ fn main() -> anyhow::Result<()> {
         }
         Some("run") => run_target(args.collect(), false),
         Some("test") => run_target(args.collect(), true),
+        Some("e2e") => {
+            ensure!(args.next().is_none(), "e2e takes no arguments\n\n{USAGE}");
+            e2e()
+        }
         Some("-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -640,6 +647,70 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
         }
     }
     ensure!(failed == 0, "{failed} test binaries failed");
+    Ok(())
+}
+
+/// The suites under `tests/`, each package against the stdio server: built now with the
+/// library and the CLI, the server made ready to boot, and all three named to the suites in
+/// the environment, with a home of this run's own.
+fn e2e() -> anyhow::Result<()> {
+    let root = root_path();
+    let out = target_path().join("debug");
+    let mut build = cargo();
+    build.current_dir(&root).arg("build");
+    for package in [CLIENT_PACKAGE, "virtx-cli", "virtx-server-stdio"] {
+        build.args(["-p", package]);
+    }
+    run(build, "the client, the CLI and the server")?;
+    let server = out.join(format!("virtx-uvm{}", env::consts::EXE_SUFFIX));
+    ready(&server)?;
+    let library = out.join(client_library());
+
+    ensure!(
+        root.join("virtx-node/node_modules/koffi").is_dir(),
+        "virtx-node has no node_modules: `npm install` there first"
+    );
+
+    let home = env::temp_dir().join(format!("virtx-e2e-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    let suites: [(&str, Command); 3] = [
+        ("Rust", {
+            let mut test = cargo();
+            test.current_dir(&root).args(["test", "-p", "virtx-e2e"]);
+            test
+        }),
+        ("Python", {
+            let mut uv = Command::new("uv");
+            uv.current_dir(root.join("virtx-py"))
+                .args(["run", "pytest"])
+                .arg(root.join("tests/python"));
+            uv
+        }),
+        ("Node", {
+            let mut node = Command::new("node");
+            // A pattern, which node expands: a directory is taken as one file.
+            node.current_dir(&root)
+                .args(["--test", "tests/node/**/*.spec.mjs"]);
+            node
+        }),
+    ];
+    let mut failed = Vec::new();
+    for (name, mut command) in suites {
+        eprintln!("xtask: e2e, {name}");
+        let status = command
+            .env("VIRTX_UVM", &server)
+            .env("VIRTX_CORE_LIB", &library)
+            .env("VIRTX_HOME", &home)
+            .status()
+            .with_context(|| format!("running the {name} suite"))?;
+        if !status.success() {
+            failed.push(name);
+        }
+    }
+    let _ = fs::remove_dir_all(&home);
+    ensure!(failed.is_empty(), "e2e failed: {}", failed.join(", "));
+    eprintln!("xtask: e2e passed");
     Ok(())
 }
 

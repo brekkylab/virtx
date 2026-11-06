@@ -3409,6 +3409,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtx-e2e"
+version = "0.0.0"
+dependencies = [
+ "virtx-rs",
+]
+
+[[package]]
 name = "virtx-rs"
 version = "0.1.2"
 dependencies = [

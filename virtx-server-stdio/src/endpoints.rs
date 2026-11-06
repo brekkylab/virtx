@@ -2,7 +2,6 @@
 //! host's [`Home`]: one client is on the other end of stdio, so all of it is its.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -21,13 +20,13 @@ use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 use tokio::task::{AbortHandle, JoinSet};
 
 use virtx_core::{
     ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
-    SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxSignalArgs,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJob, SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxSignalArgs,
     SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs, VolumeListOutputItem,
     VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
@@ -225,14 +224,17 @@ fn read(sandbox: Arc<Sandbox>) {
                 let started = started.map(|pid| {
                     let mut jobs = sandbox.jobs.lock().unwrap();
                     let id = pick(|id| jobs.contains_key(id));
-                    let job = Job::new(SandboxJob {
-                        id: id.clone(),
-                        kind: SandboxJobKind::Exec,
-                        pid,
-                        cmd,
-                        running: true,
-                        code: None,
-                    });
+                    let job = Job::new(
+                        SandboxJob {
+                            id: id.clone(),
+                            kind: SandboxJobKind::Exec,
+                            pid,
+                            cmd,
+                            running: true,
+                            code: None,
+                        },
+                        SandboxJobEntry::Truncated {},
+                    );
                     jobs.insert(id, Arc::clone(&job));
                     running.insert(pid, Arc::clone(&job));
                     job
@@ -241,12 +243,12 @@ fn read(sandbox: Arc<Sandbox>) {
             }
             CtrlResp::Stdout { id, line } => {
                 if let Some(job) = running.get(&id) {
-                    job.write(SandboxJobEntry::Stdout(line), SandboxJobEntry::Truncated {});
+                    job.write(SandboxJobEntry::Stdout(line));
                 }
             }
             CtrlResp::Stderr { id, line } => {
                 if let Some(job) = running.get(&id) {
-                    job.write(SandboxJobEntry::Stderr(line), SandboxJobEntry::Truncated {});
+                    job.write(SandboxJobEntry::Stderr(line));
                 }
             }
             CtrlResp::Exited { id, code } => {
@@ -277,106 +279,42 @@ fn read(sandbox: Arc<Sandbox>) {
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
 struct Job<T, E> {
     job: Mutex<T>,
-    log: Mutex<Log<E>>,
-    changed: watch::Sender<()>,
+    log: Arc<Log<E>>,
 }
 
-struct Log<E> {
-    entries: Vec<E>,
-    truncated: bool,
-    ended: bool,
-    /// The job was removed: a reader's stream ends where it is.
-    removed: bool,
-}
-
-impl<T: Clone + Serialize + Send + 'static, E: Clone + Serialize + Send + 'static> Job<T, E> {
-    fn new(job: T) -> Arc<Self> {
+impl<T: Clone + Serialize + Send + 'static, E: Clone + Serialize + Send + Sync + 'static>
+    Job<T, E>
+{
+    /// `job`, with an empty log that keeps `truncated` once past its limit.
+    fn new(job: T, truncated: E) -> Arc<Self> {
         Arc::new(Job {
             job: Mutex::new(job),
-            log: Mutex::new(Log {
-                entries: Vec::new(),
-                truncated: false,
-                ended: false,
-                removed: false,
-            }),
-            changed: watch::channel(()).0,
+            log: Log::new(LOG_LIMIT, truncated),
         })
     }
 
-    /// Keep `entry`, unless the log is past its limit, where `truncated` is kept once instead.
-    fn write(&self, entry: E, truncated: E) {
-        let mut log = self.log.lock().unwrap();
-        if log.ended {
-            return;
-        }
-        if log.entries.len() < LOG_LIMIT {
-            log.entries.push(entry);
-        } else if !log.truncated {
-            log.truncated = true;
-            log.entries.push(truncated);
-        } else {
-            return;
-        }
-        drop(log);
-        self.changed.send_replace(());
+    fn write(&self, entry: E) {
+        self.log.push(entry);
     }
 
     /// End it, as `ended` changes the job, with `end` last in its log; nothing if it has ended.
     fn end(&self, ended: impl FnOnce(&mut T), end: E) {
-        let mut log = self.log.lock().unwrap();
-        if log.ended {
-            return;
-        }
-        log.ended = true;
-        log.entries.push(end);
-        ended(&mut self.job.lock().unwrap());
-        drop(log);
-        self.changed.send_replace(());
+        self.log.end(end, || ended(&mut self.job.lock().unwrap()));
     }
 
     fn remove(&self) {
-        self.log.lock().unwrap().removed = true;
-        self.changed.send_replace(());
+        self.log.remove();
     }
 
     fn answer(&self) -> Response {
         json(&*self.job.lock().unwrap())
     }
 
-    /// Its log after the entry `Last-Event-ID` in `headers` names, as an event stream: each
-    /// entry as it comes, until the end or the job's removal.
-    fn events(self: Arc<Self>, headers: &HeaderMap) -> Response {
-        let after: usize = headers
-            .get("last-event-id")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
-        let changed = self.changed.subscribe();
-        let events = futures_util::stream::unfold(
-            (self, changed, after),
-            |(job, mut changed, next)| async move {
-                loop {
-                    let (entry, ended) = {
-                        let log = job.log.lock().unwrap();
-                        if log.removed {
-                            return None;
-                        }
-                        (log.entries.get(next).cloned(), log.ended)
-                    };
-                    if let Some(entry) = entry {
-                        let data = serde_json::to_string(&entry).expect("an entry serializes");
-                        let event = Bytes::from(format!("id: {}\ndata: {data}\n\n", next + 1));
-                        return Some((Ok::<_, Infallible>(event), (job, changed, next + 1)));
-                    }
-                    if ended || changed.changed().await.is_err() {
-                        return None;
-                    }
-                }
-            },
-        );
+    /// Its log after the entry `Last-Event-ID` in `headers` names, as an event stream.
+    fn events(&self, headers: &HeaderMap) -> Response {
         (
             [(header::CONTENT_TYPE, "text/event-stream")],
-            Body::from_stream(events),
+            Body::from_stream(Arc::clone(&self.log).events(headers)),
         )
             .into_response()
     }
@@ -465,18 +403,19 @@ where
 {
     let mut jobs = home.image_jobs.lock().unwrap();
     let id = pick(|id| jobs.contains_key(id));
-    let job = Job::new(ImageJob {
-        id: id.clone(),
-        kind,
-        reference,
-        running: true,
-        digest: None,
-        error: None,
-    });
+    let job = Job::new(
+        ImageJob {
+            id: id.clone(),
+            kind,
+            reference,
+            running: true,
+            digest: None,
+            error: None,
+        },
+        ImageJobEntry::Truncated {},
+    );
     let logged = Arc::clone(&job);
-    let work = work(Box::new(move |line| {
-        logged.write(ImageJobEntry::Log(line), ImageJobEntry::Truncated {})
-    }));
+    let work = work(Box::new(move |line| logged.write(ImageJobEntry::Log(line))));
     let ended = Arc::clone(&job);
     let task = tokio::spawn(async move {
         let end = match work.await {

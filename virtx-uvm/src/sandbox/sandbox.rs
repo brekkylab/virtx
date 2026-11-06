@@ -16,7 +16,8 @@ use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, FsTree, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec,
-    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotStore, VolumeMount, VolumeStore,
+    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeMount,
+    VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -109,6 +110,9 @@ pub struct Sandbox {
     snapshot: Option<String>,
     /// The one it made for itself, without one, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// Its snapshot's lock, held for each of its machines and between them, until it is
+    /// closed.
+    snapshot_lock: Mutex<Option<SnapshotLock>>,
     /// What each of its machines boots, and the process each runs as.
     config: MachineConfig,
     vm: Vec<OsString>,
@@ -206,10 +210,13 @@ impl Sandbox {
             .map(|name| snapshots.open(name))
             .transpose()?;
         if let Some(snapshot) = &snapshot
-            && (snapshot.in_use()? || held(&snapshot.name))
+            && held(&snapshot.name)
         {
             return Err(SnapshotError::InUse(snapshot.name.clone()).into());
         }
+        // Held from here until the sandbox is closed, whether its machine runs or not, against
+        // every other sandbox, removal and request to its files, in this process or another.
+        let snapshot_lock = snapshot.as_ref().map(Snapshot::lock).transpose()?;
         let volumes = args
             .volumes
             .iter()
@@ -225,11 +232,13 @@ impl Sandbox {
         // Merging the layers' metadata, and formatting a snapshot, are blocking work.
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
-        let upper = match snapshot {
-            Some(_) => None,
+        let (upper, snapshot_lock) = match snapshot_lock {
+            Some(lock) => (None, lock),
             None => {
                 let dir = Upper::dir(snapshots);
-                Some(tokio::task::spawn_blocking(move || Upper::create(&dir)).await??)
+                let upper = tokio::task::spawn_blocking(move || Upper::create(&dir)).await??;
+                let lock = upper.snapshot.lock()?;
+                (Some(upper), lock)
             }
         };
 
@@ -237,6 +246,7 @@ impl Sandbox {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
             snapshot: snapshot.or_else(|| upper.as_ref().map(|upper| upper.snapshot.clone())),
+            snapshot_held: true,
             spec: MachineSpec {
                 vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
                 ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
@@ -255,6 +265,7 @@ impl Sandbox {
             _held: held_image,
             snapshot: args.snapshot.clone(),
             upper: Mutex::new(upper),
+            snapshot_lock: Mutex::new(Some(snapshot_lock)),
             config,
             vm,
             state: Mutex::new(State::Parked),
@@ -397,6 +408,7 @@ impl Sandbox {
         if let State::Up(machine) = state {
             machine.stop();
         }
+        drop(self.snapshot_lock.lock().unwrap().take());
         drop(self.upper.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);

@@ -18,6 +18,8 @@ use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 struct Server {
     client: Client,
     home: PathBuf,
+    /// Whether the home is this server's to remove, rather than another's it shares.
+    owns: bool,
 }
 
 impl Server {
@@ -35,6 +37,19 @@ impl Server {
         Server {
             client: Client::spawn(command).unwrap(),
             home,
+            owns: true,
+        }
+    }
+
+    /// Another server over this one's home, as a second client spawns one over the same
+    /// `VIRTX_HOME`.
+    fn beside(&self) -> Server {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-stdio"));
+        command.env("VIRTX_HOME", &self.home);
+        Server {
+            client: Client::spawn(command).unwrap(),
+            home: self.home.clone(),
+            owns: false,
         }
     }
 
@@ -110,7 +125,9 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.home);
+        if self.owns {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
     }
 }
 
@@ -650,6 +667,46 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_parked_sandbox_holds_its_snapshot_against_another_server() {
+    let server = Server::spawn_with("snapshot-park", &[("VIRTX_PARK_AFTER_MS", "500")]);
+    server.pull_image("alpine:3.20").await;
+    server
+        .client
+        .create_snapshot(Some("work"), Some(1))
+        .await
+        .unwrap();
+    let on_work = || {
+        let mut args = SandboxCreateArgs::new("alpine:3.20");
+        args.snapshot = Some("work".into());
+        args
+    };
+    let id = server.client.create_sandbox(&on_work()).await.unwrap().id;
+    let (_, ended) = server
+        .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+
+    // Its machine stopped, the snapshot is still the sandbox's, to a server over the same home
+    // as much as to its own.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let other = server.beside();
+    let snapshot = FileRoot::Snapshot("work".into());
+    assert_eq!(status(other.client.remove_snapshot("work").await), 409);
+    assert_eq!(status(other.client.create_sandbox(&on_work()).await), 409);
+    assert_eq!(
+        status(other.client.write_file(&snapshot, "x", "y", None).await),
+        423
+    );
+    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+
+    // Removed, the sandbox lets it go.
+    server.client.remove_sandbox(&id).await.unwrap();
+    other.client.remove_snapshot("work").await.unwrap();
 }
 
 #[tokio::test]

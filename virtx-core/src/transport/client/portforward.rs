@@ -453,7 +453,16 @@ mod ffi {
 
             unsafe { virtx_port_forwarder_free(forwarder) };
             unsafe { virtx_client_release(client) };
-            assert!(std::net::TcpStream::connect(address).is_err());
+            // A process another test spawns meanwhile holds the port's descriptor until it
+            // execs, and the port answers until then.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::net::TcpStream::connect(address).is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the port still answers after the forwarder is freed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 }

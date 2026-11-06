@@ -305,7 +305,8 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  snapshot?: string
+  /** The snapshot it stands on, or its name. */
+  snapshot?: string | Snapshot
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -313,7 +314,8 @@ export interface SandboxCreateOptions {
   memoryMib?: number
   gpu?: boolean
   gpuMemoryMib?: number
-  volumes?: { volume: string; path: string; readonly?: boolean }[]
+  /** Each volume, or its name, and where it is mounted. */
+  volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
 }
 
 export interface SandboxExecOptions {

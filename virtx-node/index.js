@@ -723,8 +723,15 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
+  // `snapshot` and each of `volumes`' `volume` are a handle or its name.
   async createSandbox(image, options = {}) {
-    const info = await this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
+    const { snapshot, volumes } = options
+    const info = await this._call('virtx_client_create_sandbox', {
+      ...options,
+      image: imageName(image),
+      snapshot: snapshot instanceof Snapshot ? snapshot.name : snapshot,
+      volumes: volumes?.map((v) => (v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v)),
+    })
     return new Sandbox(this, info)
   }
 

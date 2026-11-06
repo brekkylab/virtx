@@ -546,7 +546,7 @@ class Client:
         self,
         image: str | ImageName,
         *,
-        snapshot: str | None = None,
+        snapshot: str | Snapshot | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
@@ -555,7 +555,8 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, standing on ``snapshot`` if given. ``ports`` are TCP
+        """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
+        given, with ``volumes`` mounted into it, each a ``SandboxVolume``. ``ports`` are TCP
         ports in it to open, reserved as it is made and answered here only, each with the
         ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
         return Sandbox.from_dict(
@@ -564,7 +565,7 @@ class Client:
                 "virtx_client_create_sandbox",
                 _args(
                     image=image_name(image).to_dict(),
-                    snapshot=snapshot,
+                    snapshot=snapshot.name if isinstance(snapshot, Snapshot) else snapshot,
                     network=network,
                     ports=list(ports),
                     vcpus=vcpus,

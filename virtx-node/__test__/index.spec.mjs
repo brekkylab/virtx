@@ -189,6 +189,14 @@ test('a snapshot carries its client to its files', async () => {
     await snapshot.remove()
     await assert.rejects(client.getSnapshot('t'), { status: 404 })
 
+    const handed = await client.createSnapshot('handed')
+    const sandbox = await client.createSandbox('alpine:3.20', {
+      snapshot: handed,
+      volumes: [{ volume: await client.getVolume('v'), path: '/data', readonly: true }],
+    })
+    assert.equal(sandbox.snapshot, 'handed')
+    await sandbox.remove()
+
     const locked = await client.getSnapshot('locked')
     assert.equal(locked.inUse, true)
     await assert.rejects(locked.readDir(''), { status: 423 })

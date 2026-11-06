@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from .files import Files, SandboxFiles
 from .job import LogEntry, StartedJob, Truncated
+from .volume import Volume
 
 if TYPE_CHECKING:
     from .client import Client
@@ -30,15 +31,16 @@ class SandboxPort:
 
 @dataclass(frozen=True)
 class SandboxVolume:
-    """A volume mounted at ``path`` in a sandbox."""
+    """A volume, a ``Volume`` or its name, mounted at ``path`` in a sandbox."""
 
-    volume: str
+    volume: str | Volume
     path: str
     readonly: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """As the wire has it."""
-        return {"volume": self.volume, "path": self.path, "readonly": self.readonly}
+        volume = self.volume.name if isinstance(self.volume, Volume) else self.volume
+        return {"volume": volume, "path": self.path, "readonly": self.readonly}
 
 
 @dataclass(frozen=True)

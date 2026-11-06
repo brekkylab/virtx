@@ -43,9 +43,9 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 
 | The task needs | At `create_sandbox` |
 |---|---|
-| files it shares with the host or later sandboxes | a volume, made with `create_volume`, in `volumes` as `SandboxVolume(volume, path, readonly)` |
+| files it shares with the host or later sandboxes | a volume, made with `create_volume`, in `volumes` as `SandboxVolume(volume, path, readonly)`, the `Volume` or its name |
 | files it must not change | the same, with `readonly=True` |
-| what it installs kept for the next sandbox | a snapshot, made with `create_snapshot`, as `snapshot=` |
+| what it installs kept for the next sandbox | a snapshot, made with `create_snapshot`, as `snapshot=`, the `Snapshot` or its name |
 | a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)` |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |

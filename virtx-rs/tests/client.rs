@@ -229,6 +229,18 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .wait()
         .unwrap();
+    let volume = client.get_volume("v").wait().unwrap();
+    let snapshot = client.create_snapshot(Some("handed"), None).wait().unwrap();
+    let on_handles = client
+        .create_sandbox(
+            &SandboxCreateArgs::new("alpine:3.20")
+                .snapshot(snapshot.name())
+                .readonly_volume(volume.name(), "/data"),
+        )
+        .wait()
+        .unwrap();
+    assert_eq!(on_handles.info().snapshot.as_deref(), Some("handed"));
+    on_handles.remove().unwrap_wait();
     sandbox.create_dir_all("work/dir").unwrap_wait();
     sandbox
         .write_file("work/dir/a.txt", "hello", None)
@@ -318,9 +330,10 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     );
 
     // `cat` echoes its stdin until it is closed.
-    let mut args = SandboxExecArgs::new(["cat"]);
-    args.stdin = true;
-    let cat = sandbox.exec(&args).wait().unwrap();
+    let cat = sandbox
+        .exec(&SandboxExecArgs::new(["cat"]).stdin(true))
+        .wait()
+        .unwrap();
     cat.write_stdin(Some("a\n"), true).unwrap_wait();
     let mut log = cat.log(None);
     let first = log.wait_next().unwrap().unwrap();

@@ -244,17 +244,17 @@ While a sandbox holds it, its files are the sandbox's: reading them, and removin
 
 ```python
 snapshot = await client.create_snapshot("dev")
-sandbox = await client.create_sandbox("jq:latest", snapshot=snapshot.name)
+sandbox = await client.create_sandbox("jq:latest", snapshot=snapshot)
 ```
 
-A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go.
+A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go. A snapshot or a volume is named by its handle or its name; in Rust, `SandboxCreateArgs::new("jq:latest").snapshot(snapshot.name()).readonly_volume(volume.name(), "/data")`.
 
 ```python
 from virtx import SandboxVolume
 
 volume = await client.create_volume("data")
 sandbox = await client.create_sandbox(
-    "jq:latest", volumes=[SandboxVolume(volume=volume.name, path="/data", readonly=False)]
+    "jq:latest", volumes=[SandboxVolume(volume, "/data", readonly=False)]
 )
 ```
 

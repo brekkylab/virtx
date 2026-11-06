@@ -1,15 +1,53 @@
-# virtx
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
+</p>
 
-<img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
-<img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> <a href="https://www.npmjs.com/package/@brekkylab/virtx"><img src="https://img.shields.io/npm/v/@brekkylab/virtx?label=@brekkylab/virtx&color=339933" alt="npm node"></a>
+<h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
+
+<p align="center">
+  <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
+  <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> <a href="https://www.npmjs.com/package/@brekkylab/virtx"><img src="https://img.shields.io/npm/v/@brekkylab/virtx?label=@brekkylab/virtx&color=339933" alt="npm node"></a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
+</p>
+
+<br>
 
 virtx lets you run tasks in disposable Linux VMs from your own code.
 
-It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all.
+It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
 
-A virtx server runs the VMs, on your machine or another one, and this repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
-What client and server say to each other is [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md): plain HTTP, over TCP or over a server the client starts as a child process.
+virtx is also the VM layer under [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK. In Ailoy, every agent gets its own virtx VM as its sandbox: the agent runs on your host, and its commands and file tools run inside the VM. You can use virtx on its own too, with any agent or none at all.
+
+## How it works
+
+A virtx server runs the VMs, on your machine or another one. This repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
+
+Your code asks the server for a sandbox, a VM booted from an image you name. It then runs commands in it as jobs and reads their output as a log. Volumes and snapshots hold whatever should outlive the sandbox, and anything else is gone when you remove it.
+
+Client and server speak plain HTTP, described in [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md). The client either starts the server as a child process and talks to it over stdin and stdout, so there is nothing to install or keep running, or connects to one by URL.
+
+## Requirements
+
+These apply to the machine that runs the virtx server.
+
+- **Host:** Linux, macOS on Apple silicon, or Windows 11 or later. Guests are always Linux.
+- **Linux:** a kernel with KVM support, `/dev/kvm` accessible to your user, hardware virtualization enabled in the firmware, and FUSE. KVM is built into most modern kernels, so nothing usually needs installing.
+- **Windows:** the VM runs on the Windows Hypervisor Platform, which is off by default. Turn it on from an administrator PowerShell, then restart, with virtualization enabled in the firmware:
+
+  ```powershell
+  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+  ```
+
+- **Clients:** Python 3.10 or later, Node 18 or later, or Rust.
+- **GPU:** a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [GPU](#gpu).
 
 ## Quickstart
 
@@ -305,3 +343,11 @@ A server that can't give a GPU refuses the sandbox rather than run it on the CPU
 | **Guest** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux, always |
 
 Each package's own README has the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md).
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests and how to open a PR. For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue. Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

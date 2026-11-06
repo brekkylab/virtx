@@ -68,6 +68,8 @@ pub(crate) enum Server {
 }
 
 impl Server {
+    /// The server the environment names, or else the test server over stdio, which the run
+    /// takes over TCP as well.
     pub(crate) fn from_env() -> Server {
         let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
         if let Some(command) = var("VIRTX_E2E_SERVER") {
@@ -76,9 +78,6 @@ impl Server {
         if let Some(url) = var("VIRTX_E2E_URL") {
             let (auth, headers) = (Auth::None, HeaderMap::new());
             return Server::Url(Reach { url, auth, headers });
-        }
-        if var("VIRTX_E2E_TCP").is_some() {
-            return Server::TestTcp;
         }
         Server::Test
     }
@@ -93,17 +92,29 @@ impl Server {
         matches!(self, Server::Test | Server::Spawn(_))
     }
 
-    /// Whether several clients can reach one server: any but a spawned one, which answers its
-    /// own client alone.
+    /// Whether several clients can reach one server: over TCP or at a URL. Over stdio a server
+    /// carries its one client.
     pub(crate) fn is_shared(&self) -> bool {
-        !matches!(self, Server::Spawn(_))
+        matches!(self, Server::TestTcp | Server::Url(_))
     }
 
     /// Whether it refuses a request without valid credentials: the test server over TCP does,
     /// with ones the harness makes up. A server at a URL is reached with none, and over stdio
     /// a server takes none.
     pub(crate) fn wants_credentials(&self) -> bool {
-        matches!(self, Server::Test | Server::TestTcp)
+        matches!(self, Server::TestTcp)
+    }
+
+    /// Whether a scenario that `needs` it runs against this server, a prune `prune` lets it.
+    pub(crate) fn runs(&self, needs: Needs, prune: bool) -> bool {
+        match needs {
+            Needs::Any => true,
+            Needs::Test => self.is_test(),
+            Needs::Spawned => self.is_spawned(),
+            Needs::Prune => self.is_test() || prune,
+            Needs::Shared => self.is_shared(),
+            Needs::Credentials => self.wants_credentials(),
+        }
     }
 
     /// A client of a server of its own, or of the one at the URL.
@@ -124,9 +135,8 @@ impl Server {
         }
     }
 
-    /// One server several clients reach: the one at the URL, or else a test server served on
-    /// the loopback over TCP, even where the other scenarios have it over stdio, which carries
-    /// one client.
+    /// One server several clients reach: the one at the URL, or a test server served on the
+    /// loopback over TCP.
     async fn reach(&self) -> Reach {
         match self {
             Server::Test | Server::TestTcp => serve().await,

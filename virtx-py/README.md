@@ -33,13 +33,13 @@ async for entry in client.image_job_log(job.id, after=1):  # from its second ent
     ...
 ```
 
-A sandbox runs commands as jobs the same way: `exec_sandbox` starts one, a `SandboxJob`, and iterated it yields its output, a line as it is written, then how it ended. One value awaited and then iterated reads the log of the one job it started.
+A sandbox runs commands as jobs the same way: `create_sandbox` answers a `Sandbox` that carries its client, and its `exec` starts one, a `SandboxJob`, and iterated it yields its output, a line as it is written, then how it ended. One value awaited and then iterated reads the log of the one job it started.
 
 ```python
 from virtx import SandboxJobEnd, Stderr, Stdout
 
 sandbox = await client.create_sandbox("alpine:3.20")
-run = client.exec_sandbox(sandbox.id, ["echo", "hi"])
+run = sandbox.exec(["echo", "hi"])
 job = await run
 print("started", job.id)
 async for entry in run:

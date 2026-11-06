@@ -13,13 +13,13 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
     ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
     ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
+    MountSource, Recipe, RegistryAuth, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJob, SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error,
+    Error, Sandbox,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -570,21 +570,32 @@ impl Client {
 
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
-        Call::new(self.api, unsafe {
+        let client = self.clone();
+        let call: Call<Vec<SandboxInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_sandbox)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Sandbox::new(client.clone(), info))
+                .collect()
         })
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
-        self.call(self.api.virtx_client_create_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
     /// The sandbox `id`, without its ports.
     pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
         let args = json!({ "id": id.as_ref() });
-        self.call(self.api.virtx_client_get_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_get_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
@@ -707,7 +718,7 @@ impl Client {
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 
-    fn call<T: DeserializeOwned>(
+    fn call<T: DeserializeOwned + 'static>(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,

@@ -35,8 +35,9 @@ if [ "$(uname -s)" = Darwin ]; then
 
     SPIRV_Cross_src="$ROOT/3rdparty/SPIRV-Cross"
     SPIRV_Cross_pin="$(cat "$MoltenVK_src/ExternalRevisions/SPIRV-Cross_repo_revision")"
-    if [ "$(git -C "$SPIRV_Cross_src" rev-parse HEAD)" != "$SPIRV_Cross_pin" ]; then
-        echo "3rdparty/SPIRV-Cross is not at the revision MoltenVK pins ($SPIRV_Cross_pin)." >&2
+    # The fork's branch is that revision and our commits on top of it.
+    if ! git -C "$SPIRV_Cross_src" merge-base --is-ancestor "$SPIRV_Cross_pin" HEAD 2>/dev/null; then
+        echo "3rdparty/SPIRV-Cross is not on the revision MoltenVK pins ($SPIRV_Cross_pin)." >&2
         echo "Rebase the fork's virtx branch onto that revision and pin it." >&2
         exit 1
     fi

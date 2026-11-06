@@ -30,8 +30,9 @@ async def test_a_snapshot_is_created_got_listed_and_removed(test_server: str) ->
         assert created in await client.list_snapshot()
         assert (await client.get_snapshot("locked")).in_use
         await client.remove_snapshot("new")
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.get_snapshot("new")
+        assert refused.value.status == 404
 
 
 async def test_a_volume_is_created_and_got(test_server: str) -> None:
@@ -64,11 +65,13 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server
         assert log == [Stderr("failed"), SandboxJobEnd(1)]
 
         await client.remove_sandbox_job(sandbox.id, job.id)
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.get_sandbox_job(sandbox.id, job.id)
+        assert refused.value.status == 404
         await client.remove_sandbox(sandbox.id)
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.get_sandbox(sandbox.id)
+        assert refused.value.status == 404
 
 
 async def test_a_log_is_truncated_at_its_limit_and_resumed_after_an_entry(
@@ -112,8 +115,9 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_serve
         assert (await client.get_image_job(job.id)).digest == "sha256:0"
         assert job.id in [item.id for item in await client.list_image_job()]
         await client.remove_image_job(job.id)
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.get_image_job(job.id)
+        assert refused.value.status == 404
 
 
 async def test_a_failed_pull_ends_its_log_with_its_error(test_server: str) -> None:

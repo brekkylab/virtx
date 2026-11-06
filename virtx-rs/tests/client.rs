@@ -137,7 +137,7 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .write_file(&volume, "dir/t.txt", "text 3", Some(&etag))
         .wait()
         .unwrap_err();
-    assert!(stale.to_string().contains("412"), "{stale}");
+    assert_eq!(stale.status(), Some(412), "{stale}");
     assert!(client.exists(&volume, "dir/t.txt").wait().unwrap());
     assert!(client.is_file(&volume, "dir/t.txt").wait().unwrap());
     assert!(!client.is_dir(&volume, "dir/t.txt").wait().unwrap());
@@ -158,10 +158,10 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         .copy_file(&volume, "b.txt", "c.txt", false)
         .wait()
         .unwrap_err();
-    assert!(refused.to_string().contains("412"), "{refused}");
+    assert_eq!(refused.status(), Some(412), "{refused}");
     client.remove_file(&volume, "dir", false).unwrap_wait();
     let gone = client.stat_file(&volume, "dir").wait().unwrap_err();
-    assert!(gone.to_string().contains("404"), "{gone}");
+    assert_eq!(gone.status(), Some(404), "{gone}");
     assert_eq!(
         client.read_file(&volume, "c.txt", 0, None).wait().unwrap(),
         b"hello world"
@@ -169,7 +169,7 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
 
     let locked = FileRoot::Snapshot("locked".into());
     let refused = client.read_dir(&locked, "").wait().unwrap_err();
-    assert!(refused.to_string().contains("423"), "{refused}");
+    assert_eq!(refused.status(), Some(423), "{refused}");
 }
 
 fn a_sandbox_s_files_are_its_own_and_go_with_it() {
@@ -189,7 +189,7 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
     );
     client.remove_sandbox(&sandbox.id).unwrap_wait();
     let gone = client.read_dir(&root, "").wait().unwrap_err();
-    assert!(gone.to_string().contains("404"), "{gone}");
+    assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
 fn a_snapshot_is_created_got_and_removed() {
@@ -204,7 +204,7 @@ fn a_snapshot_is_created_got_and_removed() {
     assert_eq!(got, created);
     client.remove_snapshot("t").unwrap_wait();
     let gone = client.get_snapshot("t").wait().unwrap_err();
-    assert!(gone.to_string().contains("404"), "{gone}");
+    assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
 fn a_process_run_in_a_sandbox_is_read_from_its_log() {
@@ -259,7 +259,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
 
     client.remove_sandbox(&sandbox.id).unwrap_wait();
     let gone = client.get_sandbox(&sandbox.id).wait().unwrap_err();
-    assert!(gone.to_string().contains("404"), "{gone}");
+    assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
 fn an_image_build_is_a_job_with_a_log() {
@@ -365,7 +365,7 @@ fn a_started_job_is_read_as_its_log() {
         .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
         .log();
     let refused = log.wait_next().unwrap().unwrap_err();
-    assert!(refused.to_string().contains("422"), "{refused}");
+    assert_eq!(refused.status(), Some(422), "{refused}");
     assert!(log.wait_next().is_none());
     assert!(log.job().is_none());
 }

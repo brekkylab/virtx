@@ -16,7 +16,7 @@ use tokio::{
 
 use super::{
     VIRTX_END, VIRTX_ERROR, VIRTX_PENDING,
-    bytes::{VirtxBytes, encode, failure, write},
+    bytes::{Failure, VirtxBytes, encode, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
 
@@ -71,10 +71,10 @@ impl Drop for Items {
 
 /// Run `stream` on `runtime`, tracked in `tasks`, and hand C the stream. Its first error is
 /// its last item.
-pub(super) fn start<T: Serialize>(
+pub(super) fn start<T: Serialize, E: Into<Failure>>(
     runtime: &Handle,
     tasks: &Mutex<JoinSet<()>>,
-    stream: impl Stream<Item = Result<T, String>> + Send + 'static,
+    stream: impl Stream<Item = Result<T, E>> + Send + 'static,
 ) -> *mut VirtxStream {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let items = Items(Arc::clone(&shared));
@@ -241,7 +241,10 @@ mod tests {
         let (stream, send) = pending(&runtime, &tasks);
 
         send.send(Err("no".to_string())).unwrap();
-        assert_eq!(wait(stream), (VIRTX_ERROR, Some(Value::from("no"))));
+        assert_eq!(
+            wait(stream),
+            (VIRTX_ERROR, Some(serde_json::json!({"message": "no"})))
+        );
         let _ = send.send(Ok(1));
         assert_eq!(wait(stream), (VIRTX_END, None));
 

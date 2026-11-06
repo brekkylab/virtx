@@ -172,13 +172,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening at {}", config.listen))?;
     eprintln!("serving at http://{}/", listener.local_addr()?);
-    // A machine still running at the end shuts down with this process, as its control channel
-    // closes.
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    tokio::task::spawn_blocking(move || {
+        for home in access.homes() {
+            home.close_all();
+        }
+    })
+    .await?;
     Ok(())
 }
 

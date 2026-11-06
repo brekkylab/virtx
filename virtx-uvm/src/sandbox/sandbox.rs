@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
+use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,8 +15,8 @@ use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, Sand
 use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
-    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, SnapshotError, SnapshotStore, VolumeMount, VolumeStore,
+    Digest, FsTree, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec,
+    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotStore, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -23,6 +25,20 @@ pub const DEFAULT_MEMORY_MIB: u32 = 4096;
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
+
+/// How long a sandbox is in use by nothing before its machine is stopped, where
+/// `VIRTX_PARK_AFTER_MS` does not say: in milliseconds, `0` for never.
+const PARK_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// How long a sandbox is in use by nothing before its machine is stopped, `None` for never:
+/// `VIRTX_PARK_AFTER_MS`, in milliseconds, or five minutes.
+pub fn park_after() -> Option<Duration> {
+    match std::env::var("VIRTX_PARK_AFTER_MS").map(|ms| ms.parse::<u64>()) {
+        Ok(Ok(0)) => None,
+        Ok(Ok(ms)) => Some(Duration::from_millis(ms)),
+        _ => Some(PARK_AFTER),
+    }
+}
 
 /// The signals a job is sent, by name, each numbered as Linux numbers it: its index, plus one.
 const SIGNALS: [&str; 31] = [
@@ -69,17 +85,36 @@ pub fn signal_number(name: &str) -> Option<i32> {
 /// A command sent to the machine and not yet answered, and who waits for its job.
 type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
 
-/// A sandbox: the machine it booted, up until the sandbox is closed, and the processes run in
-/// it.
+/// Where a sandbox's machine is.
+enum State {
+    Up(Arc<Machine>),
+    /// Stopped while the sandbox was in use by nothing, and booted again for what next needs
+    /// it.
+    Parked,
+    /// Ended on its own, or with the sandbox: nothing boots it again.
+    Exited,
+}
+
+/// A sandbox: a machine booted as it was made, again whenever it is needed after it was
+/// [parked](Sandbox::idle) for want of use, and the processes run in it.
+///
+/// What it wrote is kept across its machine's stops, on its snapshot or on the one it made for
+/// itself; what ran in it is not.
 pub struct Sandbox {
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
     _held: ImageHold,
+    /// The snapshot it was made on, by name.
     snapshot: Option<String>,
-    machine: Arc<Machine>,
-    /// Whether its machine runs still.
-    up: AtomicBool,
+    /// The one it made for itself, without one, until it is closed.
+    upper: Mutex<Option<Upper>>,
+    /// What each of its machines boots, and the process each runs as.
+    config: MachineConfig,
+    vm: Vec<OsString>,
+    state: Mutex<State>,
+    /// Held while its machine boots or stops, so one does at a time.
+    turn: tokio::sync::Mutex<()>,
     /// Its jobs, by id, until each is removed.
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
     /// Each command sent to the machine and not yet answered, in the order sent, and who waits
@@ -96,7 +131,8 @@ pub struct Sandbox {
 impl Sandbox {
     /// Boot a sandbox as `args` asks, of what `images`, `snapshots` and `volumes` hold, by
     /// running `vm` as its machine's process (see [`Machine::start`]). `held` says whether
-    /// another sandbox stands on a snapshot, which this one is then refused.
+    /// another sandbox stands on a snapshot, which this one is then refused. Its machine is
+    /// stopped once the sandbox has been in use by nothing for `park_after`.
     pub async fn create(
         images: &ImageStore,
         snapshots: &SnapshotStore,
@@ -104,6 +140,7 @@ impl Sandbox {
         held: impl Fn(&str) -> bool,
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
+        park_after: Option<Duration>,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
         let mut given = HashSet::new();
@@ -185,14 +222,21 @@ impl Sandbox {
             })
             .collect::<Result<_, Error>>()?;
 
-        // Merging the layers' metadata is blocking work.
+        // Merging the layers' metadata, and formatting a snapshot, are blocking work.
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
+        let upper = match snapshot {
+            Some(_) => None,
+            None => {
+                let dir = Upper::dir(snapshots);
+                Some(tokio::task::spawn_blocking(move || Upper::create(&dir)).await??)
+            }
+        };
 
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
-            snapshot,
+            snapshot: snapshot.or_else(|| upper.as_ref().map(|upper| upper.snapshot.clone())),
             spec: MachineSpec {
                 vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
                 ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
@@ -206,23 +250,25 @@ impl Sandbox {
             volumes,
             ports: args.ports.clone(),
         };
-
-        // Booting is blocking work, until the guest takes commands.
-        let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
         let sandbox = Arc::new(Sandbox {
             image: digest,
             _held: held_image,
             snapshot: args.snapshot.clone(),
-            machine: Arc::new(machine),
-            up: AtomicBool::new(true),
+            upper: Mutex::new(upper),
+            config,
+            vm,
+            state: Mutex::new(State::Parked),
+            turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::default(),
             starting: Mutex::default(),
             ports: Ports::default(),
             used: Mutex::new(Instant::now()),
             active: AtomicUsize::new(0),
         });
-        let reading = Arc::clone(&sandbox);
-        std::thread::spawn(move || reading.read());
+        sandbox.wake().await?;
+        if let Some(after) = park_after {
+            tokio::spawn(park_when_idle(Arc::downgrade(&sandbox), after));
+        }
         Ok(sandbox)
     }
 
@@ -233,7 +279,7 @@ impl Sandbox {
             id,
             image: self.image.to_string(),
             snapshot: self.snapshot.clone(),
-            running: self.up.load(Ordering::Relaxed),
+            running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
         }
     }
@@ -249,13 +295,16 @@ impl Sandbox {
         cmd: Vec<String>,
         timeout: Option<Duration>,
     ) -> Result<Arc<Job>, Error> {
+        // In use until the job runs, which keeps it in use from there.
+        let _activity = self.activity();
+        let machine = self.wake().await?;
         let (waiter, started) = oneshot::channel();
         {
             let mut starting = self.starting.lock().unwrap();
-            if !self.up.load(Ordering::Relaxed) {
+            if !self.is(&machine) {
                 return Err(Error::Ended);
             }
-            self.machine.exec(cmd.clone())?;
+            machine.exec(cmd.clone())?;
             starting.push_back((cmd, waiter));
         }
         let job = started
@@ -266,11 +315,8 @@ impl Sandbox {
             let (sandbox, job) = (Arc::downgrade(self), Arc::clone(&job));
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
-                let (pid, running) = job.pid();
-                if let Some(sandbox) = sandbox.upgrade()
-                    && running
-                {
-                    let _ = sandbox.machine.signal(pid, SIGKILL);
+                if let Some(sandbox) = sandbox.upgrade() {
+                    let _ = sandbox.kill(&job);
                 }
             });
         }
@@ -294,10 +340,7 @@ impl Sandbox {
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
-        let (pid, running) = job.pid();
-        if running {
-            self.machine.signal(pid, SIGKILL)?;
-        }
+        self.kill(&job)?;
         job.remove();
         Ok(())
     }
@@ -305,10 +348,10 @@ impl Sandbox {
     /// Send the job `id` `signal`, as [`signal_number`] numbers it.
     pub fn signal(&self, id: &str, signal: i32) -> Result<(), Error> {
         let (pid, running) = self.job(id)?.pid();
-        if !running {
-            return Err(Error::JobEnded("the job has ended"));
-        }
-        self.machine.signal(pid, signal)?;
+        // A job that runs keeps the machine it runs in up.
+        let machine = self.up().filter(|_| running);
+        let machine = machine.ok_or(Error::JobEnded("the job has ended"))?;
+        machine.signal(pid, signal)?;
         Ok(())
     }
 
@@ -318,16 +361,14 @@ impl Sandbox {
         Err(Error::JobEnded("the job was started without stdin"))
     }
 
-    /// Its machine, to ask of its files.
-    pub fn machine(&self) -> Result<Arc<Machine>, Error> {
-        match self.up.load(Ordering::Relaxed) {
-            true => Ok(Arc::clone(&self.machine)),
-            false => Err(Error::Ended),
-        }
+    /// Its machine, booted again if it was parked, to ask of its files. The caller holds an
+    /// [`Activity`] for as long as it asks, so the machine is not parked under it.
+    pub async fn machine(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        self.wake().await
     }
 
-    /// A connection to `port` in its machine. Refused when the machine has ended, as a port
-    /// nothing listens on is.
+    /// A connection to `port` in its machine. Refused while no machine runs, as a port nothing
+    /// listens on is: a parked one is not booted for it, since nothing would listen there.
     pub async fn connect(&self, port: u16) -> io::Result<TcpStream> {
         self.ports.connect(port).await
     }
@@ -349,22 +390,97 @@ impl Sandbox {
         Some(self.used.lock().unwrap().elapsed())
     }
 
-    /// Stop its machine, and end and remove every job in it, as cancelling each does. Blocks
-    /// while the guest puts what it wrote on its snapshot.
+    /// Stop its machine for good, and end and remove every job in it, as cancelling each does.
+    /// Blocks while the guest puts what it wrote on its snapshot.
     pub fn close(&self) {
-        self.machine.stop();
+        let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
+        if let State::Up(machine) = state {
+            machine.stop();
+        }
+        drop(self.upper.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);
             job.remove();
         }
     }
 
-    /// What its machine says, until it ends: each command's pid, as the job its waiter gets,
-    /// and each job's output and end.
-    fn read(self: Arc<Self>) {
-        let _published = self.ports.publish(self.machine.published.clone());
+    /// Its machine, booting one if it is parked.
+    async fn wake(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        let _turn = self.turn.lock().await;
+        match &*self.state.lock().unwrap() {
+            State::Up(machine) => return Ok(Arc::clone(machine)),
+            State::Exited => return Err(Error::Ended),
+            State::Parked => {}
+        }
+        // Booting is blocking work, until the guest takes commands.
+        let (config, vm) = (self.config.clone(), self.vm.clone());
+        let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
+        let machine = Arc::new(machine);
+        let closed = {
+            let mut state = self.state.lock().unwrap();
+            let closed = matches!(*state, State::Exited);
+            if !closed {
+                *state = State::Up(Arc::clone(&machine));
+            }
+            closed
+        };
+        // Closed while it booted: what booted goes with it.
+        if closed {
+            tokio::task::spawn_blocking(move || machine.stop()).await?;
+            return Err(Error::Ended);
+        }
+        let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
+        std::thread::spawn(move || reading.read(&read));
+        Ok(machine)
+    }
+
+    /// Stop its machine if it has been in use by nothing for `after`, to boot again when it
+    /// is next needed.
+    async fn park(&self, after: Duration) {
+        let _turn = self.turn.lock().await;
+        if self.idle().is_none_or(|idle| idle < after) {
+            return;
+        }
+        let machine = {
+            let mut state = self.state.lock().unwrap();
+            let State::Up(machine) = &*state else {
+                return;
+            };
+            let machine = Arc::clone(machine);
+            *state = State::Parked;
+            machine
+        };
+        let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+    }
+
+    /// Its machine while one runs.
+    fn up(&self) -> Option<Arc<Machine>> {
+        match &*self.state.lock().unwrap() {
+            State::Up(machine) => Some(Arc::clone(machine)),
+            _ => None,
+        }
+    }
+
+    /// Whether `machine` is its machine now.
+    fn is(&self, machine: &Arc<Machine>) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, machine))
+    }
+
+    /// Kill `job` if it runs.
+    fn kill(&self, job: &Job) -> Result<(), Error> {
+        let (pid, running) = job.pid();
+        if let Some(machine) = self.up().filter(|_| running) {
+            machine.signal(pid, SIGKILL)?;
+        }
+        Ok(())
+    }
+
+    /// What `machine` says, until it ends: each command's pid, as the job its waiter gets, and
+    /// each job's output and end.
+    fn read(&self, machine: &Arc<Machine>) {
+        let _published = self.ports.publish(machine.published.clone());
         let mut running = HashMap::new();
-        while let Some(message) = self.machine.recv() {
+        while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
                     let Some((cmd, waiter)) = self.starting.lock().unwrap().pop_front() else {
@@ -406,13 +522,42 @@ impl Sandbox {
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell.
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
+        // nothing ran; otherwise it ended on its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();
-        self.up.store(false, Ordering::Relaxed);
+        {
+            let mut state = self.state.lock().unwrap();
+            if matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine)) {
+                *state = State::Exited;
+            }
+        }
         starting.clear();
         for job in running.into_values() {
             job.end(128 + SIGKILL);
         }
+    }
+}
+
+/// Park `sandbox`'s machine each time it has been in use by nothing for `after`, until the
+/// sandbox goes or its machine has exited.
+async fn park_when_idle(sandbox: std::sync::Weak<Sandbox>, after: Duration) {
+    let mut wait = after;
+    loop {
+        tokio::time::sleep(wait).await;
+        let Some(sandbox) = sandbox.upgrade() else {
+            return;
+        };
+        if matches!(*sandbox.state.lock().unwrap(), State::Exited) {
+            return;
+        }
+        wait = match sandbox.idle() {
+            Some(idle) if idle >= after => {
+                sandbox.park(after).await;
+                after
+            }
+            Some(idle) => after - idle,
+            None => after,
+        };
     }
 }
 
@@ -430,6 +575,88 @@ impl Drop for Activity {
     fn drop(&mut self) {
         *self.0.used.lock().unwrap() = Instant::now();
         self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The snapshot a sandbox made without one makes for itself, deleted when the sandbox is
+/// closed, or by the next [`Sandbox::sweep`] once the process that made it has ended.
+///
+/// Each is `<name>.ext4` in `<root>/sandbox/`, beside `<name>.owner`, which the process that
+/// made it holds a lock on for as long as it runs.
+struct Upper {
+    snapshot: Snapshot,
+    owner: PathBuf,
+    _held: File,
+}
+
+impl Upper {
+    fn dir(snapshots: &SnapshotStore) -> PathBuf {
+        snapshots.root().join("sandbox")
+    }
+
+    fn create(dir: &Path) -> Result<Upper, Error> {
+        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
+        let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+        let owner = dir.join(format!("{name}.owner"));
+        let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
+        held.try_lock().map_err(|e| SnapshotError::Io {
+            context: format!("locking {}", owner.display()),
+            source: e.into(),
+        })?;
+        let path = dir.join(format!("{name}.ext4"));
+        // Owned from here, so a disk that failed to format is deleted too.
+        let upper = Upper {
+            snapshot: Snapshot { name, path },
+            owner,
+            _held: held,
+        };
+        let file = File::create_new(&upper.snapshot.path)
+            .map_err(io(format!("creating {}", upper.snapshot.path.display())))?;
+        FsTree::new()
+            .to_ext4(file, Snapshot::SIZE)
+            .map_err(SnapshotError::from)?;
+        Ok(upper)
+    }
+}
+
+impl Drop for Upper {
+    fn drop(&mut self) {
+        self.snapshot.delete();
+        let _ = fs::remove_file(&self.owner);
+    }
+}
+
+impl Sandbox {
+    /// Delete what sandboxes made under `snapshots`' root by processes that have since ended
+    /// left: a server that was killed closed none of its own.
+    pub fn sweep(snapshots: &SnapshotStore) {
+        let dir = Upper::dir(snapshots);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let owner = entry.path();
+            if owner.extension().is_none_or(|e| e != "owner") {
+                continue;
+            }
+            let Ok(file) = File::open(&owner) else {
+                continue;
+            };
+            if file.try_lock().is_err() {
+                continue;
+            }
+            let Some(name) = owner.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let path = dir.join(format!("{name}.ext4"));
+            Snapshot {
+                name: name.to_owned(),
+                path,
+            }
+            .delete();
+            let _ = fs::remove_file(&owner);
+        }
     }
 }
 

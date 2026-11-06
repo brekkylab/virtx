@@ -22,11 +22,16 @@ struct Server {
 
 impl Server {
     fn spawn(name: &str) -> Server {
+        Server::spawn_with(name, &[])
+    }
+
+    /// A server, as [`spawn`](Server::spawn) makes one, with `env` set for it besides.
+    fn spawn_with(name: &str, env: &[(&str, &str)]) -> Server {
         let home = std::env::temp_dir().join(format!("virtx-stdio-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-stdio"));
-        command.env("VIRTX_HOME", &home);
+        command.env("VIRTX_HOME", &home).envs(env.iter().copied());
         Server {
             client: Client::spawn(command).unwrap(),
             home,
@@ -561,6 +566,90 @@ async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
         assert_eq!(status(client.read_dir(&volume, "out").await), 404);
         assert!(!names(client.read_dir(&volume, "").await.unwrap()).contains(&"out".to_owned()));
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
+    let server = Server::spawn_with("sandbox-park", &[("VIRTX_PARK_AFTER_MS", "500")]);
+    server.pull_image("alpine:3.20").await;
+    let id = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let root = FileRoot::Sandbox(id.clone());
+    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
+    let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
+    let still = ["sh", "-c", "ps | grep -c '[s]leep 1000'"];
+
+    let (_, ended) = server
+        .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+    let (_, ended) = server.exec(&id, &behind, None).await;
+    assert_eq!(ended.unwrap(), 0);
+    // A job that runs keeps it up, however long.
+    let (lines, ended) = server
+        .exec(
+            &id,
+            &["sh", "-c", "sleep 2; ps | grep -c '[s]leep 1000'"],
+            None,
+        )
+        .await;
+    assert_eq!((lines, ended.unwrap()), (vec!["1".into()], 0));
+
+    // Idle, it stops; a request to its files boots it again, over what it wrote.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(server.client.get_sandbox(&id).await.unwrap().running);
+    assert_eq!(
+        server.client.read_text(&root, "root/kept").await.unwrap(),
+        "kept\n"
+    );
+    let (lines, _) = server.exec(&id, &still, None).await;
+    assert_eq!(lines, ["0"]);
+
+    // And so does a job.
+    let (_, ended) = server.exec(&id, &behind, None).await;
+    assert_eq!(ended.unwrap(), 0);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let (lines, _) = server
+        .exec(
+            &id,
+            &["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"],
+            None,
+        )
+        .await;
+    assert_eq!(lines, ["kept", "0"]);
+
+    // A write to its files boots it too, and what it wrote is there after it stops again.
+    let (_, ended) = server.exec(&id, &behind, None).await;
+    assert_eq!(ended.unwrap(), 0);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    server
+        .client
+        .write_file(&root, "root/written", "written\n", None)
+        .await
+        .unwrap();
+    let (lines, _) = server.exec(&id, &still, None).await;
+    assert_eq!(lines, ["0"]);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        server
+            .client
+            .read_text(&root, "root/written")
+            .await
+            .unwrap(),
+        "written\n"
+    );
+
+    // Its own snapshot goes with it.
+    server.client.remove_sandbox(&id).await.unwrap();
+    let left = std::fs::read_dir(server.home.join("sandbox"))
+        .unwrap()
+        .count();
+    assert_eq!(left, 0);
 }
 
 #[tokio::test]

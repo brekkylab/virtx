@@ -31,7 +31,7 @@ use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
     Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
-    build_step, signal_number,
+    build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -60,6 +60,7 @@ impl Home {
     /// The images in `images`, and the snapshots and volumes under `root`.
     pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
+        Sandbox::sweep(&snapshots);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
@@ -73,6 +74,23 @@ impl Home {
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
         })
+    }
+
+    /// Close every sandbox here, as removing each does, side by side: blocks until each
+    /// machine has stopped and synced what it wrote.
+    pub fn close_all(&self) {
+        let closed: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &closed {
+                scope.spawn(|| sandbox.close());
+            }
+        });
     }
 
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
@@ -570,8 +588,8 @@ async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Re
     home.files.handle(request, &|name| home.holds(name)).await
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine: one whose machine has
-/// exited answers `409`.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it
+/// was parked: one whose machine has exited answers `409`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
@@ -579,9 +597,10 @@ async fn sandbox_files(
 ) -> Answer {
     let id = &segments["id"];
     let sandbox = home.sandbox(id)?;
-    let _activity = sandbox.activity();
-    let machine = sandbox.machine()?;
-    Ok(home.files.sandbox(id, machine, request).await)
+    // In use from here until the answer has been sent, booting it again if it was parked.
+    let activity = sandbox.activity();
+    let machine = sandbox.machine().await?;
+    Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
@@ -621,6 +640,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
         |name| home.holds(name),
         &args,
         home.vm.clone(),
+        park_after(),
     )
     .await?;
     let mut listening = JoinSet::new();

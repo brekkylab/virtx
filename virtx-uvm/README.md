@@ -96,8 +96,11 @@ stacked over it by [`machine`](src/machine/):
 /dev/vda  erofs, read-only   the image's disk              ─┘
 ```
 
-A sandbox made without a snapshot gets a temporary one, gone with it. The devices a machine
-has, and why each, are in [`machine/boot.rs`](src/machine/boot.rs).
+A sandbox made without a snapshot gets one of its own, gone with it. A sandbox's machine is
+stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
+unless it says otherwise, `0` for never) and booted again over the same snapshot when something
+does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
+[`machine/boot.rs`](src/machine/boot.rs).
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem
 and the host has no way to mount one — let alone an EROFS a macOS kernel cannot

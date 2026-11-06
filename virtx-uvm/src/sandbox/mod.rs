@@ -11,4 +11,6 @@ mod sandbox;
 
 pub use error::Error;
 pub use job::Job;
-pub use sandbox::{Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LOG_LIMIT, Sandbox, signal_number};
+pub use sandbox::{
+    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LOG_LIMIT, Sandbox, park_after, signal_number,
+};

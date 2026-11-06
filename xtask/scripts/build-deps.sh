@@ -106,7 +106,7 @@ fi
 
 # How venus reaches Vulkan. Linked on macOS, where the Vulkan is MoltenVK built into the
 # binary above and there is no loader to open. Opened at run time everywhere else: linked,
-# `virtx-uvm` needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
+# a server needs `libvulkan.so.1` to *start*, so a host without a Vulkan loader
 # could run no session at all rather than only no GPU one.
 if [ "$(uname -s)" = Darwin ]; then
     vulkan_dload=false

@@ -1,7 +1,7 @@
-# Build the stdio server, `virtx-uvm`, for every platform it is published for, and attach
+# Build the stdio server, `virtx-stdio`, for every platform it is published for, and attach
 # the archives to the GitHub release of the tag this runs on, one per platform:
 #
-#   virtx-uvm-<os>-<arch>.tar.gz      with SHA256SUMS over all of them
+#   virtx-stdio-<os>-<arch>.tar.gz      with SHA256SUMS over all of them
 #
 # The release is created as a draft if the tag has none, and the archives are attached
 # only once every platform has built, so a release never holds some platforms and not
@@ -268,7 +268,7 @@ jobs:
 
       - name: What was built
         run: |
-          ls -la target/release | grep -E "virtx-uvm|libkrunfw" || true
+          ls -la target/release | grep -E "virtx-stdio|libkrunfw" || true
           ls target/release/abin || true
 
       # What a Linux release asks of the machine it runs on -- see "The glibc floor" above.
@@ -278,7 +278,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           floor=28
-          for exe in target/release/virtx-uvm; do
+          for exe in target/release/virtx-stdio; do
             need=$(objdump -T "$exe" | grep -oE 'GLIBC_2\.[0-9]+' | sort -t. -k2 -n -u | tail -1)
             libs=$(objdump -p "$exe" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
             echo "$exe: needs $need; links $libs"
@@ -295,12 +295,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           readobj="/c/Program Files/LLVM/bin/llvm-readobj.exe"
-          for exe in target/release/virtx-uvm.exe; do
+          for exe in target/release/virtx-stdio.exe; do
             echo "== $exe"
             "$readobj" --coff-imports "$exe" | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' | sort -u | tee "$RUNNER_TEMP/imports.txt"
             # Nothing a release does not carry and Windows may not have, loaded at start-up:
             # the C++ runtime is linked in, and the rest are delay-loaded, so a host without
-            # them still runs virtx-uvm far enough to say what to install.
+            # them still runs virtx-stdio far enough to say what to install.
             if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv|dokan)" "$RUNNER_TEMP/imports.txt"; then
               echo "::error::$exe needs the DLLs above to start"; fail=1
             fi
@@ -314,7 +314,7 @@ jobs:
       # `release` restores.
       - uses: actions/cache/save@v6
         with:
-          path: target/release/dist/virtx-uvm-${{ matrix.release }}.tar.gz
+          path: target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz
           key: dist-${{ matrix.release }}-${{ github.run_id }}
           enableCrossOsArchive: true
 
@@ -329,25 +329,25 @@ jobs:
     steps:
       - uses: actions/cache/restore@v6
         with:
-          path: target/release/dist/virtx-uvm-macos-aarch64.tar.gz
+          path: target/release/dist/virtx-stdio-macos-aarch64.tar.gz
           key: dist-macos-aarch64-${{ github.run_id }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v6
         with:
-          path: target/release/dist/virtx-uvm-linux-x86_64.tar.gz
+          path: target/release/dist/virtx-stdio-linux-x86_64.tar.gz
           key: dist-linux-x86_64-${{ github.run_id }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v6
         with:
-          path: target/release/dist/virtx-uvm-linux-aarch64.tar.gz
+          path: target/release/dist/virtx-stdio-linux-aarch64.tar.gz
           key: dist-linux-aarch64-${{ github.run_id }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - uses: actions/cache/restore@v6
         with:
-          path: target/release/dist/virtx-uvm-windows-x86_64.tar.gz
+          path: target/release/dist/virtx-stdio-windows-x86_64.tar.gz
           key: dist-windows-x86_64-${{ github.run_id }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
@@ -355,7 +355,7 @@ jobs:
       - name: SHA256SUMS
         working-directory: target/release/dist
         run: |
-          sha256sum virtx-uvm-*.tar.gz | tee SHA256SUMS
+          sha256sum virtx-stdio-*.tar.gz | tee SHA256SUMS
           ls -la
 
       # The tag's release, a draft if it has none yet. `--clobber`: a rebuilt release
@@ -369,15 +369,15 @@ jobs:
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '"release exists, draft: " + (.isDraft | tostring)' \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --generate-notes
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber virtx-uvm-*.tar.gz SHA256SUMS
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber virtx-stdio-*.tar.gz SHA256SUMS
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
 
       - name: Keep as an artifact
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v7
         with:
-          name: virtx-uvm-${{ github.sha }}
+          name: virtx-stdio-${{ github.sha }}
           path: |
-            target/release/dist/virtx-uvm-*.tar.gz
+            target/release/dist/virtx-stdio-*.tar.gz
             target/release/dist/SHA256SUMS
           retention-days: 3

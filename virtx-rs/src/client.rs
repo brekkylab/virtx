@@ -39,11 +39,11 @@ pub struct Client {
 unsafe impl Send for Client {}
 unsafe impl Sync for Client {}
 
-/// Fetch `virtx-uvm`, the server of the library's version, into this host's cache if it is
+/// Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is
 /// not there, and give its path: what [`Client::spawn_virtx`] starts. Blocks for the fetch.
 ///
 /// The server is kept one directory per version, so a library that is upgraded fetches its
-/// own. `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another version;
+/// own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 /// `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
 pub fn ensure_virtx() -> Result<PathBuf, Error> {
     let api = api()?;
@@ -63,7 +63,7 @@ impl Client {
         Self::spawn_program(program.as_ptr(), args)
     }
 
-    /// Start `virtx-uvm`, the server of the library's version, with `args`, fetching it first
+    /// Start `virtx-stdio`, the server of the library's version, with `args`, fetching it first
     /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone. Blocks
     /// until it has started.
     pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Client, Error> {

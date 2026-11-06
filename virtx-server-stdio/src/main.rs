@@ -1,9 +1,9 @@
-//! `virtx-uvm` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
+//! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
 //! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
 //! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
 //! this host keeps is that one client's.
 //!
-//! `virtx-uvm vm …` is this binary spawned by itself to be a machine; see
+//! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod endpoints;

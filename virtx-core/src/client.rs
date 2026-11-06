@@ -1034,7 +1034,7 @@ pub(crate) mod ffi {
     pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-uvm`,
+    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
     /// the server of this library's version, fetched first if this host has none -- see
     /// `virtx_ensure_virtx`, which does that fetch alone.
     ///
@@ -1081,13 +1081,13 @@ pub(crate) mod ffi {
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
-    /// Fetch `virtx-uvm`, the server of this library's version, into this host's cache if it
+    /// Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
     /// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
     /// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
     /// why written to `out`.
     ///
     /// The server is kept one directory per version, so a library that is upgraded fetches
-    /// its own. `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another
+    /// its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
     /// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
     ///
     /// # Safety

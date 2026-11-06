@@ -14,20 +14,20 @@ const DIST_URL: &str = "https://github.com/brekkylab/virtx/releases/download";
 
 /// The server's file name on this host.
 fn server_file() -> String {
-    format!("virtx-uvm{}", std::env::consts::EXE_SUFFIX)
+    format!("virtx-stdio{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// The path of `virtx-uvm`, the server of this client's version, fetched into the cache if it
+/// The path of `virtx-stdio`, the server of this client's version, fetched into the cache if it
 /// is not there yet.
 ///
 /// The server and the client are released together, under one tag, so the server a client
-/// matches is the one of its own version: `v<version>` of this crate, and `$VIRTX_UVM_VERSION`
-/// to name another. It is kept under [`cache_root`]`/virtx-uvm/<version>/bin/`, one directory
+/// matches is the one of its own version: `v<version>` of this crate, and `$VIRTX_STDIO_VERSION`
+/// to name another. It is kept under [`cache_root`]`/virtx-stdio/<version>/bin/`, one directory
 /// per version, so a client that is upgraded fetches its own server and never runs an older
-/// one left behind. **Present is enough**: a version's `bin/` that has `virtx-uvm` is left
+/// one left behind. **Present is enough**: a version's `bin/` that has `virtx-stdio` is left
 /// alone.
 ///
-/// `$VIRTX_UVM` names a server to use as it is, fetching nothing -- one built here, say.
+/// `$VIRTX_STDIO` names a server to use as it is, fetching nothing -- one built here, say.
 ///
 /// # Release layout
 ///
@@ -36,7 +36,7 @@ fn server_file() -> String {
 /// placed:
 ///
 /// ```text
-/// <base>/v<version>/virtx-uvm-<os>-<arch>.tar.gz
+/// <base>/v<version>/virtx-stdio-<os>-<arch>.tar.gz
 /// <base>/v<version>/SHA256SUMS
 /// ```
 ///
@@ -44,18 +44,18 @@ fn server_file() -> String {
 /// unless `$VIRTX_DIST_URL` says otherwise.
 pub async fn ensure_virtx() -> anyhow::Result<PathBuf> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    if let Some(named) = env("VIRTX_UVM") {
+    if let Some(named) = env("VIRTX_STDIO") {
         let path = PathBuf::from(named);
         anyhow::ensure!(
             path.is_file(),
-            "$VIRTX_UVM: {} is not a file",
+            "$VIRTX_STDIO: {} is not a file",
             path.display()
         );
         return Ok(path);
     }
-    let version = env("VIRTX_UVM_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
+    let version = env("VIRTX_STDIO_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
     let base = env("VIRTX_DIST_URL").unwrap_or_else(|| DIST_URL.into());
-    let root = cache_root().join("virtx-uvm").join(&version);
+    let root = cache_root().join("virtx-stdio").join(&version);
     ensure_in(&root, &base, &version).await
 }
 
@@ -92,16 +92,19 @@ async fn ensure_in(root: &Path, base: &str, version: &str) -> anyhow::Result<Pat
     }
 
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let asset = format!("virtx-uvm-{platform}.tar.gz");
+    let asset = format!("virtx-stdio-{platform}.tar.gz");
     let release = format!("{}/v{version}", base.trim_end_matches('/'));
     let sums = fetch(&format!("{release}/SHA256SUMS"))
         .await
-        .with_context(|| format!("no virtx-uvm release v{version} is published"))?;
-    let expected = checksum_for(&sums, &asset)
-        .with_context(|| format!("no virtx-uvm release v{version} is published for {platform}"))?;
+        .with_context(|| format!("no virtx-stdio release v{version} is published"))?;
+    let expected = checksum_for(&sums, &asset).with_context(|| {
+        format!("no virtx-stdio release v{version} is published for {platform}")
+    })?;
     let archive = fetch(&format!("{release}/{asset}"))
         .await
-        .with_context(|| format!("no virtx-uvm release v{version} is published for {platform}"))?;
+        .with_context(|| {
+            format!("no virtx-stdio release v{version} is published for {platform}")
+        })?;
     let actual = format!("{:x}", Sha256::digest(&archive));
     anyhow::ensure!(
         actual == expected,
@@ -111,7 +114,7 @@ async fn ensure_in(root: &Path, base: &str, version: &str) -> anyhow::Result<Pat
     let root = root.to_path_buf();
     tokio::task::spawn_blocking(move || unpack(&archive, &root, &server))
         .await
-        .context("unpacking virtx-uvm panicked")??;
+        .context("unpacking virtx-stdio panicked")??;
     Ok(placed)
 }
 
@@ -154,10 +157,10 @@ fn unpack(archive: &[u8], root: &Path, server: &str) -> anyhow::Result<()> {
     let moved = (|| {
         tar::Archive::new(flate2::read::GzDecoder::new(archive))
             .unpack(&part)
-            .context("unpacking the virtx-uvm archive")?;
+            .context("unpacking the virtx-stdio archive")?;
         anyhow::ensure!(
             part.join(server).is_file(),
-            "the virtx-uvm archive has no {server}"
+            "the virtx-stdio archive has no {server}"
         );
 
         let bin = root.join("bin");
@@ -225,7 +228,7 @@ mod tests {
 
     use super::*;
 
-    /// A release at `v1.2.3` of an archive holding `virtx-uvm`, `libkrunfw` and `abin/`, served
+    /// A release at `v1.2.3` of an archive holding `virtx-stdio`, `libkrunfw` and `abin/`, served
     /// over HTTP with its `SHA256SUMS`, counting the archive's fetches.
     struct Release {
         base: String,
@@ -250,7 +253,7 @@ mod tests {
         file("abin/mem", b"mem");
         let archive = tar.into_inner().unwrap().finish().unwrap();
         let asset = format!(
-            "virtx-uvm-{}-{}.tar.gz",
+            "virtx-stdio-{}-{}.tar.gz",
             std::env::consts::OS,
             std::env::consts::ARCH
         );
@@ -332,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn an_archive_that_does_not_match_its_sum_places_nothing() {
         let wrong = format!(
-            "{:064x}  virtx-uvm-{}-{}.tar.gz\n",
+            "{:064x}  virtx-stdio-{}-{}.tar.gz\n",
             0,
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -358,15 +361,15 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("no virtx-uvm release v9.9.9"), "{error}");
+        assert!(error.contains("no virtx-stdio release v9.9.9"), "{error}");
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn a_sum_is_found_by_its_file_name() {
-        let sums = b"aa  virtx-uvm-a.tar.gz\nbb *virtx-uvm-b.tar.gz\n";
-        assert_eq!(checksum_for(sums, "virtx-uvm-a.tar.gz").unwrap(), "aa");
-        assert_eq!(checksum_for(sums, "virtx-uvm-b.tar.gz").unwrap(), "bb");
-        assert!(checksum_for(sums, "virtx-uvm-c.tar.gz").is_err());
+        let sums = b"aa  virtx-stdio-a.tar.gz\nbb *virtx-stdio-b.tar.gz\n";
+        assert_eq!(checksum_for(sums, "virtx-stdio-a.tar.gz").unwrap(), "aa");
+        assert_eq!(checksum_for(sums, "virtx-stdio-b.tar.gz").unwrap(), "bb");
+        assert!(checksum_for(sums, "virtx-stdio-c.tar.gz").is_err());
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "virtx-e2e"
+version = "0.0.0"
+edition = "2024"
+description = "The Rust package against virtx-uvm; run by `cargo xtask e2e`."
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+virtx-rs = { path = "../../virtx-rs" }
+
+[[test]]
+# Its own `main`, as `virtx-rs`'s tests have: the library is opened once, before every test.
+name = "pull_and_exec"
+path = "pull_and_exec.rs"
+harness = false

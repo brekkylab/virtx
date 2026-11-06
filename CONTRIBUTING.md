@@ -27,6 +27,7 @@ cargo xtask check                            # format, clippy and tests: the cli
 cargo xtask test -p virtx-server-stdio       # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)               # Python
 (cd virtx-node && npm install && npm test)   # Node
+cargo xtask e2e                              # each package and its CLI against the real server, booting VMs: tests/
 ```
 
 There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command. `cargo xtask check --client` checks the client alone, without `init`.

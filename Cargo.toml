@@ -21,6 +21,7 @@ members = [
     "virtx-uvm",
     "virtx-server-stdio",
     "virtx-server-http",
+    "tests/rust",
     "xtask",
 ]
 default-members = ["virtx-core", "virtx-rs"]

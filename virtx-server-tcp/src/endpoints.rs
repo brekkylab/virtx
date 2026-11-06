@@ -55,7 +55,7 @@ pub struct Home {
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
-    /// The sandboxes, by id, until each is removed or idles.
+    /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
@@ -81,22 +81,6 @@ impl Home {
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
         })
-    }
-
-    /// Forget every sandbox that has run nothing, and been reached at none of its ports or its
-    /// files, for `idle`, and stop its machine.
-    pub fn forget_idle(&self, idle: Duration) {
-        let mut forgotten = Vec::new();
-        self.sandboxes.lock().unwrap().retain(|_, held| {
-            let kept = held.sandbox.idle().is_none_or(|was| was < idle);
-            if !kept {
-                forgotten.push(Arc::clone(&held.sandbox));
-            }
-            kept
-        });
-        for sandbox in forgotten {
-            tokio::task::spawn_blocking(move || sandbox.close());
-        }
     }
 
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is

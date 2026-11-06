@@ -30,8 +30,8 @@ from .image import (
 )
 from .job import LogEntry, StartedJob
 from .sandbox import Sandbox, SandboxJob, SandboxJobEntry, SandboxVolume, sandbox_job_entry
-from .snapshot import SnapshotListOutputItem
-from .volume import MountSource, VolumeListOutputItem, VolumeMountListOutputItem
+from .snapshot import Snapshot
+from .volume import MountSource, Volume, VolumeMountListOutputItem
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -386,44 +386,44 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
-    async def list_snapshot(self) -> list[SnapshotListOutputItem]:
+    async def list_snapshot(self) -> list[Snapshot]:
         """Every snapshot the server holds."""
         items = await self._call("virtx_client_list_snapshot")
-        return [SnapshotListOutputItem.from_dict(item) for item in items]
+        return [Snapshot.from_dict(self, item) for item in items]
 
     async def create_snapshot(
         self, name: str | None = None, disk_gib: int | None = None
-    ) -> SnapshotListOutputItem:
+    ) -> Snapshot:
         """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
         without either the server picks it."""
         output = await self._call(
             "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
         )
-        return SnapshotListOutputItem.from_dict(output)
+        return Snapshot.from_dict(self, output)
 
-    async def get_snapshot(self, name: str) -> SnapshotListOutputItem:
+    async def get_snapshot(self, name: str) -> Snapshot:
         """The snapshot ``name``."""
         output = await self._call("virtx_client_get_snapshot", _args(name=name))
-        return SnapshotListOutputItem.from_dict(output)
+        return Snapshot.from_dict(self, output)
 
     async def remove_snapshot(self, name: str) -> None:
         """Delete the snapshot ``name`` and its upper layer."""
         await self._call("virtx_client_remove_snapshot", _args(name=name))
 
-    async def list_volume(self) -> list[VolumeListOutputItem]:
+    async def list_volume(self) -> list[Volume]:
         """Every volume the server holds."""
         items = await self._call("virtx_client_list_volume")
-        return [VolumeListOutputItem.from_dict(item) for item in items]
+        return [Volume.from_dict(self, item) for item in items]
 
-    async def create_volume(self, name: str | None = None) -> VolumeListOutputItem:
+    async def create_volume(self, name: str | None = None) -> Volume:
         """Keep a new, empty volume under ``name``; without one the server picks it."""
         output = await self._call("virtx_client_create_volume", _args(name=name))
-        return VolumeListOutputItem.from_dict(output)
+        return Volume.from_dict(self, output)
 
-    async def get_volume(self, name: str) -> VolumeListOutputItem:
+    async def get_volume(self, name: str) -> Volume:
         """The volume ``name``."""
         output = await self._call("virtx_client_get_volume", _args(name=name))
-        return VolumeListOutputItem.from_dict(output)
+        return Volume.from_dict(self, output)
 
     async def remove_volume(self, name: str) -> None:
         """Delete the volume ``name`` and everything in it."""
@@ -590,7 +590,7 @@ class Client:
     async def list_sandbox_job(self, sandbox: str) -> list[SandboxJob]:
         """Every job in ``sandbox``."""
         items = await self._call("virtx_client_list_sandbox_job", _args(sandbox=sandbox))
-        return [SandboxJob.from_dict(item) for item in items]
+        return [SandboxJob.from_dict(self, sandbox, item) for item in items]
 
     def exec_sandbox(
         self,
@@ -607,14 +607,15 @@ class Client:
         args = _args(sandbox=sandbox, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:
-            return SandboxJob.from_dict(await self._call("virtx_client_exec_sandbox", args))
+            output = await self._call("virtx_client_exec_sandbox", args)
+            return SandboxJob.from_dict(self, sandbox, output)
 
-        return StartedJob(start, lambda job: self.sandbox_job_log(sandbox, job.id))
+        return StartedJob(start, lambda job: job.log())
 
     async def get_sandbox_job(self, sandbox: str, job: str) -> SandboxJob:
         """The job ``job`` in ``sandbox``."""
         output = await self._call("virtx_client_get_sandbox_job", _args(sandbox=sandbox, job=job))
-        return SandboxJob.from_dict(output)
+        return SandboxJob.from_dict(self, sandbox, output)
 
     async def remove_sandbox_job(self, sandbox: str, job: str) -> None:
         """Cancel the job ``job`` in ``sandbox`` if it runs, killing its process, and forget

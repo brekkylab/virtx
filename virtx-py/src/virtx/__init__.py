@@ -17,9 +17,12 @@ yields the job's log, as ``image_job_log`` or ``sandbox_job_log`` does, each a `
 numbered for ``after`` to resume from, until its end entry. A download or upload of an image yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
-The files of a volume, a snapshot or a sandbox are read and written through the client too, each
-request naming its root as a ``Volume``, a ``Snapshot`` or a ``SandboxFiles``:
-``client.read_file(Volume("v"), "a.txt")``.
+A sandbox, a volume, a snapshot and a sandbox job are answered as a ``Sandbox``, a ``Volume``, a
+``Snapshot`` and a ``SandboxJob``, each carrying the client its requests go through: it is all a
+caller hands on to act on one. The three with files read and write them as ``Files``:
+``await volume.read_file("a.txt")``. The client's files requests name the root instead, a
+``VolumeFiles``, a ``SnapshotFiles`` or a ``SandboxFiles``:
+``client.read_file(VolumeFiles("v"), "a.txt")``.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
 ``create_sandbox`` answered for it: an address on this machine's loopback.
@@ -27,7 +30,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
 from .client import Client, Event, Output, Progress, ensure_virtx
-from .files import DirEntry, FileRoot, Metadata, SandboxFiles, Snapshot, Volume
+from .files import DirEntry, FileRoot, Files, Metadata, SandboxFiles, SnapshotFiles, VolumeFiles
 from .image import (
     BasicAuth,
     BearerAuth,
@@ -60,14 +63,14 @@ from .sandbox import (
     Stderr,
     Stdout,
 )
-from .snapshot import SnapshotListOutputItem
+from .snapshot import Snapshot
 from .volume import (
     GdriveSource,
     MountSource,
     MountType,
     NotionSource,
     OnedriveSource,
-    VolumeListOutputItem,
+    Volume,
     VolumeMountListOutputItem,
 )
 
@@ -79,6 +82,7 @@ __all__ = [
     "DirEntry",
     "Event",
     "FileRoot",
+    "Files",
     "GdriveSource",
     "ImageDigest",
     "ImageDownloadOutput",
@@ -112,14 +116,14 @@ __all__ = [
     "SandboxPort",
     "SandboxVolume",
     "Snapshot",
-    "SnapshotListOutputItem",
+    "SnapshotFiles",
     "StartedJob",
     "Stderr",
     "Stdout",
     "Truncated",
     "VirtxError",
     "Volume",
-    "VolumeListOutputItem",
+    "VolumeFiles",
     "VolumeMountListOutputItem",
     "image_name",
     "library_path",

@@ -83,6 +83,13 @@ impl Files {
         {
             return (StatusCode::BAD_REQUEST, "a file is written whole").into_response();
         }
+        if takes_root(&root.to_string(), &request) {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "the root is removed through its resource",
+            )
+            .into_response();
+        }
         let handler = DavHandler::builder()
             .strip_prefix(root.to_string())
             .hide_symlinks(true)
@@ -138,6 +145,20 @@ impl Files {
             .await
             .map_err(|e| refused(snapshot_status(&e), e))
     }
+}
+
+/// Whether `request` would take the root at `prefix` away or write over it: a `DELETE` or `MOVE`
+/// of it, or a `MOVE` or `COPY` onto it. `dav-server` does either a member at a time, so a
+/// filesystem refusing the root itself refuses it only once all in it has gone.
+fn takes_root(prefix: &str, request: &Request<Body>) -> bool {
+    let is_root = |path: &str| path.trim_end_matches('/') == prefix;
+    let method = request.method().as_str();
+    let destination = request
+        .headers()
+        .get("Destination")
+        .and_then(|to| to.to_str().ok()?.parse::<http::Uri>().ok());
+    (matches!(method, "DELETE" | "MOVE") && is_root(request.uri().path()))
+        || (matches!(method, "MOVE" | "COPY") && destination.is_some_and(|to| is_root(to.path())))
 }
 
 /// The first segment of `rest`, what follows a root's kind in a path.

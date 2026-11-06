@@ -540,6 +540,19 @@ async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     let nobody = FileRoot::Volume("nobody".into());
     assert_eq!(status(client.stat_file(&nobody, "").await), 404);
 
+    // The root is removed through its resource, and a request that would take it, or what is in
+    // it, is refused before anything goes.
+    client
+        .write_file(&volume, "kept.txt", "kept", None)
+        .await
+        .unwrap();
+    assert_eq!(status(client.remove_file(&volume, "", false).await), 403);
+    assert_eq!(
+        status(client.copy_file(&volume, "copied", "", true).await),
+        403
+    );
+    assert_eq!(client.read_text(&volume, "kept.txt").await.unwrap(), "kept");
+
     // A link in the volume, which a machine may have made, points at nothing here.
     #[cfg(unix)]
     {

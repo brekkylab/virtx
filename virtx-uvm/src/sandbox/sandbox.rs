@@ -402,9 +402,14 @@ impl Sandbox {
     }
 
     /// Stop its machine for good, and end and remove every job in it, as cancelling each does.
-    /// Blocks while the guest puts what it wrote on its snapshot.
+    /// Blocks while the guest puts what it wrote on its snapshot, and so must not be called on
+    /// an async runtime's thread.
     pub fn close(&self) {
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
+        // A park or a boot under way finishes first, so its machine is down by the time this
+        // returns: one being parked has synced, and one booting is stopped by `wake`, which
+        // finds the sandbox closed.
+        let _turn = self.turn.blocking_lock();
         if let State::Up(machine) = state {
             machine.stop();
         }

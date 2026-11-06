@@ -711,6 +711,44 @@ async fn a_parked_sandbox_holds_its_snapshot_against_another_server() {
 
 #[tokio::test]
 #[ignore]
+async fn a_sandbox_removed_while_its_machine_stops_answers_once_it_has_synced() {
+    let server = Server::spawn_with("snapshot-park-remove", &[("VIRTX_PARK_AFTER_MS", "500")]);
+    server.pull_image("alpine:3.20").await;
+    // The machine is parked about 500 ms after its last job ends, and syncs for a hundred or so:
+    // one removal per delay across that, each a sandbox on a snapshot of its own.
+    for delay in (450..=700).step_by(50) {
+        let name = format!("work-{delay}");
+        server
+            .client
+            .create_snapshot(Some(name.as_str()), Some(1))
+            .await
+            .unwrap();
+        let mut args = SandboxCreateArgs::new("alpine:3.20");
+        args.snapshot = Some(name.clone());
+        let id = server.client.create_sandbox(&args).await.unwrap().id;
+        // Left in the guest's page cache, so stopping the machine takes the while it syncs.
+        let (_, ended) = server
+            .exec(
+                &id,
+                &["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=256"],
+                None,
+            )
+            .await;
+        assert_eq!(ended.unwrap(), 0);
+
+        // Removed as its machine may be being parked, it answers once that machine has synced,
+        // so the snapshot holds all it wrote.
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        server.client.remove_sandbox(&id).await.unwrap();
+        let snapshot = FileRoot::Snapshot(name);
+        let big = server.client.stat_file(&snapshot, "root/big").await;
+        let size = big.map(|big| big.size).map_err(|e| e.to_string());
+        assert_eq!(size, Ok(256 << 20), "removed after {delay} ms");
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     let server = Server::spawn("sandbox-files");
     server.pull_image("alpine:3.20").await;

@@ -2,7 +2,7 @@
 
 import pytest
 
-from virtx import Client, DirEntry, Metadata, Snapshot, VirtxError, Volume
+from virtx import Client, DirEntry, Metadata, SandboxFiles, Snapshot, VirtxError, Volume
 
 
 async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
@@ -60,9 +60,23 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
             await client.read_dir(Snapshot("locked"), "")
 
 
+async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20")
+        root = SandboxFiles(sandbox.id)
+        await client.create_dir_all(root, "work/dir")
+        await client.write_file(root, "work/dir/a.txt", "hello")
+        assert await client.read_text(root, "work/dir/a.txt") == "hello"
+        assert [entry.name for entry in await client.read_dir(root, "work/dir")] == ["a.txt"]
+        await client.remove_sandbox(sandbox.id)
+        with pytest.raises(VirtxError, match="404"):
+            await client.read_dir(root, "")
+
+
 def test_a_root_and_metadata_read_as_the_wire_has_them() -> None:
     assert Volume("v").to_dict() == {"volume": "v"}
     assert Snapshot("s").to_dict() == {"snapshot": "s"}
+    assert SandboxFiles("sb1").to_dict() == {"sandbox": "sb1"}
     assert Metadata.from_dict({"is_dir": True, "size": 0}) == Metadata(True, 0)
     entry = DirEntry.from_dict(
         {"name": "a", "metadata": {"is_dir": False, "size": 1, "modified": 2}}

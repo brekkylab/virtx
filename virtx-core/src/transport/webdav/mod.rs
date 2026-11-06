@@ -1,6 +1,7 @@
-//! The files of a volume or a snapshot, which `PROTOCOL.md`'s Files has a server serve with
-//! WebDAV (RFC 4918) under `/volumes/{name}/files/` or `/snapshots/{name}/files/`: what each
-//! request names, and what a `PROPFIND` reads into. The client's end is [`client`].
+//! The files of a volume, a snapshot or a sandbox, which `PROTOCOL.md`'s Files has a server
+//! serve with WebDAV (RFC 4918) under `/volumes/{name}/files/`, `/snapshots/{name}/files/` or
+//! `/sandboxes/{id}/files/`: what each request names, and what a `PROPFIND` reads into. The
+//! client's end is [`client`].
 //!
 //! A path is relative to the root, `/`-separated, as `dir/file.txt`; the empty path is the
 //! root. The server refuses one that leads outside.
@@ -10,13 +11,14 @@ pub(crate) mod client;
 
 use serde::{Deserialize, Serialize};
 
-/// Whose files: a volume's, or a snapshot's. As JSON, `{"volume": "name"}` or
-/// `{"snapshot": "name"}`.
+/// Whose files: a volume's, a snapshot's, or a sandbox's as its processes see them. As JSON,
+/// `{"volume": "name"}`, `{"snapshot": "name"}` or `{"sandbox": "id"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileRoot {
     Volume(String),
     Snapshot(String),
+    Sandbox(String),
 }
 
 /// What names one path: its root, flattened beside it, and the path. As JSON,
@@ -127,6 +129,8 @@ mod tests {
         assert_eq!(serde_json::to_value(&root).unwrap(), json!({"volume": "v"}));
         let decoded: FileRoot = serde_json::from_value(json!({"snapshot": "s"})).unwrap();
         assert_eq!(decoded, FileRoot::Snapshot("s".into()));
+        let decoded: FileRoot = serde_json::from_value(json!({"sandbox": "sb1"})).unwrap();
+        assert_eq!(decoded, FileRoot::Sandbox("sb1".into()));
     }
 
     #[test]

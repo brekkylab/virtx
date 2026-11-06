@@ -19,6 +19,7 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
 | `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
 | `/sandboxes/` | [HTTP](#sandboxes) | Sandbox CRUD |
+| `/sandboxes/{id}/files/` | [WebDAV](#files) | The files in a sandbox, as its processes see them |
 | `/sandboxes/{id}/jobs/` | [HTTP](#sandbox-jobs) | Sandbox jobs: read, signal, cancel |
 | `/sandboxes/{id}/jobs/exec/` | [HTTP](#sandbox-jobs) | Starting a process in a sandbox |
 | `/sandboxes/{id}/jobs/{job}/stdin` | [HTTP](#sandbox-jobs) | Writing to a process's stdin |
@@ -93,7 +94,7 @@ A request that fails is answered with an HTTP error status and a body:
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
-| `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job that has ended. |
+| `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
 | `413 Content Too Large` | `too_large` | The body is over the server's limit. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
@@ -259,6 +260,8 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
 - `running` is whether its VM is up now.
 
+Its files are reached at [`/sandboxes/{id}/files/`](#files).
+
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
 Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
@@ -357,8 +360,8 @@ A request that fails is answered with the specification's error codes, in its `{
 
 ## Files
 
-The files in a volume are reached at `/volumes/{name}/files/`, and those in a snapshot at `/snapshots/{name}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
-The path after the root is the file's path in the volume or snapshot, each segment percent-encoded.
+The files in a volume are reached at `/volumes/{name}/files/`, those in a snapshot at `/snapshots/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
+The path after the root is the file's path in the volume, snapshot or sandbox, each segment percent-encoded.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -376,9 +379,18 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume or snapshot is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume or snapshot, and refuse any other with `502 Bad Gateway`.
-- A request naming a volume or snapshot that does not exist is answered `404 Not Found`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume, snapshot or sandbox is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `502 Bad Gateway`.
+- A request naming a volume, snapshot or sandbox that does not exist is answered `404 Not Found`.
+
+### A sandbox's files
+
+A sandbox's files are its root filesystem as its processes see it, the volumes mounted into it among them, while its VM runs: what a process writes is read here at once, and what is written here a process reads.
+
+- The server MAY leave out what is not a file to read or write, such as `/proc`, `/sys` and `/dev`, and what is neither a file nor a directory, such as a link or a device: it is not listed, and a request naming it is answered as if nothing were there.
+- A file a `PUT` makes is owned as one a process in the sandbox makes is; one it replaces keeps its mode and owner.
+- A write to a volume mounted `readonly` is refused with `403 Forbidden`.
+- A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.
 

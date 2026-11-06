@@ -3,8 +3,8 @@
 //! spawn.
 //!
 //! It starts with the volume `v`, the snapshot `s`, and the snapshot `locked`, held by the
-//! sandbox `holder`, so its files answer `423` to everything. Each volume and snapshot is a
-//! filesystem of its own.
+//! sandbox `holder`, so its files answer `423` to everything. Each volume, snapshot and sandbox
+//! is a filesystem of its own, a sandbox's empty as it is made.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
@@ -199,6 +199,7 @@ impl SandboxJobState {
 struct SandboxState {
     sandbox: Sandbox,
     jobs: BTreeMap<String, Arc<SandboxJobState>>,
+    files: DavHandler,
 }
 
 #[derive(Default)]
@@ -262,6 +263,7 @@ pub fn router() -> Router {
                 ports: Vec::new(),
             },
             jobs: BTreeMap::new(),
+            files: dav("/sandboxes/holder/files"),
         },
     );
     let shared: Shared = Arc::new(Mutex::new(data));
@@ -292,6 +294,9 @@ pub fn router() -> Router {
         .route("/snapshots/{name}/files", any(snapshot_files))
         .route("/snapshots/{name}/files/", any(snapshot_files))
         .route("/snapshots/{name}/files/{*path}", any(snapshot_files))
+        .route("/sandboxes/{id}/files", any(sandbox_files))
+        .route("/sandboxes/{id}/files/", any(sandbox_files))
+        .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(list_sandboxes).post(create_sandbox))
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
@@ -704,6 +709,21 @@ async fn snapshot_files(State(shared): State<Shared>, request: axum::extract::Re
     }
 }
 
+/// Answers a request under `/sandboxes/{id}/files/` from that sandbox's filesystem.
+async fn sandbox_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
+    let id = root_name(&request);
+    let dav = shared
+        .lock()
+        .unwrap()
+        .sandboxes
+        .get(&id)
+        .map(|state| state.files.clone());
+    match dav {
+        Some(dav) => dav.handle(request).await.map(axum::body::Body::new),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn list_sandboxes(State(shared): State<Shared>) -> Response {
     let sandboxes: Vec<_> = shared
         .lock()
@@ -750,6 +770,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
         SandboxState {
             sandbox: sandbox.clone(),
             jobs: BTreeMap::new(),
+            files: dav(&format!("/sandboxes/{id}/files")),
         },
     );
     let ports = args

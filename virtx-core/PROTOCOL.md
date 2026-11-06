@@ -258,13 +258,17 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
-- `running` is whether its VM is up now.
+- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
 Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
+
+A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
+Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
+A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
 
 #### Ports
 

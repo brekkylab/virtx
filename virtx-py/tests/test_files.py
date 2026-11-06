@@ -31,8 +31,9 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         etag = (await client.stat_file(volume, "dir/t.txt")).etag
         assert etag
         await client.write_file(volume, "dir/t.txt", "text 2", if_match=etag)
-        with pytest.raises(VirtxError, match="412"):
+        with pytest.raises(VirtxError) as refused:
             await client.write_file(volume, "dir/t.txt", "text 3", if_match=etag)
+        assert refused.value.status == 412
         await client.write_file(volume, "dir/bin", b"\xff\xfe")
         with pytest.raises(VirtxError, match="UTF-8"):
             await client.read_text(volume, "dir/bin")
@@ -43,21 +44,25 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         await client.remove_file(volume, "dir/t.txt")
         await client.remove_file(volume, "dir/bin")
         assert not await client.exists(volume, "dir/t.txt")
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.remove_file(volume, "dir/t.txt")
+        assert refused.value.status == 404
         await client.remove_file(volume, "dir/t.txt", missing_ok=True)
 
         await client.rename_file(volume, "dir/a.txt", "b.txt")
         await client.copy_file(volume, "b.txt", "c.txt")
-        with pytest.raises(VirtxError, match="412"):
+        with pytest.raises(VirtxError) as refused:
             await client.copy_file(volume, "b.txt", "c.txt")
+        assert refused.value.status == 412
         await client.remove_file(volume, "dir")
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.stat_file(volume, "dir")
+        assert refused.value.status == 404
         assert await client.read_file(volume, "c.txt") == b"hello world"
 
-        with pytest.raises(VirtxError, match="423"):
+        with pytest.raises(VirtxError) as refused:
             await client.read_dir(Snapshot("locked"), "")
+        assert refused.value.status == 423
 
 
 async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) -> None:
@@ -69,8 +74,9 @@ async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) ->
         assert await client.read_text(root, "work/dir/a.txt") == "hello"
         assert [entry.name for entry in await client.read_dir(root, "work/dir")] == ["a.txt"]
         await client.remove_sandbox(sandbox.id)
-        with pytest.raises(VirtxError, match="404"):
+        with pytest.raises(VirtxError) as refused:
             await client.read_dir(root, "")
+        assert refused.value.status == 404
 
 
 def test_a_root_and_metadata_read_as_the_wire_has_them() -> None:

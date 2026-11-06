@@ -40,9 +40,11 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message) {
+  constructor(message, status = null) {
     super(message)
     this.name = 'VirtxError'
+    // The HTTP status the server refused the request with, if it did.
+    this.status = status
   }
 }
 
@@ -186,7 +188,9 @@ class Library {
     }
     if (status === OK) return raw ? data : JSON.parse(data.toString('utf8'))
     if (status === ERROR) {
-      throw new VirtxError(data.length ? JSON.parse(data.toString('utf8')) : 'the call failed')
+      if (!data.length) throw new VirtxError('the call failed')
+      const failure = JSON.parse(data.toString('utf8'))
+      throw new VirtxError(failure.message, failure.status ?? null)
     }
     throw new VirtxError(`unknown status ${status}`)
   }

@@ -22,8 +22,10 @@ use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use dav_server::DavHandler;
 use http::{Method, Request, StatusCode, header};
+use http_body_util::BodyExt as _;
 
 use crate::machine::Machine;
+use crate::sandbox::Activity;
 use crate::snapshot::{Error as SnapshotError, Store as SnapshotStore};
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
 
@@ -82,11 +84,13 @@ impl Files {
     }
 
     /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from the guest
-    /// of `machine`, the sandbox's.
+    /// of `machine`, the sandbox's, keeping `activity` until the answer's body has been sent or
+    /// dropped: a file read is sent as it is read from the guest.
     pub async fn sandbox(
         &self,
         id: &str,
         machine: Arc<Machine>,
+        activity: Activity,
         request: Request<Body>,
     ) -> Response {
         let handler = match handler(format!("/sandboxes/{id}/files"), &request) {
@@ -96,7 +100,12 @@ impl Files {
         let handler = handler
             .filesystem(Box::new(sandbox::Fs(machine)))
             .build_handler();
-        handler.handle(request).await.map(Body::new)
+        handler.handle(request).await.map(|body| {
+            Body::new(body.map_frame(move |frame| {
+                let _ = &activity;
+                frame
+            }))
+        })
     }
 
     /// A WebDAV request to `root`, a volume or a snapshot.

@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 
 use super::{
     VIRTX_OK,
-    bytes::{VirtxBytes, encode, failure, write},
+    bytes::{Failure, VirtxBytes, encode, failure, write},
     future::{self, VirtxFuture},
     stream::{self, VirtxStream},
 };
@@ -60,9 +60,12 @@ impl<T: Send + Sync + 'static> Runtime<T> {
 
     /// Start what `make` makes of the value, and hand C the future, answered with its output
     /// as JSON.
-    pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
+    pub(crate) fn future<R: Serialize, E: Into<Failure>, F>(
+        &self,
+        make: impl FnOnce(Arc<T>) -> F,
+    ) -> *mut VirtxFuture
     where
-        F: Future<Output = Result<R, String>> + Send + 'static,
+        F: Future<Output = Result<R, E>> + Send + 'static,
     {
         let future = make(Arc::clone(&self.value));
         future::start(self.runtime.handle(), &self.tasks, async move {
@@ -71,23 +74,29 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 
     /// As [`future`](Self::future), answered with its output's bytes as they are, not as JSON.
-    pub(crate) fn future_raw<F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
+    pub(crate) fn future_raw<E: Into<Failure>, F>(
+        &self,
+        make: impl FnOnce(Arc<T>) -> F,
+    ) -> *mut VirtxFuture
     where
-        F: Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+        F: Future<Output = Result<Vec<u8>, E>> + Send + 'static,
     {
         let future = make(Arc::clone(&self.value));
         future::start(self.runtime.handle(), &self.tasks, async move {
             match future.await {
                 Ok(bytes) => (VIRTX_OK, bytes),
-                Err(message) => failure(message),
+                Err(failed) => failure(failed),
             }
         })
     }
 
     /// Start what `make` makes of the value, and hand C the stream.
-    pub(crate) fn stream<R: Serialize, S>(&self, make: impl FnOnce(Arc<T>) -> S) -> *mut VirtxStream
+    pub(crate) fn stream<R: Serialize, E: Into<Failure>, S>(
+        &self,
+        make: impl FnOnce(Arc<T>) -> S,
+    ) -> *mut VirtxStream
     where
-        S: Stream<Item = Result<R, String>> + Send + 'static,
+        S: Stream<Item = Result<R, E>> + Send + 'static,
     {
         stream::start(
             self.runtime.handle(),
@@ -117,8 +126,7 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 }
 
-/// Write `opened`, held once, to `out`, or its error's message, as a JSON string, to
-/// `error`.
+/// Write `opened`, held once, to `out`, or its error, as a [`Failure`]'s JSON, to `error`.
 ///
 /// # Safety
 ///

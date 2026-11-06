@@ -5,10 +5,11 @@
 //! type's own functions are next to it, as the client's are in `client`.
 //!
 //! Opening a client blocks, returns [`VIRTX_OK`] or [`VIRTX_ERROR`], and writes the client or
-//! the error's message. A request takes JSON and returns at once, running on the client's own
+//! the error. A request takes JSON and returns at once, running on the client's own
 //! runtime: a [`VirtxFuture`] if it answers once, a [`VirtxStream`] if it answers item by item.
-//! What the library writes is JSON in a [`VirtxBytes`]: an output, or an error's message as a
-//! string. C drives futures and streams as Rust does: [`virtx_future_poll`] and
+//! What the library writes is JSON in a [`VirtxBytes`]: an output, or an error as
+//! `{"message": "...", "status": 404}`, `status` only for a request the server refused with it.
+//! C drives futures and streams as Rust does: [`virtx_future_poll`] and
 //! [`virtx_stream_poll_next`] answer [`VIRTX_PENDING`] and keep the [`VirtxWaker`](waker::VirtxWaker) they were
 //! given, which is woken once there is something to take, and the next poll takes it. So the
 //! caller's event loop, whatever it is, never blocks on one: only a waker's `wake` runs on
@@ -29,7 +30,7 @@ use std::ffi::c_int;
 pub use bytes::VirtxBytes;
 #[cfg(test)]
 pub(crate) use bytes::virtx_bytes_free;
-pub(crate) use bytes::{encode, failure, json, write};
+pub(crate) use bytes::{Failure, encode, failure, json, write};
 pub use future::*;
 pub(crate) use runtime::{Runtime, release, retain, share};
 pub use stream::*;
@@ -37,7 +38,8 @@ pub use stream::*;
 /// Succeeded: the output, as JSON, is written.
 pub const VIRTX_OK: c_int = 0;
 
-/// Failed: the error's message is written, as a JSON string.
+/// Failed: the error is written, as `{"message": "...", "status": 404}`, `status` only for a
+/// request the server refused with that HTTP status.
 pub const VIRTX_ERROR: c_int = -1;
 
 /// Not answered yet: the waker given is kept, and woken once it is.

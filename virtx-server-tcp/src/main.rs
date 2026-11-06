@@ -50,11 +50,6 @@ const MACHINE_SUBCOMMAND: &str = "vm";
 /// How often the images every project shares are pruned, as `POST /images/prune` does.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// How long a sandbox is kept with no job running in it: over HTTP no client is ever known to
-/// be gone, so one that stops naming its sandboxes is taken to be, and what they hold -- their
-/// snapshots -- let go.
-const IDLE: Duration = Duration::from_secs(15 * 60);
-
 #[derive(Parser)]
 enum Command {
     /// Serve the endpoints, and sandboxes' ports beside them, as `--config` says.
@@ -143,17 +138,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .layer(cors(&config.origins));
 
-    let reaping = Arc::clone(&access);
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            every.tick().await;
-            for home in reaping.homes() {
-                home.forget_idle(IDLE);
-            }
-        }
-    });
-
     let images = access.images().clone();
     tokio::spawn(async move {
         let mut every = tokio::time::interval(PRUNE_EVERY);
@@ -172,13 +156,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening at {}", config.listen))?;
     eprintln!("serving at http://{}/", listener.local_addr()?);
-    // A machine still running at the end shuts down with this process, as its control channel
-    // closes.
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    tokio::task::spawn_blocking(move || {
+        for home in access.homes() {
+            home.close_all();
+        }
+    })
+    .await?;
     Ok(())
 }
 

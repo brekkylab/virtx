@@ -123,6 +123,7 @@ pub async fn build_step(
         rootfs,
         config,
         snapshot: Some(snapshot.clone()),
+        snapshot_held: false,
         spec: spec.clone(),
         volumes: Vec::new(),
         ports: Vec::new(),

@@ -182,6 +182,13 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
 /// What the library wrote for `status`, read with `decode` or as the error's message, and
 /// freed.
 ///
+/// What the library writes with `VIRTX_ERROR`.
+#[derive(serde::Deserialize)]
+struct Failure {
+    message: String,
+    status: Option<u16>,
+}
+
 /// # Safety
 ///
 /// As `take`.
@@ -197,8 +204,12 @@ unsafe fn take_with<T>(
         let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
         match status {
             VIRTX_OK => decode(bytes),
-            VIRTX_ERROR => Err(match serde_json::from_slice::<String>(bytes) {
-                Ok(message) => Error::Call(message),
+            VIRTX_ERROR => Err(match serde_json::from_slice::<Failure>(bytes) {
+                Ok(Failure {
+                    message,
+                    status: Some(status),
+                }) => Error::Status(status, message),
+                Ok(Failure { message, .. }) => Error::Call(message),
                 Err(e) => Error::Json(e.to_string()),
             }),
             other => Err(Error::Library(format!("unknown status {other}"))),

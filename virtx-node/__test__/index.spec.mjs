@@ -104,24 +104,24 @@ test('the files of a volume are written, listed, moved and read back', async () 
     const { etag } = await client.statFile(volume, 'dir/t.txt')
     assert.ok(etag)
     await client.writeFile(volume, 'dir/t.txt', 'text 2', etag)
-    await assert.rejects(client.writeFile(volume, 'dir/t.txt', 'text 3', etag), /412/)
+    await assert.rejects(client.writeFile(volume, 'dir/t.txt', 'text 3', etag), { status: 412 })
     assert.equal(await client.exists(volume, 'dir/t.txt'), true)
     assert.equal(await client.isFile(volume, 'dir/t.txt'), true)
     assert.equal(await client.isDir(volume, 'dir/t.txt'), false)
     assert.equal(await client.isDir(volume, 'dir'), true)
     await client.removeFile(volume, 'dir/t.txt')
     assert.equal(await client.exists(volume, 'dir/t.txt'), false)
-    await assert.rejects(client.removeFile(volume, 'dir/t.txt'), /404/)
+    await assert.rejects(client.removeFile(volume, 'dir/t.txt'), { status: 404 })
     await client.removeFile(volume, 'dir/t.txt', true)
 
     await client.renameFile(volume, 'dir/a.txt', 'b.txt')
     await client.copyFile(volume, 'b.txt', 'c.txt')
-    await assert.rejects(client.copyFile(volume, 'b.txt', 'c.txt'), /412/)
+    await assert.rejects(client.copyFile(volume, 'b.txt', 'c.txt'), { status: 412 })
     await client.removeFile(volume, 'dir')
-    await assert.rejects(client.statFile(volume, 'dir'), /404/)
+    await assert.rejects(client.statFile(volume, 'dir'), { status: 404 })
     assert.equal((await client.readFile(volume, 'c.txt')).toString(), 'hello world')
 
-    await assert.rejects(client.readDir({ snapshot: 'locked' }, ''), /423/)
+    await assert.rejects(client.readDir({ snapshot: 'locked' }, ''), { status: 423 })
   } finally {
     await client.close()
   }
@@ -140,7 +140,7 @@ test("a sandbox's files are its own and go with it", async () => {
       ['a.txt'],
     )
     await client.removeSandbox(id)
-    await assert.rejects(client.readDir(root, ''), /404/)
+    await assert.rejects(client.readDir(root, ''), { status: 404 })
   } finally {
     await client.close()
   }
@@ -163,7 +163,7 @@ test('a snapshot is created, got and removed', async () => {
     assert.ok((await client.listSnapshot()).some((s) => s.name === 'made'))
     assert.equal((await client.getSnapshot('locked')).inUse, true)
     await client.removeSnapshot('made')
-    await assert.rejects(client.getSnapshot('made'), /404/)
+    await assert.rejects(client.getSnapshot('made'), { status: 404 })
   } finally {
     await client.close()
   }
@@ -206,9 +206,9 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
     assert.deepEqual(end.end, { code: 1 })
 
     await client.removeSandboxJob(sandbox.id, job.id)
-    await assert.rejects(client.getSandboxJob(sandbox.id, job.id), /404/)
+    await assert.rejects(client.getSandboxJob(sandbox.id, job.id), { status: 404 })
     await client.removeSandbox(sandbox.id)
-    await assert.rejects(client.getSandbox(sandbox.id), /404/)
+    await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
   } finally {
     await client.close()
   }
@@ -255,7 +255,7 @@ test('an image build is a job whose log ends with its digest', async () => {
     assert.ok(end.end.error)
 
     await client.removeImageJob(job.id)
-    await assert.rejects(client.getImageJob(job.id), /404/)
+    await assert.rejects(client.getImageJob(job.id), { status: 404 })
   } finally {
     await client.close()
   }

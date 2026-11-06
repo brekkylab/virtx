@@ -503,13 +503,27 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
     run(cargo, "the servers")?;
 
     for (_, _, binary) in options.servers() {
-        sign(
+        ready(
             &options
                 .out()
                 .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
         )?;
     }
     Ok(())
+}
+
+/// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
+/// looks, and the entitlement on it.
+fn ready(exe: &Path) -> anyhow::Result<()> {
+    let kernel = kernel_library()?;
+    let beside = exe
+        .parent()
+        .context("the server binary is in a directory")?
+        .join(kernel.file_name().expect("the kernel is a file"));
+    if !beside.is_file() {
+        place(&kernel, &beside)?;
+    }
+    sign(exe)
 }
 
 fn sign(exe: &Path) -> anyhow::Result<()> {
@@ -574,9 +588,17 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
             .cloned()
             .unwrap_or_default();
         let runnable = kinds.iter().any(|k| k == "bin" || k == "example");
-        // A test's binary spawns the package's own to be the VM, which needs the entitlement too.
+        // A test's binary spawns the package's own to be the VM, which needs the entitlement
+        // and the kernel too.
         if test && !is_test && runnable {
-            sign(Path::new(exe))?;
+            let is_server = SERVERS
+                .iter()
+                .any(|(_, _, binary)| message["target"]["name"] == *binary);
+            if is_server {
+                ready(Path::new(exe))?;
+            } else {
+                sign(Path::new(exe))?;
+            }
         }
         if (test && is_test) || (!test && !is_test && runnable) {
             let manifest_dir = message["manifest_path"]

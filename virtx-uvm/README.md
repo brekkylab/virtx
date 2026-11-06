@@ -529,8 +529,9 @@ cargo xtask build server-stdio          # builds libepoxy and virglrenderer firs
 cargo xtask test -p virtx-server-stdio
 ```
 
-The kernel first, because a build of `virtx-uvm` stops without one -- it is
-what copies the kernel beside the binaries, which is how they find it.
+The kernel first, because `cargo xtask build server-*` and `cargo xtask test` stop
+without one -- they copy it beside the server binaries, which is how they find it. A
+plain `cargo build` leaves the binary unable to boot, as it leaves it unsigned.
 
 `cargo xtask run` adds `build/epoxy/bin/` to `PATH`, when a `gpu` build made one.
 That is the only thing left there: those libraries are linked rather than opened
@@ -590,8 +591,8 @@ builds again over what is already there.
 One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
 beside the binary that opens it.**
 
-`virtx-uvm/build.rs` puts it there, and libkrun opens it by name at run time rather
-than linking it. On Windows a bare name is enough, because the loader searches the
+`cargo xtask build server-*` and `cargo xtask test` put it there, and libkrun opens it
+by name at run time rather than linking it. On Windows a bare name is enough, because the loader searches the
 executable's own directory before anywhere else. On Linux it is enough too, because
 `dlopen` consults the *calling object's* `DT_RUNPATH` and the link sets that to `$ORIGIN`
 — see `.cargo/config.toml`.
@@ -1024,4 +1025,5 @@ the kernel by looking beside itself. A plain `cargo build` links a server, the a
 in it, but not the kernel; `cargo xtask install` copies the whole set into `<prefix>/bin`. On
 macOS the server needs the hypervisor entitlement, which `cargo xtask build` puts on after
 cargo links it -- after rustc's own strip too, which would otherwise rewrite the signature.
-`cargo xtask run` and `cargo xtask test` sign whatever they run.
+`cargo xtask run` and `cargo xtask test` sign whatever they run, and put the kernel beside a
+server they run.

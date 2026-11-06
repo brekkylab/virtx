@@ -88,7 +88,7 @@ async def main() -> None:
         sandbox = await client.create_sandbox("jq:latest")
         try:
             cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-            async for entry in client.exec_sandbox(sandbox.id, cmd):
+            async for entry in sandbox.exec(cmd):
                 match entry.entry:
                     case Stdout(line) | Stderr(line):
                         print(line)
@@ -122,7 +122,7 @@ async function main() {
     const sandbox = await client.createSandbox('jq:latest')
     try {
       const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
-      for await (const entry of client.execSandbox(sandbox.id, cmd)) {
+      for await (const entry of sandbox.exec(cmd)) {
         if ('stdout' in entry) console.log(entry.stdout)
         else if ('stderr' in entry) console.error(entry.stderr)
         else if ('end' in entry) console.log('exited', entry.end.code)
@@ -172,9 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .wait()?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let mut log = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(cmd))
-        .log();
+    let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
     while let Some(entry) = log.wait_next() {
         match entry?.entry {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
@@ -204,6 +202,7 @@ codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 | **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
 
 Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
+`create_sandbox`, `get_sandbox` and `list_sandbox` answer a sandbox that carries its client, so it is all a caller hands on: `exec`, `read_file`, `read_text`, `write_file`, `create_dir_all`, `remove_file` and `remove` act on it, and `root` names its files for the client's other files requests.
 Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
 
 ## Jobs and their logs
@@ -253,7 +252,7 @@ sandbox = await client.create_sandbox(
 )
 ```
 
-The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, with the root `SandboxFiles(sandbox.id)`:
+The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, with the root `sandbox.root`, or through the sandbox itself, as `sandbox.read_text("etc/hostname")`:
 
 ```python
 from virtx import Volume

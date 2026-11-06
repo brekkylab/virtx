@@ -540,7 +540,7 @@ class Client:
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds, without its ports."""
         items = await self._call("virtx_client_list_sandbox")
-        return [Sandbox.from_dict(item) for item in items]
+        return [Sandbox.from_dict(self, item) for item in items]
 
     async def create_sandbox(
         self,
@@ -559,6 +559,7 @@ class Client:
         ports in it to open, reserved as it is made and answered here only, each with the
         ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
         return Sandbox.from_dict(
+            self,
             await self._call(
                 "virtx_client_create_sandbox",
                 _args(
@@ -574,12 +575,12 @@ class Client:
                         v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
                     ],
                 ),
-            )
+            ),
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``, without its ports."""
-        return Sandbox.from_dict(await self._call("virtx_client_get_sandbox", _args(id=id)))
+        return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
 
     async def remove_sandbox(self, id: str) -> None:
         """Stop the sandbox ``id``, end its jobs, and forget it, keeping its snapshot and

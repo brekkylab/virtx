@@ -178,17 +178,21 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .wait()
         .unwrap();
-    let root = FileRoot::Sandbox(sandbox.id.clone());
-    client.create_dir_all(&root, "work/dir").unwrap_wait();
-    client
-        .write_file(&root, "work/dir/a.txt", "hello", None)
+    sandbox.create_dir_all("work/dir").unwrap_wait();
+    sandbox
+        .write_file("work/dir/a.txt", "hello", None)
         .unwrap_wait();
+    assert_eq!(sandbox.read_text("work/dir/a.txt").wait().unwrap(), "hello");
     assert_eq!(
-        client.read_text(&root, "work/dir/a.txt").wait().unwrap(),
-        "hello"
+        client
+            .read_file(&sandbox.root(), "work/dir/a.txt", 1, Some(3))
+            .wait()
+            .unwrap(),
+        b"ell"
     );
-    client.remove_sandbox(&sandbox.id).unwrap_wait();
-    let gone = client.read_dir(&root, "").wait().unwrap_err();
+    sandbox.remove_file("work/dir/a.txt", false).unwrap_wait();
+    sandbox.remove().unwrap_wait();
+    let gone = sandbox.read_file("", 0, None).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
@@ -214,15 +218,15 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         .wait()
         .unwrap();
     assert_eq!(
-        client.get_sandbox(&sandbox.id).wait().unwrap().id,
-        sandbox.id
+        client.get_sandbox(sandbox.id()).wait().unwrap().id(),
+        sandbox.id()
     );
 
-    let job = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+    let job = sandbox
+        .exec(&SandboxExecArgs::new(["echo", "hi"]))
         .wait()
         .unwrap();
-    let mut log = client.sandbox_job_log(&sandbox.id, &job.id, None);
+    let mut log = client.sandbox_job_log(sandbox.id(), &job.id, None);
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
         entries.push(entry.unwrap());
@@ -240,7 +244,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
             },
         ]
     );
-    let jobs = client.list_sandbox_job(&sandbox.id).wait().unwrap();
+    let jobs = client.list_sandbox_job(sandbox.id()).wait().unwrap();
     assert!(
         jobs.iter().any(|j| j.id == job.id && j.code == Some(0)),
         "{jobs:?}"
@@ -249,16 +253,16 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     // `cat` echoes its stdin until it is closed.
     let mut args = SandboxExecArgs::new(["cat"]);
     args.stdin = true;
-    let cat = client.exec_sandbox(&sandbox.id, &args).wait().unwrap();
+    let cat = client.exec_sandbox(sandbox.id(), &args).wait().unwrap();
     client
-        .write_sandbox_job_stdin(&sandbox.id, &cat.id, Some("a\n"), true)
+        .write_sandbox_job_stdin(sandbox.id(), &cat.id, Some("a\n"), true)
         .unwrap_wait();
-    let mut log = client.sandbox_job_log(&sandbox.id, &cat.id, None);
+    let mut log = client.sandbox_job_log(sandbox.id(), &cat.id, None);
     let first = log.wait_next().unwrap().unwrap();
     assert_eq!(first.entry, SandboxJobEntry::Stdout("a".into()));
 
-    client.remove_sandbox(&sandbox.id).unwrap_wait();
-    let gone = client.get_sandbox(&sandbox.id).wait().unwrap_err();
+    client.remove_sandbox(sandbox.id()).unwrap_wait();
+    let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
@@ -323,7 +327,7 @@ fn a_started_job_is_read_as_its_log() {
         .wait()
         .unwrap();
     let mut log = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
+        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "hi"]))
         .log();
     assert!(log.job().is_none());
     let mut entries = Vec::new();
@@ -342,10 +346,10 @@ fn a_started_job_is_read_as_its_log() {
 
     // Polled, as a runtime would.
     let job =
-        block_on(client.exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "a"]))).unwrap();
+        block_on(client.exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "a"]))).unwrap();
     assert_eq!(job.cmd, ["echo", "a"]);
     let mut log = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "b"]))
+        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "b"]))
         .log();
     let mut entries = Vec::new();
     while let Some(entry) = block_on(future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx))) {
@@ -362,7 +366,7 @@ fn a_started_job_is_read_as_its_log() {
 
     // A start refused is the log's one item.
     let mut log = client
-        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
+        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["nonexistent"]))
         .log();
     let refused = log.wait_next().unwrap().unwrap_err();
     assert_eq!(refused.status(), Some(422), "{refused}");

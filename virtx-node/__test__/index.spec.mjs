@@ -130,17 +130,19 @@ test('the files of a volume are written, listed, moved and read back', async () 
 test("a sandbox's files are its own and go with it", async () => {
   const client = Client.spawn(testServer)
   try {
-    const { id } = await client.createSandbox('alpine:3.20')
-    const root = { sandbox: id }
-    await client.createDirAll(root, 'work/dir')
-    await client.writeFile(root, 'work/dir/a.txt', 'hello')
-    assert.equal(await client.readText(root, 'work/dir/a.txt'), 'hello')
+    const sandbox = await client.createSandbox('alpine:3.20')
+    assert.deepEqual(sandbox.root, { sandbox: sandbox.id })
+    await sandbox.createDirAll('work/dir')
+    await sandbox.writeFile('work/dir/a.txt', 'hello')
+    assert.equal(await sandbox.readText('work/dir/a.txt'), 'hello')
+    assert.deepEqual(await sandbox.readFile('work/dir/a.txt', 1, 3), Buffer.from('ell'))
     assert.deepEqual(
-      (await client.readDir(root, 'work/dir')).map((entry) => entry.name),
+      (await client.readDir(sandbox.root, 'work/dir')).map((entry) => entry.name),
       ['a.txt'],
     )
-    await client.removeSandbox(id)
-    await assert.rejects(client.readDir(root, ''), { status: 404 })
+    await sandbox.removeFile('work/dir/a.txt')
+    await sandbox.remove()
+    await assert.rejects(sandbox.readFile(''), { status: 404 })
   } finally {
     await client.close()
   }
@@ -188,7 +190,7 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
     assert.equal(sandbox.running, true)
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
-    const job = await client.execSandbox(sandbox.id, ['echo', 'hi'])
+    const job = await sandbox.exec(['echo', 'hi'])
     assert.equal(job.kind, 'exec')
     assert.deepEqual(job.cmd, ['echo', 'hi'])
     const log = await entries(client.sandboxJobLog(sandbox.id, job.id))

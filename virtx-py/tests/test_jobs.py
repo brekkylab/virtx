@@ -53,7 +53,7 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server
         assert got.id == sandbox.id and got.ports == []
         assert sandbox.id in [item.id for item in await client.list_sandbox()]
 
-        job = await client.exec_sandbox(sandbox.id, ["echo", "hi"])
+        job = await sandbox.exec(["echo", "hi"])
         assert job.kind == SandboxJobKind.EXEC and job.cmd == ["echo", "hi"]
         log = [entry async for entry in client.sandbox_job_log(sandbox.id, job.id)]
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]

@@ -19,7 +19,7 @@ A build, pull or push is a job the server runs. Its request answers a `StartedJo
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
-const run = client.execSandbox(sandbox.id, ['echo', 'hi'])
+const run = sandbox.exec(['echo', 'hi'])
 const job = await run
 console.log('started', job.id)
 for await (const entry of run) {

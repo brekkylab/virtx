@@ -716,16 +716,18 @@ class Client {
     await this._call('virtx_client_copy_file', { ...root, from, to, overwrite })
   }
 
-  listSandbox() {
-    return this._call('virtx_client_list_sandbox')
+  async listSandbox() {
+    const infos = await this._call('virtx_client_list_sandbox')
+    return infos.map((info) => new Sandbox(this, info))
   }
 
-  createSandbox(image, options = {}) {
-    return this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
+  async createSandbox(image, options = {}) {
+    const info = await this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
+    return new Sandbox(this, info)
   }
 
-  getSandbox(id) {
-    return this._call('virtx_client_get_sandbox', { id })
+  async getSandbox(id) {
+    return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
   }
 
   // Stops the sandbox, ends its jobs and forgets it.
@@ -826,6 +828,51 @@ class PortForwarder {
   }
 }
 
+// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
+// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
+// read and write its files. Dropping it leaves the sandbox; `remove` removes it.
+class Sandbox {
+  constructor(client, info) {
+    // Not enumerable, so the sandbox reads, logs and compares as what the server answered.
+    Object.defineProperty(this, 'client', { value: client })
+    Object.assign(this, info)
+  }
+
+  // Its files, its root as its processes see it, for the client's files requests.
+  get root() {
+    return { sandbox: this.id }
+  }
+
+  exec(cmd, options = {}) {
+    return this.client.execSandbox(this.id, cmd, options)
+  }
+
+  readFile(at, offset, length) {
+    return this.client.readFile(this.root, at, offset, length)
+  }
+
+  readText(at) {
+    return this.client.readText(this.root, at)
+  }
+
+  writeFile(at, content, ifMatch) {
+    return this.client.writeFile(this.root, at, content, ifMatch)
+  }
+
+  createDirAll(at) {
+    return this.client.createDirAll(this.root, at)
+  }
+
+  removeFile(at, missingOk = false) {
+    return this.client.removeFile(this.root, at, missingOk)
+  }
+
+  // Stops it, ends its jobs and forgets it, keeping its snapshot and volumes.
+  remove() {
+    return this.client.removeSandbox(this.id)
+  }
+}
+
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
@@ -834,6 +881,7 @@ module.exports = {
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
+  Sandbox,
   StartedJob,
   VirtxError,
   ensureVirtx,

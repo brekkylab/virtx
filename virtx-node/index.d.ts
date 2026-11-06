@@ -199,15 +199,44 @@ export interface DirEntry {
   metadata: Metadata
 }
 
-export interface Sandbox {
+/** What the server answers about a sandbox. */
+export interface SandboxInfo {
   id: string
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
-  /** Whether its VM is up now. */
+  /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
+}
+
+/**
+ * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
+ * it, to run processes in it and read and write its files. Dropping it leaves the sandbox; `remove`
+ * removes it.
+ */
+export class Sandbox implements SandboxInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  id: string
+  image: string
+  snapshot?: string
+  running: boolean
+  ports?: SandboxPort[]
+  /** Its files, its root as its processes see it, for the client's files requests. */
+  readonly root: FileRoot
+  /** Start `cmd` in it, as `Client.execSandbox` does. */
+  exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
+  /** The file at `path`, from its root as `etc/hostname`, from `offset`, `length` bytes of it or all that is left. */
+  readFile(path: string, offset?: number, length?: number): Promise<Buffer>
+  readText(path: string): Promise<string>
+  writeFile(path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
+  createDirAll(path: string): Promise<void>
+  removeFile(path: string, missingOk?: boolean): Promise<void>
+  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  remove(): Promise<void>
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */

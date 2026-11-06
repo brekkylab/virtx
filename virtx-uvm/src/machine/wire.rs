@@ -1,5 +1,5 @@
 //! The control channel between a server and each of its machines' processes: `ctrlin`, which
-//! the server writes [`HostMessage`]s into, and `ctrlout`, which it reads [`MachineMessage`]s
+//! the server writes [`CtrlReq`]s into, and `ctrlout`, which it reads [`CtrlResp`]s
 //! from -- everything the two say to each other once the process is spawned.
 //!
 //! The same frames go on between the process and the agent in the guest, over the
@@ -7,10 +7,17 @@
 //! agent's back, so the channel runs end to end. The agent, built apart, includes this file by
 //! path.
 //!
+//! The I/O channel is two more pipes, `ioin` and `ioout`, which the process wires straight to
+//! the virtio-console port [`IO_PORT_NAME`]: the host writes [`IoReq`]s into it and
+//! reads a [`IoResp`] for each, in turn, before it sends the next.
+//!
 //! Each message is one frame: its length as four big-endian bytes, then the message as JSON.
+//! The bytes of a file go as a frame of their own ([`send_data`]) after the message they belong
+//! to: a [`Write`](IoReq::Write), and a [`Data`](IoResp::Data).
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -20,16 +27,23 @@ const MAX_FRAME: usize = 16 << 20;
 /// The name of the virtio-console port the channel runs on inside the machine.
 pub const PORT_NAME: &str = "virtx-ctrl";
 
+/// The name of the virtio-console port the I/O channel runs on inside the machine.
+pub const IO_PORT_NAME: &str = "virtx-io";
+
+/// The most of a file one [`Read`](IoReq::Read) or [`Write`](IoReq::Write)
+/// moves.
+pub const MAX_DATA: usize = 1 << 20;
+
 /// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HostMessage {
+pub enum CtrlReq {
     /// Run `cmd` in the guest, beside whatever else runs there. Answered with
-    /// [`Started`](MachineMessage::Started) before the next `Exec` is, so the host that waits for
+    /// [`Started`](CtrlResp::Started) before the next `Exec` is, so the host that waits for
     /// it before sending another knows which it answers.
     Exec { cmd: Vec<String> },
     /// Send `signal` to the process `id` and everything it started. Numbered as the guest's
     /// Linux numbers it, which is not every host's: `SIGUSR1` is 10 there and 30 on macOS. Not
-    /// answered: what the process does with it, its [`Exited`](MachineMessage::Exited) says.
+    /// answered: what the process does with it, its [`Exited`](CtrlResp::Exited) says.
     Signal { id: u32, signal: i32 },
     /// Put what the guest has written on its disks, and end the machine. Not answered: its
     /// process ends.
@@ -38,11 +52,11 @@ pub enum HostMessage {
 
 /// What the machine's process tells the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MachineMessage {
+pub enum CtrlResp {
     /// The machine has booted and the guest takes commands, with where on this host's loopback
     /// each published guest port is reached. Once per machine.
     Ready(Vec<(u16, SocketAddr)>),
-    /// The answer to the last [`Exec`](HostMessage::Exec): the guest's pid of the process it
+    /// The answer to the last [`Exec`](CtrlReq::Exec): the guest's pid of the process it
     /// started, the `id` everything said of it after is under, or why it could not be started.
     Started(std::result::Result<u32, String>),
     /// A line the process `id` wrote to its stdout, without its newline.
@@ -56,8 +70,77 @@ pub enum MachineMessage {
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
     /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
     /// could not be built or broke, logged as an error as the process's last word -- so a
-    /// process that ends before [`Ready`](MachineMessage::Ready) has said why here.
+    /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
+}
+
+/// What the host asks of the guest's files on the I/O channel, each answered with a
+/// [`IoResp`]: what it says, or [`Failed`](IoResp::Failed). Each path is
+/// absolute, as the guest's processes spell it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IoReq {
+    /// What `path` is: [`IoResp::Meta`].
+    Stat { path: String },
+    /// The entries of the directory `path`, each by its name: [`IoResp::Entries`].
+    ReadDir { path: String },
+    /// Up to `len` bytes of `path` from `offset`, and never more than [`MAX_DATA`]:
+    /// [`IoResp::Data`].
+    Read { path: String, offset: u64, len: u64 },
+    /// The bytes that follow written at `offset` in `path`, made if it is not there; without
+    /// an offset the file is those bytes and nothing else. [`IoResp::Done`].
+    Write { path: String, offset: Option<u64> },
+    /// The directory `path`, whose parent is there. [`IoResp::Done`].
+    CreateDir { path: String },
+    /// `path` gone: a file, or a directory with everything in it. [`IoResp::Done`].
+    Remove { path: String },
+    /// `from` moved to `to`, over whatever is there. With `keep`, a file at `to` gives `from`
+    /// its mode and owner first, so a file written whole beside it keeps what it was.
+    /// [`IoResp::Done`].
+    Rename {
+        from: String,
+        to: String,
+        keep: bool,
+    },
+    /// The file `from` copied to `to`, over whatever is there. [`IoResp::Done`].
+    Copy { from: String, to: String },
+}
+
+/// What the agent answers a [`IoReq`] with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IoResp {
+    Meta(IoMeta),
+    Entries(Vec<(String, IoMeta)>),
+    /// What was read, in the frame that follows.
+    Data,
+    Done,
+    /// Why it did not do what it was asked.
+    Failed(IoFailure),
+}
+
+/// What a file or a directory is. Nothing else is shown: a link, a device or a pipe is not
+/// there as far as the I/O channel says.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoMeta {
+    pub is_dir: bool,
+    pub len: u64,
+    /// When it was last modified, since the Unix epoch.
+    pub modified: Option<Duration>,
+}
+
+/// Why the guest did not do what it was asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IoFailure {
+    NotFound,
+    Exists,
+    /// What a path leads through is not a directory.
+    NotADirectory,
+    /// A file was asked for and a directory is there.
+    IsADirectory,
+    /// The guest will not have it: its permissions, a read-only mount, or a path the channel
+    /// does not show.
+    Forbidden,
+    Full,
+    Other(String),
 }
 
 /// Write `message` as one frame.
@@ -82,6 +165,23 @@ pub fn recv<M: DeserializeOwned>(input: &mut impl Read) -> io::Result<Option<M>>
     decode(&message).map(Some)
 }
 
+/// Write `data` as one frame, as it is.
+pub fn send_data(out: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    let length = u32::try_from(data.len()).map_err(io::Error::other)?;
+    out.write_all(&length.to_be_bytes())?;
+    out.write_all(data)?;
+    out.flush()
+}
+
+/// The next frame, as it is: the bytes [`send_data`] wrote.
+pub fn recv_data(input: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut length = [0; 4];
+    input.read_exact(&mut length)?;
+    let mut data = vec![0; frame_length(length)?];
+    input.read_exact(&mut data)?;
+    Ok(data)
+}
+
 fn frame_length(length: [u8; 4]) -> io::Result<usize> {
     let length = u32::from_be_bytes(length) as usize;
     match length <= MAX_FRAME {
@@ -104,12 +204,12 @@ mod tests {
     #[test]
     fn a_message_comes_out_as_it_went_in() {
         let sent = [
-            MachineMessage::Ready(vec![(80, "127.0.0.1:49152".parse().unwrap())]),
-            MachineMessage::Stdout {
+            CtrlResp::Ready(vec![(80, "127.0.0.1:49152".parse().unwrap())]),
+            CtrlResp::Stdout {
                 id: 0,
                 line: "hello".into(),
             },
-            MachineMessage::Log {
+            CtrlResp::Log {
                 level: "ERROR".into(),
                 message: "no".into(),
             },
@@ -121,10 +221,25 @@ mod tests {
         let mut input = &wire[..];
         for message in &sent {
             assert_eq!(
-                recv::<MachineMessage>(&mut input).unwrap().as_ref(),
+                recv::<CtrlResp>(&mut input).unwrap().as_ref(),
                 Some(message)
             );
         }
-        assert_eq!(recv::<MachineMessage>(&mut input).unwrap(), None);
+        assert_eq!(recv::<CtrlResp>(&mut input).unwrap(), None);
+    }
+
+    #[test]
+    fn a_file_s_bytes_follow_their_message_as_they_are() {
+        let write = IoReq::Write {
+            path: "/a b".into(),
+            offset: Some(3),
+        };
+        let mut wire = Vec::new();
+        send(&mut wire, &write).unwrap();
+        send_data(&mut wire, b"\0\xffbytes").unwrap();
+        let mut input = &wire[..];
+        assert_eq!(recv::<IoReq>(&mut input).unwrap(), Some(write));
+        assert_eq!(recv_data(&mut input).unwrap(), b"\0\xffbytes");
+        assert!(recv_data(&mut input).is_err());
     }
 }

@@ -642,7 +642,7 @@ class Client {
     await this._call('virtx_client_remove_volume_mount', { volume, path: at })
   }
 
-  // What is at `path` in `root`, `{ volume }` or `{ snapshot }`, the path relative to its root
+  // What is at `path` in `root`, `{ volume }`, `{ snapshot }` or `{ sandbox }`, the path relative to its root
   // as `dir/file.txt`.
   statFile(root, at) {
     return this._call('virtx_client_stat_file', { ...root, path: at })

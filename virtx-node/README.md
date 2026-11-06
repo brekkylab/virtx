@@ -40,7 +40,7 @@ console.log('reach it at', forwarder.address)
 forwarder.close()
 ```
 
-The files of a volume or a snapshot are read and written through the client, each request naming its root as `{ volume }` or `{ snapshot }`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+The files of a volume, a snapshot or a sandbox are read and written through the client, each request naming its root as `{ volume }`, `{ snapshot }` or `{ sandbox }`, with a path relative to it. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js
 const volume = { volume: 'data' }

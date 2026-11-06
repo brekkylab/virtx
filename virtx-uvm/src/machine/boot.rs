@@ -9,6 +9,7 @@
 //! virtio-blk /dev/vdb       the snapshot -- the overlay's upper layer
 //! virtio-con hvc0           the guest's console, into libkrun's log, which goes to ctrlout
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
+//!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
 //!                           ports -- see [`Network`]
@@ -50,7 +51,8 @@
 //! libkrun's log -- the guest's console among it -- and whatever the agent says on the
 //! [`PORT_NAME`] port, `Ready` with where the ports are published filled in. What the host
 //! sends on `ctrlin` goes on to the agent, and `ctrlin` closing shuts the guest down and ends the
-//! process.
+//! process. `ioin` and `ioout` are the [`IO_PORT_NAME`] port's own ends, which nothing here reads
+//! or writes.
 
 use std::convert::Infallible;
 use std::fs::File;
@@ -68,7 +70,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "gpu")]
 use super::gpu;
-use super::wire::{self, HostMessage, MachineMessage, PORT_NAME};
+use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
 use super::{Error, MachineConfig, Network, Result, STOP_TIMEOUT, net};
 use crate::fstree::FsTree;
 use crate::snapshot::Snapshot;
@@ -116,12 +118,14 @@ const AGENT_NAME: &str = "virtx-uvm-guest";
 const CONSOLE_TARGET: &str = "init_or_kernel";
 
 /// What a machine's process is spawned with, as one argument: the machine, and its ends of
-/// the control channel.
+/// the control channel and the I/O channel.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
     pub ctrlin: u64,
     pub ctrlout: u64,
+    pub ioin: u64,
+    pub ioout: u64,
 }
 
 /// `ctrlout`, once this process [holds](hold) it.
@@ -129,13 +133,13 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Build `machine`, running the agent, and become it: load the guest kernel, lay the init over
 /// an empty root, attach the devices, pass `ctrlin` on to the agent and the agent on to
-/// `ctrlout`, and run.
+/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(machine: MachineConfig, ctrlin: File) -> Result<Infallible> {
+pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
     // Before anything is built, so a machine over a snapshot another one holds is refused
     // with nothing to undo.
     let lock = machine.snapshot.as_ref().map(Snapshot::lock).transpose()?;
@@ -270,23 +274,35 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File) -> Result<Infallible> {
 
     // The guest's console goes to libkrun's log, and the agent's port to two pipes: one the
     // host's messages are written into for the agent to read, one it writes into for this
-    // process to pass on. Their port ends leaked, because the console borrows them for the
-    // rest of the process.
+    // process to pass on. The I/O port goes to the host's own two. Their port ends leaked,
+    // because the console borrows them for the rest of the process.
     let (to_guest, mut for_guest) =
         io::pipe().map_err(|e| Error::io("making the agent's input", e))?;
     let (mut from_guest, of_guest) =
         io::pipe().map_err(|e| Error::io("making the agent's output", e))?;
     let to_guest: &'static io::PipeReader = Box::leak(Box::new(to_guest));
     let of_guest: &'static io::PipeWriter = Box::leak(Box::new(of_guest));
+    let (ioin, ioout): (&'static File, &'static File) =
+        (Box::leak(Box::new(io.0)), Box::leak(Box::new(io.1)));
     #[cfg(unix)]
-    let (to_guest, of_guest) = {
+    let (to_guest, of_guest, ioin, ioout) = {
         use std::os::fd::AsFd;
-        (to_guest.as_fd(), of_guest.as_fd())
+        (
+            to_guest.as_fd(),
+            of_guest.as_fd(),
+            ioin.as_fd(),
+            ioout.as_fd(),
+        )
     };
     #[cfg(windows)]
-    let (to_guest, of_guest) = {
+    let (to_guest, of_guest, ioin, ioout) = {
         use std::os::windows::io::AsHandle;
-        (to_guest.as_handle(), of_guest.as_handle())
+        (
+            to_guest.as_handle(),
+            of_guest.as_handle(),
+            ioin.as_handle(),
+            ioout.as_handle(),
+        )
     };
     let mut console = ConsoleDevice::builder();
     console
@@ -295,6 +311,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File) -> Result<Infallible> {
     console
         .add_inout_port(PORT_NAME, Some(to_guest), Some(of_guest))
         .map_err(|e| Error::vmm("wiring the agent's port", e))?;
+    console
+        .add_inout_port(IO_PORT_NAME, Some(ioin), Some(ioout))
+        .map_err(|e| Error::vmm("wiring the agent's I/O port", e))?;
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind
     // it is the layer files, shared with every other root filesystem over them.
@@ -365,17 +384,17 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File) -> Result<Infallible> {
     // the host sees it has.
     let mut ctrlin = ctrlin;
     std::thread::spawn(move || {
-        while let Ok(Some(message)) = wire::recv::<HostMessage>(&mut ctrlin) {
+        while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
             let _ = wire::send(&mut for_guest, &message);
         }
-        let _ = wire::send(&mut for_guest, &HostMessage::Shutdown);
+        let _ = wire::send(&mut for_guest, &CtrlReq::Shutdown);
         std::thread::sleep(STOP_TIMEOUT);
         std::process::exit(1);
     });
     std::thread::spawn(move || {
-        while let Ok(Some(message)) = wire::recv::<MachineMessage>(&mut from_guest) {
+        while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
             let _ = send(&match message {
-                MachineMessage::Ready(_) => MachineMessage::Ready(addresses.clone()),
+                CtrlResp::Ready(_) => CtrlResp::Ready(addresses.clone()),
                 message => message,
             });
         }
@@ -407,26 +426,31 @@ pub(super) unsafe fn hold(ctrlin: u64, ctrlout: u64) -> File {
 }
 
 /// Tell the host `message`.
-pub(super) fn send(message: &MachineMessage) -> io::Result<()> {
+pub(super) fn send(message: &CtrlResp) -> io::Result<()> {
     let ctrlout = CTRLOUT
         .get()
         .ok_or_else(|| io::Error::other("ctrlout is not held"))?;
     wire::send(&mut *ctrlout.lock().unwrap(), message)
 }
 
+/// A pipe end the host left this process, as it named it.
+///
+/// # Safety
+///
+/// `end` is an end the host left open for this process, which nothing else in it holds.
 #[cfg(unix)]
-unsafe fn from_raw(end: u64) -> File {
+pub(super) unsafe fn from_raw(end: u64) -> File {
     // SAFETY: the caller's.
     unsafe { std::os::fd::FromRawFd::from_raw_fd(end as i32) }
 }
 
 #[cfg(windows)]
-unsafe fn from_raw(end: u64) -> File {
+pub(super) unsafe fn from_raw(end: u64) -> File {
     // SAFETY: the caller's.
     unsafe { std::os::windows::io::FromRawHandle::from_raw_handle(end as usize as _) }
 }
 
-/// The machine process's `log`, each record a [`Log`](MachineMessage::Log) on `ctrlout` as it is
+/// The machine process's `log`, each record a [`Log`](CtrlResp::Log) on `ctrlout` as it is
 /// made: in the thread that makes it, so what the console's last lines are is out before
 /// libkrun ends the process.
 ///
@@ -447,7 +471,7 @@ impl log::Log for Logger {
             CONSOLE_TARGET => message.trim_end_matches('\r').to_string(),
             _ => message,
         };
-        let _ = send(&MachineMessage::Log {
+        let _ = send(&CtrlResp::Log {
             level: record.level().to_string(),
             message,
         });

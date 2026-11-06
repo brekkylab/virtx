@@ -172,8 +172,8 @@ export interface VolumeMountListOutputItem {
   mountType: MountType
 }
 
-/** Whose files a request names: a volume's, or a snapshot's. A snapshot in use, held by a sandbox, refuses every request. */
-export type FileRoot = { volume: string } | { snapshot: string }
+/** Whose files a request names: a volume's, a snapshot's, or a sandbox's as its processes see them. A snapshot in use, held by a sandbox, refuses every request. */
+export type FileRoot = { volume: string } | { snapshot: string } | { sandbox: string }
 
 /** What a file or directory is. */
 export interface Metadata {

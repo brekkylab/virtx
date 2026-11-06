@@ -61,7 +61,7 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
-The files of a volume or a snapshot are read and written through the client, each request naming its root as a `Volume` or a `Snapshot`, with a path relative to it. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+The files of a volume, a snapshot or a sandbox are read and written through the client, each request naming its root as a `Volume`, a `Snapshot` or a `SandboxFiles`, with a path relative to it. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python
 from virtx import Volume

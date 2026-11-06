@@ -92,6 +92,7 @@ _WITH_DATA = (
     _HANDLE,
 )
 _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
+    "virtx_ensure_virtx": ([_OUT], ctypes.c_int),
     "virtx_client_spawn": (
         [
             ctypes.c_char_p,

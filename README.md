@@ -28,7 +28,7 @@ virtx is also the VM layer under [Ailoy](https://github.com/brekkylab/ailoy), ou
 
 ## How it works
 
-A virtx server runs the VMs, on your machine or another one. This repository is the client: one library, `libvirtx_core`, with packages for Python, Node and Rust over it.
+A virtx server runs the VMs, on your machine or another one. This repository is both ends: the client, one library, `libvirtx_core`, with packages for Python, Node and Rust over it, and the server, [`virtx-uvm`](virtx-uvm/README.md).
 
 Your code asks the server for a sandbox, a VM booted from an image you name. It then runs commands in it as jobs and reads their output as a log. Volumes and snapshots hold whatever should outlive the sandbox, and anything else is gone when you remove it.
 
@@ -52,11 +52,15 @@ These apply to the machine that runs the virtx server.
 ## Quickstart
 
 Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
-`Client.spawn("virtx-uvm")` starts the server, [`virtx-uvm`](https://github.com/brekkylab/virtx-uvm), and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
-No release of `virtx-uvm` speaks this protocol yet, so build it from that repository's `multi-process` branch, as its README says, and install it onto your `PATH`:
+`Client.spawn()` starts the server, `virtx-uvm`, and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
+The server is released with the client, so a client fetches the one of its own version the first time it is asked for, from this repository's releases into a cache, and `Client.spawn("virtx-uvm")` runs one you installed yourself instead.
+To build it, as [`CONTRIBUTING.md`](CONTRIBUTING.md) says, and have a client use that build:
 
 ```sh
-cargo xtask install --prefix ~/.local   # in virtx-uvm, once built: -> ~/.local/bin/virtx-uvm
+cargo xtask init
+cargo xtask build kernel server-stdio
+cargo xtask install --prefix ~/.local   # -> ~/.local/bin/virtx-uvm, beside its kernel
+export VIRTX_UVM=~/.local/bin/virtx-uvm  # what Client.spawn() starts, in place of a fetch
 ```
 
 ### Python
@@ -72,7 +76,7 @@ from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdou
 
 
 async def main() -> None:
-    with Client.spawn("virtx-uvm") as client:
+    with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
         async for entry in client.build_image(recipe, "jq:latest"):
             match entry.entry:
@@ -107,7 +111,7 @@ npm install @brekkylab/virtx
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 async function main() {
-  const client = Client.spawn('virtx-uvm')
+  const client = Client.spawn()
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
     for await (const entry of client.buildImage(recipe, 'jq:latest')) {
@@ -152,7 +156,7 @@ use virtx_rs::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn("virtx-uvm", [] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     let mut log = client.build_image(recipe, "jq:latest").log();
@@ -303,7 +307,7 @@ virtx save -o jq.tar jq:latest
 virtx rmi jq:latest
 ```
 
-It starts `virtx-uvm` from `$VIRTX_HOME/bin`, else from `PATH`, or the program `--server` names; `--host URL` reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token. Ctrl-C during a build, pull or push cancels the job.
+It starts `virtx-uvm` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_UVM`) names; `--host URL` reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token. Ctrl-C during a build, pull or push cancels the job.
 
 ## GPU
 

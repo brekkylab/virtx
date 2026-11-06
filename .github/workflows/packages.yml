@@ -180,7 +180,7 @@ jobs:
       - name: libvirtx_core
         shell: bash
         run: |
-          cargo build --release --locked -p virtx-core --lib --target ${{ matrix.target }}
+          cargo xtask build client --locked --target ${{ matrix.target }}
           mkdir -p dist/lib
           cp target/${{ matrix.target }}/release/${{ matrix.file }} dist/lib/
           ls -la dist/lib

@@ -39,6 +39,19 @@ pub struct Client {
 unsafe impl Send for Client {}
 unsafe impl Sync for Client {}
 
+/// Fetch `virtx-uvm`, the server of the library's version, into this host's cache if it is
+/// not there, and give its path: what [`Client::spawn_virtx`] starts. Blocks for the fetch.
+///
+/// The server is kept one directory per version, so a library that is upgraded fetches its
+/// own. `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another version;
+/// `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
+pub fn ensure_virtx() -> Result<PathBuf, Error> {
+    let api = api()?;
+    let mut out = VirtxBytes::empty();
+    let status = unsafe { (api.virtx_ensure_virtx)(&mut out) };
+    unsafe { take::<String>(api, status, out) }.map(PathBuf::from)
+}
+
 impl Client {
     /// Start `program` with `args` as the server, and talk to it over its stdin and stdout.
     /// Blocks until it has started.
@@ -46,8 +59,22 @@ impl Client {
         program: impl AsRef<str>,
         args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Client, Error> {
-        let api = api()?;
         let program = c_string(program.as_ref())?;
+        Self::spawn_program(program.as_ptr(), args)
+    }
+
+    /// Start `virtx-uvm`, the server of the library's version, with `args`, fetching it first
+    /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone. Blocks
+    /// until it has started.
+    pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Client, Error> {
+        Self::spawn_program(ptr::null(), args)
+    }
+
+    fn spawn_program(
+        program: *const std::ffi::c_char,
+        args: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Client, Error> {
+        let api = api()?;
         let args = args
             .into_iter()
             .map(|arg| c_string(arg.as_ref()))
@@ -56,13 +83,7 @@ impl Client {
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
         let status = unsafe {
-            (api.virtx_client_spawn)(
-                program.as_ptr(),
-                argv.as_ptr(),
-                argv.len(),
-                &mut raw,
-                &mut error,
-            )
+            (api.virtx_client_spawn)(program, argv.as_ptr(), argv.len(), &mut raw, &mut error)
         };
         unsafe { opened(api, status, raw, error) }
     }

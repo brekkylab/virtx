@@ -1,0 +1,21 @@
+# Each submodule is a fork under brekkylab, pinned to a commit on its `virtx` branch: the
+# upstream commit it tracks, then one commit per change of ours. `git log upstream..virtx` in
+# a submodule lists them; virtx-uvm/README.md says what each is for.
+[submodule "virglrenderer"]
+	path = 3rdparty/virglrenderer
+	url = https://github.com/brekkylab/virglrenderer.git
+	branch = virtx
+[submodule "3rdparty/libepoxy"]
+	path = 3rdparty/libepoxy
+	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer requires epoxy
+	# unconditionally, and Windows has no package manager here.
+	url = https://github.com/brekkylab/libepoxy.git
+	branch = virtx
+[submodule "MoltenVK"]
+	path = 3rdparty/MoltenVK
+	url = https://github.com/brekkylab/MoltenVK.git
+	branch = virtx
+[submodule "SPIRV-Cross"]
+	path = 3rdparty/SPIRV-Cross
+	url = https://github.com/brekkylab/SPIRV-Cross.git
+	branch = virtx

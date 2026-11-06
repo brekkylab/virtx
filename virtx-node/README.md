@@ -7,7 +7,7 @@ The package also installs the `virtx` command, the one in `libvirtx_core`: `npx 
 ```js
 const { Client, Recipe } = require('@brekkylab/virtx')
 
-const client = Client.spawn('virtx-uvm')
+const client = Client.spawn()
 for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
   if ('log' in entry) console.log(entry.log)
   else if ('end' in entry) console.log('ended', entry.end)

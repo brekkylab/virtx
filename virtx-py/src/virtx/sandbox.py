@@ -3,12 +3,12 @@ and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .files import SandboxFiles
+from .files import Files, SandboxFiles
 from .job import LogEntry, StartedJob, Truncated
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class SandboxVolume:
 
 
 @dataclass(frozen=True)
-class Sandbox:
+class Sandbox(Files):
     """One sandbox the server holds, and the client that reaches it: what runs processes in it
     and reads and writes its files. Dropping it leaves the sandbox; ``remove`` removes it."""
 
@@ -84,28 +84,13 @@ class Sandbox:
         """Run ``cmd`` in it, as ``Client.exec_sandbox`` does."""
         return self.client.exec_sandbox(self.id, cmd, stdin=stdin, timeout_ms=timeout_ms)
 
-    async def read_file(self, path: str, offset: int = 0, length: int | None = None) -> bytes:
-        """The file at ``path``, from its root as ``etc/hostname``, from ``offset``, ``length``
-        bytes of it or all that is left."""
-        return await self.client.read_file(self.root, path, offset, length)
+    async def jobs(self) -> list[SandboxJob]:
+        """Every job in it."""
+        return await self.client.list_sandbox_job(self.id)
 
-    async def read_text(self, path: str) -> str:
-        """The whole file at ``path`` as text, which it has to be: UTF-8."""
-        return await self.client.read_text(self.root, path)
-
-    async def write_file(
-        self, path: str, content: bytes | str, if_match: str | None = None
-    ) -> None:
-        """Write ``content`` as the whole file at ``path``, as ``Client.write_file`` does."""
-        await self.client.write_file(self.root, path, content, if_match)
-
-    async def create_dir_all(self, path: str) -> None:
-        """Have the directory at ``path``, as ``mkdir -p``."""
-        await self.client.create_dir_all(self.root, path)
-
-    async def remove_file(self, path: str, missing_ok: bool = False) -> None:
-        """Remove what is at ``path``, as ``Client.remove_file`` does."""
-        await self.client.remove_file(self.root, path, missing_ok)
+    async def job(self, id: str) -> SandboxJob:
+        """The job ``id`` in it."""
+        return await self.client.get_sandbox_job(self.id, id)
 
     async def remove(self) -> None:
         """Stop it, end its jobs, and forget it, keeping its snapshot and volumes."""
@@ -120,8 +105,15 @@ class SandboxJobKind(str, Enum):
 
 @dataclass(frozen=True)
 class SandboxJob:
-    """A process run in a sandbox: what ``exec_sandbox`` answers. Its output is
-    ``sandbox_job_log``'s."""
+    """A process run in a sandbox, as ``exec_sandbox`` and ``get_sandbox_job`` answer it, and
+    the client and sandbox that reach it: what signals it, writes to its stdin and reads its
+    log. Dropping it leaves the job; ``remove`` removes it."""
+
+    client: Client = field(repr=False, compare=False)
+    """The client its requests go through."""
+
+    sandbox_id: str
+    """The id of the sandbox it runs in."""
 
     id: str
     """The job's id, which every request about it names it by, beside its sandbox's."""
@@ -140,8 +132,10 @@ class SandboxJob:
     """Once it has ended, its exit code."""
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> SandboxJob:
+    def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
         return cls(
+            client,
+            sandbox_id,
             value["id"],
             SandboxJobKind(value["kind"]),
             value["pid"],
@@ -149,6 +143,29 @@ class SandboxJob:
             value["running"],
             value.get("code"),
         )
+
+    async def get(self) -> SandboxJob:
+        """It as the server has it now."""
+        return await self.client.get_sandbox_job(self.sandbox_id, self.id)
+
+    async def signal(self, signal: str) -> None:
+        """Send ``signal``, such as ``"SIGTERM"``, to its process and every process it
+        started."""
+        await self.client.signal_sandbox_job(self.sandbox_id, self.id, signal)
+
+    async def write_stdin(self, data: str | None = None, eof: bool = False) -> None:
+        """Write ``data`` to its process's stdin, then close it if ``eof``, as
+        ``Client.write_sandbox_job_stdin`` does."""
+        await self.client.write_sandbox_job_stdin(self.sandbox_id, self.id, data, eof)
+
+    def log(self, after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
+        """Its log, from its start or after its ``after``th entry, until its
+        ``SandboxJobEnd``."""
+        return self.client.sandbox_job_log(self.sandbox_id, self.id, after)
+
+    async def remove(self) -> None:
+        """Cancel it if it runs, killing its process, and forget it."""
+        await self.client.remove_sandbox_job(self.sandbox_id, self.id)
 
 
 @dataclass(frozen=True)

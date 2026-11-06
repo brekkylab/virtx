@@ -11,25 +11,26 @@ from virtx import (
     Log,
     LogEntry,
     Recipe,
+    SandboxJob,
     SandboxJobEnd,
     SandboxJobKind,
-    SnapshotListOutputItem,
+    Snapshot,
     Stderr,
     Stdout,
     Truncated,
     VirtxError,
-    VolumeListOutputItem,
+    Volume,
 )
 
 
 async def test_a_snapshot_is_created_got_listed_and_removed(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         created = await client.create_snapshot("new", disk_gib=4)
-        assert created == SnapshotListOutputItem("new", 0, False)
+        assert created == Snapshot(client, "new", 0, False)
         assert await client.get_snapshot("new") == created
         assert created in await client.list_snapshot()
         assert (await client.get_snapshot("locked")).in_use
-        await client.remove_snapshot("new")
+        await created.remove()
         with pytest.raises(VirtxError) as refused:
             await client.get_snapshot("new")
         assert refused.value.status == 404
@@ -37,11 +38,14 @@ async def test_a_snapshot_is_created_got_listed_and_removed(test_server: str) ->
 
 async def test_a_volume_is_created_and_got(test_server: str) -> None:
     with Client.spawn(test_server) as client:
-        assert await client.get_volume("v") == VolumeListOutputItem("v", 0)
+        assert await client.get_volume("v") == Volume(client, "v", 0)
         created = await client.create_volume("w")
         assert created.name == "w"
         assert await client.get_volume("w") == created
         await client.remove_volume("w")
+        with pytest.raises(VirtxError) as refused:
+            await client.get_volume("w")
+        assert refused.value.status == 404
 
 
 async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server: str) -> None:
@@ -54,17 +58,20 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server
         assert sandbox.id in [item.id for item in await client.list_sandbox()]
 
         job = await sandbox.exec(["echo", "hi"])
+        assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id
         assert job.kind == SandboxJobKind.EXEC and job.cmd == ["echo", "hi"]
-        log = [entry async for entry in client.sandbox_job_log(sandbox.id, job.id)]
+        log = [entry async for entry in job.log()]
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
+        assert (await job.get()).code == 0
         assert (await client.get_sandbox_job(sandbox.id, job.id)).code == 0
+        assert job.id in [item.id for item in await sandbox.jobs()]
         assert job.id in [item.id for item in await client.list_sandbox_job(sandbox.id)]
 
         failed = await client.exec_sandbox(sandbox.id, ["fail"])
         log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, failed.id)]
         assert log == [Stderr("failed"), SandboxJobEnd(1)]
 
-        await client.remove_sandbox_job(sandbox.id, job.id)
+        await (await sandbox.job(job.id)).remove()
         with pytest.raises(VirtxError) as refused:
             await client.get_sandbox_job(sandbox.id, job.id)
         assert refused.value.status == 404
@@ -90,19 +97,25 @@ async def test_a_log_is_truncated_at_its_limit_and_resumed_after_an_entry(
 async def test_stdin_is_written_and_a_signal_ends_a_process(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         sandbox = await client.create_sandbox("alpine:3.20")
-        cat = await client.exec_sandbox(sandbox.id, ["cat"], stdin=True)
-        await client.write_sandbox_job_stdin(sandbox.id, cat.id, "a\nb\n")
-        await client.write_sandbox_job_stdin(sandbox.id, cat.id, eof=True)
-        log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, cat.id)]
+        cat = await sandbox.exec(["cat"], stdin=True)
+        await cat.write_stdin("a\nb\n")
+        await cat.write_stdin(eof=True)
+        log = [entry.entry async for entry in cat.log()]
         assert log[:2] == [Stdout("a"), Stdout("b")]
         assert isinstance(log[-1], SandboxJobEnd)
 
-        sleep = await client.exec_sandbox(sandbox.id, ["sleep"])
+        sleep = await sandbox.exec(["sleep"])
         assert sleep.running
-        await client.signal_sandbox_job(sandbox.id, sleep.id, "SIGTERM")
-        log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, sleep.id)]
+        await sleep.signal("SIGTERM")
+        log = [entry.entry async for entry in sleep.log()]
         assert isinstance(log[-1], SandboxJobEnd)
-        assert not (await client.get_sandbox_job(sandbox.id, sleep.id)).running
+        assert not (await sleep.get()).running
+
+        # The client's requests by id reach the same jobs.
+        cat = await client.exec_sandbox(sandbox.id, ["cat"], stdin=True)
+        await client.write_sandbox_job_stdin(sandbox.id, cat.id, "c\n", eof=True)
+        log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, cat.id)]
+        assert log[0] == Stdout("c")
 
 
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_server: str) -> None:

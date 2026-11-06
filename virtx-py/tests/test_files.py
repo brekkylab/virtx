@@ -2,13 +2,23 @@
 
 import pytest
 
-from virtx import Client, DirEntry, Metadata, SandboxFiles, Snapshot, VirtxError, Volume
+from virtx import (
+    Client,
+    DirEntry,
+    GdriveSource,
+    Metadata,
+    MountType,
+    SandboxFiles,
+    SnapshotFiles,
+    VirtxError,
+    VolumeFiles,
+)
 
 
 async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
     test_server: str,
 ) -> None:
-    volume = Volume("v")
+    volume = VolumeFiles("v")
     with Client.spawn(test_server) as client:
         await client.create_dir(volume, "dir")
         await client.write_file(volume, "dir/a.txt", b"hello world")
@@ -61,7 +71,48 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         assert await client.read_file(volume, "c.txt") == b"hello world"
 
         with pytest.raises(VirtxError) as refused:
-            await client.read_dir(Snapshot("locked"), "")
+            await client.read_dir(SnapshotFiles("locked"), "")
+        assert refused.value.status == 423
+
+
+async def test_a_volume_carries_its_client_to_its_files_and_mounts(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        volume = await client.create_volume("w")
+        assert (volume.name, volume.size, volume.root) == ("w", 0, VolumeFiles("w"))
+        await volume.create_dir_all("in/dir")
+        await volume.write_file("in/a.txt", "hello")
+        await volume.rename_file("in/a.txt", "in/b.txt")
+        await volume.copy_file("in/b.txt", "c.txt")
+        assert await volume.read_text("c.txt") == "hello"
+        assert await volume.is_dir("in/dir")
+        assert sorted(entry.name for entry in await volume.read_dir("in")) == ["b.txt", "dir"]
+
+        mount = await volume.mount("drive", GdriveSource("id", "secret", "token"))
+        assert (mount.path, mount.mount_type) == ("drive", MountType.GDRIVE)
+        assert await volume.mounts() == [mount]
+        await volume.unmount("drive")
+        assert await volume.mounts() == []
+
+        got = await client.get_volume("w")
+        assert got == volume and got.client is client
+        assert volume in await client.list_volume()
+        await volume.remove()
+        with pytest.raises(VirtxError) as refused:
+            await got.stat_file("c.txt")
+        assert refused.value.status == 404
+
+
+async def test_a_snapshot_carries_its_client_to_its_files(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        snapshot = await client.create_snapshot("t")
+        await snapshot.write_file("a.txt", "kept")
+        assert await (await client.get_snapshot("t")).read_text("a.txt") == "kept"
+        await snapshot.remove()
+
+        locked = await client.get_snapshot("locked")
+        assert locked.in_use and locked.root == SnapshotFiles("locked")
+        with pytest.raises(VirtxError) as refused:
+            await locked.read_dir("")
         assert refused.value.status == 423
 
 
@@ -84,8 +135,8 @@ async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) ->
 
 
 def test_a_root_and_metadata_read_as_the_wire_has_them() -> None:
-    assert Volume("v").to_dict() == {"volume": "v"}
-    assert Snapshot("s").to_dict() == {"snapshot": "s"}
+    assert VolumeFiles("v").to_dict() == {"volume": "v"}
+    assert SnapshotFiles("s").to_dict() == {"snapshot": "s"}
     assert SandboxFiles("sb1").to_dict() == {"sandbox": "sb1"}
     assert Metadata.from_dict({"is_dir": True, "size": 0}) == Metadata(True, 0)
     entry = DirEntry.from_dict(

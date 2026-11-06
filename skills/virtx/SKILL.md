@@ -51,12 +51,12 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
 | more CPUs or memory | `vcpus=`, `memory_mib=` |
 
-Give it what the task must read or keep, and nothing more. Put input files in a volume first, from the host, with `write_file(Volume("data"), "in/a.txt", content)`. Guest paths are absolute.
+Give it what the task must read or keep, and nothing more. Put input files in a volume first, from the host, with `await volume.write_file("in/a.txt", content)` on the `Volume` that `create_volume` or `get_volume` answered. Guest paths are absolute.
 
 ## 4. Run commands, and read what came back
 
 ```python
-async for entry in client.exec_sandbox(sandbox.id, ["sh", "-c", "jq --version"], timeout_ms=10_000):
+async for entry in sandbox.exec(["sh", "-c", "jq --version"], timeout_ms=10_000):
     match entry.entry:
         case Stdout(line) | Stderr(line):
             print(line)
@@ -64,18 +64,18 @@ async for entry in client.exec_sandbox(sandbox.id, ["sh", "-c", "jq --version"],
             print("exited", code)
 ```
 
-`exec_sandbox` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. What it answers is a job: iterated, the command's output, a line per entry, then its exit code as the last entry; awaited, the job, for the requests below. A sandbox runs many commands at once, each its own job, and leaving the loop leaves the command running.
+`exec` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. What it answers is a job: iterated, the command's output, a line per entry, then its exit code as the last entry; awaited, a `SandboxJob`, for the requests below. A sandbox runs many commands at once, each its own job, and leaving the loop leaves the command running.
 
-- A command that cannot start, such as one not found, is refused at `exec_sandbox`, and makes no job.
-- `stdin=True` keeps its stdin open for `write_sandbox_job_stdin`, each write awaited before the next, until one closes it with `eof=True`.
-- `signal_sandbox_job(..., "SIGTERM")` signals it; `remove_sandbox_job` kills it and forgets it.
+- A command that cannot start, such as one not found, is refused at `exec`, and makes no job.
+- `stdin=True` keeps its stdin open for the job's `write_stdin`, each write awaited before the next, until one closes it with `eof=True`.
+- `job.signal("SIGTERM")` signals it; `job.remove()` kills it and forgets it; `job.log(after=...)` reads its log again.
 - A log that drops is read again `after` the last entry's `id`. A long one is cut at the server's limit, with one `truncated` entry, and still ends with `end`.
 
 ## 5. Check the result where it landed, and remove the sandbox
 
-Look at the volume, with `read_file` or `read_dir`, or at the log's lines, rather than at the exit code alone: a command that printed "done" but wrote outside every volume has written nothing that outlives the sandbox. If a file is missing, the usual causes are a path outside the volumes, a read-only volume, or a step the image needed and lacked.
+Look at the volume, with its `read_file` or `read_dir`, or at the log's lines, rather than at the exit code alone: a command that printed "done" but wrote outside every volume has written nothing that outlives the sandbox. If a file is missing, the usual causes are a path outside the volumes, a read-only volume, or a step the image needed and lacked.
 
-Remove the sandbox with `remove_sandbox` when the task is done, in a `finally`: it stays until removed, holding its snapshot, whose files are refused until then.
+Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`: it stays until removed, holding its snapshot, whose files are refused until then.
 
 ## Where to read more
 

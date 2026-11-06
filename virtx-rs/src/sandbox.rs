@@ -1,11 +1,14 @@
-//! A sandbox, and the client its requests go through.
+//! A sandbox and the jobs in it, each with the client its requests go through.
 
-use virtx_core::{FileRoot, Sandbox as SandboxInfo, SandboxExecArgs, SandboxJob, SandboxJobEntry};
+use virtx_core::{
+    FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxJob as SandboxJobInfo,
+    SandboxJobEntry,
+};
 
-use crate::{Call, Client, StartedJob};
+use crate::{Call, Client, Events, Files, StartedJob};
 
 /// A sandbox the server holds, as making it or asking for it answered, and the client that
-/// reaches it: what is needed to run processes in it and read and write its files.
+/// reaches it: what is needed to run processes in it, and its files, through [`Files`].
 ///
 /// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it goes
 /// with [`remove`](Self::remove), or [`Client::remove_sandbox`].
@@ -45,41 +48,14 @@ impl Sandbox {
         self.client.exec_sandbox(&self.info.id, args)
     }
 
-    /// The file at `path`, from `offset`, `length` bytes of it or all that is left; `path` is
-    /// from its root, as `etc/hostname`.
-    pub fn read_file(
-        &self,
-        path: impl Into<String>,
-        offset: u64,
-        length: Option<u64>,
-    ) -> Call<Vec<u8>> {
-        self.client.read_file(&self.root(), path, offset, length)
+    /// Every job in it.
+    pub fn jobs(&self) -> Call<Vec<SandboxJob>> {
+        self.client.list_sandbox_job(&self.info.id)
     }
 
-    /// The whole file at `path` as text, which it has to be: UTF-8.
-    pub fn read_text(&self, path: impl Into<String>) -> Call<String> {
-        self.client.read_text(&self.root(), path)
-    }
-
-    /// Write `content` as the whole file at `path`, as [`Client::write_file`] does.
-    pub fn write_file(
-        &self,
-        path: impl Into<String>,
-        content: impl AsRef<[u8]>,
-        if_match: Option<&str>,
-    ) -> Call<()> {
-        self.client
-            .write_file(&self.root(), path, content, if_match)
-    }
-
-    /// Have the directory at `path`, as `mkdir -p`.
-    pub fn create_dir_all(&self, path: impl Into<String>) -> Call<()> {
-        self.client.create_dir_all(&self.root(), path)
-    }
-
-    /// Remove what is at `path`, as [`Client::remove_file`] does.
-    pub fn remove_file(&self, path: impl Into<String>, missing_ok: bool) -> Call<()> {
-        self.client.remove_file(&self.root(), path, missing_ok)
+    /// The job `id` in it.
+    pub fn job(&self, id: impl AsRef<str>) -> Call<SandboxJob> {
+        self.client.get_sandbox_job(&self.info.id, id)
     }
 
     /// Stop it, end its jobs, and forget it, keeping its snapshot and volumes.
@@ -88,8 +64,98 @@ impl Sandbox {
     }
 }
 
+impl Files for Sandbox {
+    fn client(&self) -> &Client {
+        &self.client
+    }
+
+    fn root(&self) -> FileRoot {
+        Sandbox::root(self)
+    }
+}
+
 impl std::fmt::Debug for Sandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Sandbox").field(&self.info).finish()
+    }
+}
+
+/// A process run in a sandbox, as starting it or asking for it answered, and the client and
+/// sandbox that reach it: what signals it, writes to its stdin and reads its log.
+///
+/// Cloning holds the same client once more. Dropping it leaves the job as it is; it goes with
+/// [`remove`](Self::remove), or [`Client::remove_sandbox_job`].
+#[derive(Clone)]
+pub struct SandboxJob {
+    client: Client,
+    sandbox: String,
+    info: SandboxJobInfo,
+}
+
+impl SandboxJob {
+    pub(crate) fn new(client: Client, sandbox: String, info: SandboxJobInfo) -> SandboxJob {
+        SandboxJob {
+            client,
+            sandbox,
+            info,
+        }
+    }
+
+    /// The client its requests go through.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    pub fn id(&self) -> &str {
+        &self.info.id
+    }
+
+    /// The id of the sandbox it runs in.
+    pub fn sandbox_id(&self) -> &str {
+        &self.sandbox
+    }
+
+    /// What the server answered about it: its process, and whether and how it had ended, as
+    /// it was then.
+    pub fn info(&self) -> &SandboxJobInfo {
+        &self.info
+    }
+
+    /// It as the server has it now.
+    pub fn get(&self) -> Call<SandboxJob> {
+        self.client.get_sandbox_job(&self.sandbox, &self.info.id)
+    }
+
+    /// Send `signal`, such as `SIGTERM`, to its process and every process it started.
+    pub fn signal(&self, signal: impl AsRef<str>) -> Call<()> {
+        self.client
+            .signal_sandbox_job(&self.sandbox, &self.info.id, signal)
+    }
+
+    /// Write `data` to its process's stdin, then close it if `eof`, as
+    /// [`Client::write_sandbox_job_stdin`] does.
+    pub fn write_stdin(&self, data: Option<impl Into<String>>, eof: bool) -> Call<()> {
+        self.client
+            .write_sandbox_job_stdin(&self.sandbox, &self.info.id, data, eof)
+    }
+
+    /// Its log, from its start or after its `after`th entry, until its `end` entry.
+    pub fn log(&self, after: Option<u64>) -> Events<LogEntry<SandboxJobEntry>> {
+        self.client
+            .sandbox_job_log(&self.sandbox, &self.info.id, after)
+    }
+
+    /// Cancel it if it runs, killing its process, and forget it.
+    pub fn remove(&self) -> Call<()> {
+        self.client.remove_sandbox_job(&self.sandbox, &self.info.id)
+    }
+}
+
+impl std::fmt::Debug for SandboxJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxJob")
+            .field("sandbox", &self.sandbox)
+            .field("info", &self.info)
+            .finish()
     }
 }

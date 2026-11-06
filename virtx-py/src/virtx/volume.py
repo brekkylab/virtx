@@ -9,7 +9,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from .files import Files, VolumeFiles
+
+if TYPE_CHECKING:
+    from .client import Client
 
 
 class MountType(str, Enum):
@@ -81,18 +86,43 @@ MountSource = NotionSource | GdriveSource | OnedriveSource
 
 
 @dataclass(frozen=True)
-class VolumeListOutputItem:
+class Volume(Files):
     """One volume the server holds, as ``list_volume``, ``get_volume`` and ``create_volume``
-    answer it."""
+    answer it, and the client that reaches it: its files, and the mounts in it. Dropping it
+    leaves the volume; ``remove`` removes it."""
+
+    client: Client = field(repr=False, compare=False)
+    """The client its requests go through."""
 
     name: str
 
     size: int
-    """The bytes the volume's files take on the server."""
+    """The bytes the volume's files took on the server when it was answered."""
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> VolumeListOutputItem:
-        return cls(value["name"], value["size"])
+    def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Volume:
+        return cls(client, value["name"], value["size"])
+
+    @property
+    def root(self) -> VolumeFiles:
+        """Its files, for the client's files requests."""
+        return VolumeFiles(self.name)
+
+    async def mounts(self) -> list[VolumeMountListOutputItem]:
+        """The mounts in it, without their credentials."""
+        return await self.client.list_volume_mount(self.name)
+
+    async def mount(self, path: str, source: MountSource) -> VolumeMountListOutputItem:
+        """Mount ``source`` at ``path`` in it, a directory the mount creates."""
+        return await self.client.create_volume_mount(self.name, path, source)
+
+    async def unmount(self, path: str) -> None:
+        """Take away the mount at ``path``, leaving its source as it is."""
+        await self.client.remove_volume_mount(self.name, path)
+
+    async def remove(self) -> None:
+        """Delete it and everything in it."""
+        await self.client.remove_volume(self.name)
 
 
 @dataclass(frozen=True)

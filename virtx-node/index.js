@@ -602,32 +602,34 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  listSnapshot() {
-    return this._call('virtx_client_list_snapshot')
+  async listSnapshot() {
+    const infos = await this._call('virtx_client_list_snapshot')
+    return infos.map((info) => new Snapshot(this, info))
   }
 
-  createSnapshot(name, diskGib) {
-    return this._call('virtx_client_create_snapshot', { name, diskGib })
+  async createSnapshot(name, diskGib) {
+    return new Snapshot(this, await this._call('virtx_client_create_snapshot', { name, diskGib }))
   }
 
-  getSnapshot(name) {
-    return this._call('virtx_client_get_snapshot', { name })
+  async getSnapshot(name) {
+    return new Snapshot(this, await this._call('virtx_client_get_snapshot', { name }))
   }
 
   async removeSnapshot(name) {
     await this._call('virtx_client_remove_snapshot', { name })
   }
 
-  listVolume() {
-    return this._call('virtx_client_list_volume')
+  async listVolume() {
+    const infos = await this._call('virtx_client_list_volume')
+    return infos.map((info) => new Volume(this, info))
   }
 
-  createVolume(name) {
-    return this._call('virtx_client_create_volume', { name })
+  async createVolume(name) {
+    return new Volume(this, await this._call('virtx_client_create_volume', { name }))
   }
 
-  getVolume(name) {
-    return this._call('virtx_client_get_volume', { name })
+  async getVolume(name) {
+    return new Volume(this, await this._call('virtx_client_get_volume', { name }))
   }
 
   async removeVolume(name) {
@@ -735,21 +737,24 @@ class Client {
     await this._call('virtx_client_remove_sandbox', { id })
   }
 
-  listSandboxJob(sandbox) {
-    return this._call('virtx_client_list_sandbox_job', { sandbox })
+  async listSandboxJob(sandbox) {
+    const infos = await this._call('virtx_client_list_sandbox_job', { sandbox })
+    return infos.map((info) => new SandboxJob(this, sandbox, info))
   }
 
   // Starts `cmd` in the sandbox, its stdin open for `writeSandboxJobStdin` if `stdin`, killed
   // after `timeoutMs` if given: the job, and its output as `sandboxJobLog`'s.
   execSandbox(sandbox, cmd, options = {}) {
     return StartedJob.of(
-      this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd }),
-      (job) => this.sandboxJobLog(sandbox, job.id),
+      this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd }).then(
+        (info) => new SandboxJob(this, sandbox, info),
+      ),
+      (job) => job.log(),
     )
   }
 
-  getSandboxJob(sandbox, job) {
-    return this._call('virtx_client_get_sandbox_job', { sandbox, job })
+  async getSandboxJob(sandbox, job) {
+    return new SandboxJob(this, sandbox, await this._call('virtx_client_get_sandbox_job', { sandbox, job }))
   }
 
   // Cancels the job if it runs, killing its process, and forgets it.
@@ -828,23 +833,34 @@ class PortForwarder {
   }
 }
 
-// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
-// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
-// read and write its files. Dropping it leaves the sandbox; `remove` removes it.
-class Sandbox {
-  constructor(client, info) {
-    // Not enumerable, so the sandbox reads, logs and compares as what the server answered.
-    Object.defineProperty(this, 'client', { value: client })
-    Object.assign(this, info)
+// What the server answered about something, and the client that reaches it. The client is not
+// enumerable, so it reads, logs and compares as what the server answered.
+function held(handle, client, info) {
+  Object.defineProperty(handle, 'client', { value: client })
+  Object.assign(handle, info)
+}
+
+// The files of a volume, a snapshot or a sandbox: each request the client's of the same name, at
+// its `root`.
+class Files {
+  statFile(at) {
+    return this.client.statFile(this.root, at)
   }
 
-  // Its files, its root as its processes see it, for the client's files requests.
-  get root() {
-    return { sandbox: this.id }
+  exists(at) {
+    return this.client.exists(this.root, at)
   }
 
-  exec(cmd, options = {}) {
-    return this.client.execSandbox(this.id, cmd, options)
+  isFile(at) {
+    return this.client.isFile(this.root, at)
+  }
+
+  isDir(at) {
+    return this.client.isDir(this.root, at)
+  }
+
+  readDir(at) {
+    return this.client.readDir(this.root, at)
   }
 
   readFile(at, offset, length) {
@@ -859,6 +875,10 @@ class Sandbox {
     return this.client.writeFile(this.root, at, content, ifMatch)
   }
 
+  createDir(at) {
+    return this.client.createDir(this.root, at)
+  }
+
   createDirAll(at) {
     return this.client.createDirAll(this.root, at)
   }
@@ -867,9 +887,122 @@ class Sandbox {
     return this.client.removeFile(this.root, at, missingOk)
   }
 
+  renameFile(from, to, overwrite = false) {
+    return this.client.renameFile(this.root, from, to, overwrite)
+  }
+
+  copyFile(from, to, overwrite = false) {
+    return this.client.copyFile(this.root, from, to, overwrite)
+  }
+}
+
+// A volume the server holds (`name`, `size`), and the client that reaches it: its files and the
+// mounts in it. Dropping it leaves the volume; `remove` removes it.
+class Volume extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  get root() {
+    return { volume: this.name }
+  }
+
+  mounts() {
+    return this.client.listVolumeMount(this.name)
+  }
+
+  mount(at, source) {
+    return this.client.createVolumeMount(this.name, at, source)
+  }
+
+  unmount(at) {
+    return this.client.removeVolumeMount(this.name, at)
+  }
+
+  // Deletes it and everything in it.
+  remove() {
+    return this.client.removeVolume(this.name)
+  }
+}
+
+// A snapshot the server holds (`name`, `size`, `inUse`), and the client that reaches it: its
+// files, refused while a sandbox holds it. Dropping it leaves the snapshot; `remove` removes it.
+class Snapshot extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  get root() {
+    return { snapshot: this.name }
+  }
+
+  remove() {
+    return this.client.removeSnapshot(this.name)
+  }
+}
+
+// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
+// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
+// read and write its files. Dropping it leaves the sandbox; `remove` removes it.
+class Sandbox extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  // Its files, its root as its processes see it, for the client's files requests.
+  get root() {
+    return { sandbox: this.id }
+  }
+
+  exec(cmd, options = {}) {
+    return this.client.execSandbox(this.id, cmd, options)
+  }
+
+  jobs() {
+    return this.client.listSandboxJob(this.id)
+  }
+
+  job(id) {
+    return this.client.getSandboxJob(this.id, id)
+  }
+
   // Stops it, ends its jobs and forgets it, keeping its snapshot and volumes.
   remove() {
     return this.client.removeSandbox(this.id)
+  }
+}
+
+// A process run in a sandbox (`id`, `kind`, `pid`, `cmd`, `running`, `code`), and the client and
+// sandbox, `sandboxId`, that reach it. Dropping it leaves the job; `remove` removes it.
+class SandboxJob {
+  constructor(client, sandbox, info) {
+    Object.defineProperty(this, 'sandboxId', { value: sandbox })
+    held(this, client, info)
+  }
+
+  // It as the server has it now.
+  get() {
+    return this.client.getSandboxJob(this.sandboxId, this.id)
+  }
+
+  signal(signal) {
+    return this.client.signalSandboxJob(this.sandboxId, this.id, signal)
+  }
+
+  writeStdin(data, eof = false) {
+    return this.client.writeSandboxJobStdin(this.sandboxId, this.id, data, eof)
+  }
+
+  log(after) {
+    return this.client.sandboxJobLog(this.sandboxId, this.id, after)
+  }
+
+  // Cancels it if it runs, killing its process, and forgets it.
+  remove() {
+    return this.client.removeSandboxJob(this.sandboxId, this.id)
   }
 }
 
@@ -878,12 +1011,16 @@ if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prot
 
 module.exports = {
   Client,
+  Files,
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
   Sandbox,
+  SandboxJob,
+  Snapshot,
   StartedJob,
   VirtxError,
+  Volume,
   ensureVirtx,
   imageName,
   libraryPath,

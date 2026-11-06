@@ -24,14 +24,14 @@ usage: cargo xtask init     [--force]
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
   archive   archives the stdio server and the guest kernel, for this platform, as a release
-            carries them: target/release/dist/virtx-uvm-<os>-<arch>.tar.gz
+            carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
-  server-stdio  the server a client spawns, as the `virtx-uvm` binary; also the VM process
-  server-http   the server over HTTP, as the `virtx-server-http` binary
+  server-stdio  the server a client spawns, as the `virtx-stdio` binary; also the VM process
+  server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables every VM gets at /abin
 
@@ -56,19 +56,15 @@ const CLIENT_PACKAGE: &str = "virtx-core";
 const SERVER_PACKAGES: &[&str] = &[
     "virtx-uvm",
     "virtx-server-stdio",
-    "virtx-server-http",
+    "virtx-server-tcp",
     "xtask",
 ];
 /// Each server: its component, the package it is built from, and the binary it builds. The
-/// stdio server's binary keeps the name `virtx-uvm`, which is what a release archive carries
+/// stdio server's binary is `virtx-stdio`, which is what a release archive carries
 /// and what a client spawns.
 const SERVERS: &[(Component, &str, &str)] = &[
-    (Component::ServerStdio, "virtx-server-stdio", "virtx-uvm"),
-    (
-        Component::ServerHttp,
-        "virtx-server-http",
-        "virtx-server-http",
-    ),
+    (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
+    (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
 ];
 const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
 
@@ -76,7 +72,7 @@ const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem
 enum Component {
     Client,
     ServerStdio,
-    ServerHttp,
+    ServerTcp,
     Kernel,
     Abin,
 }
@@ -194,7 +190,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
         let component = match arg.to_str() {
             Some("client") => Component::Client,
             Some("server-stdio") => Component::ServerStdio,
-            Some("server-http") => Component::ServerHttp,
+            Some("server-tcp") => Component::ServerTcp,
             Some("kernel") => Component::Kernel,
             Some("abin") => Component::Abin,
             Some("--prefix") => {
@@ -758,7 +754,7 @@ fn dist_platform() -> anyhow::Result<String> {
 }
 
 /// Archive the set `install` would put in `bin/`, as a release carries it:
-/// `target/release/dist/virtx-uvm-<os>-<arch>.tar.gz`, which the dist workflow attaches to
+/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the dist workflow attaches to
 /// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
 /// which commit that was.
 fn archive(abin: bool) -> anyhow::Result<()> {
@@ -767,7 +763,7 @@ fn archive(abin: bool) -> anyhow::Result<()> {
     // Staged under the release profile's own directory, and emptied first: a file a
     // previous build had and this one does not must not ride along.
     let dist = target_path().join("release").join("dist");
-    let name = format!("virtx-uvm-{platform}");
+    let name = format!("virtx-stdio-{platform}");
     let stage = dist.join(&name);
     if stage.exists() {
         fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;

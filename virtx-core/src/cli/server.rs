@@ -1,4 +1,4 @@
-//! Reaching the server: one at a URL over HTTP, or `virtx-uvm` started here, over its stdin and
+//! Reaching the server: one at a URL over HTTP, or `virtx-stdio` started here, over its stdin and
 //! stdout -- the one of this version, fetched if this host has none, or the one named.
 
 use std::{io, path::PathBuf};
@@ -26,11 +26,11 @@ pub(crate) struct ServerArgs {
     )]
     pub(crate) host: Option<String>,
 
-    /// The server to start; if absent, `virtx-uvm` of this version, fetched into the cache the
+    /// The server to start; if absent, `virtx-stdio` of this version, fetched into the cache the
     /// first time.
     #[arg(
         long,
-        env = "VIRTX_UVM",
+        env = "VIRTX_STDIO",
         global = true,
         conflicts_with = "host",
         value_name = "PROGRAM"
@@ -70,11 +70,11 @@ mod tests {
     async fn a_server_named_but_missing_says_so() {
         let args = ServerArgs {
             host: None,
-            server: Some("/nonexistent/virtx-uvm".into()),
+            server: Some("/nonexistent/virtx-stdio".into()),
         };
         let error = connect(&args).await.err().unwrap();
         assert!(
-            format!("{error:#}").contains("/nonexistent/virtx-uvm: no such program"),
+            format!("{error:#}").contains("/nonexistent/virtx-stdio: no such program"),
             "{error:#}"
         );
     }

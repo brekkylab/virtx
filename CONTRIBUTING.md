@@ -16,8 +16,8 @@ The server takes more of the host. `cargo xtask init` checks out the submodules 
 
 ```bash
 cargo xtask init
-cargo xtask build kernel server-stdio        # the guest kernel and the `virtx-uvm` server
-cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-uvm, beside its kernel
+cargo xtask build kernel server-stdio        # the guest kernel and the `virtx-stdio` server
+cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-stdio, beside its kernel
 ```
 
 ## Running tests and lint

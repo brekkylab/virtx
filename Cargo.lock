@@ -3420,7 +3420,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "virtx-server-http"
+name = "virtx-server-stdio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "virtx-core",
+ "virtx-uvm",
+]
+
+[[package]]
+name = "virtx-server-tcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3436,23 +3453,6 @@ dependencies = [
  "tokio-tungstenite",
  "tower-http",
  "uuid",
- "virtx-core",
- "virtx-uvm",
-]
-
-[[package]]
-name = "virtx-server-stdio"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "http",
- "http-body-util",
- "serde",
- "serde_json",
- "tokio",
- "tower",
  "virtx-core",
  "virtx-uvm",
 ]

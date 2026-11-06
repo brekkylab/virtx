@@ -19,7 +19,7 @@ dist/
 build/
 
 # Written by the release workflow; a checkout has none.
-virtx-uvm.version
+virtx-stdio.version
 
 # Local data, secrets, and scratch.
 /data

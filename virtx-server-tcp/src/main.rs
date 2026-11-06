@@ -1,4 +1,4 @@
-//! `virtx-server-http` -- a virtx server over HTTP, to the users and projects its config names
+//! `virtx-server-tcp` -- a virtx server over HTTP, to the users and projects its config names
 //! (see [`config`]): each request carries a user's token and names a project, and the endpoints
 //! `virtx-core`'s `PROTOCOL.md` names answer it from that project's home.
 //!
@@ -9,8 +9,8 @@
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
 //! making the sandbox answers, is all a connection needs, and gives no more than the one port.
 //!
-//! `virtx-server-http token` makes a token, and says what the config keeps of it.
-//! `virtx-server-http vm …` is this binary spawned by itself to be a machine; see
+//! `virtx-server-tcp token` makes a token, and says what the config keeps of it.
+//! `virtx-server-tcp vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod access;

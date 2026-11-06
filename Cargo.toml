@@ -5,8 +5,8 @@
 # The client is `virtx-core` and `virtx-rs`. The server is the rest, kept apart because it is
 # built apart: `virtx-uvm` is the whole of the machinery -- images, disks, machines -- and
 # links libkrun. `virtx-server-stdio` is the server on `virtx-core`'s protocol over stdio --
-# the `virtx-uvm` binary -- and, as `virtx-uvm boot`, spawned by itself, the process that
-# becomes a micro-VM; `virtx-server-http` is the same server over Streamable HTTP, to the
+# the `virtx-stdio` binary -- and, as `virtx-stdio boot`, spawned by itself, the process that
+# becomes a micro-VM; `virtx-server-tcp` is the same server over Streamable HTTP, to the
 # users and projects its config names. `xtask` builds, signs and packs them.
 #
 # A bare `cargo build` or `cargo test` builds the client alone: the server needs the
@@ -20,7 +20,7 @@ members = [
     "virtx-rs",
     "virtx-uvm",
     "virtx-server-stdio",
-    "virtx-server-http",
+    "virtx-server-tcp",
     "xtask",
 ]
 default-members = ["virtx-core", "virtx-rs"]

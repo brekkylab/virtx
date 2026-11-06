@@ -25,7 +25,7 @@ impl Server {
         let home = std::env::temp_dir().join(format!("virtx-stdio-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-uvm"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-stdio"));
         command.env("VIRTX_HOME", &home);
         Server {
             client: Client::spawn(command).unwrap(),

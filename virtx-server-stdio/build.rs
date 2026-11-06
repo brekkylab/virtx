@@ -1,5 +1,5 @@
 //! Delay-loads, on Windows MSVC, the DLLs a host may not have, so that a server binary starts
-//! without them and only a call that needs one fails. `virtx-server-http` builds with this
+//! without them and only a call that needs one fails. `virtx-server-tcp` builds with this
 //! script too.
 //!
 //! * `WinHvPlatform.dll` and `WinHvEmulation.dll`, libkrun's hypervisor, which exist only

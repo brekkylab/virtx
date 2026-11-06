@@ -1,5 +1,5 @@
 [package]
-name = "virtx-server-http"
+name = "virtx-server-tcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

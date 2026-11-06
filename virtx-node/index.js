@@ -362,12 +362,12 @@ const holds = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_client_release.async(raw, () => {})
 })
 
-// Fetch `virtx-uvm`, the server of the library's version, into this host's cache if it is not
+// Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is not
 // there, and give its path: what `Client.spawn()` without a program starts. The fetch runs on a
 // worker thread, off the event loop.
 //
 // The server is kept one directory per version, so a library that is upgraded fetches its own.
-// `$VIRTX_UVM` names a server to use as it is; `$VIRTX_UVM_VERSION` another version;
+// `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 // `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
 function ensureVirtx() {
   const lib = library()
@@ -410,7 +410,7 @@ class Client {
   }
 
   // Start `program` with `args` as the server, and talk to it over its stdin and stdout.
-  // Without `program`, the server is `virtx-uvm` of this library's version, fetched first if
+  // Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
   // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, off the
   // event loop.
   static spawn(program = null, args = []) {

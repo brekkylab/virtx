@@ -34,3 +34,25 @@ pub(crate) async fn inspect(client: &Client, args: InspectArgs) -> anyhow::Resul
     anyhow::ensure!(!failed, "not every image was found");
     Ok(())
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::cli::job::tests::client;
+
+    fn args(images: &[&str]) -> InspectArgs {
+        InspectArgs {
+            images: images.iter().map(|image| image.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_name_is_looked_up_and_one_not_there_fails_the_command() {
+        let client = client().await;
+        inspect(&client, args(&["alpine:3.20"])).await.unwrap();
+        let missing = inspect(&client, args(&["alpine:3.20", "missing:1"]))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.to_string(), "not every image was found");
+    }
+}

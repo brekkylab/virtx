@@ -1,15 +1,23 @@
-"""Snapshots, volumes, sandboxes and the jobs of images and sandboxes, against ``virtx-core``'s
-``test_server`` example over stdio."""
+"""Images, snapshots, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
+against ``virtx-core``'s ``test_server`` example over stdio."""
+
+from pathlib import Path
 
 import pytest
 
 from virtx import (
+    BearerAuth,
     Client,
+    ImageDownloadOutput,
     ImageJob,
     ImageJobEnd,
     ImageJobKind,
+    ImageUploadOutput,
     Log,
     LogEntry,
+    MountType,
+    NotionSource,
+    Output,
     Recipe,
     SandboxJobEnd,
     SandboxJobKind,
@@ -19,6 +27,7 @@ from virtx import (
     Truncated,
     VirtxError,
     VolumeListOutputItem,
+    VolumeMountListOutputItem,
 )
 
 
@@ -107,9 +116,10 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_serve
         job = await client.build_image(Recipe("alpine:3.20").run("true"), "built:latest")
         assert isinstance(job, ImageJob)
         assert (job.kind, job.reference) == (ImageJobKind.BUILD, "built:latest")
+        assert job.digest is not None
         log = [entry.entry async for entry in client.image_job_log(job.id)]
-        assert log == [Log("pulling alpine:3.20"), ImageJobEnd(digest="sha256:0")]
-        assert (await client.get_image_job(job.id)).digest == "sha256:0"
+        assert log == [Log("pulling alpine:3.20"), ImageJobEnd(digest=job.digest)]
+        assert (await client.get_image_job(job.id)).digest == job.digest
         assert job.id in [item.id for item in await client.list_image_job()]
         await client.remove_image_job(job.id)
         with pytest.raises(VirtxError, match="404"):
@@ -130,9 +140,10 @@ async def test_a_failed_pull_ends_its_log_with_its_error(test_server: str) -> No
 async def test_a_build_iterated_yields_its_log_to_its_end(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         log = [entry async for entry in client.build_image(Recipe("alpine:3.20"), "it:latest")]
+        built = {item.reference: item.digest for item in await client.list_image()}["it:latest"]
         assert log == [
             LogEntry(1, Log("pulling alpine:3.20")),
-            LogEntry(2, ImageJobEnd("sha256:0")),
+            LogEntry(2, ImageJobEnd(built)),
         ]
 
 
@@ -151,6 +162,54 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: s
         job = await build
         assert await build == job
         log = [entry.entry async for entry in build]
-        assert log[-1] == ImageJobEnd(digest="sha256:0")
-        assert (await client.get_image_job(job.id)).digest == "sha256:0"
+        assert job.digest is not None
+        assert log[-1] == ImageJobEnd(digest=job.digest)
+        assert (await client.get_image_job(job.id)).digest == job.digest
         assert len(await client.list_image_job()) == before + 1
+
+
+async def tags(client: Client) -> dict[str, str]:
+    """Every tag on the server's images, with the digest it points at."""
+    return {item.reference: item.digest for item in await client.list_image()}
+
+
+async def test_an_image_is_tagged_downloaded_removed_and_uploaded_back(
+    test_server: str, tmp_path: Path
+) -> None:
+    with Client.spawn(test_server) as client:
+        digest = (await tags(client))["alpine:3.20"]
+        await client.tag_image("alpine:3.20", "copy:1")
+        assert (await tags(client))["copy:1"] == digest
+
+        archive = tmp_path / "copy.tar"
+        events = [event async for event in client.download_image("copy:1", archive)]
+        assert events[-1] == Output(ImageDownloadOutput(digest))
+        await client.remove_image("copy:1")
+        assert "copy:1" not in await tags(client)
+        events = [event async for event in client.upload_image(archive, "copy:1")]
+        assert events[-1] == Output(ImageUploadOutput(digest))
+        assert (await tags(client))["copy:1"] == digest
+
+        await client.untag_image("copy:1")
+        assert "copy:1" not in await tags(client)
+
+
+async def test_a_push_ends_with_the_digest_its_reference_points_at(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        digest = (await tags(client))["alpine:3.20"]
+        push = client.push_image("alpine:3.20", BearerAuth("secret"))
+        log = [entry.entry async for entry in push]
+        assert log == [Log("pushing alpine:3.20 as bearer"), ImageJobEnd(digest=digest)]
+        missing = await client.push_image("nothing:here")
+        assert missing.error == "no image nothing:here"
+
+
+async def test_a_mount_is_made_listed_and_removed(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        mount = await client.create_volume_mount("v", "notion", NotionSource("secret"))
+        assert mount == VolumeMountListOutputItem("notion", MountType.NOTION)
+        assert await client.list_volume_mount("v") == [mount]
+        with pytest.raises(VirtxError, match="409"):
+            await client.create_volume_mount("v", "notion", NotionSource("secret"))
+        await client.remove_volume_mount("v", "notion")
+        assert await client.list_volume_mount("v") == []

@@ -1,0 +1,116 @@
+---
+title: "Images"
+description: "Build recipes and manage images in registries and OCI archives."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Build from a recipe
+
+A recipe is a base image plus the steps to run on it, much like a Dockerfile: `Recipe(base)` with `.run(command)`, `.env(key, value)`, and `.workdir(directory)` chained on it, or `Recipe::new(base).step(..)` in Rust. In Rust, `Recipe::from_dockerfile` reads a Dockerfile's text: one stage, with only `FROM`, `RUN`, `ENV` and `WORKDIR`. It refuses any other instruction at its line.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
+async for entry in client.build_image(recipe, "jq:latest"):
+    # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
+    print(entry.entry)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
+for await (const entry of client.buildImage(recipe, 'jq:latest')) {
+  // { id, log } ..., then { id, end } with a digest or an error
+  console.log(entry)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
+let mut log = client.build_image(recipe, "jq:latest").log();
+while let Some(entry) = log.wait_next() {
+    // Log(line) ..., then End(ImageJobEnd { digest, error })
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
+
+A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec_sandbox`.
+
+The image keeps the recipe it was built from, as JSON under the `sh.virtx.recipe` label in its config. Each step is also added to its history, which `docker history` reads, when the base image's history accounts for each of its layers. On virtx cloud, the console shows the recipe on the image's page.
+
+A build or pull is a job. Read its log through `end` and check its `error` before booting from the tag. Awaiting the started value gives the job, whose log can be read with `image_job_log(job.id)`. See [Jobs and logs](/docs/concepts/jobs/).
+
+## Pull and push
+
+`pull_image` and `push_image` copy images between the server and a registry such as Docker Hub or `ghcr.io`. Supply that registry's credentials in the `auth` argument when required. Without credentials, these requests are anonymous.
+
+Registry credentials can be basic authentication with a username and password, or bearer authentication with a token. A registry that accepts an access token as a basic password can use it there. These credentials are for the image registry; `VIRTX_API_KEY` authenticates requests to the virtx server.
+
+## Commit a sandbox
+
+`commit_image` makes an image from a sandbox's image with what it has written as one more layer. It is a job, as a build is; read its log through `end` before booting from the tag:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+async for entry in client.commit_image(sandbox.id, "dev:v1"):
+    print(entry.entry)  # ... then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for await (const entry of client.commitImage(sandbox.id, 'dev:v1')) {
+  // ... then { id, end } with a digest or an error
+  console.log(entry)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut log = client.commit_image(&sandbox.id, "dev:v1").log();
+while let Some(entry) = log.wait_next() {
+    // ... then End(ImageJobEnd { digest, error })
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+A committed image doesn't keep the recipe of the image the sandbox started from. Its history gets `virtx commit <sandbox id>` instead, on the same condition.
+
+See [Keep work](/docs/guides/keep-work/) for the difference between committing an image and keeping files in a volume.
+
+## Manage the server's registry
+
+These operations use the server's OCI registry. Names below are Python and Rust names; Node.js uses camelCase.
+
+| Operation | What it does |
+| --- | --- |
+| `list_image` | Lists image tags and the digests they point at. |
+| `tag_image` | Points a tag at an image, moving the tag if it is already in use. |
+| `untag_image` | Removes a tag, leaving the image it points at. |
+| `remove_image` | Removes every tag on the image in that name, then the image unless another name still tags it; refused while a sandbox uses it, its tags already removed. |
+| `download_image` | Writes an image to an OCI image layout in a tar archive on this machine. |
+| `upload_image` | Uploads an image from an OCI image layout archive and points the supplied tag at it. |
+| `prune_image` | Deletes images no tag points at and no sandbox uses, and what only those images held, once they are an hour old. |
+
+`download_image` and `upload_image` are not jobs. Iterate them: their events are a line of log per blob, then what they wrote.

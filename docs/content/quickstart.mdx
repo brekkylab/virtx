@@ -1,0 +1,155 @@
+---
+title: "Cloud quickstart"
+description: "Sign in, create an API key, and build and run a sandbox on virtx cloud."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Sign in and create a key
+
+Open [the console sign-in page](/signin/) and sign in with Google. Your first sign-in creates your account and a personal organization.
+
+Open **API keys** in the console. Create a key in the dialog, giving it a name and expiry. Copy the secret while the dialog shows it: the secret is shown once. The page also provides a first SDK snippet.
+
+Set `VIRTX_API_KEY` to the copied secret in your shell, replacing the placeholder below:
+
+```sh
+export VIRTX_API_KEY='<API key secret>'
+```
+
+With the key set, `Client.from_env()` in Python, `Client.fromEnv()` in Node.js, or `Client::from_env()` in Rust selects virtx cloud. Without an explicit URL or region, it connects to `run.virtx.sh`, where DNS selects the nearest region. See [Environment variables](/docs/reference/environment/) to select a region or another endpoint.
+
+## Install and run
+
+Each example builds an image containing `jq`, creates a sandbox, runs a command, reads its output, and removes the sandbox.
+
+<Tabs>
+<TabItem label="Python">
+
+```sh
+pip install virtx
+```
+
+```python
+import asyncio
+
+from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdout
+
+
+async def main() -> None:
+    with Client.from_env() as client:
+        recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
+        async for entry in client.build_image(recipe, "jq:latest"):
+            match entry.entry:
+                case Log(line):
+                    print(line)
+                case ImageJobEnd(error=str(error)):
+                    raise RuntimeError(error)
+
+        sandbox = await client.create_sandbox("jq:latest")
+        try:
+            cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
+            async for entry in client.exec_sandbox(sandbox.id, cmd):
+                match entry.entry:
+                    case Stdout(line) | Stderr(line):
+                        print(line)
+                    case SandboxJobEnd(code):
+                        print("exited", code)
+        finally:
+            await client.remove_sandbox(sandbox.id)
+
+
+asyncio.run(main())
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```sh
+npm install @brekkylab/virtx
+```
+
+```js
+const { Client, Recipe } = require('@brekkylab/virtx')
+
+async function main() {
+  const client = Client.fromEnv()
+  try {
+    const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
+    for await (const entry of client.buildImage(recipe, 'jq:latest')) {
+      if ('log' in entry) console.log(entry.log)
+      else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
+    }
+
+    const sandbox = await client.createSandbox('jq:latest')
+    try {
+      const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
+      for await (const entry of client.execSandbox(sandbox.id, cmd)) {
+        if ('stdout' in entry) console.log(entry.stdout)
+        else if ('stderr' in entry) console.error(entry.stderr)
+        else if ('end' in entry) console.log('exited', entry.end.code)
+      }
+    } finally {
+      await client.removeSandbox(sandbox.id)
+    }
+  } finally {
+    await client.close()
+  }
+}
+
+main()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+The Rust package is `virtx-rs`. It is not on crates.io yet. Add the git dependency:
+
+```toml
+[dependencies]
+virtx-rs = { git = "https://github.com/brekkylab/virtx", branch = "cloud" }
+```
+
+Rust opens `libvirtx_core` at runtime, from `virtx_rs::load(path)` or `VIRTX_CORE_LIB`. A checkout of the repository builds it: `cargo build -p virtx-core --lib` leaves `libvirtx_core.dylib` on macOS, `libvirtx_core.so` on Linux or `virtx_core.dll` on Windows in `target/debug/`; point `VIRTX_CORE_LIB` at that file. Requests are futures or streams for an async runtime, or can block with `wait` and `wait_next`, as below.
+
+```rust
+use virtx_rs::{
+    Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::from_env()?;
+
+    let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
+    let mut log = client.build_image(recipe, "jq:latest").log();
+    while let Some(entry) = log.wait_next() {
+        match entry?.entry {
+            ImageJobEntry::Log(line) => println!("{line}"),
+            ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
+            _ => {}
+        }
+    }
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
+        .wait()?;
+    let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
+    let mut log = client
+        .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(cmd))
+        .log();
+    while let Some(entry) = log.wait_next() {
+        match entry?.entry {
+            SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
+            SandboxJobEntry::End(end) => println!("exited {}", end.code),
+            _ => {}
+        }
+    }
+    client.remove_sandbox(&sandbox.id).wait()?;
+    Ok(())
+}
+```
+
+</TabItem>
+</Tabs>
+
+Read [Jobs and logs](/docs/concepts/jobs/) for how the returned work is awaited and iterated, or [Keep work](/docs/guides/keep-work/) for files that should outlive a sandbox.

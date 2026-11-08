@@ -1,0 +1,21 @@
+---
+title: "Jobs and logs"
+description: "Await jobs, stream their logs, and resume readers."
+# no sections: the table of contents would hold the title alone
+tableOfContents: false
+---
+
+Builds, pulls, pushes and commits, like every command run in a sandbox, are jobs the server runs apart from the request that started them. `build_image`, `pull_image`, `push_image`, `commit_image`, and `exec_sandbox` return a started job with two uses:
+
+- Iterated with `async for` in Python, `for await` in Node.js, or `.log()` in Rust, it is the job's log. Entries continue through `end`, which gives an image's digest or failure, or a process's exit code.
+- Awaited, or with `.wait()` in Rust, it is the job itself. Its `id` names it to other requests.
+
+Awaiting and iterating one value starts one job. In Rust, `.wait()` and `.log()` each take the value, so one value is either awaited or iterated. While a log is read, `log.job()` is the job once its first entry has come, for cancelling or signalling it. Read its log again with `image_job_log` or `sandbox_job_log`; on virtx cloud and the HTTP server, an image job and its log are kept for a minute after its end. `list_image_job` lists image jobs and `list_sandbox_job` a sandbox's; `get_image_job` and `get_sandbox_job` fetch one by id.
+
+- Every entry has an `id`, its number in the log. If a reader's stream drops, request the log `after` the last entry seen to resume there.
+- Any number of readers can read a log, each from its start or from the entry they request.
+- A log keeps a limit's worth of entries. After that, one `truncated` entry represents what was dropped, and `end` still comes.
+- Process output is a line per entry, `stdout` or `stderr`, with its `\n` removed. A `\r` before it stays, and a line longer than 64 KiB arrives as several entries.
+- Leaving the loop leaves the job running. `remove_image_job` and `remove_sandbox_job` cancel running jobs and forget them. Removing a sandbox job kills its process group.
+
+`signal_sandbox_job` sends a signal such as `SIGTERM` to a job's process group. `timeout_ms` kills a process when its time runs out. See [Run commands](/docs/guides/run-commands/).

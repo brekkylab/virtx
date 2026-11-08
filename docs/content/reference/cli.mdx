@@ -1,0 +1,69 @@
+---
+title: "CLI"
+description: "Build and manage a server's images from a shell, and sign in to virtx cloud."
+---
+
+The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
+
+```sh
+uvx virtx images                 # or `pip install virtx`
+npx @brekkylab/virtx images      # or `npm install -g @brekkylab/virtx`
+cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
+```
+
+| Command | What it does |
+| --- | --- |
+| `virtx build -t NAME[:TAG] [PATH]` | Builds an image from the Dockerfile in `PATH`, `.` by default, or the one `-f` names. The log goes to stderr and `NAME:TAG sha256:…` to stdout. |
+| `virtx images` | Lists images. |
+| `virtx inspect IMAGE…` | Prints images as JSON, each by a ref (`name:tag`), image ID or digest. |
+| `virtx tag SOURCE TARGET[:TAG]` | Points a ref at an image, moving the ref if it is in use. |
+| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. |
+| `virtx pull NAME[:TAG]` | Pulls an image from a registry, tagged as it is named. |
+| `virtx push NAME[:TAG]` | Pushes an image to the registry its ref names. |
+| `virtx save -o FILE IMAGE` | Writes an image to an OCI archive. |
+| `virtx load -i FILE -t NAME[:TAG]` | Tags the image in an OCI archive, uploading what the server lacks. |
+| `virtx image prune` | Removes every image no ref points at and no sandbox uses. |
+
+Each command is also `virtx image <command>`, with `ls` and `rm` for `images` and `rmi`. A registry that wants credentials gets them with `-u USER`, its password or access token read from stdin, or `--token-stdin` for a bearer token. Ctrl-C during a build, pull or push cancels the job.
+
+```sh
+virtx build -t jq:latest .
+virtx tag jq:latest ghcr.io/me/jq:1
+echo "$GHCR_TOKEN" | virtx push -u me ghcr.io/me/jq:1
+virtx save -o jq.tar jq:latest
+virtx rmi jq:latest
+```
+
+## Which server
+
+Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Run locally](/docs/local/) for both servers.
+
+## Sign in to virtx cloud
+
+With virtx cloud, the command also signs in from a terminal for the SDKs to use:
+
+| Command | What it does |
+| --- | --- |
+| `virtx login` | Signs in by showing a code to approve in the console, in a browser. |
+| `virtx token` | Prints an access token, refreshed as needed. `VIRTX_API_KEY` accepts this token. |
+| `virtx token --json` | Prints `token` and `expires_in` in JSON, as the SDKs read them. |
+| `virtx whoami` | Prints the signed-in user's email. |
+| `virtx logout` | Signs out and ends the session, removing the stored refresh and access tokens. |
+
+### Domain and device flow
+
+The global `--domain` option selects the cloud domain. The order is `--domain`, `VIRTX_DOMAIN`, then `virtx.sh`. The control plane is at `https://api.<domain>`.
+
+`virtx login` uses RFC 8628's device flow. It prints the code and verification page, attempts to open the page in a browser, and waits for approval. A denied code fails; an expired code requires running `virtx login` again.
+
+A person's access token names neither an organization nor a cell endpoint. `VIRTX_ORG` names the organization's UUID and `VIRTX_URL` the cell endpoint. The SDK's endpoint selection is described in [Environment variables](/docs/reference/environment/).
+
+### Token storage
+
+The refresh token is kept under the domain in the OS keychain. If keychain storage is unavailable, the CLI writes `~/.config/virtx/<domain>.token`, which on Unix is readable by its owner alone.
+
+Access tokens last 15 minutes. The CLI caches an access token in `~/.config/virtx/<domain>.access`, written the same way. It reuses that token while more than 120 seconds remain; otherwise, it refreshes the token and stores the replacement refresh token.
+
+`virtx token` holds `~/.config/virtx/<domain>.lock` while reading, refreshing, and storing tokens. This coordinates concurrent processes so they can share a refresh. Setting `VIRTX_TOKEN_REFUSED` forces a refresh, as an SDK does after a server refuses its token.
+
+The SDKs run `virtx token --json` to obtain a token. See [Environment variables](/docs/reference/environment/) for their endpoint and authentication selection.

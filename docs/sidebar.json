@@ -1,0 +1,30 @@
+[
+  {
+    "label": "Getting started",
+    "items": [
+      { "label": "Overview", "link": "/" },
+      { "slug": "quickstart" },
+      { "slug": "local" }
+    ]
+  },
+  {
+    "label": "Guides",
+    "items": [
+      { "label": "All guides", "link": "/guides/" },
+      { "slug": "guides/run-commands" },
+      { "slug": "guides/keep-work" },
+      { "slug": "guides/images" },
+      { "slug": "guides/ports" },
+      { "slug": "guides/gpu", "badge": { "text": "Early access", "variant": "default" } },
+      { "slug": "guides/coding-agents" }
+    ]
+  },
+  {
+    "label": "Concepts",
+    "items": [{ "slug": "concepts/resources" }, { "slug": "concepts/jobs" }]
+  },
+  {
+    "label": "Reference",
+    "items": [{ "slug": "reference/environment" }, { "slug": "reference/cli" }]
+  }
+]

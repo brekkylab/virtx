@@ -1,0 +1,124 @@
+---
+title: "Run locally"
+description: "Start the server as a child process of your program, or run your own HTTP server."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The [virtx repository](https://github.com/brekkylab/virtx) is both ends: the client packages and the server, `virtx-stdio`. `Client.spawn()` starts the server as a child process of your program and talks to it over its stdin and stdout, so there is nothing to install or keep running. `Client.connect(url, auth, headers)` reaches a server over HTTP instead; `auth` and `headers` are optional in Python and Node.js, and Rust's `Client::connect` takes all three. `set_auth` and `set_headers` change them on an open client.
+
+The server is released with the client. The first time a client needs it, it fetches the server of its own version from the repository's releases into a cache, one directory per version, so an upgraded library fetches its own. `VIRTX_STDIO` names a server to use as it is; the other variables are in [Environment variables](/docs/reference/environment/#the-local-server).
+
+The [quickstart](/docs/quickstart/) uses cloud clients. For a local server, replace its environment-based client with the spawn call for your language:
+
+<Tabs>
+<TabItem label="Python">
+
+Use `Client.spawn()` in place of `Client.from_env()`. `Client.spawn(program, args)` starts a server you name instead, and `ensure_virtx()` does the fetch alone, off the event loop.
+
+</TabItem>
+<TabItem label="Node.js">
+
+Use `Client.spawn()` in place of `Client.fromEnv()`. `Client.spawn(program, args)` starts a server you name instead, and `ensureVirtx()` does the fetch alone, on a worker thread.
+
+</TabItem>
+<TabItem label="Rust">
+
+Use `Client::spawn_virtx([] as [&str; 0])?` in place of `Client::from_env()?`. `Client::spawn(program, args)` starts a server you name instead.
+
+</TabItem>
+</Tabs>
+
+See [Resources](/docs/concepts/resources/) for the image, sandbox, snapshot and volume operations.
+
+## Requirements
+
+These apply to the machine that runs the server. Sandboxes are Linux VMs on every host.
+
+- **Linux:** a kernel with KVM support, `/dev/kvm` accessible to your user, hardware virtualization enabled in the firmware, and FUSE.
+- **macOS:** Apple silicon.
+- **Windows:** 11 or later. The VM runs on the Windows Hypervisor Platform, which is off by default. Turn it on from an administrator PowerShell, then restart, with virtualization enabled in the firmware:
+
+  ```powershell
+  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+  ```
+
+- **Clients:** Python 3.10 or later, Node.js 18 or later, or Rust.
+- **GPU:** a Vulkan loader on the host, plus the guest's half of Vulkan in the image; see [GPU](/docs/guides/gpu/).
+
+## Build the server from source
+
+No release carries `virtx-stdio` yet; the next one does. Until then, build it from the repository, as its `CONTRIBUTING.md` says, and point the client at that build:
+
+```sh
+cargo xtask init
+cargo xtask build kernel server-stdio
+# -> ~/.local/bin/virtx-stdio, beside its kernel
+cargo xtask install --prefix ~/.local
+# what Client.spawn() starts, in place of a fetch
+export VIRTX_STDIO=~/.local/bin/virtx-stdio
+```
+
+## Your own HTTP server
+
+`virtx-server-tcp`, in the same repository, serves the same protocol over HTTP to the users and projects its config names. Run it with `cargo xtask run`, which builds it and gives it what it needs to boot a VM on this machine:
+
+```sh
+# a token, and its token_sha256 for the config
+cargo xtask run -p virtx-server-tcp -- token
+cargo xtask run -p virtx-server-tcp -- serve --config server.json
+```
+
+`server.json` names where to listen, where projects are kept, each user's `token_sha256`, and each project's members:
+
+```json
+{
+  "listen": "127.0.0.1:8470",
+  "home": "/var/lib/virtx",
+  "origins": [],
+  "users": { "alice": { "token_sha256": "<64 hex digits>" } },
+  "projects": { "demo": { "members": ["alice"] } }
+}
+```
+
+A token is kept as its SHA-256, so the file does not hold what it would take to use one. Images are under `<home>/images/`, shared by every project; a project's snapshots and volumes are under `<home>/project/<name>/`.
+
+Every request carries the user's token and names its project in a `virtx-project` header. The server answers `401` to a token it does not know, `400` to a request that names no project, and `403` to a project the user is not a member of or to an `Origin` the config does not let in. A client refuses to send a token over plain `http` to any host but this machine's loopback.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from virtx import BearerAuth, Client
+
+client = Client.connect(
+    "http://127.0.0.1:8470", BearerAuth(token), {"virtx-project": "demo"}
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.connect(
+  'http://127.0.0.1:8470',
+  { type: 'bearer', token },
+  { 'virtx-project': 'demo' }
+)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::Bearer { token },
+    [("virtx-project", "demo")],
+)?;
+```
+
+</TabItem>
+</Tabs>
+
+See [Environment variables](/docs/reference/environment/) to select an HTTP endpoint through `VIRTX_URL`.

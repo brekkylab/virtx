@@ -1,0 +1,77 @@
+---
+title: "Environment variables"
+description: "Endpoint and credential resolution for environment-based clients, and the local server's variables."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+`Client.from_env()` reads the environment in Python. Node.js calls it `Client.fromEnv()`, and Rust calls it `Client::from_env()`.
+
+| Variable | What it does |
+| --- | --- |
+| `VIRTX_URL` | Explicit server URL. Takes precedence over endpoint selection from the region or domain. |
+| `VIRTX_API_KEY` | Bearer credential for requests. Takes precedence over signed-in CLI authentication. |
+| `VIRTX_ORG` | Organization id, sent as the `virtx-org` header whenever set. Without an API key, it selects authentication through `virtx token --json`. |
+| `VIRTX_DOMAIN` | Cloud domain used when constructing an endpoint. Defaults to `virtx.sh`. |
+| `VIRTX_REGION` | Cell code used when constructing a regional endpoint, such as `use1`. |
+| `VIRTX_CORE_LIB` | Path to `libvirtx_core` to open when an explicit library has not been loaded. This selects the local library, not the server endpoint. |
+
+## Endpoint resolution
+
+Python's `from_env` treats an empty value as unset. It chooses the endpoint in this order:
+
+1. Use `VIRTX_URL` if set.
+2. Otherwise, if `VIRTX_REGION` is set, use `https://<region>.api.<domain>`, with `VIRTX_DOMAIN` or the default domain. This step does not require a key or organization.
+3. Otherwise, if `VIRTX_API_KEY` or `VIRTX_ORG` is set, use `https://run.<domain>`, with `VIRTX_DOMAIN` or the default domain.
+4. Otherwise, raise `VirtxError` with `VIRTX_URL is not set, and no cell of virtx cloud was found`.
+
+Setting only `VIRTX_DOMAIN` does not select an endpoint. `VIRTX_REGION` has no default.
+
+On virtx cloud, `run.virtx.sh` reaches the nearest cell selected by DNS. A specific cell uses `<region>.api.virtx.sh`. virtx cloud's first cell is `use1`. A sandbox in another cell can also be reached through the selected cell.
+
+## Authentication resolution
+
+After selecting the URL, Python's `from_env` chooses authentication:
+
+1. If `VIRTX_API_KEY` is set, use `BearerAuth(key)`.
+2. Otherwise, if `VIRTX_ORG` is set, use `CommandAuth` to run `virtx token --json`, obtaining the signed-in person's token again as it runs out.
+3. Otherwise, connect without authentication.
+
+If `VIRTX_ORG` is set, it is sent as `virtx-org` in every case, including when an API key is also set. An explicit URL does not change this authentication order.
+
+See [CLI](/docs/reference/cli/) for signing in, and [Cloud quickstart](/docs/quickstart/) for creating an API key.
+
+## Core library resolution
+
+<Tabs>
+<TabItem label="Python">
+
+Python uses `virtx.load(path)`, then `VIRTX_CORE_LIB`, then the copy in its package, then the system loader's search for `libvirtx_core`.
+
+</TabItem>
+<TabItem label="Node.js">
+
+Node.js uses `load(file)`, then `VIRTX_CORE_LIB`, then a copy beside `index.js`, then the platform package, then the system loader's search for `libvirtx_core`.
+
+</TabItem>
+<TabItem label="Rust">
+
+Rust opens `libvirtx_core` at runtime through `virtx_rs::load(path)` or `VIRTX_CORE_LIB`. One process opens one library.
+
+</TabItem>
+</Tabs>
+
+## The local server
+
+`Client.spawn()` without a program starts `virtx-stdio` of the library's version, fetched into a cache the first time; the `virtx` command does the same. These variables change what is started, and where the CLI reaches a server over HTTP:
+
+| Variable | What it does |
+| --- | --- |
+| `VIRTX_STDIO` | A server to start as it is, in place of the fetched `virtx-stdio`; the CLI's `--server`. |
+| `VIRTX_STDIO_VERSION` | Another version of `virtx-stdio` to fetch. |
+| `VIRTX_DIST_URL` | Where releases are fetched from. |
+| `VIRTX_HOME` | The cache the server is fetched into. |
+| `VIRTX_HOST` | The CLI's `--host`: a server's base URL, reached over HTTP in place of a server started here. |
+| `VIRTX_TOKEN` | The bearer token the CLI sends to `--host`. |
+
+See [Run locally](/docs/local/) for building the server and running your own HTTP server, and [CLI](/docs/reference/cli/) for the command.

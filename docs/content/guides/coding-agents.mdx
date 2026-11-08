@@ -1,0 +1,27 @@
+---
+title: "Coding agents"
+description: "Install the virtx skill for Claude or Codex and run sandbox tasks."
+---
+
+The virtx repository is a plugin marketplace. Install the agent skill without cloning the repository first:
+
+```bash
+claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
+codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
+```
+
+The skill covers running tasks in disposable Linux micro-VMs from Python, Node.js, or Rust. It requires the package and a virtx server, without a checkout of virtx.
+
+## What the skill covers
+
+The skill follows this workflow:
+
+1. Install the package in the user's language and reach a server over stdio or HTTP.
+2. Prepare the image, building from a recipe or pulling from a registry. Read the build or pull log through its end before booting from the tag.
+3. Create a sandbox with the volumes, ports, network access, CPUs, and memory the task needs. Use a name to find kept work, commit an image for other sandboxes, or use an ephemeral sandbox for work that should be deleted when it stops.
+4. Run commands and read their output. Use argv, wrap commands in a shell when needed, set timeouts, signal or remove jobs, and resume logs after the last entry seen.
+5. Check the result in volume files or log lines and remove the sandbox. The skill calls for checking what was written, rather than relying on the exit code alone.
+
+The image must contain the tools the command needs. Files outside a volume do not outlive sandbox removal unless kept in a snapshot or committed to an image. Read-only volumes cannot accept writes.
+
+Start with the [cloud quickstart](/docs/quickstart/) for credentials, or [Run locally](/docs/local/) for a local server. The [guides](/docs/guides/) cover commands, retained work, ports, images, and GPU early access.

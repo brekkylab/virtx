@@ -54,7 +54,7 @@ let recipe = Recipe::new("alpine:latest")
     .step(Step::env("LANG", "C.UTF-8"))
     .step(Step::workdir("/work"));
 let mut log = client.build_image(recipe, "jq:latest").log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     // Log(line) ..., then End(ImageJobEnd { digest, error })
     println!("{:?}", entry?.entry);
 }
@@ -122,11 +122,11 @@ await client.untagImage('jq:1.7')
 <TabItem label="Rust">
 
 ```rust
-client.tag_image("jq:latest", "jq:1.7").wait()?;
-for item in client.list_image().wait()? {
+client.tag_image("jq:latest", "jq:1.7").await?;
+for item in client.list_image().await? {
     println!("{} {}", item.reference, item.digest);
 }
-client.untag_image("jq:1.7").wait()?;
+client.untag_image("jq:1.7").await?;
 ```
 
 </TabItem>
@@ -175,20 +175,20 @@ for await (const entry of client.pushImage('ghcr.io/me/jq:1', auth)) console.log
 
 ```rust
 let mut log = client.pull_image("python:3.12-slim", None).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("python:3.12-slim"))
-    .wait()?;
+    .await?;
 
-client.tag_image("jq:latest", "ghcr.io/me/jq:1").wait()?;
+client.tag_image("jq:latest", "ghcr.io/me/jq:1").await?;
 let auth = RegistryAuth::Basic {
     username: "me".into(),
     password: std::env::var("GHCR_TOKEN")?,
 };
 let mut log = client.push_image("ghcr.io/me/jq:1", Some(auth)).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }
 ```
@@ -241,7 +241,7 @@ const sandbox = await remote.createSandbox('jq:latest')
 ```rust
 let local = Client::spawn_virtx([] as [&str; 0])?;
 let mut events = local.download_image("jq:latest", "jq.tar");
-while let Some(event) = events.wait_next() {
+while let Some(event) = events.next().await {
     event?;
 }
 
@@ -251,12 +251,12 @@ let remote = Client::connect(
     [("virtx-project", "demo")],
 )?;
 let mut events = remote.upload_image("jq.tar", "jq:latest");
-while let Some(event) = events.wait_next() {
+while let Some(event) = events.next().await {
     event?;
 }
 let sandbox = remote
     .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
-    .wait()?;
+    .await?;
 ```
 
 </TabItem>
@@ -288,7 +288,7 @@ console.log(pruned.images.length, 'images,', pruned.reclaimed, 'bytes')
 <TabItem label="Rust">
 
 ```rust
-let pruned = client.prune_image().wait()?;
+let pruned = client.prune_image().await?;
 println!("{} images, {} bytes", pruned.images.len(), pruned.reclaimed);
 ```
 

@@ -59,7 +59,7 @@ let recipe = Recipe::new("alpine:latest").step(
     "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools",
 );
 let mut log = client.build_image(recipe, "vulkan:latest").log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     match entry?.entry {
         ImageJobEntry::Log(line) => println!("{line}"),
         ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
@@ -69,9 +69,9 @@ while let Some(entry) = log.wait_next() {
 let args = SandboxCreateArgs::new("vulkan:latest")
     .gpu(true)
     .gpu_memory_mib(8192);
-let sandbox = client.create_sandbox(&args).wait()?;
+let sandbox = client.create_sandbox(&args).await?;
 let mut log = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }
 ```

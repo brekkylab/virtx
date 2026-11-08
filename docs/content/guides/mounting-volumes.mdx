@@ -39,8 +39,8 @@ await volume.writeFile('config.json', '{"retries": 3}')
 <TabItem label="Rust">
 
 ```rust
-let volume = client.create_volume(Some("data")).wait()?;
-volume.write_file("config.json", r#"{"retries": 3}"#, None).wait()?;
+let volume = client.create_volume(Some("data")).await?;
+volume.write_file("config.json", r#"{"retries": 3}"#, None).await?;
 ```
 
 </TabItem>
@@ -80,9 +80,9 @@ for await (const entry of sandbox.exec(['cat', '/data/config.json'])) console.lo
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").volume(volume.name(), "/data");
-let sandbox = client.create_sandbox(&args).wait()?;
+let sandbox = client.create_sandbox(&args).await?;
 let mut log = sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }
 ```
@@ -137,8 +137,8 @@ for (const entry of await volume.readDir('docs/notion')) console.log(entry.name)
 
 ```rust
 let source = MountSource::Notion { api_key: std::env::var("NOTION_API_KEY")? };
-volume.mount("docs/notion", source).wait()?;
-for entry in volume.read_dir("docs/notion").wait()? {
+volume.mount("docs/notion", source).await?;
+for entry in volume.read_dir("docs/notion").await? {
     println!("{}", entry.name);
 }
 ```

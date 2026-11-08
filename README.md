@@ -127,20 +127,23 @@ main()
 <summary><b>Rust</b></summary>
 
 ```sh
-cargo add virtx
+cargo add virtx futures
+cargo add tokio --features macros,rt-multi-thread
 ```
 
 ```rust
+use futures::StreamExt;
 use virtx::{
     Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     let mut log = client.build_image(recipe, "jq:latest").log();
-    while let Some(entry) = log.wait_next() {
+    while let Some(entry) = log.next().await {
         match entry?.entry {
             ImageJobEntry::Log(line) => println!("{line}"),
             ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
@@ -150,17 +153,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
-        .wait()?;
+        .await?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
     let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-    while let Some(entry) = log.wait_next() {
+    while let Some(entry) = log.next().await {
         match entry?.entry {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
             SandboxJobEntry::End(end) => println!("exited {}", end.code),
             _ => {}
         }
     }
-    sandbox.remove().wait()?;
+    sandbox.remove().await?;
     Ok(())
 }
 ```

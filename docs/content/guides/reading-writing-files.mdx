@@ -48,16 +48,16 @@ console.log(await sandbox.readText('work/count.txt'))
 ```rust
 use virtx::Files;
 
-sandbox.create_dir_all("work").wait()?;
-sandbox.write_file("work/input.txt", "one two three\n", None).wait()?;
+sandbox.create_dir_all("work").await?;
+sandbox.write_file("work/input.txt", "one two three\n", None).await?;
 
 let cmd = ["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"];
 let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     entry?;
 }
 
-println!("{}", sandbox.read_text("work/count.txt").wait()?);
+println!("{}", sandbox.read_text("work/count.txt").await?);
 ```
 
 </TabItem>
@@ -102,12 +102,12 @@ if (await sandbox.isFile('work/count.txt')) {
 <TabItem label="Rust">
 
 ```rust
-for entry in sandbox.read_dir("work").wait()? {
+for entry in sandbox.read_dir("work").await? {
     println!("{} {}", entry.name, entry.metadata.size);
 }
 
-if sandbox.is_file("work/count.txt").wait()? {
-    let meta = sandbox.stat_file("work/count.txt").wait()?;
+if sandbox.is_file("work/count.txt").await? {
+    let meta = sandbox.stat_file("work/count.txt").await?;
     println!("{} {:?}", meta.size, meta.etag);
 }
 ```
@@ -143,9 +143,9 @@ await sandbox.removeFile('work', true)
 <TabItem label="Rust">
 
 ```rust
-sandbox.copy_file("work/count.txt", "work/count.bak", false).wait()?;
-sandbox.rename_file("work/count.bak", "work/old.txt", true).wait()?;
-sandbox.remove_file("work", true).wait()?;
+sandbox.copy_file("work/count.txt", "work/count.bak", false).await?;
+sandbox.rename_file("work/count.bak", "work/old.txt", true).await?;
+sandbox.remove_file("work", true).await?;
 ```
 
 </TabItem>

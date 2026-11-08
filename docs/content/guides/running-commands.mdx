@@ -37,7 +37,7 @@ for await (const entry of sandbox.exec(['uname', '-a'])) {
 
 ```rust
 let mut log = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     match entry?.entry {
         SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
         SandboxJobEntry::End(end) => println!("exited {}", end.code),
@@ -92,17 +92,17 @@ console.log(job.running, job.code)
 
 ```rust
 let args = SandboxExecArgs::new(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 1; done"]);
-let job = sandbox.exec(&args).wait()?;
+let job = sandbox.exec(&args).await?;
 println!("{} {}", job.id(), job.info().running);
 
-let job = sandbox.job(job.id()).wait()?; // later, from the sandbox
+let job = sandbox.job(job.id()).await?; // later, from the sandbox
 let mut log = job.log(None);
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     let entry = entry?;
     println!("{} {:?}", entry.id, entry.entry);
 }
 
-let job = job.get().wait()?;
+let job = job.get().await?;
 println!("{} {:?}", job.info().running, job.info().code);
 ```
 
@@ -174,9 +174,9 @@ await job.remove()
 <TabItem label="Rust">
 
 ```rust
-let job = sandbox.exec(&SandboxExecArgs::new(["sleep", "600"])).wait()?;
-job.signal("SIGTERM").wait()?;
-job.remove().wait()?;
+let job = sandbox.exec(&SandboxExecArgs::new(["sleep", "600"])).await?;
+job.signal("SIGTERM").await?;
+job.remove().await?;
 ```
 
 </TabItem>

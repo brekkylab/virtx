@@ -49,7 +49,7 @@ let args = SandboxCreateArgs::new("alpine:latest")
     .vcpus(2)
     .memory_mib(2048)
     .network(false);
-let sandbox = client.create_sandbox(&args).wait()?;
+let sandbox = client.create_sandbox(&args).await?;
 ```
 
 </TabItem>
@@ -84,11 +84,11 @@ const sandbox = await client.getSandbox('<sandbox id>')
 <TabItem label="Rust">
 
 ```rust
-for sandbox in client.list_sandbox().wait()? {
+for sandbox in client.list_sandbox().await? {
     println!("{} {} {}", sandbox.id(), sandbox.info().image, sandbox.info().running);
 }
 
-let sandbox = client.get_sandbox("<sandbox id>").wait()?;
+let sandbox = client.get_sandbox("<sandbox id>").await?;
 ```
 
 </TabItem>
@@ -116,7 +116,7 @@ await sandbox.remove()
 <TabItem label="Rust">
 
 ```rust
-sandbox.remove().wait()?;
+sandbox.remove().await?;
 ```
 
 </TabItem>

@@ -39,7 +39,7 @@ const sandbox = await client.createSandbox('alpine:latest', { network: false })
 ```rust
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("alpine:latest").network(false))
-    .wait()?;
+    .await?;
 ```
 
 </TabItem>
@@ -104,8 +104,8 @@ forwarder.close()
 ```rust
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(8000))
-    .wait()?;
-sandbox.exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).wait()?; // started, left running
+    .await?;
+sandbox.exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).await?; // started, left running
 
 let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url)?;
 println!("http://{}", forwarder.address());

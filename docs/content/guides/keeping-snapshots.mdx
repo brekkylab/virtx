@@ -41,7 +41,7 @@ const snapshot = await client.createSnapshot('task-42')
 <TabItem label="Rust">
 
 ```rust
-let snapshot = client.create_snapshot(Some("task-42"), None).wait()?;
+let snapshot = client.create_snapshot(Some("task-42"), None).await?;
 ```
 
 </TabItem>
@@ -72,10 +72,10 @@ await snapshot.writeFile('attachments/notes.txt', 'ship the release on friday\n'
 <TabItem label="Rust">
 
 ```rust
-snapshot.create_dir_all("attachments").wait()?;
+snapshot.create_dir_all("attachments").await?;
 snapshot
     .write_file("attachments/notes.txt", "ship the release on friday\n", None)
-    .wait()?;
+    .await?;
 ```
 
 </TabItem>
@@ -112,13 +112,13 @@ await sandbox.remove()
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
-let sandbox = client.create_sandbox(&args).wait()?;
+let sandbox = client.create_sandbox(&args).await?;
 let cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"];
 let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     entry?;
 }
-sandbox.remove().wait()?;
+sandbox.remove().await?;
 ```
 
 </TabItem>
@@ -158,10 +158,10 @@ console.log(await snapshot.readText('artifacts/report.txt'))
 <TabItem label="Rust">
 
 ```rust
-for entry in snapshot.read_dir("artifacts").wait()? {
+for entry in snapshot.read_dir("artifacts").await? {
     println!("{} {}", entry.name, entry.metadata.size);
 }
-println!("{}", snapshot.read_text("artifacts/report.txt").wait()?);
+println!("{}", snapshot.read_text("artifacts/report.txt").await?);
 ```
 
 </TabItem>
@@ -199,12 +199,12 @@ for await (const entry of sandbox.exec(['ls', '/attachments', '/artifacts'])) co
 ```rust
 snapshot
     .write_file("attachments/todo.txt", "write the changelog\n", None)
-    .wait()?;
+    .await?;
 
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
-let sandbox = client.create_sandbox(&args).wait()?;
+let sandbox = client.create_sandbox(&args).await?;
 let mut log = sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).log();
-while let Some(entry) = log.wait_next() {
+while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }
 ```

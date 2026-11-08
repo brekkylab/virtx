@@ -21,7 +21,7 @@ Work the steps below in order. Step 2 is the one that gets skipped: a command th
 
 A client reaches one server: `Client.spawn()` (`Client::spawn_virtx` in Rust) starts it on this machine as a child process, fetching the server of the client's own version into a cache the first time, and `Client.connect(url, auth)` reaches one over HTTP, with a bearer token if it wants one. `Client.spawn("virtx-stdio")` starts one installed on `PATH` instead; `ensure_virtx()` (`ensureVirtx()`) does the fetch alone, ahead of time. The Python and Node packages carry the library; the Rust crate opens `libvirtx_core` at run time, from `virtx::load(path)` or `$VIRTX_CORE_LIB`.
 
-Every Python request is a coroutine and every log an async iterator. In Node they are promises and async iterables, with names in camelCase. In Rust each is a `Future` or a `Stream`, or blocks with `wait()` and `wait_next()`; a started job's log is its `.log()`.
+Every Python request is a coroutine and every log an async iterator. In Node they are promises and async iterables, with names in camelCase. In Rust each is a `Future` or a `Stream`, awaited with `.await` in an async runtime such as Tokio; a started job's log is its `.log()`, read with `StreamExt::next`.
 
 ## 2. Have the image
 

@@ -177,7 +177,7 @@ main()
 <summary><b>Rust</b></summary>
 
 ```sh
-cargo add virtx-rs
+cargo add virtx
 ```
 
 The example blocks with `wait` and `wait_next`; in an async runtime, `.await` the same calls instead.

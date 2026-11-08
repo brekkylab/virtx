@@ -5,13 +5,14 @@ use virtx_core::{
     SandboxJobEntry,
 };
 
-use crate::{Call, Client, Events, Files, StartedJob};
+use crate::{Call, Client, Events, StartedJob, files};
 
 /// A sandbox the server holds, as making it or asking for it answered, and the client that
-/// reaches it: what is needed to run processes in it, and its files, through [`Files`].
+/// reaches it: what is needed to run processes in it, and its files, through
+/// [`Files`](crate::Files).
 ///
 /// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it goes
-/// with [`remove`](Self::remove), or [`Client::remove_sandbox`].
+/// with [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Sandbox {
     client: Client,
@@ -38,12 +39,8 @@ impl Sandbox {
         &self.info
     }
 
-    /// Its files, its root as its processes see it, for the client's files requests.
-    pub fn root(&self) -> FileRoot {
-        FileRoot::Sandbox(self.info.id.clone())
-    }
-
-    /// Start a process in it, as [`Client::exec_sandbox`] does.
+    /// Start a process in it as `args` says; see [`SandboxExecArgs::new`]. Its output and how
+    /// it ended are the job's [`log`](SandboxJob::log), or [`StartedJob::log`].
     pub fn exec(&self, args: &SandboxExecArgs) -> StartedJob<SandboxJob, SandboxJobEntry> {
         self.client.exec_sandbox(&self.info.id, args)
     }
@@ -64,13 +61,13 @@ impl Sandbox {
     }
 }
 
-impl Files for Sandbox {
+impl files::sealed::Root for Sandbox {
     fn client(&self) -> &Client {
         &self.client
     }
 
     fn root(&self) -> FileRoot {
-        Sandbox::root(self)
+        FileRoot::Sandbox(self.info.id.clone())
     }
 }
 
@@ -84,7 +81,7 @@ impl std::fmt::Debug for Sandbox {
 /// sandbox that reach it: what signals it, writes to its stdin and reads its log.
 ///
 /// Cloning holds the same client once more. Dropping it leaves the job as it is; it goes with
-/// [`remove`](Self::remove), or [`Client::remove_sandbox_job`].
+/// [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct SandboxJob {
     client: Client,
@@ -132,14 +129,15 @@ impl SandboxJob {
             .signal_sandbox_job(&self.sandbox, &self.info.id, signal)
     }
 
-    /// Write `data` to its process's stdin, then close it if `eof`, as
-    /// [`Client::write_sandbox_job_stdin`] does.
+    /// Write `data` to its process's stdin, then close it if `eof`. Answers once it is written:
+    /// a caller writes again only then, so the writes land in order.
     pub fn write_stdin(&self, data: Option<impl Into<String>>, eof: bool) -> Call<()> {
         self.client
             .write_sandbox_job_stdin(&self.sandbox, &self.info.id, data, eof)
     }
 
-    /// Its log, from its start or after its `after`th entry, until its `end` entry.
+    /// Its log, its process's output, from its start or after its `after`th entry, until its
+    /// `end` entry. Dropping it leaves the job as it is.
     pub fn log(&self, after: Option<u64>) -> Events<LogEntry<SandboxJobEntry>> {
         self.client
             .sandbox_job_log(&self.sandbox, &self.info.id, after)

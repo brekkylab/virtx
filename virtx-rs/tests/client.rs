@@ -18,9 +18,9 @@ use futures_core::Stream;
 use std::{io::Read, net::TcpStream};
 
 use virtx_rs::{
-    Auth, Client, Error, FileRoot, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry,
-    MountSource, MountType, PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJobEnd, SandboxJobEntry,
+    Auth, Client, Error, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry, MountSource,
+    MountType, PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd,
+    SandboxJobEntry,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -83,93 +83,64 @@ fn test_server() -> PathBuf {
 
 fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
-    let volume = FileRoot::Volume("v".into());
-    client.create_dir(&volume, "dir").unwrap_wait();
-    client
-        .write_file(&volume, "dir/a.txt", "hello world", None)
+    let volume = client.get_volume("v").wait().unwrap();
+    volume.create_dir("dir").unwrap_wait();
+    volume
+        .write_file("dir/a.txt", "hello world", None)
         .unwrap_wait();
-    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
-    client.create_dir_all(&volume, "deep/er/dir").unwrap_wait();
-    assert!(
-        client
-            .stat_file(&volume, "deep/er/dir")
-            .wait()
-            .unwrap()
-            .is_dir
-    );
+    volume.create_dir_all("deep/er/dir").unwrap_wait();
+    volume.create_dir_all("deep/er/dir").unwrap_wait();
+    assert!(volume.stat_file("deep/er/dir").wait().unwrap().is_dir);
 
-    let metadata = client.stat_file(&volume, "dir/a.txt").wait().unwrap();
+    let metadata = volume.stat_file("dir/a.txt").wait().unwrap();
     assert!(!metadata.is_dir && metadata.size == 11, "{metadata:?}");
-    let entries = client.read_dir(&volume, "dir").wait().unwrap();
+    let entries = volume.read_dir("dir").wait().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "a.txt");
     assert_eq!(entries[0].metadata, metadata);
 
-    let read = client
-        .read_file(&volume, "dir/a.txt", 0, None)
-        .wait()
-        .unwrap();
+    let read = volume.read_file("dir/a.txt", 0, None).wait().unwrap();
     assert_eq!(read, b"hello world");
-    let read = client
-        .read_file(&volume, "dir/a.txt", 6, Some(3))
-        .wait()
-        .unwrap();
+    let read = volume.read_file("dir/a.txt", 6, Some(3)).wait().unwrap();
     assert_eq!(read, b"wor");
 
     // Text, an etag to write over, and what is there, told without an error.
-    client
-        .write_file(&volume, "dir/t.txt", "텍스트", None)
+    volume.write_file("dir/t.txt", "텍스트", None).unwrap_wait();
+    assert_eq!(volume.read_text("dir/t.txt").wait().unwrap(), "텍스트");
+    let etag = volume.stat_file("dir/t.txt").wait().unwrap().etag.unwrap();
+    volume
+        .write_file("dir/t.txt", "text 2", Some(&etag))
         .unwrap_wait();
-    assert_eq!(
-        client.read_text(&volume, "dir/t.txt").wait().unwrap(),
-        "텍스트"
-    );
-    let etag = client
-        .stat_file(&volume, "dir/t.txt")
-        .wait()
-        .unwrap()
-        .etag
-        .unwrap();
-    client
-        .write_file(&volume, "dir/t.txt", "text 2", Some(&etag))
-        .unwrap_wait();
-    let stale = client
-        .write_file(&volume, "dir/t.txt", "text 3", Some(&etag))
+    let stale = volume
+        .write_file("dir/t.txt", "text 3", Some(&etag))
         .wait()
         .unwrap_err();
     assert_eq!(stale.status(), Some(412), "{stale}");
-    assert!(client.exists(&volume, "dir/t.txt").wait().unwrap());
-    assert!(client.is_file(&volume, "dir/t.txt").wait().unwrap());
-    assert!(!client.is_dir(&volume, "dir/t.txt").wait().unwrap());
-    assert!(client.is_dir(&volume, "dir").wait().unwrap());
-    client
-        .remove_file(&volume, "dir/t.txt", false)
-        .unwrap_wait();
-    assert!(!client.exists(&volume, "dir/t.txt").wait().unwrap());
-    client.remove_file(&volume, "dir/t.txt", true).unwrap_wait();
+    assert!(volume.exists("dir/t.txt").wait().unwrap());
+    assert!(volume.is_file("dir/t.txt").wait().unwrap());
+    assert!(!volume.is_dir("dir/t.txt").wait().unwrap());
+    assert!(volume.is_dir("dir").wait().unwrap());
+    volume.remove_file("dir/t.txt", false).unwrap_wait();
+    assert!(!volume.exists("dir/t.txt").wait().unwrap());
+    volume.remove_file("dir/t.txt", true).unwrap_wait();
 
-    client
-        .rename_file(&volume, "dir/a.txt", "b.txt", false)
+    volume
+        .rename_file("dir/a.txt", "b.txt", false)
         .unwrap_wait();
-    client
-        .copy_file(&volume, "b.txt", "c.txt", false)
-        .unwrap_wait();
-    let refused = client
-        .copy_file(&volume, "b.txt", "c.txt", false)
+    volume.copy_file("b.txt", "c.txt", false).unwrap_wait();
+    let refused = volume
+        .copy_file("b.txt", "c.txt", false)
         .wait()
         .unwrap_err();
     assert_eq!(refused.status(), Some(412), "{refused}");
-    client.remove_file(&volume, "dir", false).unwrap_wait();
-    let gone = client.stat_file(&volume, "dir").wait().unwrap_err();
+    volume.remove_file("dir", false).unwrap_wait();
+    let gone = volume.stat_file("dir").wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
+    let again = client.get_volume("v").wait().unwrap();
     assert_eq!(
-        client.read_file(&volume, "c.txt", 0, None).wait().unwrap(),
+        again.read_file("c.txt", 0, None).wait().unwrap(),
         b"hello world"
     );
-
-    let locked = FileRoot::Snapshot("locked".into());
-    let refused = client.read_dir(&locked, "").wait().unwrap_err();
-    assert_eq!(refused.status(), Some(423), "{refused}");
 }
 
 fn a_volume_carries_its_client_to_its_files_and_mounts() {
@@ -204,12 +175,14 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
         .wait()
         .unwrap();
     assert_eq!(mount.mount_type, MountType::Notion);
-    assert_eq!(volume.mounts().wait().unwrap(), [mount]);
+    let fresh = client.get_volume("w").wait().unwrap();
+    assert_eq!(fresh.mounts().wait().unwrap(), [mount]);
     volume.unmount("notion").unwrap_wait();
-    assert!(volume.mounts().wait().unwrap().is_empty());
+    assert!(fresh.mounts().wait().unwrap().is_empty());
 
     let got = client.get_volume("w").wait().unwrap();
     assert_eq!(got.name(), "w");
+    assert_eq!(got.read_text("in/b.txt").wait().unwrap(), "hello");
     assert!(
         client
             .list_volume()
@@ -219,6 +192,8 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
             .any(|v| v.name() == "w")
     );
     volume.remove().unwrap_wait();
+    let gone = client.get_volume("w").wait().unwrap_err();
+    assert_eq!(gone.status(), Some(404), "{gone}");
     let gone = got.stat_file("c.txt").wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
@@ -248,13 +223,18 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
     assert_eq!(sandbox.read_text("work/dir/a.txt").wait().unwrap(), "hello");
     assert_eq!(
         client
-            .read_file(&sandbox.root(), "work/dir/a.txt", 1, Some(3))
+            .get_sandbox(sandbox.id())
+            .wait()
+            .unwrap()
+            .read_file("work/dir/a.txt", 1, Some(3))
             .wait()
             .unwrap(),
         b"ell"
     );
     sandbox.remove_file("work/dir/a.txt", false).unwrap_wait();
     sandbox.remove().unwrap_wait();
+    let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
+    assert_eq!(gone.status(), Some(404), "{gone}");
     let gone = sandbox.read_file("", 0, None).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
@@ -325,7 +305,14 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         "{jobs:?}"
     );
     assert_eq!(
-        client.list_sandbox_job(sandbox.id()).wait().unwrap().len(),
+        client
+            .get_sandbox(sandbox.id())
+            .wait()
+            .unwrap()
+            .jobs()
+            .wait()
+            .unwrap()
+            .len(),
         jobs.len()
     );
 
@@ -353,7 +340,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     let gone = sleep.get().wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 
-    client.remove_sandbox(sandbox.id()).unwrap_wait();
+    sandbox.remove().unwrap_wait();
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
@@ -418,9 +405,7 @@ fn a_started_job_is_read_as_its_log() {
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .wait()
         .unwrap();
-    let mut log = client
-        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "hi"]))
-        .log();
+    let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "hi"])).log();
     assert!(log.job().is_none());
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
@@ -437,12 +422,9 @@ fn a_started_job_is_read_as_its_log() {
     );
 
     // Polled, as a runtime would.
-    let job =
-        block_on(client.exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "a"]))).unwrap();
+    let job = block_on(sandbox.exec(&SandboxExecArgs::new(["echo", "a"]))).unwrap();
     assert_eq!(job.info().cmd, ["echo", "a"]);
-    let mut log = client
-        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["echo", "b"]))
-        .log();
+    let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "b"])).log();
     let mut entries = Vec::new();
     while let Some(entry) = block_on(future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx))) {
         entries.push(entry.unwrap().entry);
@@ -457,9 +439,7 @@ fn a_started_job_is_read_as_its_log() {
     );
 
     // A start refused is the log's one item.
-    let mut log = client
-        .exec_sandbox(sandbox.id(), &SandboxExecArgs::new(["nonexistent"]))
-        .log();
+    let mut log = sandbox.exec(&SandboxExecArgs::new(["nonexistent"])).log();
     let refused = log.wait_next().unwrap().unwrap_err();
     assert_eq!(refused.status(), Some(422), "{refused}");
     assert!(log.wait_next().is_none());

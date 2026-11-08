@@ -47,10 +47,10 @@ pub use virtx_core::SnapshotListOutputItem as SnapshotInfo;
 /// What the server answers about a volume; a [`Volume`] carries it with its client.
 pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
-    Auth, DirEntry, Event, FileRoot, ImageDownloadOutput, ImageJob, ImageJobEnd, ImageJobEntry,
-    ImageJobKind, ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry,
-    Metadata, MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs,
-    SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume,
-    Step, VolumeMountListOutputItem,
+    Auth, DirEntry, Event, ImageDownloadOutput, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
+    MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume, Step,
+    VolumeMountListOutputItem,
 };
 pub use volume::Volume;

@@ -35,6 +35,11 @@ else:
     FILE_NAME = "libvirtx_core.so"
 
 
+def args(**args: Any) -> bytes:
+    """``args`` without the ones left out, as JSON."""
+    return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
+
+
 class VirtxError(Exception):
     """A request failed: the server's error, the transport's, or the library's."""
 

@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .files import Files, SnapshotFiles
+from ._library import args
+from .files import Files
 
 if TYPE_CHECKING:
     from .client import Client
@@ -35,10 +36,9 @@ class Snapshot(Files):
         return cls(client, value["name"], value["size"], value["in_use"])
 
     @property
-    def root(self) -> SnapshotFiles:
-        """Its files, for the client's files requests."""
-        return SnapshotFiles(self.name)
+    def _root(self) -> dict[str, str]:
+        return {"snapshot": self.name}
 
     async def remove(self) -> None:
         """Delete it and its upper layer; refused with a ``409`` while a sandbox holds it."""
-        await self.client.remove_snapshot(self.name)
+        await self.client._call("virtx_client_remove_snapshot", args(name=self.name))

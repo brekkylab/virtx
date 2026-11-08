@@ -25,7 +25,8 @@ virtx lets you run tasks in disposable Linux VMs from your own code.
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
 
-virtx is also the VM layer under [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK. In Ailoy, every agent gets its own virtx VM as its sandbox: the agent runs on your host, and its commands and file tools run inside the VM. You can use virtx on its own too, with any agent or none at all.
+> [!TIP]
+> Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
 
 ## How it works
 

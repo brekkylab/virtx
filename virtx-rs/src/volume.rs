@@ -4,13 +4,13 @@ use virtx_core::{
     FileRoot, MountSource, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
-use crate::{Call, Client, Files};
+use crate::{Call, Client, files};
 
 /// A volume the server holds, as making it or asking for it answered, and the client that
-/// reaches it: its files, through [`Files`], and the mounts in it.
+/// reaches it: its files, through [`Files`](crate::Files), and the mounts in it.
 ///
 /// Cloning holds the same client once more. Dropping it leaves the volume as it is; it goes
-/// with [`remove`](Self::remove), or [`Client::remove_volume`].
+/// with [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Volume {
     client: Client,
@@ -34,11 +34,6 @@ impl Volume {
     /// What the server answered about it: its size, as it was then.
     pub fn info(&self) -> &VolumeInfo {
         &self.info
-    }
-
-    /// Its files, for the client's files requests.
-    pub fn root(&self) -> FileRoot {
-        FileRoot::Volume(self.info.name.clone())
     }
 
     /// The mounts in it, without their credentials.
@@ -67,13 +62,13 @@ impl Volume {
     }
 }
 
-impl Files for Volume {
+impl files::sealed::Root for Volume {
     fn client(&self) -> &Client {
         &self.client
     }
 
     fn root(&self) -> FileRoot {
-        Volume::root(self)
+        FileRoot::Volume(self.info.name.clone())
     }
 }
 

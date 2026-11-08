@@ -13,16 +13,16 @@ Requests take and answer the types of ``virtx.image``, ``virtx.snapshot``, ``vir
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
 the request that started it. The method that starts one answers a ``StartedJob``, sent when first
 awaited or iterated: awaited, it is the job, an ``ImageJob`` or a ``SandboxJob``; iterated, it
-yields the job's log, as ``image_job_log`` or ``sandbox_job_log`` does, each a ``LogEntry``
+yields the job's log, as ``image_job_log`` or ``SandboxJob.log`` does, each a ``LogEntry``
 numbered for ``after`` to resume from, until its end entry. A download or upload of an image yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
 A sandbox, a volume, a snapshot and a sandbox job are answered as a ``Sandbox``, a ``Volume``, a
-``Snapshot`` and a ``SandboxJob``, each carrying the client its requests go through: it is all a
-caller hands on to act on one. The three with files read and write them as ``Files``:
-``await volume.read_file("a.txt")``. The client's files requests name the root instead, a
-``VolumeFiles``, a ``SnapshotFiles`` or a ``SandboxFiles``:
-``client.read_file(VolumeFiles("v"), "a.txt")``.
+``Snapshot`` and a ``SandboxJob``, each carrying the client its requests go through: what acts on
+one is the handle, so it is all a caller hands on. The client lists, makes and gets them; one
+known by its id or name is had with ``get_sandbox``, ``get_volume``, ``get_snapshot`` or
+``Sandbox.job``. The three with files read and write them as ``Files``:
+``await volume.read_file("a.txt")``.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
 ``create_sandbox`` answered for it: an address on this machine's loopback.
@@ -30,7 +30,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load
 from .client import Client, Event, Output, Progress, ensure_virtx
-from .files import DirEntry, FileRoot, Files, Metadata, SandboxFiles, SnapshotFiles, VolumeFiles
+from .files import DirEntry, Files, Metadata
 from .image import (
     BasicAuth,
     BearerAuth,
@@ -81,7 +81,6 @@ __all__ = [
     "Client",
     "DirEntry",
     "Event",
-    "FileRoot",
     "Files",
     "GdriveSource",
     "ImageDigest",
@@ -108,7 +107,6 @@ __all__ = [
     "Recipe",
     "RegistryAuth",
     "Sandbox",
-    "SandboxFiles",
     "SandboxJob",
     "SandboxJobEnd",
     "SandboxJobEntry",
@@ -116,14 +114,12 @@ __all__ = [
     "SandboxPort",
     "SandboxVolume",
     "Snapshot",
-    "SnapshotFiles",
     "StartedJob",
     "Stderr",
     "Stdout",
     "Truncated",
     "VirtxError",
     "Volume",
-    "VolumeFiles",
     "VolumeMountListOutputItem",
     "image_name",
     "library_path",

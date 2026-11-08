@@ -83,45 +83,45 @@ test('a header that cannot be sent is refused when set', async () => {
 test('the files of a volume are written, listed, moved and read back', async () => {
   const client = Client.spawn(testServer)
   try {
-    const volume = { volume: 'v' }
-    await client.createDir(volume, 'dir')
-    await client.writeFile(volume, 'dir/a.txt', 'hello world')
-    await client.createDirAll(volume, 'deep/er/dir')
-    await client.createDirAll(volume, 'deep/er/dir')
-    assert.equal((await client.statFile(volume, 'deep/er/dir')).isDir, true)
+    const volume = await client.getVolume('v')
+    await volume.createDir('dir')
+    await volume.writeFile('dir/a.txt', 'hello world')
+    await volume.createDirAll('deep/er/dir')
+    await volume.createDirAll('deep/er/dir')
+    assert.equal((await volume.statFile('deep/er/dir')).isDir, true)
 
-    const metadata = await client.statFile(volume, 'dir/a.txt')
+    const metadata = await volume.statFile('dir/a.txt')
     assert.equal(metadata.isDir, false)
     assert.equal(metadata.size, 11)
-    assert.deepEqual(await client.readDir(volume, 'dir'), [{ name: 'a.txt', metadata }])
+    assert.deepEqual(await volume.readDir('dir'), [{ name: 'a.txt', metadata }])
 
-    assert.equal((await client.readFile(volume, 'dir/a.txt')).toString(), 'hello world')
-    assert.equal((await client.readFile(volume, 'dir/a.txt', 6, 3)).toString(), 'wor')
+    assert.equal((await volume.readFile('dir/a.txt')).toString(), 'hello world')
+    assert.equal((await volume.readFile('dir/a.txt', 6, 3)).toString(), 'wor')
 
     // Text, an etag to write over, and what is there, told without an error.
-    await client.writeFile(volume, 'dir/t.txt', '텍스트')
-    assert.equal(await client.readText(volume, 'dir/t.txt'), '텍스트')
-    const { etag } = await client.statFile(volume, 'dir/t.txt')
+    await volume.writeFile('dir/t.txt', '텍스트')
+    assert.equal(await volume.readText('dir/t.txt'), '텍스트')
+    const { etag } = await volume.statFile('dir/t.txt')
     assert.ok(etag)
-    await client.writeFile(volume, 'dir/t.txt', 'text 2', etag)
-    await assert.rejects(client.writeFile(volume, 'dir/t.txt', 'text 3', etag), { status: 412 })
-    assert.equal(await client.exists(volume, 'dir/t.txt'), true)
-    assert.equal(await client.isFile(volume, 'dir/t.txt'), true)
-    assert.equal(await client.isDir(volume, 'dir/t.txt'), false)
-    assert.equal(await client.isDir(volume, 'dir'), true)
-    await client.removeFile(volume, 'dir/t.txt')
-    assert.equal(await client.exists(volume, 'dir/t.txt'), false)
-    await assert.rejects(client.removeFile(volume, 'dir/t.txt'), { status: 404 })
-    await client.removeFile(volume, 'dir/t.txt', true)
+    await volume.writeFile('dir/t.txt', 'text 2', etag)
+    await assert.rejects(volume.writeFile('dir/t.txt', 'text 3', etag), { status: 412 })
+    assert.equal(await volume.exists('dir/t.txt'), true)
+    assert.equal(await volume.isFile('dir/t.txt'), true)
+    assert.equal(await volume.isDir('dir/t.txt'), false)
+    assert.equal(await volume.isDir('dir'), true)
+    await volume.removeFile('dir/t.txt')
+    assert.equal(await volume.exists('dir/t.txt'), false)
+    await assert.rejects(volume.removeFile('dir/t.txt'), { status: 404 })
+    await volume.removeFile('dir/t.txt', true)
 
-    await client.renameFile(volume, 'dir/a.txt', 'b.txt')
-    await client.copyFile(volume, 'b.txt', 'c.txt')
-    await assert.rejects(client.copyFile(volume, 'b.txt', 'c.txt'), { status: 412 })
-    await client.removeFile(volume, 'dir')
-    await assert.rejects(client.statFile(volume, 'dir'), { status: 404 })
-    assert.equal((await client.readFile(volume, 'c.txt')).toString(), 'hello world')
+    await volume.renameFile('dir/a.txt', 'b.txt')
+    await volume.copyFile('b.txt', 'c.txt')
+    await assert.rejects(volume.copyFile('b.txt', 'c.txt'), { status: 412 })
+    await volume.removeFile('dir')
+    await assert.rejects(volume.statFile('dir'), { status: 404 })
+    assert.equal((await volume.readFile('c.txt')).toString(), 'hello world')
 
-    await assert.rejects(client.readDir({ snapshot: 'locked' }, ''), { status: 423 })
+    await assert.rejects((await client.getSnapshot('locked')).readDir(''), { status: 423 })
   } finally {
     await client.close()
   }
@@ -131,17 +131,17 @@ test("a sandbox's files are its own and go with it", async () => {
   const client = Client.spawn(testServer)
   try {
     const sandbox = await client.createSandbox('alpine:3.20')
-    assert.deepEqual(sandbox.root, { sandbox: sandbox.id })
     await sandbox.createDirAll('work/dir')
     await sandbox.writeFile('work/dir/a.txt', 'hello')
     assert.equal(await sandbox.readText('work/dir/a.txt'), 'hello')
     assert.deepEqual(await sandbox.readFile('work/dir/a.txt', 1, 3), Buffer.from('ell'))
     assert.deepEqual(
-      (await client.readDir(sandbox.root, 'work/dir')).map((entry) => entry.name),
+      (await (await client.getSandbox(sandbox.id)).readDir('work/dir')).map((entry) => entry.name),
       ['a.txt'],
     )
     await sandbox.removeFile('work/dir/a.txt')
     await sandbox.remove()
+    await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
     await assert.rejects(sandbox.readFile(''), { status: 404 })
   } finally {
     await client.close()
@@ -155,25 +155,25 @@ test('a volume carries its client to its files and mounts', async () => {
     assert.ok(volume instanceof virtx.Volume && volume instanceof virtx.Files)
     assert.equal(volume.client, client)
     assert.deepEqual({ ...volume }, { name: 'w', size: 0 })
-    assert.deepEqual(volume.root, { volume: 'w' })
     await volume.createDirAll('in/dir')
     await volume.writeFile('in/a.txt', 'hello')
     await volume.renameFile('in/a.txt', 'in/b.txt')
     await volume.copyFile('in/b.txt', 'c.txt')
-    assert.equal(await volume.readText('c.txt'), 'hello')
+    assert.equal(await (await client.getVolume('w')).readText('c.txt'), 'hello')
     assert.equal(await volume.isDir('in/dir'), true)
     assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), ['b.txt', 'dir'])
 
     const mount = await volume.mount('notion', { type: 'notion', apiKey: 'k' })
     assert.deepEqual(mount, { path: 'notion', mountType: 'notion' })
-    assert.deepEqual(await volume.mounts(), [mount])
+    assert.deepEqual(await (await client.getVolume('w')).mounts(), [mount])
     await volume.unmount('notion')
-    assert.deepEqual(await volume.mounts(), [])
+    assert.deepEqual(await (await client.getVolume('w')).mounts(), [])
 
     const got = await client.getVolume('w')
     assert.deepEqual(got, volume)
     assert.ok((await client.listVolume()).some((v) => v.name === 'w'))
     await volume.remove()
+    await assert.rejects(client.getVolume('w'), { status: 404 })
     await assert.rejects(got.statFile('c.txt'), { status: 404 })
   } finally {
     await client.close()
@@ -195,6 +195,7 @@ test('a snapshot carries its client to its files', async () => {
       volumes: [{ volume: await client.getVolume('v'), path: '/data', readonly: true }],
     })
     assert.equal(sandbox.snapshot, 'handed')
+    assert.equal((await client.getSnapshot('handed')).inUse, true)
     await sandbox.remove()
 
     const locked = await client.getSnapshot('locked')
@@ -221,7 +222,7 @@ test('a snapshot is created, got and removed', async () => {
     assert.deepEqual(await client.getSnapshot('made'), snapshot)
     assert.ok((await client.listSnapshot()).some((s) => s.name === 'made'))
     assert.equal((await client.getSnapshot('locked')).inUse, true)
-    await client.removeSnapshot('made')
+    await snapshot.remove()
     await assert.rejects(client.getSnapshot('made'), { status: 404 })
   } finally {
     await client.close()
@@ -234,7 +235,8 @@ test('a volume is created and got', async () => {
     const volume = await client.createVolume('w')
     assert.equal(volume.name, 'w')
     assert.deepEqual(await client.getVolume('w'), volume)
-    await client.removeVolume('w')
+    await volume.remove()
+    await assert.rejects(client.getVolume('w'), { status: 404 })
   } finally {
     await client.close()
   }
@@ -258,19 +260,19 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
       [{ stdout: 'hi' }, { end: { code: 0 } }],
     )
     // Read again after the first entry, from the second.
-    assert.deepEqual(await entries(client.sandboxJobLog(sandbox.id, job.id, log[0].id)), log.slice(1))
+    assert.deepEqual(await entries(job.log(log[0].id)), log.slice(1))
     assert.equal((await job.get()).code, 0)
-    assert.equal((await client.getSandboxJob(sandbox.id, job.id)).code, 0)
-    assert.ok((await sandbox.jobs()).some((j) => j.id === job.id))
-    assert.ok((await client.listSandboxJob(sandbox.id)).some((j) => j.id === job.id))
+    const got = await client.getSandbox(sandbox.id)
+    assert.equal((await got.job(job.id)).code, 0)
+    assert.ok((await got.jobs()).some((j) => j.id === job.id))
 
-    const failed = await client.execSandbox(sandbox.id, ['fail'])
-    const end = (await entries(client.sandboxJobLog(sandbox.id, failed.id))).at(-1)
+    const failed = await sandbox.exec(['fail'])
+    const end = (await entries(failed.log())).at(-1)
     assert.deepEqual(end.end, { code: 1 })
 
     await (await sandbox.job(job.id)).remove()
-    await assert.rejects(client.getSandboxJob(sandbox.id, job.id), { status: 404 })
-    await client.removeSandbox(sandbox.id)
+    await assert.rejects(got.job(job.id), { status: 404 })
+    await sandbox.remove()
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
   } finally {
     await client.close()
@@ -294,13 +296,7 @@ test('a job reads its stdin and is signalled', async () => {
     await sleep.signal('SIGTERM')
     const end = (await entries(sleep.log())).at(-1)
     assert.ok('end' in end)
-    assert.equal((await sleep.get()).running, false)
-
-    // The client's requests by id reach the same jobs.
-    const again = await client.execSandbox(sandbox.id, ['cat'], { stdin: true })
-    await client.writeSandboxJobStdin(sandbox.id, again.id, 'three\n', true)
-    const first = (await entries(client.sandboxJobLog(sandbox.id, again.id)))[0]
-    assert.equal(first.stdout, 'three')
+    assert.equal((await (await client.getSandbox(sandbox.id)).job(sleep.id)).running, false)
   } finally {
     await client.close()
   }
@@ -347,8 +343,8 @@ test('a started build is iterated to its end', async () => {
 test('a started command is iterated to its end', async () => {
   const client = Client.spawn(testServer)
   try {
-    const { id: sandbox } = await client.createSandbox('alpine:3.20')
-    const log = await entries(client.execSandbox(sandbox, ['echo', 'hi']))
+    const sandbox = await client.createSandbox('alpine:3.20')
+    const log = await entries(sandbox.exec(['echo', 'hi']))
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ stdout: 'hi' }, { end: { code: 0 } }],

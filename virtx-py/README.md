@@ -4,7 +4,7 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`, as the [repository README](../README.md#from-a-shell) describes.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `remove_image_job` or `remove_sandbox_job` cancels it.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `remove_image_job` or `SandboxJob.remove` cancels it.
 
 ```python
 import asyncio
@@ -79,7 +79,7 @@ for entry in await volume.read_dir("in"):
 print(await volume.read_file("in/notes.txt"))
 ```
 
-The client's own files requests name the root, a `VolumeFiles`, a `SnapshotFiles` or a `SandboxFiles`: `await client.read_file(VolumeFiles("data"), "in/notes.txt")`.
+What acts on a sandbox, a volume, a snapshot or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume`, `get_snapshot` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
 
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 

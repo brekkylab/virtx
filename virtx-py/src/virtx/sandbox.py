@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .files import Files, SandboxFiles
+from ._library import args
+from .files import Files
 from .job import LogEntry, StartedJob, Truncated
 from .volume import Volume
 
@@ -76,27 +77,38 @@ class Sandbox(Files):
         )
 
     @property
-    def root(self) -> SandboxFiles:
-        """Its files, its root as its processes see it, for the client's files requests."""
-        return SandboxFiles(self.id)
+    def _root(self) -> dict[str, str]:
+        return {"sandbox": self.id}
 
     def exec(
         self, cmd: Iterable[str], *, stdin: bool = False, timeout_ms: int | None = None
     ) -> StartedJob[SandboxJob, SandboxJobEntry]:
-        """Run ``cmd`` in it, as ``Client.exec_sandbox`` does."""
-        return self.client.exec_sandbox(self.id, cmd, stdin=stdin, timeout_ms=timeout_ms)
+        """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
+        after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
+        ended, as ``SandboxJob.log``'s. Sent when first awaited or iterated."""
+        request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
+
+        async def start() -> SandboxJob:
+            output = await self.client._call("virtx_client_exec_sandbox", request)
+            return SandboxJob.from_dict(self.client, self.id, output)
+
+        return StartedJob(start, lambda job: job.log())
 
     async def jobs(self) -> list[SandboxJob]:
         """Every job in it."""
-        return await self.client.list_sandbox_job(self.id)
+        items = await self.client._call("virtx_client_list_sandbox_job", args(sandbox=self.id))
+        return [SandboxJob.from_dict(self.client, self.id, item) for item in items]
 
     async def job(self, id: str) -> SandboxJob:
         """The job ``id`` in it."""
-        return await self.client.get_sandbox_job(self.id, id)
+        output = await self.client._call(
+            "virtx_client_get_sandbox_job", args(sandbox=self.id, job=id)
+        )
+        return SandboxJob.from_dict(self.client, self.id, output)
 
     async def remove(self) -> None:
         """Stop it, end its jobs, and forget it, keeping its snapshot and volumes."""
-        await self.client.remove_sandbox(self.id)
+        await self.client._call("virtx_client_remove_sandbox", args(id=self.id))
 
 
 class SandboxJobKind(str, Enum):
@@ -107,9 +119,9 @@ class SandboxJobKind(str, Enum):
 
 @dataclass(frozen=True)
 class SandboxJob:
-    """A process run in a sandbox, as ``exec_sandbox`` and ``get_sandbox_job`` answer it, and
-    the client and sandbox that reach it: what signals it, writes to its stdin and reads its
-    log. Dropping it leaves the job; ``remove`` removes it."""
+    """A process run in a sandbox, as ``Sandbox.exec``, ``Sandbox.jobs`` and ``Sandbox.job``
+    answer it, and the client and sandbox that reach it: what signals it, writes to its stdin
+    and reads its log. Dropping it leaves the job; ``remove`` removes it."""
 
     client: Client = field(repr=False, compare=False)
     """The client its requests go through."""
@@ -146,28 +158,37 @@ class SandboxJob:
             value.get("code"),
         )
 
+    def _args(self, **fields: Any) -> bytes:
+        return args(sandbox=self.sandbox_id, job=self.id, **fields)
+
     async def get(self) -> SandboxJob:
         """It as the server has it now."""
-        return await self.client.get_sandbox_job(self.sandbox_id, self.id)
+        output = await self.client._call("virtx_client_get_sandbox_job", self._args())
+        return SandboxJob.from_dict(self.client, self.sandbox_id, output)
 
     async def signal(self, signal: str) -> None:
         """Send ``signal``, such as ``"SIGTERM"``, to its process and every process it
         started."""
-        await self.client.signal_sandbox_job(self.sandbox_id, self.id, signal)
+        await self.client._call("virtx_client_signal_sandbox_job", self._args(signal=signal))
 
     async def write_stdin(self, data: str | None = None, eof: bool = False) -> None:
-        """Write ``data`` to its process's stdin, then close it if ``eof``, as
-        ``Client.write_sandbox_job_stdin`` does."""
-        await self.client.write_sandbox_job_stdin(self.sandbox_id, self.id, data, eof)
+        """Write ``data`` to its process's stdin, then close it if ``eof``. Returns once it is
+        written: await it before the next write, so the writes land in order."""
+        await self.client._call(
+            "virtx_client_write_sandbox_job_stdin", self._args(data=data, eof=eof or None)
+        )
 
-    def log(self, after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
-        """Its log, from its start or after its ``after``th entry, until its
-        ``SandboxJobEnd``."""
-        return self.client.sandbox_job_log(self.sandbox_id, self.id, after)
+    async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
+        """Its log, its process's output, from its start or after its ``after``th entry, until
+        its ``SandboxJobEnd``. Closing it leaves the job as it is."""
+        async for item in self.client._items(
+            "virtx_client_sandbox_job_log", self._args(after=after)
+        ):
+            yield sandbox_job_entry(item)
 
     async def remove(self) -> None:
         """Cancel it if it runs, killing its process, and forget it."""
-        await self.client.remove_sandbox_job(self.sandbox_id, self.id)
+        await self.client._call("virtx_client_remove_sandbox_job", self._args())
 
 
 @dataclass(frozen=True)
@@ -196,7 +217,7 @@ SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 
 
 def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
-    """An item of ``sandbox_job_log``'s stream, as ``{"id": n, "stdout": "..."}`` and the
+    """An item of ``SandboxJob.log``'s stream, as ``{"id": n, "stdout": "..."}`` and the
     like."""
     entry: SandboxJobEntry
     if "stdout" in item:

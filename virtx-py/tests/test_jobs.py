@@ -43,7 +43,7 @@ async def test_a_volume_is_created_and_got(test_server: str) -> None:
         created = await client.create_volume("w")
         assert created.name == "w"
         assert await client.get_volume("w") == created
-        await client.remove_volume("w")
+        await created.remove()
         with pytest.raises(VirtxError) as refused:
             await client.get_volume("w")
         assert refused.value.status == 404
@@ -77,19 +77,18 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server
         log = [entry async for entry in job.log()]
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
         assert (await job.get()).code == 0
-        assert (await client.get_sandbox_job(sandbox.id, job.id)).code == 0
-        assert job.id in [item.id for item in await sandbox.jobs()]
-        assert job.id in [item.id for item in await client.list_sandbox_job(sandbox.id)]
+        assert (await got.job(job.id)).code == 0
+        assert job.id in [item.id for item in await got.jobs()]
 
-        failed = await client.exec_sandbox(sandbox.id, ["fail"])
-        log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, failed.id)]
+        failed = await sandbox.exec(["fail"])
+        log = [entry.entry async for entry in failed.log()]
         assert log == [Stderr("failed"), SandboxJobEnd(1)]
 
-        await (await sandbox.job(job.id)).remove()
+        await job.remove()
         with pytest.raises(VirtxError) as refused:
-            await client.get_sandbox_job(sandbox.id, job.id)
+            await got.job(job.id)
         assert refused.value.status == 404
-        await client.remove_sandbox(sandbox.id)
+        await sandbox.remove()
         with pytest.raises(VirtxError) as refused:
             await client.get_sandbox(sandbox.id)
         assert refused.value.status == 404
@@ -100,11 +99,11 @@ async def test_a_log_is_truncated_at_its_limit_and_resumed_after_an_entry(
 ) -> None:
     with Client.spawn(test_server) as client:
         sandbox = await client.create_sandbox("alpine:3.20")
-        job = await client.exec_sandbox(sandbox.id, ["lines", "20"])
-        log = [entry async for entry in client.sandbox_job_log(sandbox.id, job.id)]
+        job = await sandbox.exec(["lines", "20"])
+        log = [entry async for entry in job.log()]
         assert [entry.entry for entry in log[-2:]] == [Truncated(), SandboxJobEnd(0)]
         assert len(log) == 10
-        rest = [entry async for entry in client.sandbox_job_log(sandbox.id, job.id, after=8)]
+        rest = [entry async for entry in job.log(after=8)]
         assert rest == log[8:]
 
 
@@ -123,13 +122,8 @@ async def test_stdin_is_written_and_a_signal_ends_a_process(test_server: str) ->
         await sleep.signal("SIGTERM")
         log = [entry.entry async for entry in sleep.log()]
         assert isinstance(log[-1], SandboxJobEnd)
-        assert not (await sleep.get()).running
-
-        # The client's requests by id reach the same jobs.
-        cat = await client.exec_sandbox(sandbox.id, ["cat"], stdin=True)
-        await client.write_sandbox_job_stdin(sandbox.id, cat.id, "c\n", eof=True)
-        log = [entry.entry async for entry in client.sandbox_job_log(sandbox.id, cat.id)]
-        assert log[0] == Stdout("c")
+        got = await client.get_sandbox(sandbox.id)
+        assert not (await got.job(sleep.id)).running
 
 
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_server: str) -> None:
@@ -170,7 +164,7 @@ async def test_a_build_iterated_yields_its_log_to_its_end(test_server: str) -> N
 async def test_an_exec_iterated_yields_its_output_and_how_it_ended(test_server: str) -> None:
     with Client.spawn(test_server) as client:
         sandbox = await client.create_sandbox("alpine:3.20")
-        log = [entry async for entry in client.exec_sandbox(sandbox.id, ["echo", "hi"])]
+        log = [entry async for entry in sandbox.exec(["echo", "hi"])]
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
 
 

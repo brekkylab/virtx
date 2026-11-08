@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from .files import Files, VolumeFiles
+from ._library import args
+from .files import Files
 
 if TYPE_CHECKING:
     from .client import Client
@@ -104,31 +105,37 @@ class Volume(Files):
         return cls(client, value["name"], value["size"])
 
     @property
-    def root(self) -> VolumeFiles:
-        """Its files, for the client's files requests."""
-        return VolumeFiles(self.name)
+    def _root(self) -> dict[str, str]:
+        return {"volume": self.name}
 
     async def mounts(self) -> list[VolumeMountListOutputItem]:
         """The mounts in it, without their credentials."""
-        return await self.client.list_volume_mount(self.name)
+        items = await self.client._call("virtx_client_list_volume_mount", args(volume=self.name))
+        return [VolumeMountListOutputItem.from_dict(item) for item in items]
 
     async def mount(self, path: str, source: MountSource) -> VolumeMountListOutputItem:
         """Mount ``source`` at ``path`` in it, a directory the mount creates."""
-        return await self.client.create_volume_mount(self.name, path, source)
+        output = await self.client._call(
+            "virtx_client_create_volume_mount",
+            args(volume=self.name, path=path, source=source.to_dict()),
+        )
+        return VolumeMountListOutputItem.from_dict(output)
 
     async def unmount(self, path: str) -> None:
         """Take away the mount at ``path``, leaving its source as it is."""
-        await self.client.remove_volume_mount(self.name, path)
+        await self.client._call(
+            "virtx_client_remove_volume_mount", args(volume=self.name, path=path)
+        )
 
     async def remove(self) -> None:
         """Delete it and everything in it."""
-        await self.client.remove_volume(self.name)
+        await self.client._call("virtx_client_remove_volume", args(name=self.name))
 
 
 @dataclass(frozen=True)
 class VolumeMountListOutputItem:
-    """One mount in a volume, as ``list_volume_mount`` and ``create_volume_mount`` answer it.
-    Its credentials are not answered."""
+    """One mount in a volume, as ``Volume.mounts`` and ``Volume.mount`` answer it. Its
+    credentials are not answered."""
 
     path: str
     """Where it is mounted."""

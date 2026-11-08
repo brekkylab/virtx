@@ -298,6 +298,9 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         ]
     );
     assert_eq!(job.get().wait().unwrap().info().code, Some(0));
+    let held = sandbox.job_from(job.info().clone());
+    assert_eq!(held.sandbox_id(), sandbox.id());
+    assert_eq!(held.get().wait().unwrap().info().code, Some(0));
     let jobs = sandbox.jobs().wait().unwrap();
     assert!(
         jobs.iter()

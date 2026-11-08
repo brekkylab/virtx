@@ -13,7 +13,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # What the types need, and all they need: a crate that only names requests and their answers
-# (`virtx-rs`, which reaches the library through the C ABI) takes `default-features = false`.
+# (`virtx`, the Rust client in `virtx-rs/`, which reaches the library through the C ABI) takes `default-features = false`.
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 

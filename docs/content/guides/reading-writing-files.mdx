@@ -46,7 +46,7 @@ console.log(await sandbox.readText('work/count.txt'))
 <TabItem label="Rust">
 
 ```rust
-use virtx_rs::Files;
+use virtx::Files;
 
 sandbox.create_dir_all("work").wait()?;
 sandbox.write_file("work/input.txt", "one two three\n", None).wait()?;

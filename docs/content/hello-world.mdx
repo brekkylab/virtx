@@ -99,7 +99,7 @@ main()
 The example blocks with `wait` and `wait_next`; in an async runtime, `.await` the same calls instead.
 
 ```rust
-use virtx_rs::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
+use virtx::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
@@ -203,7 +203,7 @@ const client = Client.connect(
 <TabItem label="Rust">
 
 ```rust
-use virtx_rs::Auth;
+use virtx::Auth;
 
 let client = Client::connect(
     "http://127.0.0.1:8470",

@@ -4,7 +4,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 
 ## One behaviour, two ends
 
-- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx-rs`, `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
+- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
 - A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, each package's own `README.md`, and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.

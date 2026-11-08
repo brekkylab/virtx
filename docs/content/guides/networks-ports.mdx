@@ -47,22 +47,27 @@ let sandbox = client
 
 ## Ports
 
-A port carries plain TCP, so any service that listens on one can be reached through it: a web server over HTTP, SSH, a VNC desktop, a database, or a protocol of your own.
-virtx does not look inside the connection.
+A port carries plain TCP, so you can reach any service that listens on one: a web server, SSH, a VNC desktop, a database, or your own protocol.
+virtx passes the bytes through without looking at them.
 
-A port in the sandbox is not reached directly: it is forwarded to a port on your machine, and you connect to that one.
-Pass `ports` to `create_sandbox` to open TCP ports in the guest.
-Each comes back in `sandbox.ports` with a `url`, and `PortForwarder.open` forwards it to an address on your machine's loopback, which any TCP client can connect to.
-Ports work with `network` off, since they carry connections in, not out.
+To reach a sandbox's port, use a `PortForwarder`.
+It forwards the port to an address on your machine, and you connect to that address.
 
-How a connection gets there depends on where the server runs:
+1. Pass `ports` to `create_sandbox` to open those ports in the sandbox.
+2. Each one comes back in `sandbox.ports` with a `url`.
+3. `PortForwarder.open` takes that `url` and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to.
 
-- A server on your machine, as `Client.spawn` starts, answers a loopback address of its own for each port, and the forwarder's address is that one: nothing is carried in between.
-- A server reached over HTTP answers a URL that carries the credentials for that one port. The forwarder listens on a port of your machine's loopback and carries each connection made to it in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`. The server relays the bytes to the port in the sandbox, and its answers back.
+How the forwarding works depends on where the server runs:
+
+- **A server on your machine**, started with `Client.spawn`, already listens on a local address for each port, so the forwarder just gives you that address.
+- **A server over HTTP** is reached through a WebSocket.
+  The forwarder listens on a local port, and opens a WebSocket to the port's `url` for each connection made to it.
+  The server passes the bytes between that WebSocket and the port in the sandbox.
 
 <img src={portForwarding.src} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/ports/<capability> on the virtx server, which connects to port 8000 in the sandbox it runs." />
 
-So a remote sandbox's port needs nothing open on the server's machine beyond the server's own HTTP address, and the URL is as secret as the credentials in it.
+Because everything goes through the server's own HTTP address, the server's machine needs no other port open.
+The `url` holds the credentials for its port, so keep it secret.
 
 In the example below, the sandbox opens port 8000 and runs an HTTP server on it, and the forwarder makes it reachable at a local address that a browser or `curl` can open:
 

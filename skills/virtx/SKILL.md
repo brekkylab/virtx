@@ -80,6 +80,6 @@ Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`
 ## Where to read more
 
 - [`README.md`](../../README.md): the Quickstart, for a local server and a remote one.
-- [virtx.sh/docs](https://virtx.sh/docs/): a guide each for images, sandboxes, commands, files, networks and ports, snapshots, volumes and the GPU, and the API reference.
+- [`docs/content/`](../../docs/content/): the guides and the API reference.
 - [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
 - [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.

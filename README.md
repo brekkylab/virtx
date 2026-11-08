@@ -74,7 +74,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](https://virtx.sh/docs/guides/using-gpus/).
+Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
 
 ## Quickstart
 
@@ -315,7 +315,7 @@ Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a 
 
 ## Documentation
 
-See the [documentation](https://virtx.sh/docs/) for guides and the API reference.
+See the [documentation](docs/) for guides and the API reference.
 
 ## Coverage
 

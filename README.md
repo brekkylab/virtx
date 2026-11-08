@@ -232,6 +232,20 @@ let client = Client::connect(
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 
+## Features
+
+- **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
+- **Run it wherever you work:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
+  - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
+  - **Servers:** 💻 local(stdio) · 🖥️ remote(tcp) · ☁️ cloud
+  - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
+- **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
+- **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
+- **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
+- **Pick up where you left off:** keep what a sandbox wrote in a snapshot for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
+- **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
+
 ## Requirements
 
 ### Client
@@ -260,20 +274,6 @@ Guests are always Linux.
 #### (Optional) GPU
 
 Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
-
-## Features
-
-- **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
-- **Run it wherever you work:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
-  - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
-  - **Servers:** 💻 local(stdio) · 🖥️ remote(tcp) · ☁️ cloud
-  - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
-- **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
-- **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
-- **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
-- **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
-- **Pick up where you left off:** keep what a sandbox wrote in a snapshot for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
-- **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
 
 ## How it works
 

@@ -179,7 +179,6 @@ cargo xtask run -p virtx-server-tcp -- token   # prints a token and its token_sh
 {
   "listen": "127.0.0.1:8470",
   "home": "/var/lib/virtx",
-  "origins": [],
   "users": { "alice": { "token_sha256": "<token_sha256>" } },
   "projects": { "demo": { "members": ["alice"] } }
 }
@@ -295,7 +294,7 @@ Either way, client and server speak the same plain HTTP protocol; only the trans
 | Use it for | Running VMs on the machine you work on | A bigger machine, or one host shared by a team | Running VMs without hardware of your own |
 
 Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
-Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
+Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a microVM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
 
 ### Core concepts
 
@@ -332,7 +331,7 @@ See the [documentation](docs/) for guides and the API reference.
 | **Hosts** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS (Apple silicon) · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows 11 or later |
 | **Guest** | <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux, always |
 
-Each package's own README has the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md).
+Each package documents the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
 ## Contributing
 

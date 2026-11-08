@@ -2,7 +2,7 @@
 
 A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with `ctypes`: the package has no extension module of its own, and a wheel carries the library for its platform beside its Python files.
 
-The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`, as the [repository README](../README.md#from-a-shell) describes.
+The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `remove_image_job` or `remove_sandbox_job` cancels it.
 

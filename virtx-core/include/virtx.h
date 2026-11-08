@@ -439,7 +439,8 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
                                                      size_t args_len);
 
 // The files of a volume or a snapshot: what is at `path`, given
-// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
+// `{"sandbox": "...", "path": "..."}`, the path
 // relative to its root as `dir/file.txt`. Answers with
 // `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
 // the Unix epoch and `etag` as the server spells it, each only if the server says.

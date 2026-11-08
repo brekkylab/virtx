@@ -641,6 +641,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sandbox_s_files_are_its_own_and_go_with_it() {
+        for client in each().await {
+            let sandbox = client
+                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+                .await
+                .unwrap();
+            let root = FileRoot::Sandbox(sandbox.id.clone());
+            client.create_dir_all(&root, "work/dir").await.unwrap();
+            client
+                .write_file(&root, "work/dir/a.txt", "hello", None)
+                .await
+                .unwrap();
+            assert_eq!(
+                client.read_text(&root, "work/dir/a.txt").await.unwrap(),
+                "hello"
+            );
+            let entries = client.read_dir(&root, "work/dir").await.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].name, "a.txt");
+
+            client.remove_sandbox(&sandbox.id).await.unwrap();
+            assert_eq!(refusal(client.read_dir(&root, "").await).0, 404);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
     async fn a_process_s_log_is_its_output_then_how_it_ended() {
         for client in each().await {
             let sandbox = client
@@ -1830,7 +1857,8 @@ pub(crate) mod ffi {
     }
 
     /// The files of a volume or a snapshot: what is at `path`, given
-    /// `{"volume": "...", "path": "..."}` or `{"snapshot": "...", "path": "..."}`, the path
+    /// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
+    /// `{"sandbox": "...", "path": "..."}`, the path
     /// relative to its root as `dir/file.txt`. Answers with
     /// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
     /// the Unix epoch and `etag` as the server spells it, each only if the server says.

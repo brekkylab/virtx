@@ -1,5 +1,6 @@
-"""The files in a volume or a snapshot, reached with WebDAV at ``/volumes/{name}/`` or
-``/snapshots/{name}/``: what each request names, and what it answers.
+"""The files in a volume, a snapshot or a sandbox, reached with WebDAV at
+``/volumes/{name}/files/``, ``/snapshots/{name}/files/`` or ``/sandboxes/{id}/files/``: what
+each request names, and what it answers.
 
 A path is relative to the root, ``/``-separated, as ``dir/file.txt``; the empty path is the
 root. The server refuses one that leads outside.
@@ -35,7 +36,18 @@ class Snapshot:
         return {"snapshot": self.name}
 
 
-FileRoot = Volume | Snapshot
+@dataclass(frozen=True)
+class SandboxFiles:
+    """The files of the sandbox ``id``, as its processes see them, while its VM runs."""
+
+    id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"sandbox": self.id}
+
+
+FileRoot = Volume | Snapshot | SandboxFiles
 """Whose files a request names."""
 
 

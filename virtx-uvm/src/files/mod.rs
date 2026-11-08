@@ -1,12 +1,15 @@
-//! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume or a snapshot
-//! over WebDAV at `/volumes/{name}/files/` and `/snapshots/{name}/files/`.
+//! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume, a snapshot or a
+//! sandbox over WebDAV at `/volumes/{name}/files/`, `/snapshots/{name}/files/` and
+//! `/sandboxes/{id}/files/`.
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their
 //! paths. A snapshot's are the ext4 image a machine writes: read whole into an
 //! [`FsTree`](crate::FsTree) for each request, and written back whole after one that changed
 //! it, so a snapshot's requests go one at a time. A snapshot in use -- a sandbox's, or under a
-//! machine -- answers `423` to everything.
+//! machine -- answers `423` to everything. A sandbox's are its machine's root as its processes
+//! see it, asked of the agent there ([`Machine::io`]).
 
+mod sandbox;
 mod snapshot;
 mod volume;
 
@@ -20,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use dav_server::DavHandler;
 use http::{Method, Request, StatusCode, header};
 
+use crate::machine::Machine;
 use crate::snapshot::{Error as SnapshotError, Store as SnapshotStore};
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
 
@@ -77,23 +81,30 @@ impl Files {
         self.dav(&root, request, held).await
     }
 
-    /// A WebDAV request to `root`.
+    /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from the guest
+    /// of `machine`, the sandbox's.
+    pub async fn sandbox(
+        &self,
+        id: &str,
+        machine: Arc<Machine>,
+        request: Request<Body>,
+    ) -> Response {
+        let handler = match handler(format!("/sandboxes/{id}/files"), &request) {
+            Ok(handler) => handler,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let handler = handler
+            .filesystem(Box::new(sandbox::Fs(machine)))
+            .build_handler();
+        handler.handle(request).await.map(Body::new)
+    }
+
+    /// A WebDAV request to `root`, a volume or a snapshot.
     async fn dav(&self, root: &Root, request: Request<Body>, held: Held<'_>) -> Response {
-        if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE)
-        {
-            return (StatusCode::BAD_REQUEST, "a file is written whole").into_response();
-        }
-        if takes_root(&root.to_string(), &request) {
-            return refused(
-                StatusCode::FORBIDDEN,
-                "the root is removed through its resource",
-            )
-            .into_response();
-        }
-        let handler = DavHandler::builder()
-            .strip_prefix(root.to_string())
-            .hide_symlinks(true)
-            .read_buf_size(volume::READ);
+        let handler = match handler(root.to_string(), &request) {
+            Ok(handler) => handler,
+            Err(refusal) => return refusal.into_response(),
+        };
         match root {
             Root::Volume(name) => {
                 let volume = match self.volumes.open(name) {
@@ -145,6 +156,24 @@ impl Files {
             .await
             .map_err(|e| refused(snapshot_status(&e), e))
     }
+}
+
+/// What answers a WebDAV request under `prefix`, but its filesystem: refused for a write of part
+/// of a file, since a file is written whole, and for one that [takes the root](takes_root).
+fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavConfig, Refusal> {
+    if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
+    }
+    if takes_root(&prefix, request) {
+        return Err(refused(
+            StatusCode::FORBIDDEN,
+            "the root is removed through its resource",
+        ));
+    }
+    Ok(DavHandler::builder()
+        .strip_prefix(prefix)
+        .hide_symlinks(true)
+        .read_buf_size(volume::READ))
 }
 
 /// Whether `request` would take the root at `prefix` away or write over it: a `DELETE` or `MOVE`

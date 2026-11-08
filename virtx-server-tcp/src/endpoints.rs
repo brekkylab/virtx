@@ -36,7 +36,7 @@ use virtx_uvm::{
     Digest, Files, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, Machine,
     MachineConfig, MachineError, MachineSpec, Network, Os, Ports, Reference, RegistryClient,
     Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeMount, VolumeStore, build_step,
-    wire::MachineMessage,
+    wire::CtrlResp,
 };
 
 /// An image job, with the entries its log carries.
@@ -136,8 +136,8 @@ impl Home {
         })
     }
 
-    /// Forget every sandbox that has run nothing, and been reached at none of its ports, for
-    /// `idle`, and stop its machine.
+    /// Forget every sandbox that has run nothing, and been reached at none of its ports or its
+    /// files, for `idle`, and stop its machine.
     pub fn forget_idle(&self, idle: Duration) {
         let mut forgotten = Vec::new();
         self.sandboxes.lock().unwrap().retain(|_, sandbox| {
@@ -223,7 +223,7 @@ struct Sandbox {
     image: Digest,
     _held: ImageHold,
     snapshot: Option<String>,
-    machine: Machine,
+    machine: Arc<Machine>,
     /// Whether its machine runs still.
     up: AtomicBool,
     /// Its jobs, by id, until each is removed.
@@ -231,7 +231,8 @@ struct Sandbox {
     /// Each command sent to the machine and not yet answered, in the order sent, and who waits
     /// for its job.
     starting: Mutex<VecDeque<Starting>>,
-    /// When it was made, or a job in it or a connection through its ports last ended.
+    /// When it was made, or a job in it, a connection through its ports or a request to its files
+    /// last ended.
     used: Mutex<Instant>,
     /// Where its machine's ports are reached, where it answers each was opened, and the
     /// capability in each answer, by the port it opens.
@@ -283,7 +284,7 @@ fn read(sandbox: Arc<Sandbox>) {
     let mut running = HashMap::new();
     while let Some(message) = sandbox.machine.recv() {
         match message {
-            MachineMessage::Started(started) => {
+            CtrlResp::Started(started) => {
                 let Some((cmd, waiter)) = sandbox.starting.lock().unwrap().pop_front() else {
                     continue;
                 };
@@ -304,17 +305,17 @@ fn read(sandbox: Arc<Sandbox>) {
                 });
                 let _ = waiter.send(started);
             }
-            MachineMessage::Stdout { id, line } => {
+            CtrlResp::Stdout { id, line } => {
                 if let Some(job) = running.get(&id) {
                     job.write(SandboxJobEntry::Stdout(line), SandboxJobEntry::Truncated {});
                 }
             }
-            MachineMessage::Stderr { id, line } => {
+            CtrlResp::Stderr { id, line } => {
                 if let Some(job) = running.get(&id) {
                     job.write(SandboxJobEntry::Stderr(line), SandboxJobEntry::Truncated {});
                 }
             }
-            MachineMessage::Exited { id, code } => {
+            CtrlResp::Exited { id, code } => {
                 if let Some(job) = running.remove(&id) {
                     *sandbox.used.lock().unwrap() = Instant::now();
                     job.end(
@@ -323,7 +324,7 @@ fn read(sandbox: Arc<Sandbox>) {
                     );
                 }
             }
-            MachineMessage::Ready(_) | MachineMessage::Log { .. } => {}
+            CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}
         }
     }
     // Gone, and what ran in it with it: killed, as far as anything in it can tell.
@@ -480,6 +481,9 @@ pub fn router() -> Router {
         .route("/snapshots/{name}/files", any(files))
         .route("/snapshots/{name}/files/", any(files))
         .route("/snapshots/{name}/files/{*path}", any(files))
+        .route("/sandboxes/{id}/files", any(sandbox_files))
+        .route("/sandboxes/{id}/files/", any(sandbox_files))
+        .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
@@ -860,6 +864,31 @@ async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Re
     home.files.handle(request, &|name| home.holds(name)).await
 }
 
+/// A request to the files of a sandbox, over WebDAV, asked of its machine: one whose machine has
+/// exited answers `409`.
+async fn sandbox_files(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(segments): Segments<HashMap<String, String>>,
+    request: axum::extract::Request,
+) -> Answer {
+    let id = &segments["id"];
+    let sandbox = home.sandbox(id)?;
+    if !sandbox.up.load(Ordering::Relaxed) {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            "ended",
+            format!("sandbox {id}'s machine has exited"),
+        ));
+    }
+    *sandbox.used.lock().unwrap() = Instant::now();
+    let answer = home
+        .files
+        .sandbox(id, Arc::clone(&sandbox.machine), request)
+        .await;
+    *sandbox.used.lock().unwrap() = Instant::now();
+    Ok(answer)
+}
+
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
     let listed: Vec<_> = sandboxes
@@ -997,7 +1026,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
         image: digest,
         _held: held,
         snapshot: args.snapshot,
-        machine,
+        machine: Arc::new(machine),
         up: AtomicBool::new(true),
         jobs: Mutex::default(),
         starting: Mutex::default(),

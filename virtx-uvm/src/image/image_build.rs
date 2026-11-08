@@ -16,7 +16,7 @@ use virtx_core::Step;
 
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
-use crate::machine::wire::MachineMessage;
+use crate::machine::wire::CtrlResp;
 use crate::machine::{self, Machine, MachineConfig, MachineSpec};
 use crate::snapshot::{self, Snapshot};
 
@@ -145,7 +145,7 @@ pub async fn build_step(
         machine.exec(cmd)?;
         let id = loop {
             match machine.recv() {
-                Some(MachineMessage::Started(started)) => {
+                Some(CtrlResp::Started(started)) => {
                     break started.map_err(machine::Error::NotStarted)?;
                 }
                 Some(_) => {}
@@ -158,13 +158,12 @@ pub async fn build_step(
         };
         loop {
             match machine.recv() {
-                Some(
-                    MachineMessage::Stdout { id: of, line }
-                    | MachineMessage::Stderr { id: of, line },
-                ) if of == id => {
+                Some(CtrlResp::Stdout { id: of, line } | CtrlResp::Stderr { id: of, line })
+                    if of == id =>
+                {
                     let _ = lines.send(line);
                 }
-                Some(MachineMessage::Exited { id: of, code }) if of == id => return Ok(code),
+                Some(CtrlResp::Exited { id: of, code }) if of == id => return Ok(code),
                 Some(_) => {}
                 None => {
                     return Err(machine::Error::Died(

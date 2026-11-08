@@ -5,7 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use oci_spec::image::Config;
@@ -15,7 +15,7 @@ use crate::{
     machine::{
         Error, Network, Result,
         boot::{self, BootArgs},
-        wire::{self, HostMessage, MachineMessage},
+        wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
     },
     snapshot::Snapshot,
 };
@@ -25,6 +25,10 @@ const TAIL: usize = 50;
 
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long [`Machine::io`] waits for the guest's answer, from when it is asked, before it
+/// gives up on it.
+pub(super) const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What a machine is: the root filesystem it boots, the image's config it runs under, where
 /// its writes go, and how big a machine runs them.
@@ -95,11 +99,15 @@ pub struct VolumeMount {
 /// killed, and what the guest had not yet written to its disk is lost.
 ///
 /// Shared between threads: one waits on [`recv`](Machine::recv) while others
-/// [`exec`](Machine::exec), [`signal`](Machine::signal) and [`kill`](Machine::kill).
+/// [`exec`](Machine::exec), [`signal`](Machine::signal), [`kill`](Machine::kill) and ask of its
+/// files with [`io`](Machine::io).
 pub struct Machine {
     process: Mutex<Child>,
     ctrlin: Mutex<io::PipeWriter>,
     ctrlout: Mutex<io::PipeReader>,
+    /// Where requests go to the thread that holds `ioin` and `ioout`, which asks them one at a
+    /// time.
+    io: mpsc::Sender<IoJob>,
     /// Where on this host's loopback each of its [`ports`](MachineConfig::ports) is reached.
     pub published: Vec<(u16, SocketAddr)>,
 }
@@ -126,10 +134,14 @@ impl Machine {
         let (their_ctrlin, ctrlin) = io::pipe().map_err(|e| Error::io("making ctrlin", e))?;
         let (mut ctrlout, their_ctrlout) =
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
+        let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
+        let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
         let args = BootArgs {
             config,
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
+            ioin: raw(&their_ioin),
+            ioout: raw(&their_ioout),
         };
         let mut command = Command::new(program);
         command
@@ -138,26 +150,30 @@ impl Machine {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        inherit(&mut command, [args.ctrlin, args.ctrlout])
-            .map_err(|e| Error::io("handing the machine its control channel", e))?;
+        inherit(
+            &mut command,
+            [args.ctrlin, args.ctrlout, args.ioin, args.ioout],
+        )
+        .map_err(|e| Error::io("handing the machine its channels", e))?;
         let mut process = command
             .spawn()
             .map_err(|e| Error::io("starting the machine's process", e))?;
-        // The process's now: held here too, they would keep the channel open past its end.
-        drop((their_ctrlin, their_ctrlout));
+        // The process's now: held here too, they would keep the channels open past its end.
+        drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 
         let mut tail = VecDeque::with_capacity(TAIL);
         loop {
             match wire::recv(&mut ctrlout).ok().flatten() {
-                Some(MachineMessage::Ready(published)) => {
+                Some(CtrlResp::Ready(published)) => {
                     return Ok(Machine {
                         process: Mutex::new(process),
                         ctrlin: Mutex::new(ctrlin),
                         ctrlout: Mutex::new(ctrlout),
+                        io: files(ioin, ioout),
                         published,
                     });
                 }
-                Some(MachineMessage::Log { message, .. }) => {
+                Some(CtrlResp::Log { message, .. }) => {
                     if tail.len() == TAIL {
                         tail.pop_front();
                     }
@@ -179,24 +195,21 @@ impl Machine {
     }
 
     /// Start `cmd` in the guest, beside whatever else runs there. Answered by a
-    /// [`Started`](MachineMessage::Started) from [`recv`](Machine::recv), each `exec` in turn,
+    /// [`Started`](CtrlResp::Started) from [`recv`](Machine::recv), each `exec` in turn,
     /// with its pid there: the id its output and its end come back under.
     pub fn exec(&self, cmd: Vec<String>) -> Result<()> {
         if cmd.is_empty() {
             return Err(Error::NoCommand);
         }
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &HostMessage::Exec { cmd },
-        )
-        .map_err(|e| Error::io("sending the command", e))
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Exec { cmd })
+            .map_err(|e| Error::io("sending the command", e))
     }
 
     /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.
     pub fn signal(&self, id: u32, signal: i32) -> Result<()> {
         wire::send(
             &mut *self.ctrlin.lock().unwrap(),
-            &HostMessage::Signal { id, signal },
+            &CtrlReq::Signal { id, signal },
         )
         .map_err(|e| Error::io("sending the signal", e))
     }
@@ -205,7 +218,7 @@ impl Machine {
     /// by [`STOP_TIMEOUT`], and answer once its process has ended and let go of what it held,
     /// so [`recv`](Machine::recv) ends.
     pub fn stop(&self) {
-        let _ = wire::send(&mut *self.ctrlin.lock().unwrap(), &HostMessage::Shutdown);
+        let _ = wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Shutdown);
         let mut process = self.process.lock().unwrap();
         let until = Instant::now() + STOP_TIMEOUT;
         while matches!(process.try_wait(), Ok(None)) && Instant::now() < until {
@@ -223,20 +236,98 @@ impl Machine {
         let _ = process.wait();
     }
 
+    /// Ask `request` of the guest's files, with `data` for a [`Write`](IoReq::Write),
+    /// and wait for the answer, with what it read for a [`Read`](IoReq::Read). One
+    /// request at a time: another waits until this one is answered, and neither waits past
+    /// [`IO_TIMEOUT`]. One given up on is not asked, unless it already was.
+    pub fn io(&self, request: &IoReq, data: &[u8]) -> Result<(IoResp, Vec<u8>)> {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        let (answer, answered) = mpsc::sync_channel(1);
+        let job = IoJob {
+            request: request.clone(),
+            data: data.to_vec(),
+            deadline,
+            answer,
+        };
+        let gone = || Error::io("asking the guest's files", io::ErrorKind::BrokenPipe.into());
+        self.io.send(job).map_err(|_| gone())?;
+        match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::io(
+                "waiting for the guest's files",
+                io::ErrorKind::TimedOut.into(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(gone()),
+        }
+    }
+
     /// The next thing the machine says, waiting for it; `None` once its process has ended.
     /// One thread at a time waits here.
-    pub fn recv(&self) -> Option<MachineMessage> {
+    pub fn recv(&self) -> Option<CtrlResp> {
         wire::recv(&mut *self.ctrlout.lock().unwrap())
             .ok()
             .flatten()
     }
 }
 
+/// A request for the thread [`files`] starts, and where its answer goes.
+struct IoJob {
+    request: IoReq,
+    data: Vec<u8>,
+    /// When whoever asked stops waiting.
+    deadline: Instant,
+    answer: mpsc::SyncSender<Result<(IoResp, Vec<u8>)>>,
+}
+
+/// Start the thread that asks the guest's files over `ioin` and `ioout`, a request at a time,
+/// and answer where requests for it go. It ends with the [`Machine`], or once the channel has.
+fn files(mut ioin: io::PipeWriter, mut ioout: io::PipeReader) -> mpsc::Sender<IoJob> {
+    let (jobs, queued) = mpsc::channel::<IoJob>();
+    std::thread::spawn(move || {
+        for job in queued {
+            if Instant::now() >= job.deadline {
+                continue;
+            }
+            let answer = exchange(&mut ioin, &mut ioout, &job.request, &job.data);
+            let broken = answer.is_err();
+            let _ = job.answer.send(answer);
+            if broken {
+                // A frame cut short leaves the channel out of step for good.
+                break;
+            }
+        }
+    });
+    jobs
+}
+
+/// Send `request`, with `data` for a [`Write`](IoReq::Write), and read its answer.
+fn exchange(
+    ioin: &mut io::PipeWriter,
+    ioout: &mut io::PipeReader,
+    request: &IoReq,
+    data: &[u8],
+) -> Result<(IoResp, Vec<u8>)> {
+    wire::send(ioin, request).map_err(|e| Error::io("sending to the guest's files", e))?;
+    if matches!(request, IoReq::Write { .. }) {
+        wire::send_data(ioin, data).map_err(|e| Error::io("sending to the guest's files", e))?;
+    }
+    let answer = wire::recv::<IoResp>(ioout)
+        .and_then(|answer| answer.ok_or_else(|| io::ErrorKind::UnexpectedEof.into()))
+        .map_err(|e| Error::io("reading the guest's answer", e))?;
+    let read = match answer {
+        IoResp::Data => {
+            wire::recv_data(ioout).map_err(|e| Error::io("reading the guest's answer", e))?
+        }
+        _ => Vec::new(),
+    };
+    Ok((answer, read))
+}
+
 /// A pipe end as the command line names it.
 ///
 /// Neither std nor tokio hands a child anything past its stdin, stdout and stderr, so the
-/// control channel's two ends are kept open across `exec` and named on its command line: by
-/// descriptor number on Unix, by handle value on Windows.
+/// channels' ends are kept open across `exec` and named on its command line: by descriptor
+/// number on Unix, by handle value on Windows.
 #[cfg(unix)]
 fn raw(end: &impl std::os::fd::AsRawFd) -> u64 {
     end.as_raw_fd() as u64
@@ -249,7 +340,7 @@ fn raw(end: &impl std::os::windows::io::AsRawHandle) -> u64 {
 
 /// Keep `ends` open in the process `command` spawns, which they are not by default.
 #[cfg(unix)]
-fn inherit(command: &mut Command, ends: [u64; 2]) -> io::Result<()> {
+fn inherit(command: &mut Command, ends: [u64; 4]) -> io::Result<()> {
     use std::os::unix::process::CommandExt as _;
 
     // SAFETY: `fcntl` is async-signal-safe, which is all that may run between `fork` and
@@ -272,7 +363,7 @@ fn inherit(command: &mut Command, ends: [u64; 2]) -> io::Result<()> {
 /// Inheritable from here on, so a process this one spawns meanwhile gets them too, and holds
 /// the channel open for as long as it lives.
 #[cfg(windows)]
-fn inherit(_: &mut Command, ends: [u64; 2]) -> io::Result<()> {
+fn inherit(_: &mut Command, ends: [u64; 4]) -> io::Result<()> {
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
 
     for end in ends {
@@ -295,7 +386,9 @@ pub fn enter() -> Result<Infallible> {
         .map_err(|e| Error::io("reading the machine to be", io::Error::other(e)))?;
     // SAFETY: `start` left these open for this process, and named them to it alone.
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
-    let entered = boot::boot(args.config, ctrlin);
+    // SAFETY: as above.
+    let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
+    let entered = boot::boot(args.config, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
     }

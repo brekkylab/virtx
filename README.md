@@ -253,7 +253,7 @@ sandbox = await client.create_sandbox(
 )
 ```
 
-The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it:
+The files of a volume or a snapshot are read and written from the client, without a sandbox, each request naming its root and a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, with the root `SandboxFiles(sandbox.id)`:
 
 ```python
 from virtx import Volume

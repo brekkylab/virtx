@@ -12,10 +12,11 @@
 //! A machine stays up once it has booted, and runs the commands it is sent side by side, each a
 //! process of the guest's under its pid there ([`Machine::exec`]), until it is stopped
 //! ([`Machine::stop`]), or dropped, which kills it. The host and the process talk over two pipes
-//! and nothing else (see [`wire`]): `ctrlin`, which the host sends commands and signals through,
-//! and `ctrlout` ([`Machine::recv`]), which the process says everything on -- that the guest is
-//! up and where its ports are published, each process's id as it starts, its output and how it
-//! ended under that id, and the process's log.
+//! (see [`wire`]): `ctrlin`, which the host sends commands and signals through, and `ctrlout`
+//! ([`Machine::recv`]), which the process says everything on -- that the guest is up and where
+//! its ports are published, each process's id as it starts, its output and how it ended under
+//! that id, and the process's log. Two more, `ioin` and `ioout`, run past the process to the
+//! agent, which reads and writes the guest's files over them ([`Machine::io`]).
 
 mod boot;
 mod error;

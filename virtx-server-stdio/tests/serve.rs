@@ -564,6 +564,128 @@ async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
 }
 
 #[tokio::test]
+#[ignore]
+async fn the_files_of_a_sandbox_are_what_its_processes_see() {
+    let server = Server::spawn("sandbox-files");
+    server.pull_image("alpine:3.20").await;
+    server.client.create_volume(Some("data")).await.unwrap();
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.volumes = vec![SandboxVolume {
+        volume: "data".into(),
+        path: "/data".into(),
+        readonly: true,
+    }];
+    let id = server.client.create_sandbox(&args).await.unwrap().id;
+    let client = &server.client;
+    let root = FileRoot::Sandbox(id.clone());
+
+    // The root as a process sees it, but for the kernel's filesystems and the agent's.
+    let listed = names(client.read_dir(&root, "").await.unwrap());
+    for shown in ["etc", "root", "data"] {
+        assert!(listed.contains(&shown.into()), "{listed:?}");
+    }
+    for hidden in ["proc", "sys", "dev", ".virtx"] {
+        assert!(!listed.contains(&hidden.into()), "{listed:?}");
+    }
+    assert_eq!(status(client.stat_file(&root, "proc/self").await), 404);
+
+    // What is written here a process reads at once, and the other way round.
+    client
+        .write_file(&root, "root/put", "put\n", None)
+        .await
+        .unwrap();
+    let (lines, ended) = server.exec(&id, &["cat", "/root/put"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["put".into()], 0));
+    let (_, ended) = server
+        .exec(&id, &["sh", "-c", "echo made > /root/made"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+    assert_eq!(
+        client.read_text(&root, "root/made").await.unwrap(),
+        "made\n"
+    );
+
+    // A file larger than one request carries goes and comes back whole.
+    let big: Vec<u8> = (0..3_500_000u32).map(|i| (i % 251) as u8).collect();
+    client
+        .write_file(&root, "root/big", big.clone(), None)
+        .await
+        .unwrap();
+    let (lines, _) = server.exec(&id, &["wc", "-c", "/root/big"], None).await;
+    assert_eq!(lines, ["3500000 /root/big"]);
+    let read = client.read_file(&root, "root/big", 0, None).await.unwrap();
+    assert!(read[..] == big[..], "{} bytes read back", read.len());
+
+    // A file written over keeps its mode, and runs as it did.
+    client
+        .write_file(&root, "root/run", "#!/bin/sh\necho one\n", None)
+        .await
+        .unwrap();
+    let (_, ended) = server.exec(&id, &["chmod", "755", "/root/run"], None).await;
+    assert_eq!(ended.unwrap(), 0);
+    client
+        .write_file(&root, "root/run", "#!/bin/sh\necho two\n", None)
+        .await
+        .unwrap();
+    let (lines, ended) = server.exec(&id, &["/root/run"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["two".into()], 0));
+
+    // Directories are made, and files moved, copied and removed in them.
+    client.create_dir_all(&root, "work/a/b").await.unwrap();
+    client
+        .rename_file(&root, "root/put", "work/a/b/moved", false)
+        .await
+        .unwrap();
+    client
+        .copy_file(&root, "work/a/b/moved", "work/copied", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        names(client.read_dir(&root, "work").await.unwrap()).len(),
+        2
+    );
+    client.remove_file(&root, "work", false).await.unwrap();
+    let (_, ended) = server.exec(&id, &["test", "-e", "/work"], None).await;
+    assert_eq!(ended.unwrap(), 1);
+
+    // A link is not shown, a read-only volume takes no write, and the root is not removed.
+    let (_, ended) = server
+        .exec(&id, &["ln", "-s", "/etc/hostname", "/root/link"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+    assert!(!names(client.read_dir(&root, "root").await.unwrap()).contains(&"link".into()));
+    assert_eq!(
+        status(client.read_file(&root, "root/link", 0, None).await),
+        404
+    );
+    assert_eq!(
+        status(client.write_file(&root, "data/x", "x", None).await),
+        403
+    );
+    assert_eq!(status(client.remove_file(&root, "", false).await), 403);
+
+    // A pipe is neither read nor written, and holds up nothing asked after it.
+    let (_, ended) = server.exec(&id, &["mkfifo", "/root/fifo"], None).await;
+    assert_eq!(ended.unwrap(), 0);
+    let fifo = async {
+        assert_eq!(
+            status(client.copy_file(&root, "root/run", "root/fifo", true).await),
+            403
+        );
+        assert_eq!(
+            status(client.read_file(&root, "root/fifo", 0, None).await),
+            404
+        );
+        client.read_text(&root, "root/made").await.unwrap()
+    };
+    let read = tokio::time::timeout(std::time::Duration::from_secs(10), fifo).await;
+    assert_eq!(read.expect("a pipe held the files up"), "made\n");
+
+    server.client.remove_sandbox(&id).await.unwrap();
+    assert_eq!(status(client.read_dir(&root, "").await), 404);
+}
+
+#[tokio::test]
 async fn the_files_of_a_snapshot_are_kept_in_its_image() {
     let server = Server::spawn("snapshot-files");
     server

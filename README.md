@@ -274,6 +274,8 @@ Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest
 
 ## How it works
 
+### Client-server model
+
 virtx follows a client-server model.
 Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
 
@@ -295,9 +297,13 @@ Either way, client and server speak the same plain HTTP protocol; only the trans
 Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
 Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
 
-## Core concepts
+### Core concepts
 
 The main resource is the **sandbox**: a VM you run commands in.
+
+<p align="center">
+  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable snapshot over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
+</p>
 
 A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **snapshot** above, where its writes go.
 

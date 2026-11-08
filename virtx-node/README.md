@@ -56,7 +56,7 @@ for (const entry of await volume.readDir('in')) console.log(entry.name, entry.me
 console.log((await volume.readFile('in/notes.txt')).toString())
 ```
 
-The client's own files requests name the root, `{ volume }`, `{ snapshot }` or `{ sandbox }`: `await client.readFile({ volume: 'data' }, 'in/notes.txt')`.
+What acts on a sandbox, a volume, a snapshot or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
 
 The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or a copy beside `index.js`, or the one in the platform's package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 

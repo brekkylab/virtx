@@ -2,13 +2,13 @@
 
 use virtx_core::{FileRoot, SnapshotListOutputItem as SnapshotInfo};
 
-use crate::{Call, Client, Files};
+use crate::{Call, Client, files};
 
 /// A snapshot the server holds, as making it or asking for it answered, and the client that
-/// reaches it: its files, through [`Files`], refused with a `423` while a sandbox holds it.
+/// reaches it: its files, through [`Files`](crate::Files), refused with a `423` while a sandbox holds it.
 ///
 /// Cloning holds the same client once more. Dropping it leaves the snapshot as it is; it goes
-/// with [`remove`](Self::remove), or [`Client::remove_snapshot`].
+/// with [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Snapshot {
     client: Client,
@@ -35,24 +35,19 @@ impl Snapshot {
         &self.info
     }
 
-    /// Its files, for the client's files requests.
-    pub fn root(&self) -> FileRoot {
-        FileRoot::Snapshot(self.info.name.clone())
-    }
-
     /// Delete it and its upper layer; refused with a `409` while a sandbox holds it.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_snapshot(&self.info.name)
     }
 }
 
-impl Files for Snapshot {
+impl files::sealed::Root for Snapshot {
     fn client(&self) -> &Client {
         &self.client
     }
 
     fn root(&self) -> FileRoot {
-        Snapshot::root(self)
+        FileRoot::Snapshot(self.info.name.clone())
     }
 }
 

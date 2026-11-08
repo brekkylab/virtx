@@ -386,7 +386,7 @@ impl Client {
     }
 
     /// Delete the snapshot `name` and its upper layer.
-    pub fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
         let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_snapshot, args)
     }
@@ -429,13 +429,13 @@ impl Client {
     }
 
     /// Delete the volume `name` and everything in it.
-    pub fn remove_volume(&self, name: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_volume(&self, name: impl AsRef<str>) -> Call<()> {
         let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_volume, args)
     }
 
     /// The mounts in `volume`, without their credentials.
-    pub fn list_volume_mount(
+    pub(crate) fn list_volume_mount(
         &self,
         volume: impl AsRef<str>,
     ) -> Call<Vec<VolumeMountListOutputItem>> {
@@ -444,7 +444,7 @@ impl Client {
     }
 
     /// Mount `source` at `path` in `volume`, a directory the mount creates.
-    pub fn create_volume_mount(
+    pub(crate) fn create_volume_mount(
         &self,
         volume: impl AsRef<str>,
         path: impl AsRef<str>,
@@ -455,38 +455,42 @@ impl Client {
     }
 
     /// Take away the mount at `path` in `volume`, leaving its source as it is.
-    pub fn remove_volume_mount(&self, volume: impl AsRef<str>, path: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_volume_mount(
+        &self,
+        volume: impl AsRef<str>,
+        path: impl AsRef<str>,
+    ) -> Call<()> {
         let args = json!({ "volume": volume.as_ref(), "path": path.as_ref() });
         self.call(self.api.virtx_client_remove_volume_mount, args)
     }
 
     /// What is at `path` in `root`, a path relative to its root as `dir/file.txt`.
-    pub fn stat_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<Metadata> {
+    pub(crate) fn stat_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<Metadata> {
         self.call(self.api.virtx_client_stat_file, self.at(root, path))
     }
 
     /// Whether anything is at `path` in `root`.
-    pub fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_file_exists, self.at(root, path))
     }
 
     /// Whether a file is at `path` in `root`.
-    pub fn is_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn is_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_is_file, self.at(root, path))
     }
 
     /// Whether a directory is at `path` in `root`.
-    pub fn is_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn is_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_is_dir, self.at(root, path))
     }
 
     /// The entries of the directory at `path` in `root`.
-    pub fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
+    pub(crate) fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
         self.call(self.api.virtx_client_read_dir, self.at(root, path))
     }
 
     /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
-    pub fn read_file(
+    pub(crate) fn read_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -503,7 +507,7 @@ impl Client {
     }
 
     /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
-    pub fn read_text(&self, root: &FileRoot, path: impl Into<String>) -> Call<String> {
+    pub(crate) fn read_text(&self, root: &FileRoot, path: impl Into<String>) -> Call<String> {
         self.call(self.api.virtx_client_read_text, self.at(root, path))
     }
 
@@ -511,7 +515,7 @@ impl Client {
     /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
     /// the file gave, the write goes only while the file still has it, and is refused with a
     /// `412` otherwise.
-    pub fn write_file(
+    pub(crate) fn write_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -538,20 +542,20 @@ impl Client {
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
-    pub fn create_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+    pub(crate) fn create_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
         self.call(self.api.virtx_client_create_dir, self.at(root, path))
     }
 
     /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
     /// needed, and one there already is left as it is. Refused with a `405` when a file is at
     /// `path`.
-    pub fn create_dir_all(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+    pub(crate) fn create_dir_all(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
         self.call(self.api.virtx_client_create_dir_all, self.at(root, path))
     }
 
     /// Remove what is at `path` in `root`: a directory with everything in it. With
     /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`.
-    pub fn remove_file(
+    pub(crate) fn remove_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -567,7 +571,7 @@ impl Client {
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
     /// `overwrite`, and refused if not and something is there.
-    pub fn rename_file(
+    pub(crate) fn rename_file(
         &self,
         root: &FileRoot,
         from: impl Into<String>,
@@ -585,7 +589,7 @@ impl Client {
 
     /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
     /// [`rename_file`](Client::rename_file) replaces what is at `to`.
-    pub fn copy_file(
+    pub(crate) fn copy_file(
         &self,
         root: &FileRoot,
         from: impl Into<String>,
@@ -638,13 +642,13 @@ impl Client {
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
-    pub fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)
     }
 
     /// Every job in the sandbox `id`.
-    pub fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
+    pub(crate) fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
         let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref() });
         let client = self.clone();
@@ -661,7 +665,7 @@ impl Client {
     /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
     /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s, or
     /// [`StartedJob::log`].
-    pub fn exec_sandbox(
+    pub(crate) fn exec_sandbox(
         &self,
         id: impl AsRef<str>,
         args: &SandboxExecArgs,
@@ -688,7 +692,11 @@ impl Client {
     }
 
     /// The job `job` in the sandbox `id`.
-    pub fn get_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<SandboxJob> {
+    pub(crate) fn get_sandbox_job(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+    ) -> Call<SandboxJob> {
         let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
         let client = self.clone();
@@ -697,14 +705,14 @@ impl Client {
     }
 
     /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
-    pub fn remove_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<()> {
         let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox_job, args)
     }
 
     /// Send `signal`, such as `SIGTERM`, to the process of the job `job` in the sandbox `id`
     /// and every process it started.
-    pub fn signal_sandbox_job(
+    pub(crate) fn signal_sandbox_job(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,
@@ -718,7 +726,7 @@ impl Client {
     /// Write `data` to the stdin of the process of the job `job` in the sandbox `id`, then
     /// close it if `eof`. Answers once it is written: a caller writes again only then, so the
     /// writes land in order.
-    pub fn write_sandbox_job_stdin(
+    pub(crate) fn write_sandbox_job_stdin(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,
@@ -736,7 +744,7 @@ impl Client {
 
     /// The log of the job `job` in the sandbox `id`, its process's output, from its start or
     /// after its `after`th entry, until its `end` entry. Dropping it leaves the job as it is.
-    pub fn sandbox_job_log(
+    pub(crate) fn sandbox_job_log(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,

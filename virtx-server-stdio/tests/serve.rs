@@ -484,6 +484,52 @@ async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
     server.client.remove_snapshot("work").await.unwrap();
 }
 
+/// `abin/` beside the server is the guest's `/abin`, read-only and first on `PATH`, with what
+/// each program is beside it.
+#[tokio::test]
+#[ignore]
+async fn a_sandbox_runs_the_programs_in_abin_by_name() {
+    let server = Server::spawn("abin");
+    server.pull_image("alpine:3.20").await;
+    let id = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+
+    let (lines, ended) = server
+        .exec(&id, &["sh", "-c", "command -v index"], None)
+        .await;
+    assert_eq!((lines, ended.unwrap()), (vec!["/abin/index".into()], 0));
+    let (_, ended) = server
+        .exec(&id, &["test", "-f", "/abin/skills/index/SKILLS.md"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+    let (_, ended) = server.exec(&id, &["touch", "/abin/x"], None).await;
+    assert_ne!(ended.unwrap(), 0, "/abin is read-only");
+
+    let (lines, ended) = server
+        .exec(
+            &id,
+            &[
+                "sh",
+                "-c",
+                "mkdir -p /root/docs && echo 'the borrow checker' > /root/docs/a.md \
+                 && cd /root && index init notes.db && index ingest notes.db docs >/dev/null \
+                 && index search notes.db borrow",
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(ended.unwrap(), 0, "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains("docs/a.md")),
+        "{lines:?}"
+    );
+    server.client.remove_sandbox(&id).await.unwrap();
+}
+
 #[tokio::test]
 async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     let server = Server::spawn("volume-files");

@@ -35,10 +35,10 @@
 //!
 //! What this builds is for the machine it runs on. Cross-building pdfium to
 //! `*-unknown-linux-musl` is not a matter of another `gn` argument — it needs a musl sysroot
-//! and a C++ toolchain aimed at it, which is the same wall `mem` and `index` meet with
+//! and a C++ toolchain aimed at it, which is the same wall `index` meets with
 //! `rusqlite`'s C. So a musl target here is refused with that said, rather than started and
 //! failed twenty minutes later. Building the guest's `/abin` on a guest-shaped machine is
-//! what answers it, and it answers all three programs at once.
+//! what answers it, and it answers both programs at once.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -427,7 +427,7 @@ mod pdfium {
             return Err(format!(
                 "{target} needs a musl sysroot and a C++ toolchain aimed at it, which this build \
                  script does not have and cannot conjure. Build the library on a musl machine — \
-                 the same one that has to build `mem` and `index`, whose C has the same problem — \
+                 the same one that has to build `index`, whose C has the same problem — \
                  and point {DIR_ENV} at it."
             ));
         }

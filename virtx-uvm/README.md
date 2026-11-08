@@ -945,12 +945,12 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 ## `/abin`
 
-`/abin` is a directory of virtx's own executables for the guest: today `index` and `mem` --
-the programs in [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+`/abin` is a directory of virtx's own executables for the guest: today `index`, from [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
 
-**No machine is given it at present.** `cargo xtask build abin` builds it, `cargo xtask install`
-installs it beside the servers, and the dist workflow puts it in a release, but neither server
-shares it into a machine: that went with the move to a machine per sandbox, and is not back.
+Every machine gets the `abin/` directory beside the server's binary, shared read-only and mounted at `/abin`, with `/abin` put in front of the image's `PATH`.
+A host with no `abin/` boots machines without one rather than refusing to.
+On Windows each program is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report.
+`cargo xtask test` builds it beside the server binary it tests.
 
 ```sh
 cargo xtask build abin                     # -> target/release/abin, beside the server;
@@ -1010,8 +1010,8 @@ virtx-server-tcp/          the same server over HTTP, to the users and projects 
 virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
                             own workspace, built for musl by this crate's build script and
                             embedded in it
-virtx-abins/                the programs for /abin -- index and mem, with docread beside them
-                            -- and a SKILLS.md each; its own workspace, built for musl
+virtx-abins/                the programs for /abin -- index, with docread beside it -- and a
+                            SKILLS.md each; its own workspace, built for musl
 3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch
 3rdparty/MoltenVK/          fork of MoltenVK, with SPIRV-Cross; macOS builds only
 3rdparty/libepoxy/          fork of libepoxy at 1.5.10, unchanged; Windows builds only

@@ -66,7 +66,7 @@ const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
 ];
-const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
+const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
@@ -424,7 +424,7 @@ fn build(options: &Options) -> anyhow::Result<()> {
         build_servers(options)?;
     }
     if options.has(Component::Abin) {
-        build_abin(options)?;
+        build_abin(options.debug, &options.out().join("abin"))?;
     }
     if options.has(Component::Kernel) {
         build_kernel()?;
@@ -509,16 +509,19 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
-/// looks, and the entitlement on it.
+/// looks, `abin/` beside it, where a machine's `/abin` is shared from, and the entitlement on
+/// it. `abin/` is built every time, in the debug profile, so a test runs the programs as they
+/// stand.
 fn ready(exe: &Path) -> anyhow::Result<()> {
     let kernel = kernel_library()?;
-    let beside = exe
+    let dir = exe
         .parent()
-        .context("the server binary is in a directory")?
-        .join(kernel.file_name().expect("the kernel is a file"));
+        .context("the server binary is in a directory")?;
+    let beside = dir.join(kernel.file_name().expect("the kernel is a file"));
     if !beside.is_file() {
         place(&kernel, &beside)?;
     }
+    build_abin(true, &dir.join("abin"))?;
     sign(exe)
 }
 
@@ -639,7 +642,9 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_abin(options: &Options) -> anyhow::Result<()> {
+/// Build the `/abin` programs for the guest, in the debug or release profile, and place them
+/// and their `SKILLS.md` in `out`.
+fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
     let arch = target.split('-').next().unwrap_or_default();
@@ -656,7 +661,7 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     let crate_dir = root.join("virtx-abins");
     let mut cargo = cross_cargo(&crate_dir);
     cargo.args(["build", "--target", target]);
-    if !options.debug {
+    if !debug {
         cargo.arg("--release");
     }
     for (package, _) in ABINS {
@@ -664,11 +669,11 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     }
     run(cargo, &format!("abin for {target}"))?;
 
-    let out = options.out().join("abin");
-    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    let profile = if debug { "debug" } else { "release" };
+    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     for (_, program) in ABINS {
         place(
-            &target_path().join(format!("{target}/{}/{program}", options.profile())),
+            &target_path().join(format!("{target}/{profile}/{program}")),
             &out.join(program),
         )?;
 

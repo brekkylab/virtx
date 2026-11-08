@@ -10,16 +10,11 @@
 //! index drop   notes.db
 //! ```
 //!
-//! # What this is, next to `mem`
+//! # What a search answers with
 //!
-//! `mem` takes text a caller hands it; this takes files, and remembers where each one came
-//! from. That is the whole difference between them as commands — and it is why the answer to a
-//! search here names a path the caller can open, rather than only the text.
-//!
-//! The store is SQLite's FTS5, the engine `mem` uses, so the two link one search engine
-//! rather than two. What they share and where they part is written down in
-//! [`virtx_exec_storebase::sqlite`]: one set of tables, and `meta.kind` to tell a store of one
-//! from a store of the other.
+//! A store remembers where each document came from, so the answer to a search names a path the
+//! caller can open, rather than only the text. The engine is SQLite's FTS5, and what a store's
+//! file holds is written down in [`sqlite`].
 //!
 //! # A document is known by the path it was given under
 //!
@@ -50,6 +45,7 @@
 
 mod ingest;
 mod search;
+mod sqlite;
 mod store;
 
 use std::{

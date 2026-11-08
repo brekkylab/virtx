@@ -250,7 +250,7 @@ mod tests {
         };
         file(&server, b"#!/bin/sh\necho server\n");
         file("libkrunfw.5.dylib", b"kernel");
-        file("abin/mem", b"mem");
+        file("abin/index", b"index");
         let archive = tar.into_inner().unwrap().finish().unwrap();
         let asset = format!(
             "virtx-stdio-{}-{}.tar.gz",
@@ -297,7 +297,7 @@ mod tests {
             fs::read(root.join("bin/libkrunfw.5.dylib")).unwrap(),
             b"kernel"
         );
-        assert_eq!(fs::read(root.join("bin/abin/mem")).unwrap(), b"mem");
+        assert_eq!(fs::read(root.join("bin/abin/index")).unwrap(), b"index");
         assert!(
             !fs::read_dir(&root).unwrap().any(|e| e
                 .unwrap()

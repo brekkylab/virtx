@@ -2,8 +2,7 @@ create table meta (key text primary key, value text not null);
 
 create table item (
     rowid      integer primary key,
-    id         text unique,
-    path       text unique,
+    path       text not null unique,
     title      text not null default '',
     mtime      integer not null default 0,
     len        integer not null default 0,

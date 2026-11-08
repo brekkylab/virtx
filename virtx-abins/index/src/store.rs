@@ -19,7 +19,7 @@
 //! log's index is a shared-memory file that every connection `mmap`s and expects to be coherent
 //! between processes. A FUSE filesystem is under no obligation to give them that, and the
 //! failure is silent. So the store stays on the rollback journal SQLite starts in, and
-//! concurrent writers wait on [`BUSY_TIMEOUT`].
+//! concurrent writers wait on [`sqlite::BUSY_TIMEOUT`].
 //!
 //! # The body lives in the FTS table
 //!
@@ -31,26 +31,15 @@
 
 use std::{io, path::Path, sync::Mutex};
 
-use virtx_exec_storebase::sqlite::{self, sql_error};
 use rusqlite::Connection;
 
-use crate::ingest::Stamp;
+use crate::{
+    ingest::Stamp,
+    sqlite::{self, sql_error},
+};
 
-/// What this crate writes into `meta.kind`, and what it insists on when opening.
-///
-/// The tables are `storebase`'s and `mem` keeps the same ones, so this is the only thing
-/// that tells a store of one kind from a store of the other — see
-/// [`virtx_exec_storebase::sqlite`].
-const KIND: &str = "index";
-
-/// A document written or replaced is [`sqlite::UPSERT`] with a path bound, which is what makes
-/// it a document rather than a memory: `path` is `unique`, so a second `ingest` of it lands on
-/// the conflict clause and updates in place, keeping the rowid `item_fts` is filed under.
-///
-/// `item.id` is left null — that column is `mem`'s. What makes a document is its path.
-/// Every row that has a path — which in a shared table is what "every document" means, since a
-/// row with none is `mem`'s. The whole set and not a filtered slice, because the filter is
-/// [`under`](crate::ingest::under) and it is component-wise: `notes-other/a.md` is not under
+/// Every document — `queries/held.sql`. The whole set and not a filtered slice, because the
+/// filter is [`under`](crate::ingest::under) and it is component-wise: `notes-other/a.md` is not under
 /// `notes`, where a SQL `like 'notes%'` would say it was. Doing the prefix test in SQL would
 /// mean either escaping `%` and `_` out of every path or keeping a second spelling of the
 /// rule, and this reads three small columns with no body among them.
@@ -112,7 +101,7 @@ impl Store {
     /// [`sqlite::create`], which is where both of those rules live.
     pub fn try_new(path: impl AsRef<Path>) -> io::Result<Store> {
         Ok(Store {
-            conn: Mutex::new(sqlite::create(path.as_ref(), KIND)?),
+            conn: Mutex::new(sqlite::create(path.as_ref())?),
         })
     }
 
@@ -122,27 +111,21 @@ impl Store {
     /// for a file that is not one of these — see [`sqlite::open`].
     pub fn try_from_file(path: impl AsRef<Path>) -> io::Result<Store> {
         Ok(Store {
-            conn: Mutex::new(sqlite::open(path.as_ref(), KIND)?),
+            conn: Mutex::new(sqlite::open(path.as_ref())?),
         })
     }
 
-    /// Whether `path` is an `index` store — what `list` sifts a directory with, and what
-    /// `drop` asks before it deletes anything.
-    ///
-    /// It has to ask about the *kind* and not only the schema, because a `mem` file has the
-    /// same tables: without that, `list` would count somebody's memories as documents and `drop`
-    /// would delete them.
+    /// Whether `path` is a store — what `list` sifts a directory with, and what `drop` asks
+    /// before it deletes anything. See [`sqlite::is_store`].
     pub fn looks_like_one(path: &Path) -> bool {
-        sqlite::is_store(path, KIND)
+        sqlite::is_store(path)
     }
 
     /// How many documents it holds — what `list` reports.
     pub fn count(&self) -> io::Result<u64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // `count(*)` is an `i64` in SQLite and is never negative, so the widening is safe.
-        conn.query_row("select count(*) from item where path is not null", [], |row| {
-            row.get::<_, i64>(0)
-        })
+        conn.query_row("select count(*) from item", [], |row| row.get::<_, i64>(0))
             .map(|n| n as u64)
             .map_err(sql_error)
     }
@@ -176,8 +159,6 @@ impl Store {
                 let rowid: i64 = upsert
                     .query_row(
                         (
-                            // The null that says "this is a document": identity is the path.
-                            None::<&str>,
                             path.as_ref(),
                             &doc.title,
                             // SQLite counts in `i64` and a `Stamp` is `u64`, so the two

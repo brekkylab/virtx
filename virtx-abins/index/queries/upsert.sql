@@ -1,5 +1,5 @@
-insert into item (id, path, title, mtime, len, written_at)
-values (?1, ?2, ?3, ?4, ?5, ?6)
+insert into item (path, title, mtime, len, written_at)
+values (?1, ?2, ?3, ?4, ?5)
 on conflict(path) do update set
     title      = excluded.title,
     mtime      = excluded.mtime,

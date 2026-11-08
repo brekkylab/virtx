@@ -476,38 +476,34 @@ fn drop_refuses_what_is_not_a_store() {
     assert_eq!(missing.status.code(), Some(1));
 }
 
-/// The tables are shared with `mem`, so nothing about a file's *structure* says which
-/// command wrote it. `meta.kind` does, and these are the three places it has to be asked.
-///
-/// Without it `list` would count somebody's memories as documents, `drop` would delete them, and
-/// `search` would answer from rows whose path is null.
+/// Somebody else's SQLite database beside a store is not one: `list` passes over it, and
+/// nothing that writes or deletes will touch it.
 #[test]
-fn a_mem_store_is_not_one_of_these() {
+fn another_sqlite_database_is_not_one_of_these() {
     let dir = ready();
     ok(dir.path(), &["ingest", "notes.db", "docs"]);
 
-    // A store of the other kind, beside this one, made through the shared schema.
-    let theirs = dir.path().join("memories.db");
-    drop(virtx_exec_storebase::sqlite::create(&theirs, "mem").expect("a mem store"));
+    let theirs = dir.path().join("theirs.db");
+    rusqlite::Connection::open(&theirs)
+        .unwrap()
+        .execute_batch("create table meta (key text primary key, value text not null)")
+        .unwrap();
 
     assert_eq!(
         ok(dir.path(), &["list", "."]),
         "notes.db\t3 document(s)\n",
-        "only this kind is listed"
+        "only a store is listed"
     );
 
     for args in [
-        vec!["search", "memories.db", "ownership"],
-        vec!["drop", "memories.db"],
-        vec!["ingest", "memories.db", "docs"],
+        vec!["search", "theirs.db", "ownership"],
+        vec!["drop", "theirs.db"],
+        vec!["ingest", "theirs.db", "docs"],
     ] {
         let out = index(dir.path(), &args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let said = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            said.contains("mem") || said.contains("not a store"),
-            "{args:?} said: {said}"
-        );
+        assert!(said.contains("not a store"), "{args:?} said: {said}");
     }
     assert!(theirs.is_file(), "and it is still there");
 }

@@ -4,32 +4,7 @@ Thanks for your interest in improving **virtx**. This repository is both ends of
 
 ## Development setup
 
-The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on the first `cargo` call. Every build step is `cargo xtask`.
-
-```bash
-git clone https://github.com/brekkylab/virtx
-cd virtx
-cargo xtask build client                     # libvirtx_core, all a change to the client needs
-```
-
-The server takes more of the host. `cargo xtask init` checks out the submodules under `3rdparty/`, the GPU libraries the server is built with, and adds the guest's musl target; [`virtx-uvm/README.md`](virtx-uvm/README.md) lists what else each host needs. Then:
-
-```bash
-cargo xtask init
-cargo xtask build kernel server-stdio        # the guest kernel and the `virtx-stdio` server
-cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-stdio, beside its kernel
-```
-
-## Running tests and lint
-
-```bash
-cargo xtask check                            # format, clippy and tests: the client always, the servers once `init` has run
-cargo xtask test -p virtx-server-stdio       # the servers' own tests, which boot VMs
-(cd virtx-py && uv run pytest)               # Python
-(cd virtx-node && npm install && npm test)   # Node
-```
-
-There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command. `cargo xtask check --client` checks the client alone, without `init`.
+The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on the first `cargo` call. [`AGENTS.md`](AGENTS.md) covers [building from source](AGENTS.md#building-from-source) and [tests and lint](AGENTS.md#tests-and-lint).
 
 ## Pull requests
 
@@ -38,7 +13,7 @@ There is no pull-request CI, so what you run locally is the gate. `git config co
 3. Bring a test that fails without the change. A bug fix comes with the test that caught it; a behaviour change comes with the test that pins the new behaviour, in the surface it lives in.
 4. The shape to aim for is `virtx-core` first, with each package connecting to it, but do not hold a PR back for it: a change that reaches one package only is welcome as it is. A maintainer may suggest moving it into `virtx-core`, and that can be a follow-up PR.
 5. A change to the protocol (`virtx-core/PROTOCOL.md`) moves the client and the servers in the same PR, since both are here. Open an issue first, with the [protocol change template](.github/ISSUE_TEMPLATE/protocol.md), so the change is agreed before it is built.
-6. Run the checks above before opening the PR.
+6. Pass the tests and lint before opening the PR: `cargo xtask check`, and the tests of whatever the change touches, as [Tests and lint](AGENTS.md#tests-and-lint) lists.
 7. Title the PR with one sentence saying what virtx does once it is merged, with no issue number. The issue goes in the description as `Closes #N` or `Resolves #N`.
 8. Fill in the pull request template, describing the finished state rather than the rounds of work behind it. Problem, cause, fix and result are for a change that fixes something: drop the ones that do not apply, and a change with no problem behind it has a Changes section in place of Fix. The verification lines and the three checkboxes always stay. `gh pr create --body` does not load the template, so start the description from [`.github/pull_request_template.md`](.github/pull_request_template.md).
 

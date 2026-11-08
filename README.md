@@ -328,9 +328,13 @@ Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a 
 See the [documentation](docs/) for guides and the API reference.
 Each package documents the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
+## Building from source
+
+See [Building from source](AGENTS.md#building-from-source) in AGENTS.md.
+
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests and how to open a PR. For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue. Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
+Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers how to open a PR. For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue. Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
 
 ## License
 

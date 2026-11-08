@@ -21,16 +21,44 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the `packages` workflow runs to pack and smoke-test the client's packages. `.github/workflows/dist.yml` builds the server for every platform and attaches the archives to the tag's GitHub release.
 
-## Building, tests and lint
+## Building from source
 
-Every step is `cargo xtask`; `cargo xtask --help` lists them.
+Every step is `cargo xtask`, run from a clone of this repository; `cargo xtask --help` lists them.
 
 ```bash
-git clone https://github.com/brekkylab/virtx
+git clone https://github.com/brekkylab/virtx && cd virtx
+```
+
+### Server
+
+The servers need more of the host than Rust; [virtx-uvm/README.md](virtx-uvm/README.md) lists what each host needs.
+
+```bash
 cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
-cargo xtask build client                          # libvirtx_core
-cargo xtask build kernel server-stdio server-tcp # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
-cargo xtask install                               # what was built, into $VIRTX_HOME/bin
+cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both servers, signed on macOS
+cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
+export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
+```
+
+### Clients
+
+Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+
+```bash
+cargo xtask build client
+cargo xtask install --prefix ~/.local
+export VIRTX_CORE_LIB=~/.local/bin/libvirtx_core.so   # .dylib on macOS, virtx_core.dll on Windows
+```
+
+Then, in your own project, install the package for your language from the clone:
+
+- **Python:** `pip install path/to/virtx/virtx-py`
+- **Node:** `npm install path/to/virtx/virtx-node`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
+
+## Tests and lint
+
+```bash
 cargo xtask check                                 # the gate: format, clippy and tests, of the client always and of the servers once `init` has run
 cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python

@@ -4,7 +4,7 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `remove_image_job` or `SandboxJob.remove` cancels it.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
 
 ```python
 import asyncio
@@ -25,11 +25,11 @@ async def main():
 asyncio.run(main())
 ```
 
-Awaited, the same call answers the job, an `ImageJob`, and its log is read after with `image_job_log`, from its start or `after` an entry: by another reader, or after a reconnect.
+Awaited, the same call answers the job, an `ImageJob` that carries its client, and its log is read after with its `log`, from its start or `after` an entry: by another reader, or after a reconnect.
 
 ```python
 job = await client.pull_image("alpine:3.20")
-async for entry in client.image_job_log(job.id, after=1):  # from its second entry
+async for entry in job.log(after=1):  # from its second entry
     ...
 ```
 

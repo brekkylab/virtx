@@ -12,8 +12,9 @@
 //! Starting a job is a [`StartedJob`], a call answering with the job, or its [`JobLog`].
 //!
 //! Making or asking for a sandbox, a volume or a snapshot answers a [`Sandbox`], a [`Volume`]
-//! or a [`Snapshot`], and running a process in a sandbox a [`SandboxJob`]: each carries the
-//! client, so it is all a caller hands on to act on it. The three with files reach them through
+//! or a [`Snapshot`], running a process in a sandbox a [`SandboxJob`], and building, pulling or
+//! pushing an image an [`ImageJob`]: each carries the client, so it is all a caller hands on to
+//! act on it. The three with files reach them through
 //! [`Files`].
 //!
 //! The types requests take and answer are `virtx-core`'s, re-exported here.
@@ -22,6 +23,7 @@ mod call;
 mod client;
 mod error;
 mod files;
+mod image;
 mod job;
 mod library;
 mod portforward;
@@ -33,11 +35,14 @@ pub use call::{Call, Events};
 pub use client::{Client, ensure_virtx};
 pub use error::Error;
 pub use files::Files;
+pub use image::ImageJob;
 pub use job::{JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;
 pub use sandbox::{Sandbox, SandboxJob};
 pub use snapshot::Snapshot;
+/// What the server answers about an image job; an [`ImageJob`] carries it with its client.
+pub use virtx_core::ImageJob as ImageJobInfo;
 /// What the server answers about a sandbox; a [`Sandbox`] carries it with its client.
 pub use virtx_core::Sandbox as SandboxInfo;
 /// What the server answers about a sandbox job; a [`SandboxJob`] carries it with its client.
@@ -47,7 +52,7 @@ pub use virtx_core::SnapshotListOutputItem as SnapshotInfo;
 /// What the server answers about a volume; a [`Volume`] carries it with its client.
 pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
-    Auth, DirEntry, Event, ImageDownloadOutput, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
     MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs,
     SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume, Step,

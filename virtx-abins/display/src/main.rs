@@ -61,23 +61,14 @@ enum Cli {
     Run(Run),
 
     /// Save what a screen shows now as a PNG
-    ///
-    /// Read from the screen `display run` keeps, from any command on the same machine while it
-    /// runs. The cursor is not in it: `display cursor` says where it is. Prints the path
-    /// written.
     #[command(after_long_help = "Example:\n  display shot /tmp/screen.png")]
     Shot(Shot),
 
     /// Print where the pointer is on a screen, and the cursor's name
     ///
-    /// One line: the pointer's x and y in pixels from the screen's top left corner, then the
-    /// name of the cursor shown there when it has one. The name is what the program under the
-    /// pointer chose to show, and so says what is there: `xterm` over text, `hand2` over a
-    /// link, `left_ptr` over most else.
-    ///
-    /// A cursor has a name when its program loaded it from a cursor theme, through libXcursor.
-    /// GTK and Qt programs bring both; for another X program, an image without libXcursor and
-    /// a cursor theme gives positions only.
+    /// Output is `X Y NAME`. X and Y are the pointer's position in pixels, from the top left
+    /// corner. NAME is the cursor's name, e.g. `xterm` over text, `hand2` over a link,
+    /// `left_ptr` elsewhere; it is left out when the program gives its cursor no name.
     #[command(after_long_help = "Example:\n  $ display cursor\n  640 360 xterm")]
     Cursor(CursorArgs),
 }

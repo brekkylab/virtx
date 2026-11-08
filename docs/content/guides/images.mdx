@@ -93,7 +93,7 @@ A build stores its image under the supplied tag. `create_sandbox` boots it by th
 
 A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
 
-A build, like a pull or a push, is a job. Read its log through `end` and check its `error` before booting from the tag. Awaiting the started value gives the job, whose log can be read with `image_job_log(job.id)`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A build, like a pull or a push, is a job. Read its log through `end` and check its `error` before booting from the tag. Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
 
 ## Tagging
 

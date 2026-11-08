@@ -72,7 +72,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [GPU](#gpu).
+Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](https://virtx.sh/docs/guides/using-gpus/).
 
 ## Quickstart
 
@@ -282,156 +282,38 @@ let client = Client::connect(
 
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
-## Resources
+## Features
 
-| | What it is | Made and read with |
-|---|---|---|
-| **Image** | What a sandbox boots: a manifest and its layers, under a tag such as `jq:latest` | `build_image`, `pull_image`, `push_image`; listed, tagged, removed, downloaded and uploaded through the server's OCI registry |
-| **Sandbox** | A VM booted from an image, on a snapshot if given, with volumes mounted into it | `create_sandbox`, `get_sandbox`, `list_sandbox`, `remove_sandbox`, `exec_sandbox`; its files over WebDAV |
-| **Snapshot** | The writable layer of a sandbox's root filesystem, kept under a name | `create_snapshot`, `get_snapshot`, `list_snapshot`, `remove_snapshot`; its files over WebDAV |
-| **Volume** | Storage kept under a name, mounted into sandboxes, with remote sources such as Notion or Google Drive mounted inside it | `create_volume`, `get_volume`, `list_volume`, `remove_volume`, `*_volume_mount`; its files over WebDAV |
+- **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
+- **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
+- **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
+- **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
+- **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
+- **Pick up where you left off:** keep what a sandbox wrote in a snapshot for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
+- **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
 
-Names here are Python's and Rust's; Node's are the same in camelCase, such as `createSandbox`.
-A sandbox, a snapshot and a volume are answered as a `Sandbox`, a `Snapshot` and a `Volume` that carry their client, so each is all a caller hands on, and `remove` removes it:
+## Core concepts
 
-- All three are `Files`: `stat_file`, `exists`, `is_file`, `is_dir`, `read_dir`, `read_file`, `read_text`, `write_file`, `create_dir`, `create_dir_all`, `remove_file`, `rename_file` and `copy_file` act on their files, and `root` names those files for the client's own files requests. In Rust, `use virtx_rs::Files` brings them into scope.
-- A `Sandbox` runs a process with `exec`, and lists its jobs with `jobs` and gets one with `job`.
-- A `Volume` lists its mounts with `mounts`, and adds one with `mount` and takes it away with `unmount`.
-- A process in a sandbox is a `SandboxJob` that carries its client and sandbox: `get`, `signal`, `write_stdin`, `log` and `remove` act on it.
+The main resource is the **sandbox**: a VM you run commands in.
 
-Building, pulling and pushing an image, and running a command in a sandbox, start a [job](#jobs-and-their-logs).
+A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **snapshot** above, where its writes go.
 
-## Jobs and their logs
+The image is what every sandbox on it starts from.
+Images are OCI images, the format Docker uses, so `alpine:latest` or any image from a registry works.
 
-A build, pull or push, and every command in a sandbox, is a job the server runs apart from the request that started it.
-`build_image`, `pull_image`, `push_image` and `exec_sandbox` answer a started job, which is two things at once:
+The snapshot is where a sandbox's changes pile up.
+A new snapshot starts empty; a sandbox made on it later starts with everything the last one wrote, so what one installed the next one finds.
+One sandbox holds a snapshot at a time.
+A sandbox made without a snapshot has its own, which goes when the sandbox is removed.
 
-- Iterated (`async for` in Python, `for await` in Node, `.log()` in Rust), it is the job's log, an entry at a time until its last, `end`, which says how it ended: an image's digest or why it failed, a process's exit code.
-- Awaited (`.wait()` in Rust, too), it is the job itself, whose `id` names it to every other request.
+When a sandbox needs storage apart from its root filesystem, use a **volume**.
+Unlike a snapshot, a volume is mounted at a path, read-write or read-only, and can be mounted into several sandboxes at once.
+It stays when they are removed, and its files can be read and written from your code without a sandbox at all.
+Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a volume too, read-only, so a sandbox sees them as files.
 
-One value awaited and iterated starts one job. Its log can be read again any time with `image_job_log`, or a sandbox job's `log`.
+## Documentation
 
-- Every entry has an `id`, its number in the log. A reader whose stream dropped asks for the log `after` the last one it saw, and picks up there.
-- Any number of readers read one log, each from its start or from wherever they ask.
-- A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes.
-- A process's output is a line per entry, `stdout` or `stderr`, without its line ending.
-- Leaving the loop leaves the job running. `remove_image_job` and a sandbox job's `remove` cancel one that runs, killing a process and its children, and forget it.
-
-A process started with `stdin` takes what its job's `write_stdin` writes, the next write sent once the one before is answered, until one closes it with `eof`. Its `signal` sends it a signal such as `SIGTERM`, and `timeout_ms` kills it when it runs out.
-
-```python
-run = sandbox.exec(["cat"], stdin=True)
-job = await run
-await job.write_stdin("hello\n", eof=True)
-async for entry in run:
-    print(entry)
-```
-
-## Snapshots and volumes
-
-A sandbox made on a snapshot starts with the changes in it and writes into it, so what one sandbox installed the next one finds.
-While a sandbox holds it, its files are the sandbox's: reading them, and removing the snapshot, are refused until the sandbox is removed.
-
-```python
-snapshot = await client.create_snapshot("dev")
-sandbox = await client.create_sandbox("jq:latest", snapshot=snapshot)
-```
-
-A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go. A snapshot or a volume is named by its handle or its name; in Rust, `SandboxCreateArgs::new("jq:latest").snapshot(snapshot.name()).volume(volume.at("/data").readonly())`.
-
-```python
-from virtx import SandboxVolume
-
-volume = await client.create_volume("data")
-sandbox = await client.create_sandbox(
-    "jq:latest", volumes=[SandboxVolume(volume, "/data", readonly=False)]
-)
-```
-
-The files of a volume or a snapshot are read and written from the client, without a sandbox, through the volume or snapshot, with a path in it. A sandbox's own, its root as its processes see it, are reached the same way while its VM runs, as `sandbox.read_text("etc/hostname")`:
-
-```python
-volume = await client.get_volume("data")
-await volume.create_dir_all("in")
-await volume.write_file("in/notes.txt", b"ship the release")
-for entry in await volume.read_dir("in"):
-    print(entry.name, entry.metadata.size)
-print(await volume.read_text("in/notes.txt"))
-```
-
-The client's own files requests take the root instead: `client.read_text(volume.root, "in/notes.txt")`, or `VolumeFiles("data")` in Python and `{ volume: 'data' }` in Node for a name alone.
-
-A write can name the `etag` a read gave, so it goes only over the file it read. Files move with `rename_file` and `copy_file`, and go with `remove_file`.
-
-## Ports
-
-`ports` at making a sandbox open TCP ports in it, each answered with a URL, there only. A `PortForwarder` opened over the client with that URL puts the port at an address on this machine's loopback, for any TCP client:
-
-```python
-from virtx import PortForwarder
-
-sandbox = await client.create_sandbox("jq:latest", ports=[8000])
-with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
-    print("reach it at", forwarder.address)
-```
-
-Ports are the way in. `network=False` takes away the way out.
-
-## Images
-
-A recipe is a base image and the steps over it, as a Dockerfile is; in Rust, `Recipe::from_dockerfile` reads one.
-A build stores what it builds under its tag, and `create_sandbox` boots it by that tag, or by its digest for exactly that build.
-`pull_image` and `push_image` copy an image between the server and a registry such as Docker Hub or `ghcr.io`, with that registry's credentials if it wants them.
-
-Everything else is the server's OCI registry: `list_image`, `tag_image`, `untag_image` and `remove_image`, and `download_image` and `upload_image` to move an image to and from an OCI archive on this machine. `prune_image` deletes what no tag points at and no sandbox uses.
-
-### From a shell
-
-The `virtx` command does the same to a server's images with the commands `docker` has for them: `build`, `images`, `inspect`, `tag`, `rmi`, `pull`, `push`, `save`, `load`, each also as `virtx image <command>`, and `virtx image prune`. The Python and Node packages install it, as `libvirtx_core` carries it, and [`virtx-cli`](virtx-cli/) builds it as a binary of its own.
-
-```sh
-uvx virtx images                               # or `pip install virtx`
-npx @brekkylab/virtx images                    # or `npm install -g @brekkylab/virtx`
-cargo install --path virtx-cli
-
-virtx build -t jq:latest .                     # ./Dockerfile; the log on stderr, `jq:latest sha256:…` on stdout
-virtx images
-virtx tag jq:latest ghcr.io/me/jq:1
-echo "$GHCR_TOKEN" | virtx push -u me ghcr.io/me/jq:1
-virtx save -o jq.tar jq:latest
-virtx rmi jq:latest
-```
-
-It starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names; `--host URL` reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token. Ctrl-C during a build, pull or push cancels the job.
-
-## GPU
-
-The VM gets a GPU through Vulkan on every host, so it can run heavy work like deep learning.
-Ask for it with `gpu=True` at making a sandbox, `gpu_memory_mib` for its memory, and install the guest's half of Vulkan in the image:
-
-```python
-recipe = Recipe("alpine:latest").run(
-    # The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
-    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
-)
-async for entry in client.build_image(recipe, "vulkan:latest"):
-    print(entry.entry)
-sandbox = await client.create_sandbox("vulkan:latest", gpu=True, gpu_memory_mib=8192)
-async for entry in client.exec_sandbox(sandbox.id, ["vulkaninfo", "--summary"]):
-    print(entry.entry)
-```
-
-The host's GPU shows up in the guest as `Virtio-GPU Venus (<the host's GPU>)`. What the image needs for that:
-
-| | Alpine | Debian |
-|---|---|---|
-| Vulkan loader (`libvulkan.so.1`) | `vulkan-loader` | `libvulkan1` |
-| venus driver | `mesa-vulkan-virtio` | `mesa-vulkan-drivers`, trixie or later |
-
-- **Install the loader yourself.** Without it, no program in the guest finds a Vulkan device, whatever the host has. Some packages bring it along (Debian's `vulkan-tools` does) and some don't (Alpine's doesn't), so name it rather than count on it.
-- **An image with no venus driver still runs, but on the CPU.** Debian bookworm's Mesa has no venus, and Vulkan there falls back to `llvmpipe`, a software renderer. Check the `deviceName` your program picks.
-
-A server that can't give a GPU refuses the sandbox rather than run it on the CPU.
+See the [documentation](https://virtx.sh/docs/) for guides and the API reference.
 
 ## Coverage
 

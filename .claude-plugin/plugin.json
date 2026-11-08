@@ -1,7 +1,7 @@
 {
   "name": "virtx",
   "version": "0.1.0",
-  "description": "Run tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with a filesystem you compose.",
+  "description": "Run tasks in Linux microVMs from Python, Node.js or Rust, with snapshots and volumes for what should outlive them.",
   "author": {
     "name": "brekkylab",
     "url": "https://github.com/brekkylab"

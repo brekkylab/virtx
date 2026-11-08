@@ -1,0 +1,149 @@
+---
+title: "API reference"
+description: "Every call the Python, Node.js, and Rust clients make, grouped by what it acts on, and the environment variables they read."
+---
+
+Names here are Python's.
+Node.js uses the same names in camelCase, such as `createSandbox` for `create_sandbox`, and Rust uses the same names as Python, except where noted.
+
+A call that starts a job, marked **job** below, is iterated for its log or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+
+## Client
+
+| Call | What it does |
+| --- | --- |
+| `Client.spawn(program, args)` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
+| `Client.connect(url, auth, headers)` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request. A token is sent over plain `http` only to this machine's loopback. |
+| `set_auth(auth)`, `set_headers(headers)` | Replace what every later request sends. |
+| `clone()` | Another hold of the same session. |
+| `close()` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
+| `ensure_virtx()` | Fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it. Node.js calls it `ensureVirtx`. |
+
+## Images
+
+See [Working with images](/docs/guides/images/).
+
+| Call | What it does |
+| --- | --- |
+| `build_image(recipe, reference)` | **Job.** Builds `recipe` and points `reference` at the result. |
+| `pull_image(reference, auth)` | **Job.** Pulls `reference` from its registry. Without `auth`, anonymously. |
+| `push_image(reference, auth)` | **Job.** Pushes the image `reference` points at to the registry it names. |
+| `list_image()` | Every tag on the server's images, with the digest it points at. |
+| `tag_image(source, target)` | Points the tag `target` at the image `source` names, moving it if it is in use. |
+| `untag_image(reference)` | Removes a tag, leaving the image. |
+| `remove_image(reference)` | Removes the image and every tag on it in that name; refused while a sandbox uses it. |
+| `download_image(reference, path)` | Writes the image to an OCI image layout tar archive at `path`. |
+| `upload_image(path, reference)` | Uploads the image in an OCI archive and points the tag `reference` at it. |
+| `prune_image()` | Deletes images no tag points at and no sandbox uses, once they are an hour old. |
+| `list_image_job()`, `get_image_job(id)` | Image jobs the server holds. |
+| `image_job_log(id, after)` | An image job's log, from its start or after entry `after`. |
+| `remove_image_job(id)` | Cancels an image job if it runs, and forgets it. |
+
+A `Recipe(base)` is chained with `.run(command)`, `.env(key, value)` and `.workdir(directory)`.
+In Rust, `Recipe::new(base).step(..)` takes a `Step::run`, `Step::env` or `Step::workdir`, and `Recipe::from_dockerfile(text)` reads a Dockerfile.
+
+## Sandboxes
+
+See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `create_sandbox` takes.
+
+| Call | What it does |
+| --- | --- |
+| `create_sandbox(image, ...)` | Makes a sandbox of `image`, with the options given. |
+| `list_sandbox()`, `get_sandbox(id)` | The server's sandboxes, without their ports. |
+| `remove_sandbox(id)` | Stops a sandbox, ends its jobs, and forgets it, keeping its snapshot and volumes. |
+
+A `Sandbox` carries its client, and acts on itself:
+
+| Call | What it does |
+| --- | --- |
+| `exec(cmd, stdin, timeout_ms)` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
+| `jobs()`, `job(id)` | Its jobs. |
+| `remove()` | As `remove_sandbox`. |
+| `root` | Its files, as its processes see them; see [Files](#files). |
+
+In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `snapshot`, `running` and `ports`.
+
+## Jobs
+
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code`.
+
+| Call | What it does |
+| --- | --- |
+| `get()` | The job as the server has it now. |
+| `log(after)` | Its output, from its start or after entry `after`, until its end. |
+| `signal(signal)` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
+| `write_stdin(data, eof)` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
+| `remove()` | Kills its process if it runs, and forgets the job. |
+
+The client has the same calls by sandbox and job id: `list_sandbox_job`, `get_sandbox_job`, `sandbox_job_log`, `signal_sandbox_job`, `write_sandbox_job_stdin` and `remove_sandbox_job`.
+In Rust, `SandboxJob` answers `id()` and `info()`.
+
+## Snapshots
+
+See [Keeping work in snapshots](/docs/guides/keeping-snapshots/).
+
+| Call | What it does |
+| --- | --- |
+| `create_snapshot(name, disk_gib)` | Makes an empty snapshot holding at most `disk_gib` GiB. Without a name, the server picks one. |
+| `list_snapshot()`, `get_snapshot(name)` | The server's snapshots. |
+| `remove_snapshot(name)` | Deletes a snapshot and everything in it; refused with `409` while a sandbox holds it. |
+
+A `Snapshot` has its `name`, `size` and whether it is `in_use`, and its [files](#files).
+Its `remove()` is `remove_snapshot`.
+
+## Volumes
+
+See [Mounting volumes](/docs/guides/mounting-volumes/).
+
+| Call | What it does |
+| --- | --- |
+| `create_volume(name)` | Makes an empty volume. Without a name, the server picks one. |
+| `list_volume()`, `get_volume(name)` | The server's volumes. |
+| `remove_volume(name)` | Deletes a volume and everything in it. |
+| `create_volume_mount(volume, path, source)` | Mounts a remote store at `path` in the volume, read-only. |
+| `list_volume_mount(volume)` | The mounts in a volume, without their credentials. |
+| `remove_volume_mount(volume, path)` | Takes a mount away, leaving its store as it is. |
+
+A `Volume` has its `name` and `size`, its [files](#files), and `mount(path, source)`, `mounts()`, `unmount(path)` and `remove()`.
+
+## Files
+
+A `Sandbox`, a `Snapshot` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
+The client has the same calls with a `root` first.
+
+| Call | What it does |
+| --- | --- |
+| `stat_file(path)` | What is at `path`: its size, its modification time, and its `etag`. |
+| `exists(path)`, `is_file(path)`, `is_dir(path)` | Whether anything, a file, or a directory is at `path`. |
+| `read_dir(path)` | The entries of a directory, each with its `name` and `metadata`. |
+| `read_file(path, offset, length)` | A file's bytes, all of them or a range. |
+| `read_text(path)` | A whole UTF-8 file as text. |
+| `write_file(path, content, if_match)` | Writes a whole file, whose parent directory must exist. With `if_match`, only while the file still has that `etag`. |
+| `create_dir(path)` | Creates a directory whose parent exists. |
+| `create_dir_all(path)` | Creates a directory and its parents, as `mkdir -p`. |
+| `remove_file(path, missing_ok)` | Removes a file, or a directory with everything in it. With `missing_ok`, nothing being there is fine. |
+| `rename_file(from_path, to_path, overwrite)` | Moves a file or directory; refused onto something that exists unless `overwrite`. |
+| `copy_file(from_path, to_path, overwrite)` | Copies a file or directory, as `rename_file` replaces. |
+
+## PortForwarder
+
+See [Networks and ports](/docs/guides/networks-ports/).
+
+| Call | What it does |
+| --- | --- |
+| `PortForwarder.open(client, url)` | Forwards the sandbox port `url` names to an address on this machine's loopback. |
+| `address`, `host`, `port` | Where it is reached. In Rust, `address()`. |
+| `close()` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
+
+## Environment variables
+
+| Variable | Read by | What it does |
+| --- | --- | --- |
+| `VIRTX_CORE_LIB` | Clients | The `libvirtx_core` to open, when the program has not loaded one itself. |
+| `VIRTX_STDIO` | `spawn`, CLI | A server to start as it is, in place of the fetched `virtx-stdio`. |
+| `VIRTX_STDIO_VERSION` | `spawn`, CLI | Another version of `virtx-stdio` to fetch. |
+| `VIRTX_DIST_URL` | `spawn`, CLI | Where releases are fetched from. |
+| `VIRTX_HOME` | `spawn`, CLI | Where virtx keeps what it fetches on this machine. |
+| `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP in place of a server started here. |
+| `VIRTX_TOKEN` | CLI | The bearer token sent to `VIRTX_HOST`. |
+| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |

@@ -1,0 +1,151 @@
+---
+title: "Mounting volumes"
+description: "Create a volume, mount it into sandboxes, and mount remote stores such as Notion or Google Drive inside it."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A **volume** is storage kept apart from any sandbox, under a name.
+It is mounted at a path in a sandbox, read-write or read-only, and stays when the sandbox is removed.
+
+A volume differs from a [snapshot](/docs/guides/keeping-snapshots/) in three ways:
+
+- It sits at one path, such as `/data`, not under the whole root filesystem.
+- Several sandboxes can mount it at once.
+- Its files can be read and written from your code while sandboxes use it.
+
+## Create a volume
+
+`create_volume` makes an empty volume, and the server picks a name when none is given.
+A volume's files are read and written from your code with the same calls as a snapshot's, through the server's files API over WebDAV.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+volume = await client.create_volume("data")
+await volume.write_file("config.json", '{"retries": 3}')
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const volume = await client.createVolume('data')
+await volume.writeFile('config.json', '{"retries": 3}')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let volume = client.create_volume(Some("data")).wait()?;
+volume.write_file("config.json", r#"{"retries": 3}"#, None).wait()?;
+```
+
+</TabItem>
+</Tabs>
+
+## Mount it into a sandbox
+
+Pass `volumes` to `create_sandbox`, each with the volume, the path it is mounted at, and whether it is read-only.
+What the sandbox writes under that path goes into the volume.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import SandboxVolume
+
+sandbox = await client.create_sandbox(
+    "alpine:latest",
+    volumes=[SandboxVolume(volume, "/data")],
+)
+async for entry in sandbox.exec(["cat", "/data/config.json"]):
+    print(entry.entry)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', {
+  volumes: [{ volume, path: '/data' }],
+})
+for await (const entry of sandbox.exec(['cat', '/data/config.json'])) console.log(entry)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest").volume(volume.name(), "/data");
+let sandbox = client.create_sandbox(&args).wait()?;
+let mut log = sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).log();
+while let Some(entry) = log.wait_next() {
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+Set `readonly` to mount it read-only: `SandboxVolume(volume, "/data", readonly=True)` in Python, `{ volume, path: '/data', readonly: true }` in Node.js, or a `SandboxVolume` with `readonly: true` pushed onto `args.volumes` in Rust.
+A sandbox can mount several volumes, in order, so a later path can sit inside an earlier one; two at one path are refused.
+
+## Mount a remote store inside it
+
+A volume can also show a remote store as files.
+`mount` puts the store at a path in the volume, a directory the mount creates, and every sandbox that mounts the volume sees it there.
+Remote mounts are read-only: copy a file out of one into the volume to change it.
+
+These are the stores a volume can mount, with the credentials each takes:
+
+| Store | Shows | Source (Python) | Credentials |
+| --- | --- | --- | --- |
+| Notion | The pages a Notion integration can reach | `NotionSource` | `api_key` |
+| Google Drive | A Google Drive, with Docs, Sheets and Slides as files | `GdriveSource` | `client_id`, `client_secret`, `refresh_token` |
+| OneDrive | A OneDrive | `OnedriveSource` | `client_id`, `refresh_token`, and `client_secret` for a confidential app |
+
+In Node.js, a source is an object with its `type`, `'notion'`, `'gdrive'` or `'onedrive'`, and its credentials in camelCase.
+In Rust, it is a `MountSource` variant.
+A refresh token is taken as given: getting one through the service's consent screen is up to your app.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+import os
+
+from virtx import NotionSource
+
+await volume.mount("docs/notion", NotionSource(os.environ["NOTION_API_KEY"]))
+for entry in await volume.read_dir("docs/notion"):
+    print(entry.name)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await volume.mount('docs/notion', { type: 'notion', apiKey: process.env.NOTION_API_KEY })
+for (const entry of await volume.readDir('docs/notion')) console.log(entry.name)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let source = MountSource::Notion { api_key: std::env::var("NOTION_API_KEY")? };
+volume.mount("docs/notion", source).wait()?;
+for entry in volume.read_dir("docs/notion").wait()? {
+    println!("{}", entry.name);
+}
+```
+
+</TabItem>
+</Tabs>
+
+`mounts` lists a volume's mounts without their credentials, and `unmount` takes one away, leaving the store as it is.
+
+When it is no longer needed, `remove` deletes the volume and everything in it.

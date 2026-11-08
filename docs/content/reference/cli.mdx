@@ -1,6 +1,6 @@
 ---
 title: "CLI"
-description: "Build and manage a server's images from a shell, and sign in to virtx cloud."
+description: "Build and manage a server's images from a shell."
 ---
 
 The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
@@ -36,34 +36,4 @@ virtx rmi jq:latest
 
 ## Which server
 
-Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Run locally](/docs/local/) for both servers.
-
-## Sign in to virtx cloud
-
-With virtx cloud, the command also signs in from a terminal for the SDKs to use:
-
-| Command | What it does |
-| --- | --- |
-| `virtx login` | Signs in by showing a code to approve in the console, in a browser. |
-| `virtx token` | Prints an access token, refreshed as needed. `VIRTX_API_KEY` accepts this token. |
-| `virtx token --json` | Prints `token` and `expires_in` in JSON, as the SDKs read them. |
-| `virtx whoami` | Prints the signed-in user's email. |
-| `virtx logout` | Signs out and ends the session, removing the stored refresh and access tokens. |
-
-### Domain and device flow
-
-The global `--domain` option selects the cloud domain. The order is `--domain`, `VIRTX_DOMAIN`, then `virtx.sh`. The control plane is at `https://api.<domain>`.
-
-`virtx login` uses RFC 8628's device flow. It prints the code and verification page, attempts to open the page in a browser, and waits for approval. A denied code fails; an expired code requires running `virtx login` again.
-
-A person's access token names neither an organization nor a cell endpoint. `VIRTX_ORG` names the organization's UUID and `VIRTX_URL` the cell endpoint. The SDK's endpoint selection is described in [Environment variables](/docs/reference/environment/).
-
-### Token storage
-
-The refresh token is kept under the domain in the OS keychain. If keychain storage is unavailable, the CLI writes `~/.config/virtx/<domain>.token`, which on Unix is readable by its owner alone.
-
-Access tokens last 15 minutes. The CLI caches an access token in `~/.config/virtx/<domain>.access`, written the same way. It reuses that token while more than 120 seconds remain; otherwise, it refreshes the token and stores the replacement refresh token.
-
-`virtx token` holds `~/.config/virtx/<domain>.lock` while reading, refreshing, and storing tokens. This coordinates concurrent processes so they can share a refresh. Setting `VIRTX_TOKEN_REFUSED` forces a refresh, as an SDK does after a server refuses its token.
-
-The SDKs run `virtx token --json` to obtain a token. See [Environment variables](/docs/reference/environment/) for their endpoint and authentication selection.
+Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Hello world](/docs/hello-world/#run-it) for the two servers.

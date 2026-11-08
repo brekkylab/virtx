@@ -1,0 +1,98 @@
+---
+title: "Using GPUs"
+description: "Give a sandbox the host's GPU through Vulkan, and build an image that can use it."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The server gives a sandbox the host's GPU through Vulkan, on every host.
+The host needs a Vulkan loader, and the image needs the guest's half of Vulkan.
+
+## Create a GPU sandbox
+
+Set `gpu=True` when creating a sandbox.
+`gpu_memory_mib` sets how much memory the GPU may hold, apart from the sandbox's own memory, 8 GiB when left out.
+This builds an image with the guest's Vulkan packages, then checks the GPU with `vulkaninfo`:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+recipe = Recipe("alpine:latest").run(
+    # The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
+    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
+)
+async for entry in client.build_image(recipe, "vulkan:latest"):
+    match entry.entry:
+        case Log(line):
+            print(line)
+        case ImageJobEnd(error=str(error)):
+            raise RuntimeError(error)
+sandbox = await client.create_sandbox("vulkan:latest", gpu=True, gpu_memory_mib=8192)
+async for entry in sandbox.exec(["vulkaninfo", "--summary"]):
+    print(entry.entry)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const recipe = new Recipe('alpine:latest').run(
+  // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
+  'apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools'
+)
+for await (const entry of client.buildImage(recipe, 'vulkan:latest')) {
+  if ('log' in entry) console.log(entry.log)
+  else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
+}
+const options = { gpu: true, gpuMemoryMib: 8192 }
+const sandbox = await client.createSandbox('vulkan:latest', options)
+for await (const entry of sandbox.exec(['vulkaninfo', '--summary'])) console.log(entry)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let recipe = Recipe::new("alpine:latest").step(
+    // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
+    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools",
+);
+let mut log = client.build_image(recipe, "vulkan:latest").log();
+while let Some(entry) = log.wait_next() {
+    match entry?.entry {
+        ImageJobEntry::Log(line) => println!("{line}"),
+        ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
+        _ => {}
+    }
+}
+let args = SandboxCreateArgs::new("vulkan:latest")
+    .gpu(true)
+    .gpu_memory_mib(8192);
+let sandbox = client.create_sandbox(&args).wait()?;
+let mut log = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).log();
+while let Some(entry) = log.wait_next() {
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+The host's GPU appears in the guest as `Virtio-GPU Venus (<the host's GPU>)`.
+A server built without GPU support refuses a GPU sandbox rather than run it on the CPU, and `gpu_memory_mib` without `gpu` is refused too.
+
+## Guest packages
+
+| Component | Alpine | Debian |
+| --- | --- | --- |
+| Vulkan loader (`libvulkan.so.1`) | `vulkan-loader` | `libvulkan1` |
+| venus driver | `mesa-vulkan-virtio`, 3.24 or later | `mesa-vulkan-drivers`, trixie or later |
+
+- **Install the loader yourself.** Without it, no program in the guest finds a Vulkan device, whatever the host has.
+  Debian's `vulkan-tools` brings it along; Alpine's does not.
+  Name the loader rather than relying on another package to install it.
+- **An image with no venus driver still runs on the CPU.** Debian bookworm's Mesa has no venus, so Vulkan falls back to `llvmpipe`, a software renderer.
+  Check the `deviceName` your program selects.
+
+See [Working with images](/docs/guides/images/) for building the guest image, and [Running commands](/docs/guides/running-commands/) for reading command output.

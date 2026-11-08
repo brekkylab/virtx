@@ -1,11 +1,11 @@
 ---
 name: virtx
-description: Run a task in a disposable Linux micro-VM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx.
+description: Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx.
 ---
 
 # virtx
 
-A **sandbox** is a Linux micro-VM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot, **snapshots** that carry a root filesystem's changes from one sandbox to the next, and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox is gone when you remove it, and nothing it did outlives it but what it wrote to a snapshot or a volume. So "run this somewhere disposable" is a few requests, not an environment you set up.
+A **sandbox** is a Linux microVM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot, **snapshots** that carry a root filesystem's changes from one sandbox to the next, and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox is gone when you remove it, and nothing it did outlives it but what it wrote to a snapshot or a volume. So "run this somewhere disposable" is a few requests, not an environment you set up.
 
 virtx works under any AI agent: a sandbox is a tool like any other, and the steps below are the same whether a program or a model drives it. For an agent, the best choice is [Ailoy](https://github.com/brekkylab/ailoy), which is built on virtx: each agent gets a sandbox of its own, and its skill covers the rest.
 
@@ -17,7 +17,7 @@ Work the steps below in order. Step 2 is the one that gets skipped: a command th
 |---|---|---|
 | Python | `pip install virtx` | `from virtx import Client, Recipe` |
 | Node.js | `npm install @brekkylab/virtx` | `const { Client, Recipe } = require('@brekkylab/virtx')` |
-| Rust | `virtx-rs = { git = "https://github.com/brekkylab/virtx" }` | `use virtx_rs::{Client, Recipe};` |
+| Rust | `cargo add virtx-rs` | `use virtx_rs::{Client, Recipe};` |
 
 A client reaches one server: `Client.spawn()` (`Client::spawn_virtx` in Rust) starts it on this machine as a child process, fetching the server of the client's own version into a cache the first time, and `Client.connect(url, auth)` reaches one over HTTP, with a bearer token if it wants one. `Client.spawn("virtx-stdio")` starts one installed on `PATH` instead; `ensure_virtx()` (`ensureVirtx()`) does the fetch alone, ahead of time. The Python and Node packages carry the library; the Rust crate opens `libvirtx_core` at run time, from `virtx_rs::load(path)` or `$VIRTX_CORE_LIB`.
 
@@ -79,6 +79,7 @@ Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`
 
 ## Where to read more
 
-- [`README.md`](../../README.md): the three Quickstarts, jobs, snapshots and volumes, ports, images and the GPU.
+- [`README.md`](../../README.md): the Quickstart, for a local server and a remote one.
+- [virtx.sh/docs](https://virtx.sh/docs/): a guide each for images, sandboxes, commands, files, networks and ports, snapshots, volumes and the GPU, and the API reference.
 - [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
 - [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.

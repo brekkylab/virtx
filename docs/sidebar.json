@@ -3,28 +3,25 @@
     "label": "Getting started",
     "items": [
       { "label": "Overview", "link": "/" },
-      { "slug": "quickstart" },
-      { "slug": "local" }
+      { "slug": "hello-world" }
     ]
   },
   {
     "label": "Guides",
     "items": [
-      { "label": "All guides", "link": "/guides/" },
-      { "slug": "guides/run-commands" },
-      { "slug": "guides/keep-work" },
       { "slug": "guides/images" },
-      { "slug": "guides/ports" },
-      { "slug": "guides/gpu", "badge": { "text": "Early access", "variant": "default" } },
+      { "slug": "guides/setting-sandboxes" },
+      { "slug": "guides/running-commands" },
+      { "slug": "guides/reading-writing-files" },
+      { "slug": "guides/networks-ports" },
+      { "slug": "guides/keeping-snapshots" },
+      { "slug": "guides/mounting-volumes" },
+      { "slug": "guides/using-gpus" },
       { "slug": "guides/coding-agents" }
     ]
   },
   {
-    "label": "Concepts",
-    "items": [{ "slug": "concepts/resources" }, { "slug": "concepts/jobs" }]
-  },
-  {
     "label": "Reference",
-    "items": [{ "slug": "reference/environment" }, { "slug": "reference/cli" }]
+    "items": [{ "slug": "reference/api" }, { "slug": "reference/cli" }]
   }
 ]

@@ -4,6 +4,8 @@ description: "Pull an image, run echo in a sandbox, and read its output, on virt
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
+import clientServerLight from "../images/client-server-light.svg";
+import clientServerDark from "../images/client-server-dark.svg";
 
 This page runs one program that prints `Hello, world!` from a sandbox.
 The program is the same wherever the sandbox runs; only the line that makes the client changes.
@@ -132,6 +134,16 @@ Hello, world!
 
 
 ## Run it
+
+The program is a client, and it needs a server to run the sandbox on.
+Pick one:
+
+- virtx cloud, hosted for you.
+- A server on your machine, which the client starts itself.
+- A server you run on another machine.
+
+<img class="dark:sl-hidden" src={clientServerLight.src} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
+<img class="light:sl-hidden" src={clientServerDark.src} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
 
 ### virtx cloud
 

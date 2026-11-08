@@ -4,7 +4,7 @@
 
 Report privately through [GitHub's advisory form](https://github.com/brekkylab/virtx/security/advisories/new), or by email to contact@brekkylab.com. Please do not open a public issue for a suspected vulnerability, and do not include a working exploit or a real credential in any report.
 
-Include the language you used virtx from, the package version, the host OS and its FUSE provider, what you ran, what you expected, and what happened. A reproduction that needs no remote service, such as one on an in-memory `Directory` or a `Recipe` on `alpine:latest`, is ideal.
+Include the language you used virtx from, the package version, the host OS, what you ran, what you expected, and what happened. A reproduction that needs no remote service, such as one built from a `Recipe` on `alpine:latest`, is ideal.
 
 We aim to acknowledge a report within three working days and to describe the fix or the disagreement within fourteen. Fixes ship in a normal release, credited to the reporter unless they ask otherwise.
 
@@ -24,4 +24,3 @@ virtx draws the line between a task and the host it runs on, so the interesting 
 - **What a command does inside its VM.** The session is disposable, and what it installs, deletes or runs there is the caller's business. The boundary is the host.
 - **Binding and exposure are the operator's call.** The console server speaks to the process that started it over stdio; putting a session behind a public interface is a deployment decision.
 - **The fixtures in the tests are not secrets.** The in-memory stores and the object-store endpoints the tests build on hold nothing real.
-- **A FUSE provider's own defects.** A failure inside FUSE-T, Dokany or the kernel's FUSE belongs to that project; report it here if you are unsure and we will pass it on.

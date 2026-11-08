@@ -28,42 +28,70 @@ virtx is also the VM layer under [Ailoy](https://github.com/brekkylab/ailoy), ou
 
 ## How it works
 
-A virtx server runs the VMs, on your machine or another one. This repository is both ends: the client, one library, `libvirtx_core`, with packages for Python, Node and Rust over it, and the server, [`virtx-stdio`](virtx-stdio/README.md).
+virtx follows a client-server model.
+Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
 
-Your code asks the server for a sandbox, a VM booted from an image you name. It then runs commands in it as jobs and reads their output as a log. Volumes and snapshots hold whatever should outlive the sandbox, and anything else is gone when you remove it.
+The server can run on the same machine as your code or on another one. Either way, client and server speak the same plain HTTP protocol; only the transport differs.
 
-Client and server speak plain HTTP, described in [`virtx-core/PROTOCOL.md`](virtx-core/PROTOCOL.md). The client either starts the server as a child process and talks to it over stdin and stdout, so there is nothing to install or keep running, or connects to one by URL.
+| | Local | Remote |
+| --- | --- | --- |
+| Server | `virtx-server-stdio` | `virtx-server-tcp` |
+| Where it runs | Child process of client process | Daemon on another machine, separate from the client |
+| Transport | HTTP over stdio | HTTP over TCP |
+| Setup | None: nothing to install or keep running | Run the server, and give each user a token |
+| Use it for | Running VMs on the machine you work on | A bigger machine, or one host shared by a team |
+
+Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
+Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
+
 
 ## Requirements
 
-These apply to the machine that runs the virtx server.
+### Client
 
-- **Host:** Linux, macOS on Apple silicon, or Windows 11 or later. Guests are always Linux.
-- **Linux:** a kernel with KVM support, `/dev/kvm` accessible to your user, hardware virtualization enabled in the firmware, and FUSE. KVM is built into most modern kernels, so nothing usually needs installing.
-- **Windows:** the VM runs on the Windows Hypervisor Platform, which is off by default. Turn it on from an administrator PowerShell, then restart, with virtualization enabled in the firmware:
+Pick the one for the language you use.
+
+- **Python:** 3.10 or later.
+- **Node:** 18 or later.
+- **Rust:** 1.89 or later.
+
+### Server
+
+These apply to the machine that runs the virtx server.
+Guests are always Linux.
+
+#### Hypervisor
+
+- **Linux**: a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware. KVM is built into most modern kernels, so nothing usually needs installing.
+- **macOS**: Apple silicon only. The VM runs on `Hypervisor.framework`, which is built in, so nothing needs installing or turning on.
+- **Windows**: Windows 11 or later, x86_64 only. The VM runs on the Windows Hypervisor Platform. If it is off, run this in an administrator PowerShell and restart:
 
   ```powershell
   Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
   ```
 
-- **Clients:** Python 3.10 or later, Node 18 or later, or Rust.
-- **GPU:** a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [GPU](#gpu).
+#### (Optional) GPU
+
+Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [GPU](#gpu).
 
 ## Quickstart
 
-Each one builds an image with `jq` in it, boots a sandbox from it, runs a command, and reads what it wrote.
-`Client.spawn()` starts the server, `virtx-stdio`, and talks to it over its stdin and stdout; `Client.connect(url)` reaches one over HTTP instead.
-The server is released with the client, so a client fetches the one of its own version the first time it is asked for, from this repository's releases into a cache, and `Client.spawn("virtx-stdio")` runs one you installed yourself instead.
-To build it, as [`CONTRIBUTING.md`](CONTRIBUTING.md) says, and have a client use that build:
+> [!TIP]
+> Using a coding agent? Install the [virtx skill](skills/virtx/SKILL.md) and let it write this for you:
+>
+> ```bash
+> claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
+> codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
+> ```
 
-```sh
-cargo xtask init
-cargo xtask build kernel server-stdio
-cargo xtask install --prefix ~/.local   # -> ~/.local/bin/virtx-stdio, beside its kernel
-export VIRTX_STDIO=~/.local/bin/virtx-stdio  # what Client.spawn() starts, in place of a fetch
-```
+Each example builds an image with `jq` in it, boots a sandbox from it, runs a command, and prints its output.
 
-### Python
+### Local
+
+`Client.spawn()` starts a local server for you.
+
+<details>
+<summary><b>Python</b></summary>
 
 ```sh
 pip install virtx
@@ -101,7 +129,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-### Node
+</details>
+
+<details>
+<summary><b>Node</b></summary>
 
 ```sh
 npm install @brekkylab/virtx
@@ -138,17 +169,16 @@ async function main() {
 main()
 ```
 
-### Rust
+</details>
 
-The Rust package is `virtx-rs`, not on crates.io yet:
+<details>
+<summary><b>Rust</b></summary>
 
-```toml
-[dependencies]
-virtx-rs = { git = "https://github.com/brekkylab/virtx" }
+```sh
+cargo add virtx-rs
 ```
 
-It opens `libvirtx_core` at run time, from `virtx_rs::load(path)` or `$VIRTX_CORE_LIB`, so every module in a process shares one client.
-Each request is a `Future` or a `Stream` any async runtime awaits, or blocks with `wait` and `wait_next` on a thread without one, as here:
+The example blocks with `wait` and `wait_next`; in an async runtime, `.await` the same calls instead.
 
 ```rust
 use virtx_rs::{
@@ -185,12 +215,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Or let a coding agent do it: this repo is its own plugin marketplace, so the [agent skill](skills/virtx/SKILL.md) installs with no clone first.
+</details>
 
-```bash
-claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
-codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
+### Remote
+
+On the server machine, make a token and write a `server.json` that lets its user into a project:
+
+```sh
+cargo xtask run -p virtx-server-tcp -- token   # prints a token and its token_sha256
 ```
+
+```json
+{
+  "listen": "127.0.0.1:8470",
+  "home": "/var/lib/virtx",
+  "origins": [],
+  "users": { "alice": { "token_sha256": "<token_sha256>" } },
+  "projects": { "demo": { "members": ["alice"] } }
+}
+```
+
+```sh
+cargo xtask run -p virtx-server-tcp -- serve --config server.json
+```
+
+On the client, connect with the token and the project in place of `Client.spawn()`. The rest is the same as the local example.
+
+<details>
+<summary><b>Python</b></summary>
+
+```python
+from virtx import BearerAuth, Client
+
+client = Client.connect(
+    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+)
+```
+
+</details>
+
+<details>
+<summary><b>Node</b></summary>
+
+```js
+const client = Client.connect(
+  'http://127.0.0.1:8470',
+  { type: 'bearer', token: '<token>' },
+  { 'virtx-project': 'demo' }
+)
+```
+
+</details>
+
+<details>
+<summary><b>Rust</b></summary>
+
+```rust
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::Bearer { token: "<token>".into() },
+    [("virtx-project", "demo")],
+)?;
+```
+
+</details>
+
+A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Resources
 
@@ -247,7 +337,7 @@ snapshot = await client.create_snapshot("dev")
 sandbox = await client.create_sandbox("jq:latest", snapshot=snapshot)
 ```
 
-A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go. A snapshot or a volume is named by its handle or its name; in Rust, `SandboxCreateArgs::new("jq:latest").snapshot(snapshot.name()).readonly_volume(volume.name(), "/data")`.
+A volume is mounted into any number of sandboxes at the paths you choose, read-only if you say so, and stays when they go. A snapshot or a volume is named by its handle or its name; in Rust, `SandboxCreateArgs::new("jq:latest").snapshot(snapshot.name()).volume(volume.at("/data").readonly())`.
 
 ```python
 from virtx import SandboxVolume

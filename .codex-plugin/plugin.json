@@ -13,7 +13,6 @@
     "vm",
     "sandbox",
     "microvm",
-    "fuse",
     "agent",
     "python",
     "nodejs",

@@ -35,9 +35,9 @@ See [Resources](/docs/concepts/resources/) for the image, sandbox, snapshot and 
 
 These apply to the machine that runs the server. Sandboxes are Linux VMs on every host.
 
-- **Linux:** a kernel with KVM support, `/dev/kvm` accessible to your user, hardware virtualization enabled in the firmware, and FUSE.
+- **Linux:** a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware.
 - **macOS:** Apple silicon.
-- **Windows:** 11 or later. The VM runs on the Windows Hypervisor Platform, which is off by default. Turn it on from an administrator PowerShell, then restart, with virtualization enabled in the firmware:
+- **Windows:** 11 or later. The VM runs on the Windows Hypervisor Platform. If it is off, run this in an administrator PowerShell and restart:
 
   ```powershell
   Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform

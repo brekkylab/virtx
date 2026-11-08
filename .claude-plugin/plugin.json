@@ -9,5 +9,5 @@
   "homepage": "https://github.com/brekkylab/virtx",
   "repository": "https://github.com/brekkylab/virtx",
   "license": "Apache-2.0",
-  "keywords": ["vm", "sandbox", "microvm", "fuse", "agent", "python", "nodejs", "rust"]
+  "keywords": ["vm", "sandbox", "microvm","agent", "python", "nodejs", "rust"]
 }

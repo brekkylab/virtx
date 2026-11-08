@@ -35,7 +35,7 @@ export default defineConfig({
   srcDir: './preview',
   integrations: [
     starlight({
-      title: 'virtx docs (preview)',
+      title: 'virtx docs',
       // the site's icon, from the site: the preview has no public/ of its own
       favicon: 'https://virtx.sh/favicon.svg',
       sidebar,

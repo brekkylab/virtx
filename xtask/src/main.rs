@@ -66,7 +66,10 @@ const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
 ];
-const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index")];
+const ABINS: &[(&str, &str)] = &[
+    ("virtx-exec-index", "index"),
+    ("virtx-exec-docread", "docread"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {

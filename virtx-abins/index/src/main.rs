@@ -4,6 +4,7 @@
 //! index init   notes.db
 //! index ingest notes.db docs          # a directory means everything under it
 //! index search notes.db -n 5 borrow checker
+//! index rechunk notes.db --chunk-size 800  # cut again, from what the store holds
 //! index sync   notes.db docs          # the store says what the tree says
 //! index purge  notes.db docs/old      # ingest undone
 //! index list                          # the stores beside this one
@@ -12,9 +13,10 @@
 //!
 //! # What a search answers with
 //!
-//! A store remembers where each document came from, so the answer to a search names a path the
-//! caller can open, rather than only the text. The engine is SQLite's FTS5, and what a store's
-//! file holds is written down in [`sqlite`].
+//! A store cuts each document into chunks — see [`chunk`] — and a search answers with chunks:
+//! the path the document came from and the lines the chunk spans, so the caller can open it,
+//! and the chunk's text with `--text`. The engine is SQLite's FTS5, and what a store's file
+//! holds is written down in [`sqlite`].
 //!
 //! # A document is known by the path it was given under
 //!
@@ -30,19 +32,15 @@
 //! way. Nothing here canonicalizes on the caller's behalf: a store that answered with a path
 //! nobody typed would be answering about a file the caller cannot name.
 //!
-//! # Vectors: the schema is ready, and there is nothing in it
+//! # Vectors: the column is there, and there is nothing in it
 //!
-//! A store carries a `chunk` table with an `embedding` column, and `meta` has room for the model
-//! and the dimension that produced them. **All of it is empty.** There is no embedder in this
-//! workspace to fill it — ailoy, the only language-model runtime here, has no embedding API — and
-//! choosing a chunk size before there is a model to size chunks for would be deciding on no
-//! evidence.
-//!
-//! Since a document's body is stored whole, chunks stay derivable at any later time: the day an
-//! embedder arrives, the work is a backfill rather than a re-ingest. Recording the model in
-//! `meta` is what makes that backfill able to notice that the vectors it finds were written by a
-//! different model, which is the difference between re-embedding and ranking wrongly in silence.
+//! Each chunk has an `embedding` column, and `meta` has room for the model and the dimension
+//! that produced them. **Both are empty.** There is no embedder in this workspace to fill them.
+//! The day one arrives, the work is a backfill over the chunks already there rather than a
+//! re-ingest, and recording the model in `meta` is what lets that backfill notice vectors
+//! written by a different model.
 
+mod chunk;
 mod ingest;
 mod search;
 mod sqlite;
@@ -56,7 +54,7 @@ use std::{
 
 use clap::{Parser as _, Subcommand};
 
-use crate::{search::DEFAULT_LIMIT, store::Store};
+use crate::{chunk::Chunking, search::DEFAULT_LIMIT, store::Store};
 
 /// The name every message this program writes about itself is spelled with.
 ///
@@ -95,6 +93,9 @@ enum Command {
         /// Where to make it, `notes.db` for instance.
         #[arg(value_name = "STORE")]
         store: PathBuf,
+
+        #[command(flatten)]
+        chunking: ChunkingArgs,
     },
 
     /// Index files into a store.
@@ -113,6 +114,11 @@ enum Command {
     },
 
     /// Search a store.
+    ///
+    /// Each hit is a chunk of a document, on a line of its own: the score, larger being nearer,
+    /// then `path:first-last` with the lines the chunk spans, then the document's name, all
+    /// tab-separated. Under it, indented by a tab, is a snippet cut around the match, or the
+    /// chunk's whole text with `--text`.
     Search {
         /// Which store to ask.
         #[arg(value_name = "STORE")]
@@ -121,6 +127,11 @@ enum Command {
         /// How many hits to answer with.
         #[arg(short = 'n', long = "limit", value_name = "N", default_value_t = DEFAULT_LIMIT)]
         limit: usize,
+
+        /// Answer with each chunk's whole text, every line of it indented under the hit, in
+        /// place of a snippet.
+        #[arg(long)]
+        text: bool,
 
         /// The words to look for, joined back together since a shell has already split them.
         #[arg(required = true, value_name = "QUERY")]
@@ -166,6 +177,19 @@ enum Command {
         paths: Vec<PathBuf>,
     },
 
+    /// Cut every document in a store into chunks again, by a new size and overlap.
+    ///
+    /// From the text the store already holds: no file is read, so a document whose file is
+    /// gone is cut too. The store keeps the new chunking for what is ingested after.
+    Rechunk {
+        /// Which store to cut again.
+        #[arg(value_name = "STORE")]
+        store: PathBuf,
+
+        #[command(flatten)]
+        chunking: ChunkingArgs,
+    },
+
     /// The stores in a directory, and how much is in each.
     ///
     /// Looks at that one directory and does not descend into it. Files that are not stores are
@@ -186,6 +210,27 @@ enum Command {
         #[arg(value_name = "STORE")]
         store: PathBuf,
     },
+}
+
+// How a store cuts documents into the chunks a search answers with.
+#[derive(clap::Args)]
+struct ChunkingArgs {
+    /// The most characters a chunk holds. A chunk is cut before a heading, at a blank line, at
+    /// a line end or at whitespace where it can be, so most are shorter.
+    #[arg(long, value_name = "CHARS", default_value_t = Chunking::DEFAULT_SIZE)]
+    chunk_size: usize,
+
+    /// How many characters at the end of a chunk the next one may start with again, so a
+    /// passage cut in two is still whole in one of them.
+    #[arg(long, value_name = "CHARS", default_value_t = Chunking::DEFAULT_OVERLAP)]
+    overlap: usize,
+}
+
+impl ChunkingArgs {
+    fn chunking(&self) -> Result<Chunking, Answer> {
+        Chunking::new(self.chunk_size, self.overlap)
+            .map_err(|e| Answer::failed(format!("{NAME}: {e}\n")))
+    }
 }
 
 /// What a command produced: what to say, and whether it worked.
@@ -223,7 +268,10 @@ impl Answer {
 /// The command, done.
 fn run(command: Command) -> Answer {
     match command {
-        Command::Init { store } => init(&store),
+        Command::Init { store, chunking } => match chunking.chunking() {
+            Ok(chunking) => init(&store, chunking),
+            Err(refusal) => refusal,
+        },
 
         Command::Ingest { store, paths } => match opened(&store) {
             Ok(store) => reported("ingest", ingest::run(&store, &paths)),
@@ -233,9 +281,10 @@ fn run(command: Command) -> Answer {
         Command::Search {
             store,
             limit,
+            text,
             query,
         } => match opened(&store) {
-            Ok(store) => reported("search", search::run(&store, limit, &query.join(" "))),
+            Ok(store) => reported("search", search::run(&store, limit, text, &query.join(" "))),
             Err(refusal) => refusal,
         },
 
@@ -253,6 +302,16 @@ fn run(command: Command) -> Answer {
             Err(refusal) => refusal,
         },
 
+        Command::Rechunk { store, chunking } => match (chunking.chunking(), opened(&store)) {
+            (Ok(chunking), Ok(mut store)) => reported(
+                "rechunk",
+                store
+                    .rechunk(chunking)
+                    .map(|n| format!("rechunked {n} document(s)\n")),
+            ),
+            (Err(refusal), _) | (_, Err(refusal)) => refusal,
+        },
+
         Command::List { dir } => list(&dir),
 
         Command::Drop { store } => drop_store(&store),
@@ -268,8 +327,8 @@ fn reported(what: &str, done: std::io::Result<String>) -> Answer {
 }
 
 /// `init` — the file, and its schema.
-fn init(store: &Path) -> Answer {
-    match Store::try_new(store) {
+fn init(store: &Path, chunking: Chunking) -> Answer {
+    match Store::try_new(store, chunking) {
         // The store, named as it was asked for, and nothing else: a line a script can read as
         // the path it now has. What went right needs no sentence — the file is the answer.
         Ok(_) => Answer::ok(format!("{}\n", store.display())),

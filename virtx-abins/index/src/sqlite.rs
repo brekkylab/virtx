@@ -5,9 +5,9 @@
 //!
 //! `schema_version` and `kind` are read before any other table is touched, so that a file that
 //! is somebody else's SQLite database, or a store from a schema this build does not speak, is
-//! refused by name rather than failing three statements later. It is also where the keys that
-//! outlive one schema go: a store that grows vectors needs to record which model produced them
-//! and at what dimension.
+//! refused by name rather than failing three statements later. It is also where a store's
+//! settings go: how its documents are cut into chunks, and, once a store grows vectors, which
+//! model produced them and at what dimension.
 //!
 //! # What a store's content must be
 //!
@@ -38,12 +38,13 @@ pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// outlives this build, and somebody holding one will want to read it with `sqlite3` or write a
 /// tool that does.
 ///
-/// `chunk` is created empty — there is no embedder in this workspace yet, and choosing a chunk
-/// size before there is a model to size chunks for would be deciding on no evidence.
+/// `item` holds each document whole, and `chunk` the spans of it a search answers with, each
+/// with its text in `chunk_fts` under the chunk's rowid. `chunk.embedding` stays empty until
+/// there is an embedder to fill it.
 pub const SCHEMA: &str = include_str!("../queries/init.sql");
 
 /// What this schema is; refuse a file written by another one.
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 /// What a store says it is in `meta.kind`, and what [`open`] insists on.
 pub const KIND: &str = "index";
@@ -51,22 +52,26 @@ pub const KIND: &str = "index";
 /// One document written — `queries/upsert.sql`.
 ///
 /// `path` is a document's identity, so a second write of it lands on the conflict clause and
-/// updates in place. The rowid has to survive that update: `item_fts` is joined to it, and a
-/// replacement that renumbered the row would leave the text filed under a number nothing
-/// points at. `returning rowid` hands back the one to file the text under, whether the row was
-/// new or already there.
+/// updates in place, keeping its rowid. `returning rowid` hands back the one to file the
+/// document's chunks under, whether the row was new or already there.
 pub const UPSERT: &str = include_str!("../queries/upsert.sql");
 
-/// The text of one document — `queries/fts_write.sql`, `queries/fts_clear.sql`.
+/// One chunk of a document, and its text — `queries/chunk_write.sql`,
+/// `queries/chunk_fts_write.sql`.
+pub const CHUNK_WRITE: &str = include_str!("../queries/chunk_write.sql");
+pub const CHUNK_FTS_WRITE: &str = include_str!("../queries/chunk_fts_write.sql");
+
+/// Every chunk of a document, gone — `queries/chunk_fts_clear.sql`, `queries/chunk_clear.sql`.
 ///
-/// Two statements because FTS5 has no upsert: a row is cleared and written again.
-pub const FTS_WRITE: &str = include_str!("../queries/fts_write.sql");
-pub const FTS_CLEAR: &str = include_str!("../queries/fts_clear.sql");
+/// The text first, since it is found by way of the chunks, and by hand, because `chunk_fts` is
+/// a virtual table and nothing cascades into one.
+pub const CHUNK_FTS_CLEAR: &str = include_str!("../queries/chunk_fts_clear.sql");
+pub const CHUNK_CLEAR: &str = include_str!("../queries/chunk_clear.sql");
 
 const VERSION_KEY: &str = "schema_version";
 const KIND_KEY: &str = "kind";
 
-/// Make the store at `path`.
+/// Make the store at `path`, with `settings` in its `meta` beside what every store says.
 ///
 /// [`AlreadyExists`](io::ErrorKind::AlreadyExists) when there is already a file there. Making a
 /// store is the one thing that brings one into being, so being handed a name that is taken is
@@ -77,7 +82,7 @@ const KIND_KEY: &str = "kind";
 /// **Nothing usable is left behind on failure.** A file that exists but has no schema in it
 /// would make every retry of the same command fail as "already exists" — a store that does not
 /// exist, standing in the way of creating itself.
-pub fn create(path: &Path) -> io::Result<Connection> {
+pub fn create(path: &Path, settings: &[(&str, String)]) -> io::Result<Connection> {
     // The absence of the file *is* the check, so it is made by the creation rather than by a
     // `try_exists` before it: two calls racing for one name both see nothing there, and only an
     // exclusive create makes one of them lose.
@@ -99,12 +104,10 @@ pub fn create(path: &Path) -> io::Result<Connection> {
         // nothing a half-written schema could damage. What plays the part of a rollback is the
         // removal below, which undoes the file rather than the statements in it.
         conn.execute_batch(SCHEMA).map_err(sql_error)?;
-        for (key, value) in [(VERSION_KEY, SCHEMA_VERSION), (KIND_KEY, KIND)] {
-            conn.execute(
-                "insert into meta (key, value) values (?1, ?2)",
-                (key, value),
-            )
-            .map_err(sql_error)?;
+        let ours = [(VERSION_KEY, SCHEMA_VERSION), (KIND_KEY, KIND)];
+        let settings = settings.iter().map(|(key, value)| (*key, value.as_str()));
+        for (key, value) in ours.into_iter().chain(settings) {
+            set(&conn, key, value)?;
         }
         Ok(conn)
     })();
@@ -211,6 +214,17 @@ pub fn said(conn: &Connection, key: &str) -> io::Result<Option<String>> {
     .map_err(sql_error)
 }
 
+/// Write `value` under `key` in `meta`, over whatever was there.
+pub fn set(conn: &Connection, key: &str, value: &str) -> io::Result<()> {
+    conn.execute(
+        "insert into meta (key, value) values (?1, ?2) \
+         on conflict(key) do update set value = excluded.value",
+        (key, value),
+    )
+    .map(drop)
+    .map_err(sql_error)
+}
+
 /// Open one connection, with the pragmas a store that may sit on a FUSE mount needs.
 pub fn connect(path: &Path, flags: OpenFlags) -> io::Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(sql_error)?;
@@ -250,8 +264,11 @@ mod tests {
     fn a_new_store_says_which_schema_and_kind_it_is() {
         let dir = tempfile::tempdir().unwrap();
         let path = at(&dir, "s.db");
-        let conn = create(&path).expect("a store can be made");
-        assert_eq!(said(&conn, VERSION_KEY).unwrap().as_deref(), Some("1"));
+        let conn = create(&path, &[]).expect("a store can be made");
+        assert_eq!(
+            said(&conn, VERSION_KEY).unwrap().as_deref(),
+            Some(SCHEMA_VERSION)
+        );
         assert_eq!(said(&conn, KIND_KEY).unwrap().as_deref(), Some(KIND));
         drop(conn);
 
@@ -264,7 +281,7 @@ mod tests {
     fn a_store_of_another_kind_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = at(&dir, "other.db");
-        let conn = create(&path).unwrap();
+        let conn = create(&path, &[]).unwrap();
         conn.execute(
             "update meta set value = 'other' where key = ?1",
             (KIND_KEY,),
@@ -283,7 +300,7 @@ mod tests {
     fn a_store_from_another_schema_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = at(&dir, "newer.db");
-        let conn = create(&path).unwrap();
+        let conn = create(&path, &[]).unwrap();
         conn.execute(
             "update meta set value = '99' where key = ?1",
             (VERSION_KEY,),
@@ -302,10 +319,10 @@ mod tests {
     #[test]
     fn the_upsert_updates_a_document_in_place() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = create(&at(&dir, "s.db")).unwrap();
+        let conn = create(&at(&dir, "s.db"), &[]).unwrap();
         let mut up = conn.prepare(UPSERT).unwrap();
         let mut write = |mtime: i64, len: i64, at: &str| -> i64 {
-            up.query_row(("/a.md", "a.md", mtime, len, at), |r| r.get(0))
+            up.query_row(("/a.md", "a.md", "body", mtime, len, at), |r| r.get(0))
                 .unwrap()
         };
 
@@ -313,7 +330,7 @@ mod tests {
         let second = write(200, 20, "t2");
         assert_eq!(
             first, second,
-            "the rowid survives, which is what item_fts is filed under"
+            "the rowid survives, which is what its chunks are filed under"
         );
 
         let (mtime, len, at): (i64, i64, String) = conn
@@ -336,7 +353,7 @@ mod tests {
         let path = at(&dir, "taken.db");
         std::fs::write(&path, b"someone else's").unwrap();
 
-        let e = create(&path).expect_err("the name is taken");
+        let e = create(&path, &[]).expect_err("the name is taken");
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
             std::fs::read(&path).unwrap(),

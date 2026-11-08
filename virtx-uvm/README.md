@@ -945,7 +945,7 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 ## `/abin`
 
-`/abin` is a directory of virtx's own executables for the guest: today `index`, from [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+`/abin` is a directory of virtx's own executables for the guest: today `index` and `docread`, from [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
 
 Every machine gets the `abin/` directory beside the server's binary, shared read-only and mounted at `/abin`, with `/abin` put in front of the image's `PATH`.
 A host with no `abin/` boots machines without one rather than refusing to.
@@ -957,13 +957,6 @@ cargo xtask build abin                     # -> target/release/abin, beside the 
                                            #    fetches the musl sysroot the first time
 cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
 ```
-
-`docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
-C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
-that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built for
-`<arch>-unknown-linux-musl` somewhere that has that toolchain, dropped at
-`~/.cache/virtx/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
-and `docread` added to `ABINS` in [`xtask`](../xtask/src/main.rs).
 
 What each program is travels with it: `virtx-abins/{program}/SKILLS.md` is installed at
 `abin/skills/{program}/SKILLS.md`, so whatever gets the programs gets the reading of them too.
@@ -1010,8 +1003,8 @@ virtx-server-tcp/          the same server over HTTP, to the users and projects 
 virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
                             own workspace, built for musl by this crate's build script and
                             embedded in it
-virtx-abins/                the programs for /abin -- index, with docread beside it -- and a
-                            SKILLS.md each; its own workspace, built for musl
+virtx-abins/                the programs for /abin -- index and docread -- and a SKILLS.md
+                            each; its own workspace, built for musl
 3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch
 3rdparty/MoltenVK/          fork of MoltenVK, with SPIRV-Cross; macOS builds only
 3rdparty/libepoxy/          fork of libepoxy at 1.5.10, unchanged; Windows builds only

@@ -1,5 +1,5 @@
-# The programs that live in the guest's `/abin`: `index`, with `docread` beside it. They are
-# written and built here, for the machine that runs them; `virtx` is what decides what a
+# The programs that live in the guest's `/abin`: `index` and `docread`. They are written and
+# built here, for the machine that runs them; `virtx` is what decides what a
 # delegated executable *is*.
 #
 # Its own workspace root rather than a member of the one above: everything here is
@@ -26,9 +26,6 @@ clap = { version = "4", features = ["derive"] }
 # which is the one thing here a cross build needs more than rustup for; see
 # `.cargo/config.toml`.
 rusqlite = { version = "0.40", features = ["bundled"] }
-# `docread`'s build script alone: the check that makes a published `libpdfium.a` safe to fetch,
-# since what is fetched ends up inside the binary.
-sha2 = "0.10"
 tempfile = "3"
 
 # These ship inside an image rather than onto a disk somebody buys, so the binary's size is

@@ -502,10 +502,11 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
         .exec(&id, &["sh", "-c", "command -v index"], None)
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["/abin/index".into()], 0));
-    let (_, ended) = server
-        .exec(&id, &["test", "-f", "/abin/skills/index/SKILLS.md"], None)
-        .await;
-    assert_eq!(ended.unwrap(), 0);
+    for program in ["index", "docread"] {
+        let skill = format!("/abin/skills/{program}/SKILLS.md");
+        let (_, ended) = server.exec(&id, &["test", "-f", &skill], None).await;
+        assert_eq!(ended.unwrap(), 0, "{skill}");
+    }
     let (_, ended) = server.exec(&id, &["touch", "/abin/x"], None).await;
     assert_ne!(ended.unwrap(), 0, "/abin is read-only");
 
@@ -525,6 +526,17 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
     assert_eq!(ended.unwrap(), 0, "{lines:?}");
     assert!(
         lines.iter().any(|line| line.contains("docs/a.md")),
+        "{lines:?}"
+    );
+
+    let (lines, ended) = server
+        .exec(&id, &["docread", "/root/docs/a.md"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.ends_with("\tthe borrow checker")),
         "{lines:?}"
     );
     server.client.remove_sandbox(&id).await.unwrap();

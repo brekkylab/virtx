@@ -65,7 +65,7 @@ cargo xtask test -p virtx-server-stdio            # the servers' own tests, whic
 (cd virtx-node && npm install && npm test)        # Node
 ```
 
-- Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
+- Run `cargo xtask check` before pushing. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - A change to the client needs nothing of `init`; `cargo xtask check --client` checks it alone. A change to the servers needs `init`, and a change that reaches a VM runs `cargo xtask test` for the server it touches.
 - A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the surface the behaviour lives in: `virtx-core`'s in-module tests and `tests/`, the servers' `tests/`, `virtx-py/tests/` and `virtx-node/__test__/`.
 

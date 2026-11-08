@@ -162,7 +162,7 @@ On the machine that should run the VMs, make a token.
 This prints the token and its `token_sha256`:
 
 ```sh
-cargo xtask run -p virtx-server-tcp -- token
+virtx-server-tcp token
 ```
 
 Write a `server.json` that lets that token's user into a project:
@@ -179,7 +179,7 @@ Write a `server.json` that lets that token's user into a project:
 Start the server:
 
 ```sh
-cargo xtask run -p virtx-server-tcp -- serve --config server.json
+virtx-server-tcp serve --config server.json
 ```
 
 In the program, connect with the token and the project in place of `Client.spawn()`:

@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 On the server machine, make a token and write a `server.json` that lets its user into a project:
 
 ```sh
-cargo xtask run -p virtx-server-tcp -- token   # prints a token and its token_sha256
+virtx-server-tcp token   # prints a token and its token_sha256
 ```
 
 ```json
@@ -185,10 +185,11 @@ cargo xtask run -p virtx-server-tcp -- token   # prints a token and its token_sh
 ```
 
 ```sh
-cargo xtask run -p virtx-server-tcp -- serve --config server.json
+virtx-server-tcp serve --config server.json
 ```
 
-On the client, connect with the token and the project in place of `Client.spawn()`. The rest is the same as the local example.
+On the client, connect with the token and the project in place of `Client.spawn()`.
+The rest is the same as the local example.
 
 <details open>
 <summary><b>Python</b></summary>
@@ -231,13 +232,12 @@ let client = Client::connect(
 
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
-
 ## Features
 
 - **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
 - **Run it wherever you work:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
-  - **Servers:** 💻 local(stdio) · 🖥️ remote(tcp) · ☁️ cloud
+  - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
 - **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
@@ -263,9 +263,13 @@ Guests are always Linux.
 
 #### Hypervisor
 
-- **Linux**: a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware. KVM is built into most modern kernels, so nothing usually needs installing.
-- **macOS**: Apple silicon only. The VM runs on `Hypervisor.framework`, which is built in, so nothing needs installing or turning on.
-- **Windows**: Windows 11 or later, x86_64 only. The VM runs on the Windows Hypervisor Platform. If it is off, run this in an administrator PowerShell and restart:
+- **Linux**: a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware.
+  KVM is built into most modern kernels, so nothing usually needs installing.
+- **macOS**: Apple silicon only.
+  The VM runs on `Hypervisor.framework`, which is built in, so nothing needs installing or turning on.
+- **Windows**: Windows 11 or later, x86_64 only.
+  The VM runs on the Windows Hypervisor Platform.
+  If it is off, run this in an administrator PowerShell and restart:
 
   ```powershell
   Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
@@ -334,7 +338,10 @@ See [Building from source](AGENTS.md#building-from-source) in AGENTS.md.
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers how to open a PR. For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue. Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
+Bug reports, ideas and pull requests are welcome.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers how to open a PR.
+For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
 
 ## License
 

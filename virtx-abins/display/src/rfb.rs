@@ -6,6 +6,11 @@
 //! sent, and sends the tiles that changed, ZRLE when the viewer takes it and raw otherwise.
 //! A request nothing has changed for waits for the screen to change.
 //!
+//! The cursor goes as x11vnc sends it. A viewer that takes cursor shapes (`Cursor`) is sent
+//! the image to draw itself, again whenever it changes, and one that takes positions too
+//! (`PointerPos`) is sent where the pointer is whenever it moves, so a pointer moved by a
+//! program shows. A viewer that takes neither gets the cursor drawn into the screen.
+//!
 //! The reading half waits for data with `poll` and reads only what has come ([`Polled`]). A
 //! port forwarded into a virtx guest is a vsock under its TCP socket, and a `recv` blocked on a
 //! vsock holds the socket's lock, so a send from the other half would wait for the viewer to
@@ -19,7 +24,11 @@ use std::{
     time::Duration,
 };
 
-use crate::{frame::Framebuffer, input::Input, zrle::Zrle};
+use crate::{
+    frame::Framebuffer,
+    input::{Cursor, Input},
+    zrle::Zrle,
+};
 
 /// How often a waiting request looks at the screen again.
 const POLL: Duration = Duration::from_millis(33);
@@ -28,6 +37,8 @@ const TILE: usize = 64;
 
 const ENCODING_RAW: i32 = 0;
 const ENCODING_ZRLE: i32 = 16;
+const ENCODING_CURSOR: i32 = -239;
+const ENCODING_POINTER_POS: i32 = -232;
 const SECURITY_NONE: u8 = 1;
 const SECURITY_VNC: u8 = 2;
 
@@ -175,6 +186,12 @@ impl PixelFormat {
 struct Viewer {
     format: PixelFormat,
     zrle: bool,
+    /// Whether the viewer draws the cursor itself, from the shape it is sent.
+    cursor_shape: bool,
+    /// Whether the viewer moves its cursor to where it is told the pointer is.
+    cursor_position: bool,
+    /// Set by each `SetEncodings`, so the cursor is sent again in the way now asked for.
+    encodings_changed: bool,
     /// A request waiting for an answer: whether it is incremental.
     request: Option<bool>,
     closed: bool,
@@ -201,6 +218,9 @@ fn session(mut stream: TcpStream, shared: &Shared) -> io::Result<()> {
         Mutex::new(Viewer {
             format,
             zrle: false,
+            cursor_shape: false,
+            cursor_position: false,
+            encodings_changed: false,
             request: None,
             closed: false,
         }),
@@ -217,7 +237,7 @@ fn session(mut stream: TcpStream, shared: &Shared) -> io::Result<()> {
             wake.notify_all();
             result
         });
-        let answered = answer(&mut stream, &mut screen, viewer);
+        let answered = answer(&mut stream, &mut screen, viewer, &shared.input);
         let _ = stream.shutdown(std::net::Shutdown::Both);
         let read = reader.join().unwrap();
         answered.and(read)
@@ -354,7 +374,11 @@ fn read_messages(
                     .iter()
                     .map(|&e| i32::from_be_bytes(e))
                     .collect();
-                state.lock().unwrap().zrle = encodings.contains(&ENCODING_ZRLE);
+                let mut state = state.lock().unwrap();
+                state.zrle = encodings.contains(&ENCODING_ZRLE);
+                state.cursor_shape = encodings.contains(&ENCODING_CURSOR);
+                state.cursor_position = encodings.contains(&ENCODING_POINTER_POS);
+                state.encodings_changed = true;
             }
             // FramebufferUpdateRequest: the area asked about is the whole screen, here.
             3 => {
@@ -398,6 +422,7 @@ fn answer(
     stream: &mut TcpStream,
     screen: &mut Framebuffer,
     viewer: &(Mutex<Viewer>, Condvar),
+    input: &Mutex<Input>,
 ) -> io::Result<()> {
     let (state, wake) = viewer;
     let (width, height) = (usize::from(screen.width), usize::from(screen.height));
@@ -405,9 +430,12 @@ fn answer(
     let mut now: Vec<u32> = Vec::new();
     let mut zrle = Zrle::new();
     let mut message = Vec::new();
+    // The cursor's shape and position as last sent, for a viewer that draws it.
+    let mut sent_serial: Option<u32> = None;
+    let mut sent_position: Option<(i16, i16)> = None;
 
     loop {
-        let (incremental, format, use_zrle) = {
+        let (incremental, format, use_zrle, shape, position) = {
             let mut s = state.lock().unwrap();
             while s.request.is_none() && !s.closed {
                 s = wake.wait(s).unwrap();
@@ -415,16 +443,39 @@ fn answer(
             if s.closed {
                 return Ok(());
             }
-            (s.request.unwrap(), s.format.clone(), s.zrle)
+            if std::mem::take(&mut s.encodings_changed) {
+                (sent_serial, sent_position) = (None, None);
+                // A cursor drawn into what was sent, or one left out of it, is now wrong.
+                sent.clear();
+            }
+            let request = s.request.unwrap();
+            (
+                request,
+                s.format.clone(),
+                s.zrle,
+                s.cursor_shape,
+                s.cursor_position,
+            )
         };
 
         screen.read(&mut now)?;
+        let cursor = input.lock().unwrap().cursor();
+        if !shape && let Some(cursor) = &cursor {
+            cursor.draw(&mut now, width, height);
+        }
         let rects = if incremental && sent.len() == now.len() {
             changed(&sent, &now, width, height)
         } else {
             vec![(0, 0, width, height)]
         };
-        if rects.is_empty() {
+        let new_shape = cursor
+            .as_ref()
+            .filter(|c| shape && sent_serial != Some(c.serial));
+        let new_position = cursor
+            .as_ref()
+            .map(|c| (c.x, c.y))
+            .filter(|&p| shape && position && sent_position != Some(p));
+        if rects.is_empty() && new_shape.is_none() && new_position.is_none() {
             // Nothing to say yet: look again, unless the request was replaced meanwhile.
             let s = state.lock().unwrap();
             let _ = wake.wait_timeout(s, POLL).unwrap();
@@ -439,18 +490,29 @@ fn answer(
             }
         }
 
+        let count = rects.len() + new_shape.is_some() as usize + new_position.is_some() as usize;
         message.clear();
         message.extend_from_slice(&[0, 0]);
-        message.extend_from_slice(&(rects.len() as u16).to_be_bytes());
-        for &(x, y, w, h) in &rects {
-            for v in [x, y, w, h] {
-                message.extend_from_slice(&(v as u16).to_be_bytes());
-            }
+        message.extend_from_slice(&(count as u16).to_be_bytes());
+        if let Some(cursor) = new_shape {
+            cursor_shape(cursor, &format, &mut message);
+            sent_serial = Some(cursor.serial);
+        }
+        if let Some((x, y)) = new_position {
+            rect_header(
+                (x.max(0) as usize, y.max(0) as usize, 0, 0),
+                ENCODING_POINTER_POS,
+                &mut message,
+            );
+            sent_position = Some((x, y));
+        }
+        for &rect in &rects {
+            let (x, y, w, h) = rect;
             if use_zrle {
-                message.extend_from_slice(&ENCODING_ZRLE.to_be_bytes());
-                zrle.encode(&now, width, (x, y, w, h), &format, &mut message);
+                rect_header(rect, ENCODING_ZRLE, &mut message);
+                zrle.encode(&now, width, rect, &format, &mut message);
             } else {
-                message.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+                rect_header(rect, ENCODING_RAW, &mut message);
                 for row in y..y + h {
                     for &v in &now[row * width + x..row * width + x + w] {
                         format.write_pixel(format.pixel(v), &mut message);
@@ -460,6 +522,37 @@ fn answer(
         }
         stream.write_all(&message)?;
         std::mem::swap(&mut sent, &mut now);
+    }
+}
+
+fn rect_header((x, y, w, h): (usize, usize, usize, usize), encoding: i32, out: &mut Vec<u8>) {
+    for v in [x, y, w, h] {
+        out.extend_from_slice(&(v as u16).to_be_bytes());
+    }
+    out.extend_from_slice(&encoding.to_be_bytes());
+}
+
+/// The `Cursor` pseudo-rectangle (RFC 6143 §7.8.2): the hot spot as its position, the image's
+/// pixels in the viewer's format, then a bitmask of the ones that show, a row a whole byte.
+fn cursor_shape(cursor: &Cursor, format: &PixelFormat, out: &mut Vec<u8>) {
+    let (w, h) = (usize::from(cursor.width), usize::from(cursor.height));
+    rect_header(
+        (usize::from(cursor.hot.0), usize::from(cursor.hot.1), w, h),
+        ENCODING_CURSOR,
+        out,
+    );
+    let pixels: Vec<(u32, bool)> = cursor.pixels().collect();
+    for &(rgb, _) in &pixels {
+        format.write_pixel(format.pixel(rgb), out);
+    }
+    for row in pixels.chunks(w.max(1)) {
+        for byte in row.chunks(8) {
+            let bits = byte
+                .iter()
+                .enumerate()
+                .fold(0u8, |b, (i, &(_, shown))| b | (u8::from(shown) << (7 - i)));
+            out.push(bits);
+        }
     }
 }
 
@@ -532,6 +625,25 @@ mod tests {
         format.write_pixel(format.pixel(0xffffff), &mut out);
         assert_eq!(out, [0xff, 0xff]);
         assert_eq!(format.cpixel_len(), 2);
+    }
+
+    #[test]
+    fn a_cursor_shape_is_its_pixels_then_a_mask_a_row_a_byte() {
+        let cursor = Cursor {
+            x: 5,
+            y: 5,
+            hot: (1, 0),
+            width: 9,
+            height: 1,
+            serial: 7,
+            argb: [vec![0xff112233; 8], vec![0]].concat(),
+        };
+        let mut out = Vec::new();
+        cursor_shape(&cursor, &PixelFormat::default(), &mut out);
+        assert_eq!(out[..12], [0, 1, 0, 0, 0, 9, 0, 1, 0xff, 0xff, 0xff, 0x11]);
+        assert_eq!(out[12..16], [0x33, 0x22, 0x11, 0]);
+        assert_eq!(out.len(), 12 + 9 * 4 + 2);
+        assert_eq!(out[out.len() - 2..], [0xff, 0]);
     }
 
     #[test]

@@ -50,8 +50,9 @@ enum Cli {
     /// until this is stopped.
     ///
     /// A viewer sees the screen and types and clicks into it as a keyboard and mouse would. The
-    /// pointer is drawn by the viewer, and the clipboard is not shared. Programs that need
-    /// OpenGL from the X server (GLX) do not start on this screen.
+    /// cursor shows where the pointer is, a program moving it included: drawn by the viewer
+    /// when it can, into the screen it is sent otherwise. The clipboard is not shared. Programs
+    /// that need OpenGL from the X server (GLX) do not start on this screen.
     #[command(after_long_help = "Examples:\n  \
         display run -- xterm\n  \
         display run --size 1920x1080 --password secret -- firefox https://example.com\n  \
@@ -61,8 +62,10 @@ enum Cli {
     /// Save what a screen shows now as a PNG
     ///
     /// Read from the screen `display run` keeps, from any command on the same machine while it
-    /// runs. Prints the path written.
-    #[command(after_long_help = "Example:\n  display shot /tmp/screen.png")]
+    /// runs, without the cursor unless `--cursor` asks for it. Prints the path written.
+    #[command(after_long_help = "Examples:\n  \
+        display shot /tmp/screen.png\n  \
+        display shot --cursor /tmp/screen.png")]
     Shot(Shot),
 }
 
@@ -110,6 +113,10 @@ struct Shot {
     /// The X display number of the screen to save
     #[arg(long, value_name = "N", default_value_t = 99)]
     display: u16,
+
+    /// Draw the cursor where the pointer is, as a viewer sees it
+    #[arg(long)]
+    cursor: bool,
 }
 
 fn size(s: &str) -> Result<(u16, u16), String> {
@@ -187,6 +194,16 @@ fn shot(args: Shot) -> Result<(), String> {
     screen
         .read(&mut pixels)
         .map_err(|e| format!("reading the screen: {e}"))?;
+    if args.cursor {
+        let cursor = input::Input::connect(args.display)?
+            .cursor()
+            .ok_or("the X server would not say where the cursor is")?;
+        cursor.draw(
+            &mut pixels,
+            usize::from(screen.width),
+            usize::from(screen.height),
+        );
+    }
     frame::write_png(&screen, &pixels, &args.file)
         .map_err(|e| format!("writing {}: {e}", args.file.display()))?;
     println!("{}", args.file.display());

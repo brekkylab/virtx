@@ -26,7 +26,7 @@ Start a screen, serve it over VNC, and run a command on it
 
 The command runs with `DISPLAY` set to the screen. `ready` is printed on a line of its own once the screen and VNC are up. With a command, this exits when the command does, with its status, and takes the screen down with it; without one, the screen stays up until this is stopped.
 
-A viewer sees the screen and types and clicks into it as a keyboard and mouse would. The pointer is drawn by the viewer, and the clipboard is not shared. Programs that need OpenGL from the X server (GLX) do not start on this screen.
+A viewer sees the screen and types and clicks into it as a keyboard and mouse would. The cursor shows where the pointer is, a program moving it included: drawn by the viewer when it can, into the screen it is sent otherwise. The clipboard is not shared. Programs that need OpenGL from the X server (GLX) do not start on this screen.
 
 Usage: display run [OPTIONS] [-- <COMMAND>...]
 
@@ -72,7 +72,7 @@ Examples:
 
 Save what a screen shows now as a PNG
 
-Read from the screen `display run` keeps, from any command on the same machine while it runs. Prints the path written.
+Read from the screen `display run` keeps, from any command on the same machine while it runs, without the cursor unless `--cursor` asks for it. Prints the path written.
 
 Usage: display shot [OPTIONS] <FILE>
 
@@ -86,8 +86,12 @@ Options:
           
           [default: 99]
 
+      --cursor
+          Draw the cursor where the pointer is, as a viewer sees it
+
   -h, --help
           Print help (see a summary with '-h')
 
-Example:
+Examples:
   display shot /tmp/screen.png
+  display shot --cursor /tmp/screen.png

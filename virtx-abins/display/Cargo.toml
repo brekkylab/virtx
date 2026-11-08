@@ -18,5 +18,5 @@ flate2 = "1"
 # `PR_SET_PDEATHSIG`, so the X server and the command go when `display` does.
 libc = "0.2"
 png = "0.18"
-# Input from the viewer goes into the X server through XTEST.
-x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+# Input from the viewer goes into the X server through XTEST; the cursor comes out of XFixes.
+x11rb = { version = "0.13", default-features = false, features = ["xfixes", "xtest"] }

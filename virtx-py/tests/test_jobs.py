@@ -131,13 +131,15 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(test_serve
         job = await client.build_image(Recipe("alpine:3.20").run("true"), "built:latest")
         assert isinstance(job, ImageJob)
         assert (job.kind, job.reference) == (ImageJobKind.BUILD, "built:latest")
-        log = [entry.entry async for entry in client.image_job_log(job.id)]
+        log = [entry.entry async for entry in job.log()]
         assert log == [Log("pulling alpine:3.20"), ImageJobEnd(digest="sha256:0")]
+        assert [entry.entry async for entry in job.log(after=1)] == log[1:]
+        assert (await job.get()).digest == "sha256:0"
         assert (await client.get_image_job(job.id)).digest == "sha256:0"
         assert job.id in [item.id for item in await client.list_image_job()]
-        await client.remove_image_job(job.id)
+        await job.remove()
         with pytest.raises(VirtxError) as refused:
-            await client.get_image_job(job.id)
+            await job.get()
         assert refused.value.status == 404
 
 
@@ -145,11 +147,11 @@ async def test_a_failed_pull_ends_its_log_with_its_error(test_server: str) -> No
     with Client.spawn(test_server) as client:
         job = await client.pull_image("missing")
         assert job.kind == ImageJobKind.PULL
-        log = [entry.entry async for entry in client.image_job_log(job.id)]
+        log = [entry.entry async for entry in job.log()]
         assert log[0] == Log("pulling missing")
         end = log[-1]
         assert isinstance(end, ImageJobEnd) and end.digest is None and end.error
-        assert (await client.get_image_job(job.id)).error == end.error
+        assert (await job.get()).error == end.error
 
 
 async def test_a_build_iterated_yields_its_log_to_its_end(test_server: str) -> None:

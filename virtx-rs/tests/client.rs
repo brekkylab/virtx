@@ -354,8 +354,8 @@ fn an_image_build_is_a_job_with_a_log() {
         .build_image(Recipe::new("alpine:3.20"), "t:latest")
         .wait()
         .unwrap();
-    assert_eq!(job.kind, ImageJobKind::Build);
-    let mut log = client.image_job_log(&job.id, None);
+    assert_eq!(job.info().kind, ImageJobKind::Build);
+    let mut log = job.log(None);
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
         entries.push(entry.unwrap().entry);
@@ -370,18 +370,24 @@ fn an_image_build_is_a_job_with_a_log() {
             }),
         ]
     );
-    let done = client.get_image_job(&job.id).wait().unwrap();
-    assert_eq!(done.digest.as_deref(), Some("sha256:0"), "{done:?}");
+    let mut after = job.log(Some(1));
+    assert_eq!(after.wait_next().unwrap().unwrap().entry, entries[1]);
+    assert!(after.wait_next().is_none());
+    let done = job.get().wait().unwrap();
+    assert_eq!(done.info().digest.as_deref(), Some("sha256:0"), "{done:?}");
+    let got = client.get_image_job(job.id()).wait().unwrap();
+    assert_eq!(got.info().digest.as_deref(), Some("sha256:0"), "{got:?}");
     assert!(
         client
             .list_image_job()
             .wait()
             .unwrap()
             .iter()
-            .any(|j| j.id == job.id)
+            .any(|j| j.id() == job.id())
     );
-    client.remove_image_job(&job.id).unwrap_wait();
-    assert!(client.get_image_job(&job.id).wait().is_err());
+    job.remove().unwrap_wait();
+    let gone = job.get().wait().unwrap_err();
+    assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
 fn a_started_job_is_read_as_its_log() {

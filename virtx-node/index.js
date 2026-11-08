@@ -538,10 +538,13 @@ class Client {
   }
 
   _imageJob(name, args) {
-    return StartedJob.of(this._call(name, args), (job) => this.imageJobLog(job.id))
+    return StartedJob.of(
+      this._call(name, args).then((info) => new ImageJob(this, info)),
+      (job) => job.log(),
+    )
   }
 
-  // Starts the build: the job, and its log as `imageJobLog`'s.
+  // Starts the build: the job, and its log as the job's `log`.
   buildImage(recipe, reference) {
     const declared = recipe instanceof Recipe ? recipe.toJSON() : recipe
     return this._imageJob('virtx_client_build_image', { recipe: declared, reference })
@@ -555,23 +558,13 @@ class Client {
     return this._imageJob('virtx_client_push_image', { reference, auth })
   }
 
-  listImageJob() {
-    return this._call('virtx_client_list_image_job')
+  async listImageJob() {
+    const infos = await this._call('virtx_client_list_image_job')
+    return infos.map((info) => new ImageJob(this, info))
   }
 
-  getImageJob(id) {
-    return this._call('virtx_client_get_image_job', { id })
-  }
-
-  // Cancels the job if it runs, and forgets it.
-  async removeImageJob(id) {
-    await this._call('virtx_client_remove_image_job', { id })
-  }
-
-  // The job's log entries, from its start or after the entry numbered `after`, ending after
-  // its `end` entry.
-  imageJobLog(id, after) {
-    return this._items('virtx_client_image_job_log', { id, after })
+  async getImageJob(id) {
+    return new ImageJob(this, await this._call('virtx_client_get_image_job', { id }))
   }
 
   listImage() {
@@ -789,6 +782,30 @@ class Files {
   }
 }
 
+// A build, pull or push the server runs (`id`, `kind`, `reference`, `running`, `digest`,
+// `error`), and the client that reaches it. Dropping it leaves the job; `remove` removes it.
+class ImageJob {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // It as the server has it now.
+  async get() {
+    return new ImageJob(this.client, await this.client._call('virtx_client_get_image_job', { id: this.id }))
+  }
+
+  // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
+  // entry.
+  log(after) {
+    return this.client._items('virtx_client_image_job_log', { id: this.id, after })
+  }
+
+  // Cancels it if it runs, and forgets it.
+  async remove() {
+    await this.client._call('virtx_client_remove_image_job', { id: this.id })
+  }
+}
+
 // A volume the server holds (`name`, `size`), and the client that reaches it: its files and the
 // mounts in it. Dropping it leaves the volume; `remove` removes it.
 class Volume extends Files {
@@ -928,6 +945,7 @@ if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prot
 module.exports = {
   Client,
   Files,
+  ImageJob,
   LIBRARY_ENV,
   PortForwarder,
   Recipe,

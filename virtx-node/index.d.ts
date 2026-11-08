@@ -75,8 +75,8 @@ export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
 export type ImageJobKind = 'pull' | 'push' | 'build'
 
-/** A build, pull or push the server runs. */
-export interface ImageJob {
+/** What the server answers about a build, pull or push it runs. */
+export interface ImageJobInfo {
   id: string
   kind: ImageJobKind
   /** The tag it points, or the image it pushes. */
@@ -86,6 +86,28 @@ export interface ImageJob {
   digest?: string
   /** Why it failed, once it has. */
   error?: string
+}
+
+/**
+ * A build, pull or push the server runs, as starting it or asking for it answered, and the
+ * client that reaches it: what reads its log. Dropping it leaves the job; `remove` removes it.
+ */
+export class ImageJob implements ImageJobInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  id: string
+  kind: ImageJobKind
+  reference: string
+  running: boolean
+  digest?: string
+  error?: string
+  /** It as the server has it now. */
+  get(): Promise<ImageJob>
+  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  log(after?: number): AsyncGenerator<ImageJobEntry>
+  /** Cancel it if it runs, and forget it. */
+  remove(): Promise<void>
 }
 
 /** How an image job ended. */
@@ -378,7 +400,7 @@ export type SandboxJobEntry = { id: number } & (
  * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
  * read until its `end` entry. The job starts at the call, as a promise's work does, and once
  * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
- * leaving one leaves the job running, which `removeImageJob` or the job's `remove` cancels.
+ * leaving one leaves the job running, which the job's `remove` cancels.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   [Symbol.asyncIterator](): AsyncGenerator<E>
@@ -429,18 +451,16 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
+  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
   buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  /** Every image job the server holds. */
   listImageJob(): Promise<ImageJob[]>
+  /** The image job `id`. */
   getImageJob(id: string): Promise<ImageJob>
-  /** Cancel the job if it runs, and forget it. */
-  removeImageJob(id: string): Promise<void>
-  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
-  imageJobLog(id: string, after?: number): AsyncGenerator<ImageJobEntry>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
   listImage(): Promise<ImageListItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */

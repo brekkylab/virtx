@@ -69,6 +69,7 @@ const SERVERS: &[(Component, &str, &str)] = &[
 const ABINS: &[(&str, &str)] = &[
     ("virtx-exec-index", "index"),
     ("virtx-exec-docread", "docread"),
+    ("virtx-exec-display", "display"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -689,6 +690,18 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
             let _ = fs::remove_file(at.join("SKILLS.md"));
             let _ = fs::remove_dir(&at);
         }
+    }
+
+    // `display`'s X server, built by `virtx-abins/display/xserver/build.sh` in an Alpine guest
+    // into `build/display-xserver/<arch>/`. Without it `display run` says it has no X server.
+    let xserver = root.join(format!("build/display-xserver/{arch}"));
+    if xserver.join("Xvfb").is_file() {
+        place_dir(&xserver, &out.join("libexec/display"))?;
+    } else {
+        eprintln!(
+            "xtask: no X server at {}; `display run` will have none (see virtx-abins/display/xserver/build.sh)",
+            xserver.display()
+        );
     }
     Ok(())
 }

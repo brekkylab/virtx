@@ -1,4 +1,4 @@
-# The programs that live in the guest's `/abin`: `index` and `docread`. They are written and
+# The programs that live in the guest's `/abin`: `index`, `docread` and `display`. They are written and
 # built here, for the machine that runs them; `virtx` is what decides what a
 # delegated executable *is*.
 #
@@ -7,7 +7,7 @@
 # `cargo build` -- for a target that has no host to run on.
 [workspace]
 resolver = "3"
-members = ["docread", "index"]
+members = ["display", "docread", "index"]
 
 [workspace.package]
 version = "0.1.0"

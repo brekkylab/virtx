@@ -550,7 +550,8 @@ fn abin() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// Mark each program in `dir` executable for the guest.
+/// Mark each file under `dir` executable for the guest, those in its directories too
+/// (`libexec/display/Xvfb`).
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
@@ -566,7 +567,8 @@ fn executable(dir: &Path) {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
-        if !path.is_file() {
+        if path.is_dir() {
+            executable(&path);
             continue;
         }
         let mut stream = path.clone().into_os_string();

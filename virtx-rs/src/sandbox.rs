@@ -55,6 +55,11 @@ impl Sandbox {
         self.client.get_sandbox_job(&self.info.id, id)
     }
 
+    /// The job `info` describes in it, reached through its client, without asking the server.
+    pub fn job_from(&self, info: SandboxJobInfo) -> SandboxJob {
+        SandboxJob::new(self.client.clone(), self.info.id.clone(), info)
+    }
+
     /// Stop it, end its jobs, and forget it, keeping its snapshot and volumes.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox(&self.info.id)

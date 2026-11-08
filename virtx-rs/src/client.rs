@@ -685,12 +685,6 @@ impl Client {
         )
     }
 
-    /// The job `info` describes in the sandbox `id`, reached through this client, without
-    /// asking the server.
-    pub fn sandbox_job(&self, id: impl Into<String>, info: SandboxJobInfo) -> SandboxJob {
-        SandboxJob::new(self.clone(), id.into(), info)
-    }
-
     /// The job `job` in the sandbox `id`.
     pub(crate) fn get_sandbox_job(
         &self,

@@ -75,7 +75,7 @@ async def main() -> None:
                     case SandboxJobEnd(code):
                         print("exited", code)
         finally:
-            await client.remove_sandbox(sandbox.id)
+            await sandbox.remove()
 
 
 asyncio.run(main())
@@ -111,7 +111,7 @@ async function main() {
         else if ('end' in entry) console.log('exited', entry.end.code)
       }
     } finally {
-      await client.removeSandbox(sandbox.id)
+      await sandbox.remove()
     }
   } finally {
     await client.close()

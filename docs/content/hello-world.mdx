@@ -61,7 +61,7 @@ async def main() -> None:
                     case Stdout(line):
                         print(line)
         finally:
-            await client.remove_sandbox(sandbox.id)
+            await sandbox.remove()
 
 
 asyncio.run(main())
@@ -84,7 +84,7 @@ async function main() {
         if ('stdout' in entry) console.log(entry.stdout)
       }
     } finally {
-      await client.removeSandbox(sandbox.id)
+      await sandbox.remove()
     }
   } finally {
     await client.close()

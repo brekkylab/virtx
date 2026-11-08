@@ -50,7 +50,6 @@ See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `cre
 | --- | --- |
 | `create_sandbox(image, ...)` | Makes a sandbox of `image`, with the options given. |
 | `list_sandbox()`, `get_sandbox(id)` | The server's sandboxes, without their ports. |
-| `remove_sandbox(id)` | Stops a sandbox, ends its jobs, and forgets it, keeping its snapshot and volumes. |
 
 A `Sandbox` carries its client, and acts on itself:
 
@@ -58,8 +57,9 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | Its jobs. |
-| `remove()` | As `remove_sandbox`. |
-| `root` | Its files, as its processes see them; see [Files](#files). |
+| `remove()` | Stops it, ends its jobs, and forgets it, keeping its snapshot and volumes. |
+
+Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `snapshot`, `running` and `ports`.
 
@@ -75,7 +75,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | `write_stdin(data, eof)` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
 | `remove()` | Kills its process if it runs, and forgets the job. |
 
-The client has the same calls by sandbox and job id: `list_sandbox_job`, `get_sandbox_job`, `sandbox_job_log`, `signal_sandbox_job`, `write_sandbox_job_stdin` and `remove_sandbox_job`.
+Code that holds only ids gets the job back with `get_sandbox(id)`, then its `job(id)`.
 In Rust, `SandboxJob` answers `id()` and `info()`.
 
 ## Snapshots
@@ -86,10 +86,9 @@ See [Keeping work in snapshots](/docs/guides/keeping-snapshots/).
 | --- | --- |
 | `create_snapshot(name, disk_gib)` | Makes an empty snapshot holding at most `disk_gib` GiB. Without a name, the server picks one. |
 | `list_snapshot()`, `get_snapshot(name)` | The server's snapshots. |
-| `remove_snapshot(name)` | Deletes a snapshot and everything in it; refused with `409` while a sandbox holds it. |
 
 A `Snapshot` has its `name`, `size` and whether it is `in_use`, and its [files](#files).
-Its `remove()` is `remove_snapshot`.
+Its `remove()` deletes it and everything in it; refused with `409` while a sandbox holds it.
 
 ## Volumes
 
@@ -99,17 +98,19 @@ See [Mounting volumes](/docs/guides/mounting-volumes/).
 | --- | --- |
 | `create_volume(name)` | Makes an empty volume. Without a name, the server picks one. |
 | `list_volume()`, `get_volume(name)` | The server's volumes. |
-| `remove_volume(name)` | Deletes a volume and everything in it. |
-| `create_volume_mount(volume, path, source)` | Mounts a remote store at `path` in the volume, read-only. |
-| `list_volume_mount(volume)` | The mounts in a volume, without their credentials. |
-| `remove_volume_mount(volume, path)` | Takes a mount away, leaving its store as it is. |
 
-A `Volume` has its `name` and `size`, its [files](#files), and `mount(path, source)`, `mounts()`, `unmount(path)` and `remove()`.
+A `Volume` has its `name` and `size`, and its [files](#files):
+
+| Call | What it does |
+| --- | --- |
+| `mount(path, source)` | Mounts a remote store at `path` in it, read-only. |
+| `mounts()` | The mounts in it, without their credentials. |
+| `unmount(path)` | Takes a mount away, leaving its store as it is. |
+| `remove()` | Deletes it and everything in it. |
 
 ## Files
 
 A `Sandbox`, a `Snapshot` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
-The client has the same calls with a `root` first.
 
 | Call | What it does |
 | --- | --- |

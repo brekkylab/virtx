@@ -103,8 +103,6 @@ let sandbox = client.get_sandbox("<sandbox id>").wait()?;
 
 ```python
 await sandbox.remove()
-# or, by id
-await client.remove_sandbox(sandbox.id)
 ```
 
 </TabItem>
@@ -112,8 +110,6 @@ await client.remove_sandbox(sandbox.id)
 
 ```js
 await sandbox.remove()
-// or, by id
-await client.removeSandbox(sandbox.id)
 ```
 
 </TabItem>
@@ -121,8 +117,6 @@ await client.removeSandbox(sandbox.id)
 
 ```rust
 sandbox.remove().wait()?;
-// or, by id
-client.remove_sandbox(sandbox.id()).wait()?;
 ```
 
 </TabItem>

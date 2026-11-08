@@ -42,7 +42,7 @@ Each example builds an image with `jq` in it, boots a sandbox from it, runs a co
 
 `Client.spawn()` starts a local server for you.
 
-<details>
+<details open>
 <summary><b>Python</b></summary>
 
 ```sh
@@ -191,7 +191,7 @@ cargo xtask run -p virtx-server-tcp -- serve --config server.json
 
 On the client, connect with the token and the project in place of `Client.spawn()`. The rest is the same as the local example.
 
-<details>
+<details open>
 <summary><b>Python</b></summary>
 
 ```python

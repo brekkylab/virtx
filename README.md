@@ -28,55 +28,6 @@ Whatever a VM installs or changes is gone when you remove it, unless it wrote it
 > [!TIP]
 > Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
 
-## How it works
-
-virtx follows a client-server model.
-Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
-
-The server can be virtx cloud, hosted for you, or one you run yourself, on the same machine as your code or on another one.
-Either way, client and server speak the same plain HTTP protocol; only the transport differs.
-
-| | Cloud | Local | Remote |
-| --- | --- | --- | --- |
-| Server | virtx cloud | `virtx-server-stdio` | `virtx-server-tcp` |
-| Where it runs | virtx's own machines, hosted for you | Child process of client process | Daemon on another machine, separate from the client |
-| Transport | HTTPS | HTTP over stdio | HTTP over TCP |
-| Setup | Sign in and create an API key | None: nothing to install or keep running | Run the server, and give each user a token |
-| Use it for | Running VMs without hardware of your own | Running VMs on the machine you work on | A bigger machine, or one host shared by a team |
-
-Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
-Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
-
-
-## Requirements
-
-### Client
-
-Pick the one for the language you use.
-
-- **Python:** 3.10 or later.
-- **Node:** 18 or later.
-- **Rust:** 1.89 or later.
-
-### Server
-
-These apply to the machine that runs the virtx server.
-Guests are always Linux.
-
-#### Hypervisor
-
-- **Linux**: a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware. KVM is built into most modern kernels, so nothing usually needs installing.
-- **macOS**: Apple silicon only. The VM runs on `Hypervisor.framework`, which is built in, so nothing needs installing or turning on.
-- **Windows**: Windows 11 or later, x86_64 only. The VM runs on the Windows Hypervisor Platform. If it is off, run this in an administrator PowerShell and restart:
-
-  ```powershell
-  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
-  ```
-
-#### (Optional) GPU
-
-Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
-
 ## Quickstart
 
 > [!TIP]
@@ -283,6 +234,36 @@ let client = Client::connect(
 
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
+
+## Requirements
+
+### Client
+
+Pick the one for the language you use.
+
+- **Python:** 3.10 or later.
+- **Node:** 18 or later.
+- **Rust:** 1.89 or later.
+
+### Server
+
+These apply to the machine that runs the virtx server.
+Guests are always Linux.
+
+#### Hypervisor
+
+- **Linux**: a kernel with KVM support, `/dev/kvm` accessible to your user, and hardware virtualization enabled in the firmware. KVM is built into most modern kernels, so nothing usually needs installing.
+- **macOS**: Apple silicon only. The VM runs on `Hypervisor.framework`, which is built in, so nothing needs installing or turning on.
+- **Windows**: Windows 11 or later, x86_64 only. The VM runs on the Windows Hypervisor Platform. If it is off, run this in an administrator PowerShell and restart:
+
+  ```powershell
+  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+  ```
+
+#### (Optional) GPU
+
+Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
+
 ## Features
 
 - **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
@@ -292,6 +273,32 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 - **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
 - **Pick up where you left off:** keep what a sandbox wrote in a snapshot for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
 - **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
+
+## How it works
+
+virtx follows a client-server model.
+Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/client-server-dark.svg">
+    <img alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." src="docs/images/client-server-light.svg" width="640">
+  </picture>
+</p>
+
+The server can be virtx cloud, hosted for you, or one you run yourself, on the same machine as your code or on another one.
+Either way, client and server speak the same plain HTTP protocol; only the transport differs.
+
+| | Cloud | Local | Remote |
+| --- | --- | --- | --- |
+| Server | virtx cloud | `virtx-server-stdio` | `virtx-server-tcp` |
+| Where it runs | virtx's own machines, hosted for you | Child process of client process | Daemon on another machine, separate from the client |
+| Transport | HTTPS | HTTP over stdio | HTTP over TCP |
+| Setup | Sign in and create an API key | None: nothing to install or keep running | Run the server, and give each user a token |
+| Use it for | Running VMs without hardware of your own | Running VMs on the machine you work on | A bigger machine, or one host shared by a team |
+
+Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
+Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.
 
 ## Core concepts
 

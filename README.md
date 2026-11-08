@@ -1,8 +1,6 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/virtx-logo-signature-white.svg">
-    <img alt="virtx" src="assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
-  </picture>
+  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
+  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
 </p>
 
 <h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
@@ -280,22 +278,19 @@ virtx follows a client-server model.
 Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/client-server-dark.svg">
-    <img alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." src="docs/images/client-server-light.svg" width="640">
-  </picture>
+  <img alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." src="docs/images/client-server.svg" width="640">
 </p>
 
-The server can be virtx cloud, hosted for you, or one you run yourself, on the same machine as your code or on another one.
+The server can be one you run yourself, on the same machine as your code or on another one, or virtx cloud, hosted for you.
 Either way, client and server speak the same plain HTTP protocol; only the transport differs.
 
-| | Cloud | Local | Remote |
+| | Local | Remote | Cloud |
 | --- | --- | --- | --- |
-| Server | virtx cloud | `virtx-server-stdio` | `virtx-server-tcp` |
-| Where it runs | virtx's own machines, hosted for you | Child process of client process | Daemon on another machine, separate from the client |
-| Transport | HTTPS | HTTP over stdio | HTTP over TCP |
-| Setup | Sign in and create an API key | None: nothing to install or keep running | Run the server, and give each user a token |
-| Use it for | Running VMs without hardware of your own | Running VMs on the machine you work on | A bigger machine, or one host shared by a team |
+| Server | `virtx-server-stdio` | `virtx-server-tcp` | virtx cloud |
+| Where it runs | Child process of client process | Daemon on another machine, separate from the client | virtx's own machines, hosted for you |
+| Transport | HTTP over stdio | HTTP over TCP | HTTPS |
+| Setup | None: nothing to install or keep running | Run the server, and give each user a token | Sign in and create an API key |
+| Use it for | Running VMs on the machine you work on | A bigger machine, or one host shared by a team | Running VMs without hardware of your own |
 
 Each VM is a libkrun-based microVM: a Linux guest with its own kernel, on the host's hardware virtualization (KVM on Linux, Hypervisor.framework on macOS, the Windows Hypervisor Platform on Windows).
 Code in it is separated from your machine by a hypervisor, not just by namespaces as in a container, and a VM boots in a fraction of the time a full VM takes, since there is no firmware or emulated hardware to bring up.

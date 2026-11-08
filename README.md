@@ -180,8 +180,6 @@ main()
 cargo add virtx
 ```
 
-The example blocks with `wait` and `wait_next`; in an async runtime, `.await` the same calls instead.
-
 ```rust
 use virtx::{
     Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,

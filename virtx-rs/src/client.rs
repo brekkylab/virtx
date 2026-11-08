@@ -10,17 +10,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use virtx_core::{
     Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
-    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
-    ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SnapshotCreateArgs,
-    SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
-    VolumeMountListOutputItem,
+    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
+    ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
+    ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
+    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxJob as SandboxJobInfo,
+    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs,
+    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, Sandbox, SandboxJob, Snapshot, Volume,
+    Error, ImageJob, Sandbox, SandboxJob, Snapshot, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -189,7 +189,7 @@ impl Client {
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
+    /// [`ImageJob::log`]'s, or [`StartedJob::log`].
     pub fn build_image(
         &self,
         recipe: Recipe,
@@ -199,11 +199,11 @@ impl Client {
             recipe,
             reference: reference.into(),
         };
-        self.image_job(self.call(self.api.virtx_client_build_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_build_image, args))
     }
 
     /// Start pulling `reference` from its registry, to point it at what it pulls; without
-    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s,
+    /// `auth` the server pulls anonymously. Its log is [`ImageJob::log`]'s,
     /// or [`StartedJob::log`].
     pub fn pull_image(
         &self,
@@ -214,12 +214,12 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        self.image_job(self.call(self.api.virtx_client_pull_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_pull_image, args))
     }
 
     /// Start pushing the image `reference` points at to the registry `reference` names;
     /// without `auth` the server pushes anonymously. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
+    /// [`ImageJob::log`]'s, or [`StartedJob::log`].
     pub fn push_image(
         &self,
         reference: impl Into<String>,
@@ -229,31 +229,45 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        self.image_job(self.call(self.api.virtx_client_push_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_push_image, args))
     }
 
     /// Every image job the server holds.
     pub fn list_image_job(&self) -> Call<Vec<ImageJob>> {
-        Call::new(self.api, unsafe {
+        let client = self.clone();
+        let call: Call<Vec<ImageJobInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_image_job)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| ImageJob::new(client.clone(), info))
+                .collect()
         })
+    }
+
+    /// The image job `info` describes, reached through this client, without asking the server.
+    pub fn image_job(&self, info: ImageJobInfo) -> ImageJob {
+        ImageJob::new(self.clone(), info)
     }
 
     /// The image job `id`.
     pub fn get_image_job(&self, id: impl AsRef<str>) -> Call<ImageJob> {
         let args = json!({ "id": id.as_ref() });
-        self.call(self.api.virtx_client_get_image_job, args)
+        let client = self.clone();
+        let call: Call<ImageJobInfo> = self.call(self.api.virtx_client_get_image_job, args);
+        call.map(move |info| ImageJob::new(client.clone(), info))
     }
 
     /// Cancel the image job `id` if it runs, and forget it.
-    pub fn remove_image_job(&self, id: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_image_job(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_image_job, args)
     }
 
     /// The log of the image job `id`, from its start or after its `after`th entry, until its
     /// `end` entry. Dropping it leaves the job as it is.
-    pub fn image_job_log(
+    pub(crate) fn image_job_log(
         &self,
         id: impl AsRef<str>,
         after: Option<u64>,
@@ -752,11 +766,11 @@ impl Client {
     }
 
     /// The image job `call` starts, its log read with a clone of this client.
-    fn image_job(&self, call: Call<ImageJob>) -> StartedJob<ImageJob, ImageJobEntry> {
+    fn start_image_job(&self, call: Call<ImageJobInfo>) -> StartedJob<ImageJob, ImageJobEntry> {
         let client = self.clone();
         StartedJob::new(
-            call,
-            Box::new(move |job: &ImageJob| client.image_job_log(&job.id, None)),
+            call.map(move |info| ImageJob::new(client.clone(), info)),
+            Box::new(|job: &ImageJob| job.log(None)),
         )
     }
 

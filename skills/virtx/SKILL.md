@@ -32,7 +32,7 @@ async for entry in client.build_image(Recipe("alpine:latest").run("apk add --no-
 
 - A `Recipe` is a base image plus steps, as a Dockerfile is. A build stores what it builds under its tag; build once and boot many sandboxes from it, rather than installing in each.
 - `pull_image("python:3.12-slim-trixie")` takes an image from a registry as it is.
-- A build or a pull is a job. Iterating what it answers reads its log; it is done at the `end` entry, whose `error` says it failed. Read it to the end before booting from the tag. Awaiting it instead gives the job, whose log `image_job_log(job.id)` reads later.
+- A build or a pull is a job. Iterating what it answers reads its log; it is done at the `end` entry, whose `error` says it failed. Read it to the end before booting from the tag. Awaiting it instead gives the job, whose log `job.log()` reads later.
 - Pick the base by what the task needs: `alpine:latest` boots fastest, `python:3.12-slim-trixie` or `debian:trixie-slim` when the task wants glibc or pip wheels.
 
 ## 3. Make the sandbox, with what it may keep

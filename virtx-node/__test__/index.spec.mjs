@@ -308,20 +308,24 @@ test('an image build is a job whose log ends with its digest', async () => {
     const job = await client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'built:latest')
     assert.equal(job.kind, 'build')
     assert.equal(job.reference, 'built:latest')
-    const log = await entries(client.imageJobLog(job.id))
+    assert.ok(job instanceof virtx.ImageJob)
+    assert.equal(job.client, client)
+    const log = await entries(job.log())
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
     )
+    assert.deepEqual(await entries(job.log(1)), log.slice(1))
+    assert.equal((await job.get()).digest, 'sha256:0')
     assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
     assert.ok((await client.listImageJob()).some((j) => j.id === job.id))
 
     const missing = await client.buildImage(new virtx.Recipe('missing'), 'no:latest')
-    const end = (await entries(client.imageJobLog(missing.id))).at(-1)
+    const end = (await entries(missing.log())).at(-1)
     assert.ok(end.end.error)
 
-    await client.removeImageJob(job.id)
-    await assert.rejects(client.getImageJob(job.id), { status: 404 })
+    await job.remove()
+    await assert.rejects(job.get(), { status: 404 })
   } finally {
     await client.close()
   }

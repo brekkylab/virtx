@@ -219,13 +219,13 @@ A build, pull or push, and every command in a sandbox, is a job the server runs 
 - Iterated (`async for` in Python, `for await` in Node, `.log()` in Rust), it is the job's log, an entry at a time until its last, `end`, which says how it ended: an image's digest or why it failed, a process's exit code.
 - Awaited (`.wait()` in Rust, too), it is the job itself, whose `id` names it to every other request.
 
-One value awaited and iterated starts one job. Its log can be read again any time with `image_job_log`, or a sandbox job's `log`.
+One value awaited and iterated starts one job. The job carries its client, and its log can be read again any time with its `log`.
 
 - Every entry has an `id`, its number in the log. A reader whose stream dropped asks for the log `after` the last one it saw, and picks up there.
 - Any number of readers read one log, each from its start or from wherever they ask.
 - A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes.
 - A process's output is a line per entry, `stdout` or `stderr`, without its line ending.
-- Leaving the loop leaves the job running. `remove_image_job` and a sandbox job's `remove` cancel one that runs, killing a process and its children, and forget it.
+- Leaving the loop leaves the job running. The job's `remove` cancels one that runs, killing a process and its children, and forgets it.
 
 A process started with `stdin` takes what its job's `write_stdin` writes, the next write sent once the one before is answered, until one closes it with `eof`. Its `signal` sends it a signal such as `SIGTERM`, and `timeout_ms` kills it when it runs out.
 

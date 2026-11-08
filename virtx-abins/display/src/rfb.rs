@@ -1,7 +1,7 @@
 //! The VNC server: RFB 3.8 (RFC 6143), with 3.3 and 3.7 for older viewers.
 //!
 //! Each viewer gets two threads. One reads what the viewer sends: its pixel format and
-//! encodings, its requests for updates, and its keys and pointer, which go to [`Input`]. The
+//! encodings, its requests for updates, and its keys and pointer, which go to [`XClient`]. The
 //! other answers the requests: it reads the screen, compares it in tiles with what it last
 //! sent, and sends the tiles that changed, ZRLE when the viewer takes it and raw otherwise.
 //! A request nothing has changed for waits for the screen to change.
@@ -26,7 +26,7 @@ use std::{
 
 use crate::{
     frame::Framebuffer,
-    input::{Cursor, Input},
+    xclient::{Cursor, XClient},
     zrle::Zrle,
 };
 
@@ -46,7 +46,7 @@ pub struct Shared {
     pub framebuffer: PathBuf,
     pub password: Option<String>,
     pub name: String,
-    pub input: Mutex<Input>,
+    pub xclient: Mutex<XClient>,
 }
 
 pub fn serve(listener: TcpListener, shared: Arc<Shared>) {
@@ -231,13 +231,13 @@ fn session(mut stream: TcpStream, shared: &Shared) -> io::Result<()> {
     std::thread::scope(|scope| {
         // The reading half ends with the connection, and says so to the answering half.
         let reader = scope.spawn(move || {
-            let result = read_messages(reading, viewer, &shared.input);
+            let result = read_messages(reading, viewer, &shared.xclient);
             let (state, wake) = &**viewer;
             state.lock().unwrap().closed = true;
             wake.notify_all();
             result
         });
-        let answered = answer(&mut stream, &mut screen, viewer, &shared.input);
+        let answered = answer(&mut stream, &mut screen, viewer, &shared.xclient);
         let _ = stream.shutdown(std::net::Shutdown::Both);
         let read = reader.join().unwrap();
         answered.and(read)
@@ -340,7 +340,7 @@ impl Read for Polled {
 fn read_messages(
     mut stream: impl Read,
     viewer: &(Mutex<Viewer>, Condvar),
-    input: &Mutex<Input>,
+    xclient: &Mutex<XClient>,
 ) -> io::Result<()> {
     let (state, wake) = viewer;
     loop {
@@ -394,7 +394,7 @@ fn read_messages(
                 let mut b = [0u8; 7];
                 stream.read_exact(&mut b)?;
                 let keysym = u32::from_be_bytes(b[3..7].try_into().unwrap());
-                input.lock().unwrap().key(keysym, b[0] != 0);
+                xclient.lock().unwrap().key(keysym, b[0] != 0);
             }
             // PointerEvent
             5 => {
@@ -404,7 +404,7 @@ fn read_messages(
                     u16::from_be_bytes([b[1], b[2]]),
                     u16::from_be_bytes([b[3], b[4]]),
                 );
-                input.lock().unwrap().pointer(b[0], x, y);
+                xclient.lock().unwrap().pointer(b[0], x, y);
             }
             // ClientCutText: the clipboard is not shared.
             6 => {
@@ -422,7 +422,7 @@ fn answer(
     stream: &mut TcpStream,
     screen: &mut Framebuffer,
     viewer: &(Mutex<Viewer>, Condvar),
-    input: &Mutex<Input>,
+    xclient: &Mutex<XClient>,
 ) -> io::Result<()> {
     let (state, wake) = viewer;
     let (width, height) = (usize::from(screen.width), usize::from(screen.height));
@@ -459,7 +459,7 @@ fn answer(
         };
 
         screen.read(&mut now)?;
-        let cursor = input.lock().unwrap().cursor();
+        let cursor = xclient.lock().unwrap().cursor();
         if !shape && let Some(cursor) = &cursor {
             cursor.draw(&mut now, width, height);
         }
@@ -636,6 +636,7 @@ mod tests {
             width: 9,
             height: 1,
             serial: 7,
+            name: String::new(),
             argb: [vec![0xff112233; 8], vec![0]].concat(),
         };
         let mut out = Vec::new();

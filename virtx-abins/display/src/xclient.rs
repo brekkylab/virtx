@@ -23,7 +23,8 @@ use x11rb::{
 /// The pointer buttons a VNC button mask has, 1 to 8.
 const BUTTONS: u8 = 8;
 
-pub struct Input {
+/// A connection to the X server, for its keyboard, pointer and cursor.
+pub struct XClient {
     conn: RustConnection,
     root: xproto::Window,
     min_keycode: u8,
@@ -34,7 +35,7 @@ pub struct Input {
     buttons: u8,
 }
 
-impl Input {
+impl XClient {
     pub fn connect(display: u16) -> Result<Self, String> {
         let (conn, screen) = x11rb::connect(Some(&format!(":{display}")))
             .map_err(|e| format!("connecting to :{display}: {e}"))?;
@@ -66,7 +67,12 @@ impl Input {
 
     /// The cursor as it is now, or `None` if the X server would not say.
     pub fn cursor(&self) -> Option<Cursor> {
-        let image = self.conn.xfixes_get_cursor_image().ok()?.reply().ok()?;
+        let image = self
+            .conn
+            .xfixes_get_cursor_image_and_name()
+            .ok()?
+            .reply()
+            .ok()?;
         Some(Cursor {
             x: image.x,
             y: image.y,
@@ -74,6 +80,7 @@ impl Input {
             width: image.width,
             height: image.height,
             serial: image.cursor_serial,
+            name: String::from_utf8_lossy(&image.name).into_owned(),
             argb: image.cursor_image,
         })
     }
@@ -151,6 +158,8 @@ pub struct Cursor {
     pub height: u16,
     /// Changes when the image does.
     pub serial: u32,
+    /// The name the program gave the cursor, as `xterm` or `hand2`; empty when it gave none.
+    pub name: String,
     /// Premultiplied `0xAARRGGBB`, row after row.
     pub argb: Vec<u32>,
 }
@@ -204,6 +213,7 @@ mod tests {
             width,
             height: (argb.len() / usize::from(width)) as u16,
             serial: 1,
+            name: String::new(),
             argb,
         }
     }

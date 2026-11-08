@@ -12,9 +12,10 @@ The X server comes with this program. An image needs the GUI program and the X l
 Usage: display <COMMAND>
 
 Commands:
-  run   Start a screen, serve it over VNC, and run a command on it
-  shot  Save what a screen shows now as a PNG
-  help  Print this message or the help of the given subcommand(s)
+  run     Start a screen, serve it over VNC, and run a command on it
+  shot    Save what a screen shows now as a PNG
+  cursor  Print where the pointer is on a screen, and the cursor's name
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help
@@ -72,7 +73,7 @@ Examples:
 
 Save what a screen shows now as a PNG
 
-Read from the screen `display run` keeps, from any command on the same machine while it runs, without the cursor unless `--cursor` asks for it. Prints the path written.
+Read from the screen `display run` keeps, from any command on the same machine while it runs. The cursor is not in it: `display cursor` says where it is. Prints the path written.
 
 Usage: display shot [OPTIONS] <FILE>
 
@@ -86,12 +87,31 @@ Options:
           
           [default: 99]
 
-      --cursor
-          Draw the cursor where the pointer is, as a viewer sees it
+  -h, --help
+          Print help (see a summary with '-h')
+
+Example:
+  display shot /tmp/screen.png
+
+## display cursor
+
+Print where the pointer is on a screen, and the cursor's name
+
+One line: the pointer's x and y in pixels from the screen's top left corner, then the name of the cursor shown there when it has one. The name is what the program under the pointer chose to show, and so says what is there: `xterm` over text, `hand2` over a link, `left_ptr` over most else.
+
+A cursor has a name when its program loaded it from a cursor theme, through libXcursor. GTK and Qt programs bring both; for another X program, an image without libXcursor and a cursor theme gives positions only.
+
+Usage: display cursor [OPTIONS]
+
+Options:
+      --display <N>
+          The X display number of the screen
+          
+          [default: 99]
 
   -h, --help
           Print help (see a summary with '-h')
 
-Examples:
-  display shot /tmp/screen.png
-  display shot --cursor /tmp/screen.png
+Example:
+  $ display cursor
+  640 360 xterm

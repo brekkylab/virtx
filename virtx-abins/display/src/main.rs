@@ -3,6 +3,7 @@
 //! ```text
 //! display run -- openttd
 //! display shot /artifacts/shots/turn-3.png
+//! display cursor
 //! ```
 //!
 //! `run` starts an X server with its screen in memory ([`xvfb`]), serves that screen over VNC
@@ -11,12 +12,12 @@
 //! and nothing of X's server side.
 //!
 //! The screen is a file the X server keeps mapped ([`frame`]): what VNC sends and what `shot`
-//! saves are read from it rather than asked of the X server. Input from a viewer is the one
-//! thing that goes through X, by XTEST ([`input`]).
+//! saves are read from it rather than asked of the X server. A viewer's keys and pointer, and
+//! the cursor VNC and `cursor` report, go through a connection to the X server ([`xclient`]).
 
 mod frame;
-mod input;
 mod rfb;
+mod xclient;
 mod xvfb;
 mod zrle;
 
@@ -62,11 +63,23 @@ enum Cli {
     /// Save what a screen shows now as a PNG
     ///
     /// Read from the screen `display run` keeps, from any command on the same machine while it
-    /// runs, without the cursor unless `--cursor` asks for it. Prints the path written.
-    #[command(after_long_help = "Examples:\n  \
-        display shot /tmp/screen.png\n  \
-        display shot --cursor /tmp/screen.png")]
+    /// runs. The cursor is not in it: `display cursor` says where it is. Prints the path
+    /// written.
+    #[command(after_long_help = "Example:\n  display shot /tmp/screen.png")]
     Shot(Shot),
+
+    /// Print where the pointer is on a screen, and the cursor's name
+    ///
+    /// One line: the pointer's x and y in pixels from the screen's top left corner, then the
+    /// name of the cursor shown there when it has one. The name is what the program under the
+    /// pointer chose to show, and so says what is there: `xterm` over text, `hand2` over a
+    /// link, `left_ptr` over most else.
+    ///
+    /// A cursor has a name when its program loaded it from a cursor theme, through libXcursor.
+    /// GTK and Qt programs bring both; for another X program, an image without libXcursor and
+    /// a cursor theme gives positions only.
+    #[command(after_long_help = "Example:\n  $ display cursor\n  640 360 xterm")]
+    Cursor(CursorArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -113,10 +126,13 @@ struct Shot {
     /// The X display number of the screen to save
     #[arg(long, value_name = "N", default_value_t = 99)]
     display: u16,
+}
 
-    /// Draw the cursor where the pointer is, as a viewer sees it
-    #[arg(long)]
-    cursor: bool,
+#[derive(Debug, clap::Args)]
+struct CursorArgs {
+    /// The X display number of the screen
+    #[arg(long, value_name = "N", default_value_t = 99)]
+    display: u16,
 }
 
 fn size(s: &str) -> Result<(u16, u16), String> {
@@ -135,6 +151,7 @@ fn main() -> ExitCode {
     let result = match Cli::parse() {
         Cli::Run(args) => run(args),
         Cli::Shot(args) => shot(args).map(|()| ExitCode::SUCCESS),
+        Cli::Cursor(args) => cursor(args).map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|e| {
         eprintln!("{NAME}: {e}");
@@ -145,7 +162,7 @@ fn main() -> ExitCode {
 fn run(args: Run) -> Result<ExitCode, String> {
     let (width, height) = args.size;
     let mut server = xvfb::Server::start(args.display, width, height)?;
-    let input = input::Input::connect(args.display)?;
+    let xclient = xclient::XClient::connect(args.display)?;
     let listener = TcpListener::bind((args.listen, args.port))
         .map_err(|e| format!("listening at {}:{}: {e}", args.listen, args.port))?;
 
@@ -153,7 +170,7 @@ fn run(args: Run) -> Result<ExitCode, String> {
         framebuffer: server.framebuffer().to_owned(),
         password: args.password,
         name: format!("display :{}", args.display),
-        input: std::sync::Mutex::new(input),
+        xclient: std::sync::Mutex::new(xclient),
     });
     std::thread::spawn(move || rfb::serve(listener, shared));
 
@@ -170,7 +187,7 @@ fn run(args: Run) -> Result<ExitCode, String> {
     command
         .args(rest)
         .env("DISPLAY", format!(":{}", args.display));
-    xvfb::die_with_parent(&mut command);
+    die_with_parent(&mut command);
     let status = command
         .status()
         .map_err(|e| format!("running {}: {e}", program.to_string_lossy()))?;
@@ -194,18 +211,40 @@ fn shot(args: Shot) -> Result<(), String> {
     screen
         .read(&mut pixels)
         .map_err(|e| format!("reading the screen: {e}"))?;
-    if args.cursor {
-        let cursor = input::Input::connect(args.display)?
-            .cursor()
-            .ok_or("the X server would not say where the cursor is")?;
-        cursor.draw(
-            &mut pixels,
-            usize::from(screen.width),
-            usize::from(screen.height),
-        );
-    }
     frame::write_png(&screen, &pixels, &args.file)
         .map_err(|e| format!("writing {}: {e}", args.file.display()))?;
     println!("{}", args.file.display());
     Ok(())
+}
+
+fn cursor(args: CursorArgs) -> Result<(), String> {
+    let cursor = xclient::XClient::connect(args.display)
+        .map_err(|e| format!("{e}; is `{NAME} run` running?"))?
+        .cursor()
+        .ok_or("the X server would not say where the cursor is")?;
+    if cursor.name.is_empty() {
+        println!("{} {}", cursor.x, cursor.y);
+    } else {
+        println!("{} {} {}", cursor.x, cursor.y, cursor.name);
+    }
+    Ok(())
+}
+
+/// Have `command`'s process sent SIGTERM when this one ends, however it ends.
+pub fn die_with_parent(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: `prctl` is async-signal-safe and touches nothing of the parent's.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
 }

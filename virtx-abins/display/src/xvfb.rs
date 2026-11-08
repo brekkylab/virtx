@@ -33,25 +33,6 @@ fn program() -> Result<PathBuf, String> {
     }
 }
 
-/// Have `command`'s process sent SIGTERM when this one ends, however it ends.
-pub fn die_with_parent(command: &mut Command) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt as _;
-        // SAFETY: `prctl` is async-signal-safe and touches nothing of the parent's.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = command;
-}
-
 /// A running X server.
 pub struct Server {
     child: Child,
@@ -80,7 +61,7 @@ impl Server {
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log);
-        die_with_parent(&mut command);
+        crate::die_with_parent(&mut command);
         let child = command
             .spawn()
             .map_err(|e| format!("starting {}: {e}", program.display()))?;

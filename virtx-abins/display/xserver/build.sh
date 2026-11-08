@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the X server `display` runs, as static musl executables, into OUT.
 #
-#     sh build.sh OUT
+#     sh build.sh OUT [TARBALLS]
 #
 # Run inside Alpine (musl, with `-static` archives for most of what is needed), as root: it
 # installs its build tools with `apk`. What it writes is what `/abin/libexec/display` holds:
@@ -11,11 +11,15 @@
 #     OUT/xkb/      the keymaps xkbcomp compiles, from Alpine's xkeyboard-config
 #
 # Every piece is MIT-licensed. The libraries Alpine ships no static archive of are built
-# here from X.org's release tarballs, pinned by checksum; the rest come from `apk`.
+# here from X.org's release tarballs, listed in `sources` beside this script and checked against
+# the checksums there; the rest come from `apk`. A tarball in TARBALLS is used as it is, and
+# one not there is downloaded.
 set -eu
 
-mkdir -p "${1:?usage: build.sh OUT}"
+HERE=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "${1:?usage: build.sh OUT [TARBALLS]}"
 OUT=$(cd "$1" && pwd)
+TARBALLS=${2:-}
 # Where the three live in the guest. Built into Xvfb, which runs `$LIBEXEC/xkbcomp` with
 # `-R$LIBEXEC/xkb`, so it is the one path the result cannot be moved from.
 LIBEXEC=/abin/libexec/display
@@ -33,20 +37,15 @@ apk add --no-cache \
     libx11-dev libx11-static libxcb-dev libxcb-static \
     xkeyboard-config >/dev/null
 
-# name, X.org directory, sha256
-SOURCES="
-libXau-1.0.12 lib 74d0e4dfa3d39ad8939e99bda37f5967aba528211076828464d2777d477fc0fb
-libXdmcp-1.1.5 lib d8a5222828c3adab70adf69a5583f1d32eb5ece04304f7f8392b6a353aa2228c
-libfontenc-1.1.9 lib 9d8392705cb10803d5fe1d27d236cbab3f664e26841ce01916bbbe430cf273e2
-libXfont2-2.0.9 lib f042a370666815e7b941e9b7019024755bd1c6c2954afbfa515af378251799e2
-libxkbfile-1.2.0 lib 7f71884e5faf56fb0e823f3848599cf9b5a9afce51c90982baeb64f635233ebf
-xkbcomp-1.5.0 app 2ac31f26600776db6d9cd79b3fcd272263faebac7eb85fb2f33c7141b8486060
-xorg-server-21.1.25 xserver 6ad4e3c7b59a309b32c92e5c15ce1267110f9e13f1ac78da62361a628da1a0eb
-"
-echo "$SOURCES" | while read -r name dir sum; do
+grep -v '^#' "$HERE/sources" | while read -r name dir sum; do
     [ -n "$name" ] || continue
     tarball=$WORK/src/$name.tar.xz
-    [ -f "$tarball" ] || curl -fsSL --retry 5 --retry-all-errors -o "$tarball" "https://www.x.org/releases/individual/$dir/$name.tar.xz"
+    if [ -n "$TARBALLS" ] && [ -f "$TARBALLS/$name.tar.xz" ]; then
+        cp "$TARBALLS/$name.tar.xz" "$tarball"
+    elif [ ! -f "$tarball" ]; then
+        curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
+            "https://www.x.org/releases/individual/$dir/$name.tar.xz"
+    fi
     echo "$sum  $tarball" | sha256sum -c - >/dev/null
     rm -rf "${WORK:?}/src/$name"
     tar -xJf "$tarball" -C "$WORK/src"

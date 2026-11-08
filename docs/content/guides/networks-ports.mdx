@@ -4,6 +4,7 @@ description: "Let a sandbox reach out to the network, and reach services running
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
+import portForwarding from "../../images/port-forwarding.svg";
 
 Traffic crosses a sandbox in two directions, set separately:
 
@@ -53,6 +54,15 @@ A port in the sandbox is not reached directly: it is forwarded to a port on your
 Pass `ports` to `create_sandbox` to open TCP ports in the guest.
 Each comes back in `sandbox.ports` with a `url`, and `PortForwarder.open` forwards it to an address on your machine's loopback, which any TCP client can connect to.
 Ports work with `network` off, since they carry connections in, not out.
+
+How a connection gets there depends on where the server runs:
+
+- A server on your machine, as `Client.spawn` starts, answers a loopback address of its own for each port, and the forwarder's address is that one: nothing is carried in between.
+- A server reached over HTTP answers a URL that carries the credentials for that one port. The forwarder listens on a port of your machine's loopback and carries each connection made to it in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`. The server relays the bytes to the port in the sandbox, and its answers back.
+
+<img src={portForwarding.src} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/ports/<capability> on the virtx server, which connects to port 8000 in the sandbox it runs." />
+
+So a remote sandbox's port needs nothing open on the server's machine beyond the server's own HTTP address, and the URL is as secret as the credentials in it.
 
 In the example below, the sandbox opens port 8000 and runs an HTTP server on it, and the forwarder makes it reachable at a local address that a browser or `curl` can open:
 

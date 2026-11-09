@@ -24,6 +24,7 @@ cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-stdio, besi
 
 ```bash
 cargo xtask check                            # format, clippy and tests: the client always, the servers once `init` has run
+cargo xtask test                             # the client's tests, the e2e scenarios against the stdio server once `init` has run
 cargo xtask test -p virtx-server-stdio       # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)               # Python
 (cd virtx-node && npm install && npm test)   # Node

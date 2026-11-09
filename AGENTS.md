@@ -32,6 +32,7 @@ cargo xtask build client                          # libvirtx_core
 cargo xtask build kernel server-stdio server-tcp # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
 cargo xtask install                               # what was built, into $VIRTX_HOME/bin
 cargo xtask check                                 # the gate: format, clippy and tests, of the client always and of the servers once `init` has run
+cargo xtask test                                  # the client's tests, the e2e scenarios against the stdio server once `init` has run
 cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python
 (cd virtx-node && npm install && npm test)        # Node

@@ -76,13 +76,16 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 # The stdio tests' server reads its own stdin and writes its own stdout.
 tokio = { version = "1", features = ["io-std"] }
+# The crate's own tests take the test server, so a bare `cargo test` runs them all. A dev
+# dependency's features reach no build but the tests'.
+virtx-core = { path = ".", features = ["testing"] }
 
 [features]
 # The types (`image`, `volume`, the methods' args and outputs) are always built. `client` adds
 # the wire's client end, `server` its server end, and `ffi` the C ABI over a client, which is
 # what `libvirtx_core` is built for. `testing` adds the test server over both, which the
-# crate's tests, and the bindings' tests through the `test_server` example, run against:
-# `cargo test --features testing`. `cli` adds the `virtx` command, which the bindings run
+# crate's tests, and the bindings' tests through the `test_server` example, run against: a
+# bare `cargo test` turns it on for them. `cli` adds the `virtx` command, which the bindings run
 # through `virtx_cli_main`.
 default = ["ffi", "cli"]
 client = [
@@ -136,7 +139,7 @@ harness = false
 required-features = ["testing"]
 
 # Scenarios across a real transport, against the test server as a child process of itself or a
-# server the environment names.
+# server the environment names: `cargo xtask test` names the stdio server, built and signed.
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"

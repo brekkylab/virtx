@@ -12,7 +12,9 @@
 //! those only the scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves
 //! to the server, run no command but `echo`, `cat` and `sleep`, and name what they make
 //! uniquely. The scenarios of several clients run over TCP or against the one at the URL; a
-//! spawned server carries one client, so they are passed by.
+//! spawned server carries one client, so they are passed by. `cargo xtask test` names the
+//! stdio server, built and signed, with a `VIRTX_HOME` of its own, once the servers can be
+//! built on the host.
 //!
 //! Against another server, what a scenario made is removed once it ends, passed or not, and a
 //! `sleep` it started is killed at its timeout if it is not. Each name it removes is its own,

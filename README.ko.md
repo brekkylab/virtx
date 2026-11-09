@@ -242,7 +242,7 @@ let client = Client::connect(
 
 ## 주요 기능
 
-- **믿을 수 없는 코드는 내 컴퓨터 밖에서:** 샌드박스는 모두 자체 커널을 가진 microVM이라 네임스페이스 수준이 아니라 하이퍼바이저 수준에서 격리되고, 네트워크도 완전히 끊을 수 있습니다.
+- **신뢰할 수 없는 코드는 내 컴퓨터 밖에서:** 샌드박스는 모두 자체 커널을 가진 microVM이라 네임스페이스 수준이 아니라 하이퍼바이저 수준에서 격리되고, 네트워크도 완전히 끊을 수 있습니다.
 - **어디서 작업하든 그대로:** 어떤 클라이언트든 어느 호스트의 어떤 서버와도 함께 쓸 수 있고, 로컬 서버에서 원격 서버나 클라우드로 옮길 때도 코드 한 줄만 바꾸면 됩니다.
   - **클라이언트:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드

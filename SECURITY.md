@@ -17,10 +17,10 @@ virtx draws the line between a task and the host it runs on, so the interesting 
 - **The VM reaching the host beyond what was mounted.** A command in a session that reads or writes a host path outside the session's mounts, writes under a mount declared read-only, or reaches the network from a session built with `network(false)`.
 - **A mount exposing more than its tree.** A path that escapes a mounted `Directory` or host directory, a read-only mount that accepts a write, or a mount that stays reachable after its guard is dropped or its process is gone.
 - **A credential reaching somewhere it was not given to.** A token for S3, Notion, Google Drive or OneDrive, or anything else from the host environment, that ends up inside the VM, in a command's output, or in a log.
-- **Code execution from data.** A filesystem entry, an image recipe, or a message from the console server that runs on the host rather than being handed to the VM.
+- **Code execution from data.** A filesystem entry, an image recipe, or a message from the `virtx-stdio` server that runs on the host rather than being handed to the VM.
 
 ## What does not
 
 - **What a command does inside its VM.** The session is disposable, and what it installs, deletes or runs there is the caller's business. The boundary is the host.
-- **Binding and exposure are the operator's call.** The console server speaks to the process that started it over stdio; putting a session behind a public interface is a deployment decision.
+- **Binding and exposure are the operator's call.** The `virtx-stdio` server speaks to the process that started it over stdio; putting a session behind a public interface is a deployment decision.
 - **The fixtures in the tests are not secrets.** The in-memory stores and the object-store endpoints the tests build on hold nothing real.

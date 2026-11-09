@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-서버 머신에서 토큰을 만들고, 해당 사용자가 프로젝트에 들어올 수 있도록 `server.json`을 작성합니다.
+서버 머신에서 토큰을 만들고, 그 토큰을 가진 사용자가 프로젝트에 접근할 수 있도록 `server.json`을 작성합니다.
 
 ```sh
 virtx-server-tcp token   # 토큰과 그 token_sha256을 출력합니다

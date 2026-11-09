@@ -16,6 +16,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -240,13 +241,11 @@ fn file_io(request: IoReq, data: &[u8], read: &mut Vec<u8>) -> Result<IoResp, Io
             Ok(IoResp::Entries(entries))
         }
         IoReq::Read { path, offset, len } => {
-            let path = shown(&path)?;
-            regular(&path)?;
-            let mut file = File::options()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
-                .map_err(failed)?;
+            let mut file = open_file(
+                &shown(&path)?,
+                File::options().read(true),
+                IoFailure::NotFound,
+            )?;
             file.seek(SeekFrom::Start(offset)).map_err(failed)?;
             file.take(len.min(MAX_DATA as u64))
                 .read_to_end(read)
@@ -254,19 +253,16 @@ fn file_io(request: IoReq, data: &[u8], read: &mut Vec<u8>) -> Result<IoResp, Io
             Ok(IoResp::Data)
         }
         IoReq::Write { path, offset } => {
-            let mut file = File::options()
-                .write(true)
-                .create(true)
-                .truncate(offset.is_none())
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(shown(&path)?)
-                .map_err(failed)?;
-            if !file.metadata().map_err(failed)?.is_file() {
-                return Err(IoFailure::Forbidden);
+            let mut file = open_file(
+                &shown(&path)?,
+                File::options().write(true).create(true),
+                IoFailure::Forbidden,
+            )?;
+            match offset {
+                Some(offset) => file.seek(SeekFrom::Start(offset)).map(drop),
+                None => file.set_len(0),
             }
-            if let Some(offset) = offset {
-                file.seek(SeekFrom::Start(offset)).map_err(failed)?;
-            }
+            .map_err(failed)?;
             file.write_all(data).map_err(failed)?;
             Ok(IoResp::Done)
         }
@@ -302,9 +298,26 @@ fn file_io(request: IoReq, data: &[u8], read: &mut Vec<u8>) -> Result<IoResp, Io
             Ok(IoResp::Done)
         }
         IoReq::Copy { from, to } => {
-            let (from, to) = (shown(&from)?, below_root(&to)?);
-            regular(&from)?;
-            fs::copy(&from, &to).map_err(failed)?;
+            let mut from = open_file(
+                &shown(&from)?,
+                File::options().read(true),
+                IoFailure::NotFound,
+            )?;
+            let mut to = open_file(
+                &below_root(&to)?,
+                File::options().write(true).create(true),
+                IoFailure::Forbidden,
+            )?;
+            let (source, there) = (
+                from.metadata().map_err(failed)?,
+                to.metadata().map_err(failed)?,
+            );
+            if (source.dev(), source.ino()) == (there.dev(), there.ino()) {
+                return Err(IoFailure::Forbidden);
+            }
+            to.set_len(0).map_err(failed)?;
+            io::copy(&mut from, &mut to).map_err(failed)?;
+            to.set_permissions(source.permissions()).map_err(failed)?;
             Ok(IoResp::Done)
         }
     }
@@ -338,13 +351,36 @@ fn below_root(path: &str) -> Result<PathBuf, IoFailure> {
     }
 }
 
-/// Refused unless a file is at `path`, not followed.
-fn regular(path: &Path) -> Result<(), IoFailure> {
-    match fs::symlink_metadata(path).map_err(failed)? {
-        meta if meta.is_file() => Ok(()),
-        meta if meta.is_dir() => Err(IoFailure::IsADirectory),
-        _ => Err(IoFailure::NotFound),
+/// The file at `path` opened with `options`, not followed, and refused with `other` unless it
+/// is a regular one.
+///
+/// Opened without blocking and only then checked, so a pipe or a device the guest made there
+/// is neither waited on nor written: `open` would wait for a pipe's other end for good.
+fn open_file(
+    path: &Path,
+    options: &mut fs::OpenOptions,
+    other: IoFailure,
+) -> Result<File, IoFailure> {
+    let file = options
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            // A pipe with no reader, or a device with nothing behind it.
+            Some(libc::ENXIO | libc::ENODEV) => other.clone(),
+            _ => failed(e),
+        })?;
+    let meta = file.metadata().map_err(failed)?;
+    if meta.is_dir() {
+        return Err(IoFailure::IsADirectory);
     }
+    if !meta.is_file() {
+        return Err(other);
+    }
+    // SAFETY: `fcntl` takes the descriptor `file` holds open, and plain flags.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, 0) } == -1 {
+        return Err(failed(io::Error::last_os_error()));
+    }
+    Ok(file)
 }
 
 /// What `meta` is, if it is a file or a directory.

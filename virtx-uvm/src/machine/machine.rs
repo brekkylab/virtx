@@ -5,7 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use oci_spec::image::Config;
@@ -25,6 +25,10 @@ const TAIL: usize = 50;
 
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long [`Machine::io`] waits for the guest's answer, from when it is asked, before it
+/// gives up on it.
+pub(super) const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What a machine is: the root filesystem it boots, the image's config it runs under, where
 /// its writes go, and how big a machine runs them.
@@ -107,8 +111,9 @@ pub struct Machine {
     process: Mutex<Child>,
     ctrlin: Mutex<io::PipeWriter>,
     ctrlout: Mutex<io::PipeReader>,
-    /// `ioin` and `ioout`, held together for each request and its answer.
-    io: Mutex<(io::PipeWriter, io::PipeReader)>,
+    /// Where requests go to the thread that holds `ioin` and `ioout`, which asks them one at a
+    /// time.
+    io: mpsc::Sender<IoJob>,
     /// Where on this host's loopback each of its [`ports`](MachineConfig::ports) is reached.
     pub published: Vec<(u16, SocketAddr)>,
 }
@@ -170,7 +175,7 @@ impl Machine {
                         process: Mutex::new(process),
                         ctrlin: Mutex::new(ctrlin),
                         ctrlout: Mutex::new(ctrlout),
-                        io: Mutex::new((ioin, ioout)),
+                        io: files(ioin, ioout),
                         published,
                     });
                 }
@@ -239,25 +244,27 @@ impl Machine {
 
     /// Ask `request` of the guest's files, with `data` for a [`Write`](IoReq::Write),
     /// and wait for the answer, with what it read for a [`Read`](IoReq::Read). One
-    /// request at a time: another waits here until this one is answered.
+    /// request at a time: another waits until this one is answered, and neither waits past
+    /// [`IO_TIMEOUT`]. One given up on is not asked, unless it already was.
     pub fn io(&self, request: &IoReq, data: &[u8]) -> Result<(IoResp, Vec<u8>)> {
-        let mut io = self.io.lock().unwrap();
-        let (ioin, ioout) = &mut *io;
-        wire::send(ioin, request).map_err(|e| Error::io("sending to the guest's files", e))?;
-        if matches!(request, IoReq::Write { .. }) {
-            wire::send_data(ioin, data)
-                .map_err(|e| Error::io("sending to the guest's files", e))?;
-        }
-        let answer = wire::recv::<IoResp>(ioout)
-            .and_then(|answer| answer.ok_or_else(|| io::ErrorKind::UnexpectedEof.into()))
-            .map_err(|e| Error::io("reading the guest's answer", e))?;
-        let read = match answer {
-            IoResp::Data => {
-                wire::recv_data(ioout).map_err(|e| Error::io("reading the guest's answer", e))?
-            }
-            _ => Vec::new(),
+        let deadline = Instant::now() + IO_TIMEOUT;
+        let (answer, answered) = mpsc::sync_channel(1);
+        let job = IoJob {
+            request: request.clone(),
+            data: data.to_vec(),
+            deadline,
+            answer,
         };
-        Ok((answer, read))
+        let gone = || Error::io("asking the guest's files", io::ErrorKind::BrokenPipe.into());
+        self.io.send(job).map_err(|_| gone())?;
+        match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(answer) => answer,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::io(
+                "waiting for the guest's files",
+                io::ErrorKind::TimedOut.into(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(gone()),
+        }
     }
 
     /// The next thing the machine says, waiting for it; `None` once its process has ended.
@@ -267,6 +274,59 @@ impl Machine {
             .ok()
             .flatten()
     }
+}
+
+/// A request for the thread [`files`] starts, and where its answer goes.
+struct IoJob {
+    request: IoReq,
+    data: Vec<u8>,
+    /// When whoever asked stops waiting.
+    deadline: Instant,
+    answer: mpsc::SyncSender<Result<(IoResp, Vec<u8>)>>,
+}
+
+/// Start the thread that asks the guest's files over `ioin` and `ioout`, a request at a time,
+/// and answer where requests for it go. It ends with the [`Machine`], or once the channel has.
+fn files(mut ioin: io::PipeWriter, mut ioout: io::PipeReader) -> mpsc::Sender<IoJob> {
+    let (jobs, queued) = mpsc::channel::<IoJob>();
+    std::thread::spawn(move || {
+        for job in queued {
+            if Instant::now() >= job.deadline {
+                continue;
+            }
+            let answer = exchange(&mut ioin, &mut ioout, &job.request, &job.data);
+            let broken = answer.is_err();
+            let _ = job.answer.send(answer);
+            if broken {
+                // A frame cut short leaves the channel out of step for good.
+                break;
+            }
+        }
+    });
+    jobs
+}
+
+/// Send `request`, with `data` for a [`Write`](IoReq::Write), and read its answer.
+fn exchange(
+    ioin: &mut io::PipeWriter,
+    ioout: &mut io::PipeReader,
+    request: &IoReq,
+    data: &[u8],
+) -> Result<(IoResp, Vec<u8>)> {
+    wire::send(ioin, request).map_err(|e| Error::io("sending to the guest's files", e))?;
+    if matches!(request, IoReq::Write { .. }) {
+        wire::send_data(ioin, data).map_err(|e| Error::io("sending to the guest's files", e))?;
+    }
+    let answer = wire::recv::<IoResp>(ioout)
+        .and_then(|answer| answer.ok_or_else(|| io::ErrorKind::UnexpectedEof.into()))
+        .map_err(|e| Error::io("reading the guest's answer", e))?;
+    let read = match answer {
+        IoResp::Data => {
+            wire::recv_data(ioout).map_err(|e| Error::io("reading the guest's answer", e))?
+        }
+        _ => Vec::new(),
+    };
+    Ok((answer, read))
 }
 
 /// A pipe end as the command line names it.

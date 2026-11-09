@@ -848,6 +848,23 @@ async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     );
     assert_eq!(status(client.remove_file(&root, "", false).await), 403);
 
+    // A pipe is neither read nor written, and holds up nothing asked after it.
+    let (_, ended) = server.exec(&id, &["mkfifo", "/root/fifo"], None).await;
+    assert_eq!(ended.unwrap(), 0);
+    let fifo = async {
+        assert_eq!(
+            status(client.copy_file(&root, "root/run", "root/fifo", true).await),
+            403
+        );
+        assert_eq!(
+            status(client.read_file(&root, "root/fifo", 0, None).await),
+            404
+        );
+        client.read_text(&root, "root/made").await.unwrap()
+    };
+    let read = tokio::time::timeout(std::time::Duration::from_secs(10), fifo).await;
+    assert_eq!(read.expect("a pipe held the files up"), "made\n");
+
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.read_dir(&root, "").await), 404);
 }

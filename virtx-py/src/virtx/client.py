@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
-from .files import DirEntry, FileRoot, Metadata
+from ._library import args as _args
 from .image import (
     BearerAuth,
     ImageDownloadOutput,
@@ -25,13 +25,12 @@ from .image import (
     ImageUploadOutput,
     Recipe,
     RegistryAuth,
-    image_job_entry,
     image_name,
 )
-from .job import LogEntry, StartedJob
-from .sandbox import Sandbox, SandboxJob, SandboxJobEntry, SandboxVolume, sandbox_job_entry
-from .snapshot import SnapshotListOutputItem
-from .volume import MountSource, VolumeListOutputItem, VolumeMountListOutputItem
+from .job import StartedJob
+from .sandbox import Sandbox, SandboxVolume
+from .snapshot import Snapshot
+from .volume import Volume
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -58,11 +57,6 @@ class Output(Generic[T]):
 
 
 Event = Output[T] | Progress[C]
-
-
-def _args(**args: Any) -> bytes:
-    """``args`` without the ones left out, as JSON."""
-    return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
 
 
 def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]:
@@ -283,15 +277,15 @@ class Client:
 
     def _image_job(self, name: str, args: bytes) -> StartedJob[ImageJob, ImageJobEntry]:
         async def start() -> ImageJob:
-            return ImageJob.from_dict(await self._call(name, args))
+            return ImageJob.from_dict(self, await self._call(name, args))
 
-        return StartedJob(start, lambda job: self.image_job_log(job.id))
+        return StartedJob(start, lambda job: job.log())
 
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Build ``recipe``, to point ``reference`` at what it builds: awaited, the job;
-        iterated, its log, as ``image_job_log``'s. Sent when first awaited or iterated."""
+        iterated, its log, as ``ImageJob.log``'s. Sent when first awaited or iterated."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
@@ -302,7 +296,7 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
         the server pulls anonymously. Awaited, the job; iterated, its log, as
-        ``image_job_log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s. Sent when first awaited or iterated."""
         return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -312,7 +306,7 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Push the image ``reference`` points at to the registry ``reference`` names; without
         ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
-        ``image_job_log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s. Sent when first awaited or iterated."""
         return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -320,23 +314,12 @@ class Client:
     async def list_image_job(self) -> list[ImageJob]:
         """Every image job the server holds."""
         items = await self._call("virtx_client_list_image_job")
-        return [ImageJob.from_dict(item) for item in items]
+        return [ImageJob.from_dict(self, item) for item in items]
 
     async def get_image_job(self, id: str) -> ImageJob:
         """The image job ``id``."""
-        return ImageJob.from_dict(await self._call("virtx_client_get_image_job", _args(id=id)))
-
-    async def remove_image_job(self, id: str) -> None:
-        """Cancel the image job ``id`` if it runs, and forget it."""
-        await self._call("virtx_client_remove_image_job", _args(id=id))
-
-    async def image_job_log(
-        self, id: str, after: int | None = None
-    ) -> AsyncIterator[LogEntry[ImageJobEntry]]:
-        """The log of the image job ``id``, from its start or after its ``after``th entry, until
-        its ``ImageJobEnd``. Closing it leaves the job as it is."""
-        async for item in self._items("virtx_client_image_job_log", _args(id=id, after=after)):
-            yield image_job_entry(item)
+        output = await self._call("virtx_client_get_image_job", _args(id=id))
+        return ImageJob.from_dict(self, output)
 
     async def list_image(self) -> list[ImageListOutputItem]:
         """Every tag on the server's images, as ``name:tag``, with the digest it points at."""
@@ -386,167 +369,51 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
-    async def list_snapshot(self) -> list[SnapshotListOutputItem]:
+    async def list_snapshot(self) -> list[Snapshot]:
         """Every snapshot the server holds."""
         items = await self._call("virtx_client_list_snapshot")
-        return [SnapshotListOutputItem.from_dict(item) for item in items]
+        return [Snapshot.from_dict(self, item) for item in items]
 
     async def create_snapshot(
         self, name: str | None = None, disk_gib: int | None = None
-    ) -> SnapshotListOutputItem:
+    ) -> Snapshot:
         """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
         without either the server picks it."""
         output = await self._call(
             "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
         )
-        return SnapshotListOutputItem.from_dict(output)
+        return Snapshot.from_dict(self, output)
 
-    async def get_snapshot(self, name: str) -> SnapshotListOutputItem:
+    async def get_snapshot(self, name: str) -> Snapshot:
         """The snapshot ``name``."""
         output = await self._call("virtx_client_get_snapshot", _args(name=name))
-        return SnapshotListOutputItem.from_dict(output)
+        return Snapshot.from_dict(self, output)
 
-    async def remove_snapshot(self, name: str) -> None:
-        """Delete the snapshot ``name`` and its upper layer."""
-        await self._call("virtx_client_remove_snapshot", _args(name=name))
-
-    async def list_volume(self) -> list[VolumeListOutputItem]:
+    async def list_volume(self) -> list[Volume]:
         """Every volume the server holds."""
         items = await self._call("virtx_client_list_volume")
-        return [VolumeListOutputItem.from_dict(item) for item in items]
+        return [Volume.from_dict(self, item) for item in items]
 
-    async def create_volume(self, name: str | None = None) -> VolumeListOutputItem:
+    async def create_volume(self, name: str | None = None) -> Volume:
         """Keep a new, empty volume under ``name``; without one the server picks it."""
         output = await self._call("virtx_client_create_volume", _args(name=name))
-        return VolumeListOutputItem.from_dict(output)
+        return Volume.from_dict(self, output)
 
-    async def get_volume(self, name: str) -> VolumeListOutputItem:
+    async def get_volume(self, name: str) -> Volume:
         """The volume ``name``."""
         output = await self._call("virtx_client_get_volume", _args(name=name))
-        return VolumeListOutputItem.from_dict(output)
-
-    async def remove_volume(self, name: str) -> None:
-        """Delete the volume ``name`` and everything in it."""
-        await self._call("virtx_client_remove_volume", _args(name=name))
-
-    async def list_volume_mount(self, volume: str) -> list[VolumeMountListOutputItem]:
-        """The mounts in ``volume``, without their credentials."""
-        items = await self._call("virtx_client_list_volume_mount", _args(volume=volume))
-        return [VolumeMountListOutputItem.from_dict(item) for item in items]
-
-    async def create_volume_mount(
-        self, volume: str, path: str, source: MountSource
-    ) -> VolumeMountListOutputItem:
-        """Mount ``source`` at ``path`` in ``volume``, a directory the mount creates."""
-        output = await self._call(
-            "virtx_client_create_volume_mount",
-            _args(volume=volume, path=path, source=source.to_dict()),
-        )
-        return VolumeMountListOutputItem.from_dict(output)
-
-    async def remove_volume_mount(self, volume: str, path: str) -> None:
-        """Take away the mount at ``path`` in ``volume``, leaving its source as it is."""
-        await self._call("virtx_client_remove_volume_mount", _args(volume=volume, path=path))
-
-    async def stat_file(self, root: FileRoot, path: str) -> Metadata:
-        """What is at ``path`` in ``root``, a path relative to its root as ``dir/file.txt``."""
-        output = await self._call("virtx_client_stat_file", _args(**root.to_dict(), path=path))
-        return Metadata.from_dict(output)
-
-    async def exists(self, root: FileRoot, path: str) -> bool:
-        """Whether anything is at ``path`` in ``root``."""
-        return await self._call("virtx_client_file_exists", _args(**root.to_dict(), path=path))
-
-    async def is_file(self, root: FileRoot, path: str) -> bool:
-        """Whether a file is at ``path`` in ``root``."""
-        return await self._call("virtx_client_is_file", _args(**root.to_dict(), path=path))
-
-    async def is_dir(self, root: FileRoot, path: str) -> bool:
-        """Whether a directory is at ``path`` in ``root``."""
-        return await self._call("virtx_client_is_dir", _args(**root.to_dict(), path=path))
-
-    async def read_dir(self, root: FileRoot, path: str) -> list[DirEntry]:
-        """The entries of the directory at ``path`` in ``root``."""
-        items = await self._call("virtx_client_read_dir", _args(**root.to_dict(), path=path))
-        return [DirEntry.from_dict(item) for item in items]
-
-    async def read_file(
-        self, root: FileRoot, path: str, offset: int = 0, length: int | None = None
-    ) -> bytes:
-        """The file at ``path`` in ``root``, from ``offset``, ``length`` bytes of it or all that
-        is left."""
-        return await self._call(
-            "virtx_client_read_file",
-            _args(**root.to_dict(), path=path, offset=offset, length=length),
-            raw=True,
-        )
-
-    async def read_text(self, root: FileRoot, path: str) -> str:
-        """The whole file at ``path`` in ``root`` as text, which it has to be: UTF-8."""
-        return await self._call("virtx_client_read_text", _args(**root.to_dict(), path=path))
-
-    async def write_file(
-        self, root: FileRoot, path: str, content: bytes | str, if_match: str | None = None
-    ) -> None:
-        """Write ``content``, a ``str`` as UTF-8, as the whole file at ``path`` in ``root``,
-        creating it if it does not exist. Its parent directory must exist. With ``if_match``,
-        the ``etag`` a :class:`Metadata` of the file gave, the write goes only while the file
-        still has it, and is refused with a ``412`` otherwise."""
-        args = _args(**root.to_dict(), path=path, if_match=if_match)
-        content = content.encode() if isinstance(content, str) else bytes(content)
-        handle = self._lib.virtx_client_write_file(
-            self._held(), args, len(args), content, len(content)
-        )
-        await self._lib.answer(handle)
-
-    async def create_dir(self, root: FileRoot, path: str) -> None:
-        """Create the directory at ``path`` in ``root``, whose parent must exist."""
-        await self._call("virtx_client_create_dir", _args(**root.to_dict(), path=path))
-
-    async def create_dir_all(self, root: FileRoot, path: str) -> None:
-        """Have the directory at ``path`` in ``root``, as ``mkdir -p``: its parents are
-        created as needed, and one there already is left as it is. Refused with a ``405``
-        when a file is at ``path``."""
-        await self._call("virtx_client_create_dir_all", _args(**root.to_dict(), path=path))
-
-    async def remove_file(self, root: FileRoot, path: str, missing_ok: bool = False) -> None:
-        """Remove what is at ``path`` in ``root``: a directory with everything in it. With
-        ``missing_ok``, nothing being there is fine, as ``rm -f``; without it, a ``404``."""
-        await self._call(
-            "virtx_client_remove_file",
-            _args(**root.to_dict(), path=path, missing_ok=missing_ok or None),
-        )
-
-    async def rename_file(
-        self, root: FileRoot, from_path: str, to_path: str, overwrite: bool = False
-    ) -> None:
-        """Move what is at ``from_path`` in ``root`` to ``to_path`` in it, replacing what is at
-        ``to_path`` if ``overwrite``, and refused if not and something is there."""
-        await self._call(
-            "virtx_client_rename_file",
-            _args(**root.to_dict(), **{"from": from_path}, to=to_path, overwrite=overwrite),
-        )
-
-    async def copy_file(
-        self, root: FileRoot, from_path: str, to_path: str, overwrite: bool = False
-    ) -> None:
-        """Copy what is at ``from_path`` in ``root`` to ``to_path`` in it, a directory with
-        everything in it, as ``rename_file`` replaces what is at ``to_path``."""
-        await self._call(
-            "virtx_client_copy_file",
-            _args(**root.to_dict(), **{"from": from_path}, to=to_path, overwrite=overwrite),
-        )
+        return Volume.from_dict(self, output)
 
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds, without its ports."""
         items = await self._call("virtx_client_list_sandbox")
-        return [Sandbox.from_dict(item) for item in items]
+        return [Sandbox.from_dict(self, item) for item in items]
 
     async def create_sandbox(
         self,
         image: str | ImageName,
         *,
-        snapshot: str | None = None,
+        snapshot: str | Snapshot | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
@@ -555,15 +422,17 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, standing on ``snapshot`` if given. ``ports`` are TCP
+        """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
+        given, with ``volumes`` mounted into it, each a ``SandboxVolume``. ``ports`` are TCP
         ports in it to open, reserved as it is made and answered here only, each with the
         ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
         return Sandbox.from_dict(
+            self,
             await self._call(
                 "virtx_client_create_sandbox",
                 _args(
                     image=image_name(image).to_dict(),
-                    snapshot=snapshot,
+                    snapshot=snapshot.name if isinstance(snapshot, Snapshot) else snapshot,
                     network=network,
                     ports=list(ports),
                     vcpus=vcpus,
@@ -574,76 +443,9 @@ class Client:
                         v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
                     ],
                 ),
-            )
+            ),
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``, without its ports."""
-        return Sandbox.from_dict(await self._call("virtx_client_get_sandbox", _args(id=id)))
-
-    async def remove_sandbox(self, id: str) -> None:
-        """Stop the sandbox ``id``, end its jobs, and forget it, keeping its snapshot and
-        volumes."""
-        await self._call("virtx_client_remove_sandbox", _args(id=id))
-
-    async def list_sandbox_job(self, sandbox: str) -> list[SandboxJob]:
-        """Every job in ``sandbox``."""
-        items = await self._call("virtx_client_list_sandbox_job", _args(sandbox=sandbox))
-        return [SandboxJob.from_dict(item) for item in items]
-
-    def exec_sandbox(
-        self,
-        sandbox: str,
-        cmd: Iterable[str],
-        *,
-        stdin: bool = False,
-        timeout_ms: int | None = None,
-    ) -> StartedJob[SandboxJob, SandboxJobEntry]:
-        """Run ``cmd`` in ``sandbox``, its stdin open for ``write_sandbox_job_stdin`` if
-        ``stdin``, killed after ``timeout_ms`` if one is given. Awaited, the job; iterated, its
-        output and how it ended, as ``sandbox_job_log``'s. Sent when first awaited or
-        iterated."""
-        args = _args(sandbox=sandbox, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
-
-        async def start() -> SandboxJob:
-            return SandboxJob.from_dict(await self._call("virtx_client_exec_sandbox", args))
-
-        return StartedJob(start, lambda job: self.sandbox_job_log(sandbox, job.id))
-
-    async def get_sandbox_job(self, sandbox: str, job: str) -> SandboxJob:
-        """The job ``job`` in ``sandbox``."""
-        output = await self._call("virtx_client_get_sandbox_job", _args(sandbox=sandbox, job=job))
-        return SandboxJob.from_dict(output)
-
-    async def remove_sandbox_job(self, sandbox: str, job: str) -> None:
-        """Cancel the job ``job`` in ``sandbox`` if it runs, killing its process, and forget
-        it."""
-        await self._call("virtx_client_remove_sandbox_job", _args(sandbox=sandbox, job=job))
-
-    async def signal_sandbox_job(self, sandbox: str, job: str, signal: str) -> None:
-        """Send ``signal``, such as ``"SIGTERM"``, to the process of the job ``job`` in
-        ``sandbox`` and every process it started."""
-        await self._call(
-            "virtx_client_signal_sandbox_job", _args(sandbox=sandbox, job=job, signal=signal)
-        )
-
-    async def write_sandbox_job_stdin(
-        self, sandbox: str, job: str, data: str | None = None, eof: bool = False
-    ) -> None:
-        """Write ``data`` to the stdin of the process of the job ``job`` in ``sandbox``, then
-        close it if ``eof``. Returns once it is written: await it before the next write, so the
-        writes land in order."""
-        await self._call(
-            "virtx_client_write_sandbox_job_stdin",
-            _args(sandbox=sandbox, job=job, data=data, eof=eof or None),
-        )
-
-    async def sandbox_job_log(
-        self, sandbox: str, job: str, after: int | None = None
-    ) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
-        """The log of the job ``job`` in ``sandbox``, its process's output, from its start or
-        after its ``after``th entry, until its ``SandboxJobEnd``. Closing it leaves the job as
-        it is."""
-        args = _args(sandbox=sandbox, job=job, after=after)
-        async for item in self._items("virtx_client_sandbox_job_log", args):
-            yield sandbox_job_entry(item)
+        return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))

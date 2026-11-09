@@ -25,11 +25,9 @@ tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 # A token's randomness.
 uuid = { version = "1", features = ["v4"] }
 # What the endpoints take and answer.
-virtx-core = { workspace = true }
+virtx-core = { workspace = true, features = ["server"] }
 # What the endpoints answer from, and the machines they start.
 virtx-uvm = { workspace = true }
-# A job's log, as an event stream.
-futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # The wire, spoken by hand, and by virtx-core's client with the token and the project given

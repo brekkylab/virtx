@@ -10,16 +10,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use virtx_core::{
     Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
-    ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
-    ImageTagArgs, ImageUntagArgs, ImageUploadArgs, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, Recipe, RegistryAuth, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountListOutputItem,
+    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
+    ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
+    ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
+    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxJob as SandboxJobInfo,
+    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs,
+    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error,
+    Error, ImageJob, Sandbox, SandboxJob, Snapshot, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -188,7 +189,7 @@ impl Client {
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
+    /// [`ImageJob::log`]'s, or [`StartedJob::log`].
     pub fn build_image(
         &self,
         recipe: Recipe,
@@ -198,11 +199,11 @@ impl Client {
             recipe,
             reference: reference.into(),
         };
-        self.image_job(self.call(self.api.virtx_client_build_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_build_image, args))
     }
 
     /// Start pulling `reference` from its registry, to point it at what it pulls; without
-    /// `auth` the server pulls anonymously. Its log is [`image_job_log`](Self::image_job_log)'s,
+    /// `auth` the server pulls anonymously. Its log is [`ImageJob::log`]'s,
     /// or [`StartedJob::log`].
     pub fn pull_image(
         &self,
@@ -213,12 +214,12 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        self.image_job(self.call(self.api.virtx_client_pull_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_pull_image, args))
     }
 
     /// Start pushing the image `reference` points at to the registry `reference` names;
     /// without `auth` the server pushes anonymously. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s, or [`StartedJob::log`].
+    /// [`ImageJob::log`]'s, or [`StartedJob::log`].
     pub fn push_image(
         &self,
         reference: impl Into<String>,
@@ -228,31 +229,45 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        self.image_job(self.call(self.api.virtx_client_push_image, args))
+        self.start_image_job(self.call(self.api.virtx_client_push_image, args))
     }
 
     /// Every image job the server holds.
     pub fn list_image_job(&self) -> Call<Vec<ImageJob>> {
-        Call::new(self.api, unsafe {
+        let client = self.clone();
+        let call: Call<Vec<ImageJobInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_image_job)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| ImageJob::new(client.clone(), info))
+                .collect()
         })
+    }
+
+    /// The image job `info` describes, reached through this client, without asking the server.
+    pub fn image_job(&self, info: ImageJobInfo) -> ImageJob {
+        ImageJob::new(self.clone(), info)
     }
 
     /// The image job `id`.
     pub fn get_image_job(&self, id: impl AsRef<str>) -> Call<ImageJob> {
         let args = json!({ "id": id.as_ref() });
-        self.call(self.api.virtx_client_get_image_job, args)
+        let client = self.clone();
+        let call: Call<ImageJobInfo> = self.call(self.api.virtx_client_get_image_job, args);
+        call.map(move |info| ImageJob::new(client.clone(), info))
     }
 
     /// Cancel the image job `id` if it runs, and forget it.
-    pub fn remove_image_job(&self, id: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_image_job(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_image_job, args)
     }
 
     /// The log of the image job `id`, from its start or after its `after`th entry, until its
     /// `end` entry. Dropping it leaves the job as it is.
-    pub fn image_job_log(
+    pub(crate) fn image_job_log(
         &self,
         id: impl AsRef<str>,
         after: Option<u64>,
@@ -342,9 +357,16 @@ impl Client {
     }
 
     /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<SnapshotListOutputItem>> {
-        Call::new(self.api, unsafe {
+    pub fn list_snapshot(&self) -> Call<Vec<Snapshot>> {
+        let client = self.clone();
+        let call: Call<Vec<SnapshotInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_snapshot)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Snapshot::new(client.clone(), info))
+                .collect()
         })
     }
 
@@ -354,55 +376,80 @@ impl Client {
         &self,
         name: Option<impl Into<String>>,
         disk_gib: Option<u32>,
-    ) -> Call<SnapshotListOutputItem> {
+    ) -> Call<Snapshot> {
         let args = SnapshotCreateArgs {
             name: name.map(Into::into),
             disk_gib,
         };
-        self.call(self.api.virtx_client_create_snapshot, args)
+        let client = self.clone();
+        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_create_snapshot, args);
+        call.map(move |info| Snapshot::new(client.clone(), info))
+    }
+
+    /// The snapshot `info` describes, reached through this client, without asking the server.
+    pub fn snapshot(&self, info: SnapshotInfo) -> Snapshot {
+        Snapshot::new(self.clone(), info)
     }
 
     /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<SnapshotListOutputItem> {
+    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<Snapshot> {
         let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_get_snapshot, args)
+        let client = self.clone();
+        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_get_snapshot, args);
+        call.map(move |info| Snapshot::new(client.clone(), info))
     }
 
     /// Delete the snapshot `name` and its upper layer.
-    pub fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
         let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
     /// Every volume the server holds.
-    pub fn list_volume(&self) -> Call<Vec<VolumeListOutputItem>> {
-        Call::new(self.api, unsafe {
+    pub fn list_volume(&self) -> Call<Vec<Volume>> {
+        let client = self.clone();
+        let call: Call<Vec<VolumeInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_volume)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Volume::new(client.clone(), info))
+                .collect()
         })
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
-    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<VolumeListOutputItem> {
+    pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<Volume> {
         let args = VolumeCreateArgs {
             name: name.map(Into::into),
         };
-        self.call(self.api.virtx_client_create_volume, args)
+        let client = self.clone();
+        let call: Call<VolumeInfo> = self.call(self.api.virtx_client_create_volume, args);
+        call.map(move |info| Volume::new(client.clone(), info))
+    }
+
+    /// The volume `info` describes, reached through this client, without asking the server.
+    pub fn volume(&self, info: VolumeInfo) -> Volume {
+        Volume::new(self.clone(), info)
     }
 
     /// The volume `name`.
-    pub fn get_volume(&self, name: impl AsRef<str>) -> Call<VolumeListOutputItem> {
+    pub fn get_volume(&self, name: impl AsRef<str>) -> Call<Volume> {
         let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_get_volume, args)
+        let client = self.clone();
+        let call: Call<VolumeInfo> = self.call(self.api.virtx_client_get_volume, args);
+        call.map(move |info| Volume::new(client.clone(), info))
     }
 
     /// Delete the volume `name` and everything in it.
-    pub fn remove_volume(&self, name: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_volume(&self, name: impl AsRef<str>) -> Call<()> {
         let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_volume, args)
     }
 
     /// The mounts in `volume`, without their credentials.
-    pub fn list_volume_mount(
+    pub(crate) fn list_volume_mount(
         &self,
         volume: impl AsRef<str>,
     ) -> Call<Vec<VolumeMountListOutputItem>> {
@@ -411,7 +458,7 @@ impl Client {
     }
 
     /// Mount `source` at `path` in `volume`, a directory the mount creates.
-    pub fn create_volume_mount(
+    pub(crate) fn create_volume_mount(
         &self,
         volume: impl AsRef<str>,
         path: impl AsRef<str>,
@@ -422,38 +469,42 @@ impl Client {
     }
 
     /// Take away the mount at `path` in `volume`, leaving its source as it is.
-    pub fn remove_volume_mount(&self, volume: impl AsRef<str>, path: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_volume_mount(
+        &self,
+        volume: impl AsRef<str>,
+        path: impl AsRef<str>,
+    ) -> Call<()> {
         let args = json!({ "volume": volume.as_ref(), "path": path.as_ref() });
         self.call(self.api.virtx_client_remove_volume_mount, args)
     }
 
     /// What is at `path` in `root`, a path relative to its root as `dir/file.txt`.
-    pub fn stat_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<Metadata> {
+    pub(crate) fn stat_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<Metadata> {
         self.call(self.api.virtx_client_stat_file, self.at(root, path))
     }
 
     /// Whether anything is at `path` in `root`.
-    pub fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn exists(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_file_exists, self.at(root, path))
     }
 
     /// Whether a file is at `path` in `root`.
-    pub fn is_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn is_file(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_is_file, self.at(root, path))
     }
 
     /// Whether a directory is at `path` in `root`.
-    pub fn is_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
+    pub(crate) fn is_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<bool> {
         self.call(self.api.virtx_client_is_dir, self.at(root, path))
     }
 
     /// The entries of the directory at `path` in `root`.
-    pub fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
+    pub(crate) fn read_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<Vec<DirEntry>> {
         self.call(self.api.virtx_client_read_dir, self.at(root, path))
     }
 
     /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
-    pub fn read_file(
+    pub(crate) fn read_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -470,7 +521,7 @@ impl Client {
     }
 
     /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
-    pub fn read_text(&self, root: &FileRoot, path: impl Into<String>) -> Call<String> {
+    pub(crate) fn read_text(&self, root: &FileRoot, path: impl Into<String>) -> Call<String> {
         self.call(self.api.virtx_client_read_text, self.at(root, path))
     }
 
@@ -478,7 +529,7 @@ impl Client {
     /// exist. Its parent directory must exist. With `if_match`, the `etag` a [`Metadata`] of
     /// the file gave, the write goes only while the file still has it, and is refused with a
     /// `412` otherwise.
-    pub fn write_file(
+    pub(crate) fn write_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -505,20 +556,20 @@ impl Client {
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
-    pub fn create_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+    pub(crate) fn create_dir(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
         self.call(self.api.virtx_client_create_dir, self.at(root, path))
     }
 
     /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
     /// needed, and one there already is left as it is. Refused with a `405` when a file is at
     /// `path`.
-    pub fn create_dir_all(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
+    pub(crate) fn create_dir_all(&self, root: &FileRoot, path: impl Into<String>) -> Call<()> {
         self.call(self.api.virtx_client_create_dir_all, self.at(root, path))
     }
 
     /// Remove what is at `path` in `root`: a directory with everything in it. With
     /// `missing_ok`, nothing being there is fine, as `rm -f`; without it, a `404`.
-    pub fn remove_file(
+    pub(crate) fn remove_file(
         &self,
         root: &FileRoot,
         path: impl Into<String>,
@@ -534,7 +585,7 @@ impl Client {
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
     /// `overwrite`, and refused if not and something is there.
-    pub fn rename_file(
+    pub(crate) fn rename_file(
         &self,
         root: &FileRoot,
         from: impl Into<String>,
@@ -552,7 +603,7 @@ impl Client {
 
     /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
     /// [`rename_file`](Client::rename_file) replaces what is at `to`.
-    pub fn copy_file(
+    pub(crate) fn copy_file(
         &self,
         root: &FileRoot,
         from: impl Into<String>,
@@ -570,39 +621,65 @@ impl Client {
 
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
-        Call::new(self.api, unsafe {
+        let client = self.clone();
+        let call: Call<Vec<SandboxInfo>> = Call::new(self.api, unsafe {
             (self.api.virtx_client_list_sandbox)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Sandbox::new(client.clone(), info))
+                .collect()
         })
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
-        self.call(self.api.virtx_client_create_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// The sandbox `info` describes, reached through this client, without asking the server: for
+    /// one another module over the same library holds.
+    pub fn sandbox(&self, info: SandboxInfo) -> Sandbox {
+        Sandbox::new(self.clone(), info)
     }
 
     /// The sandbox `id`, without its ports.
     pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
         let args = json!({ "id": id.as_ref() });
-        self.call(self.api.virtx_client_get_sandbox, args)
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_get_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
-    pub fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)
     }
 
     /// Every job in the sandbox `id`.
-    pub fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
+    pub(crate) fn list_sandbox_job(&self, id: impl AsRef<str>) -> Call<Vec<SandboxJob>> {
+        let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref() });
-        self.call(self.api.virtx_client_list_sandbox_job, args)
+        let client = self.clone();
+        let call: Call<Vec<SandboxJobInfo>> =
+            self.call(self.api.virtx_client_list_sandbox_job, args);
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| SandboxJob::new(client.clone(), sandbox.clone(), info))
+                .collect()
+        })
     }
 
     /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
     /// output and how it ended are [`sandbox_job_log`](Self::sandbox_job_log)'s, or
     /// [`StartedJob::log`].
-    pub fn exec_sandbox(
+    pub(crate) fn exec_sandbox(
         &self,
         id: impl AsRef<str>,
         args: &SandboxExecArgs,
@@ -615,27 +692,35 @@ impl Client {
             "timeout_ms": args.timeout_ms,
         });
         let client = self.clone();
+        let call: Call<SandboxJobInfo> = self.call(self.api.virtx_client_exec_sandbox, args);
         StartedJob::new(
-            self.call(self.api.virtx_client_exec_sandbox, args),
-            Box::new(move |job: &SandboxJob| client.sandbox_job_log(&sandbox, &job.id, None)),
+            call.map(move |info| SandboxJob::new(client.clone(), sandbox.clone(), info)),
+            Box::new(|job: &SandboxJob| job.log(None)),
         )
     }
 
     /// The job `job` in the sandbox `id`.
-    pub fn get_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<SandboxJob> {
+    pub(crate) fn get_sandbox_job(
+        &self,
+        id: impl AsRef<str>,
+        job: impl AsRef<str>,
+    ) -> Call<SandboxJob> {
+        let sandbox = id.as_ref().to_owned();
         let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
-        self.call(self.api.virtx_client_get_sandbox_job, args)
+        let client = self.clone();
+        let call: Call<SandboxJobInfo> = self.call(self.api.virtx_client_get_sandbox_job, args);
+        call.map(move |info| SandboxJob::new(client.clone(), sandbox.clone(), info))
     }
 
     /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
-    pub fn remove_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<()> {
+    pub(crate) fn remove_sandbox_job(&self, id: impl AsRef<str>, job: impl AsRef<str>) -> Call<()> {
         let args = json!({ "sandbox": id.as_ref(), "job": job.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox_job, args)
     }
 
     /// Send `signal`, such as `SIGTERM`, to the process of the job `job` in the sandbox `id`
     /// and every process it started.
-    pub fn signal_sandbox_job(
+    pub(crate) fn signal_sandbox_job(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,
@@ -649,7 +734,7 @@ impl Client {
     /// Write `data` to the stdin of the process of the job `job` in the sandbox `id`, then
     /// close it if `eof`. Answers once it is written: a caller writes again only then, so the
     /// writes land in order.
-    pub fn write_sandbox_job_stdin(
+    pub(crate) fn write_sandbox_job_stdin(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,
@@ -667,7 +752,7 @@ impl Client {
 
     /// The log of the job `job` in the sandbox `id`, its process's output, from its start or
     /// after its `after`th entry, until its `end` entry. Dropping it leaves the job as it is.
-    pub fn sandbox_job_log(
+    pub(crate) fn sandbox_job_log(
         &self,
         id: impl AsRef<str>,
         job: impl AsRef<str>,
@@ -681,11 +766,11 @@ impl Client {
     }
 
     /// The image job `call` starts, its log read with a clone of this client.
-    fn image_job(&self, call: Call<ImageJob>) -> StartedJob<ImageJob, ImageJobEntry> {
+    fn start_image_job(&self, call: Call<ImageJobInfo>) -> StartedJob<ImageJob, ImageJobEntry> {
         let client = self.clone();
         StartedJob::new(
-            call,
-            Box::new(move |job: &ImageJob| client.image_job_log(&job.id, None)),
+            call.map(move |info| ImageJob::new(client.clone(), info)),
+            Box::new(|job: &ImageJob| job.log(None)),
         )
     }
 
@@ -707,7 +792,7 @@ impl Client {
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 
-    fn call<T: DeserializeOwned>(
+    fn call<T: DeserializeOwned + 'static>(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,

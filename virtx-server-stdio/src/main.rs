@@ -39,7 +39,7 @@ async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let images = ImageStore::new(root.join("images"))?;
     let home = Arc::new(Home::new(images.clone(), &root)?);
-    let api = endpoints::router().layer(Extension(home));
+    let api = endpoints::router().layer(Extension(Arc::clone(&home)));
     let registry = Arc::new(RegistryServer::new(images, "/images/oci")?);
     let handle = move |request: http::Request<_>| {
         let (api, registry) = (api.clone(), Arc::clone(&registry));
@@ -53,7 +53,8 @@ async fn serve() -> anyhow::Result<()> {
             }
         }
     };
-    // The client is gone, and every sandbox was its: each machine shuts down, its snapshot
-    // synced, as this one's end closes its control channel.
-    Ok(serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await?)
+    let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
+    // The client is gone, and every sandbox was its.
+    tokio::task::spawn_blocking(move || home.close_all()).await?;
+    Ok(served?)
 }

@@ -995,8 +995,8 @@ pub(crate) mod ffi {
     use crate::{
         Auth,
         ffi::{
-            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure, json,
-            release, retain, share, write,
+            Failure, Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure,
+            json, release, retain, share, write,
         },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
@@ -1336,7 +1336,7 @@ pub(crate) mod ffi {
             client
                 .build_image(recipe, reference)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1361,7 +1361,7 @@ pub(crate) mod ffi {
             client
                 .pull_image(reference, auth)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1385,7 +1385,7 @@ pub(crate) mod ffi {
             client
                 .push_image(reference, auth)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1398,9 +1398,8 @@ pub(crate) mod ffi {
     pub unsafe extern "C" fn virtx_client_list_image_job(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.list_image_job().await.map_err(|e| e.to_string())
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_image_job().await.map_err(Failure::from) })
     }
 
     /// Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
@@ -1417,10 +1416,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .get_image_job(args?.id)
-                .await
-                .map_err(|e| e.to_string())
+            client.get_image_job(args?.id).await.map_err(Failure::from)
         })
     }
 
@@ -1441,7 +1437,7 @@ pub(crate) mod ffi {
             client
                 .remove_image_job(args?.id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1466,13 +1462,13 @@ pub(crate) mod ffi {
                 let ImageJobLogArgs { id, after } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(Failure::from(error));
                         return;
                     }
                 };
                 let mut log = client.image_job_log(&id, after);
                 while let Some(entry) = log.next().await {
-                    yield entry.map_err(|e| e.to_string());
+                    yield entry.map_err(Failure::from);
                 }
             }
         })
@@ -1487,7 +1483,7 @@ pub(crate) mod ffi {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .future(|client| async move { client.list_image().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.list_image().await.map_err(Failure::from) })
     }
 
     /// Points the tag `target` at the image `source` names, given
@@ -1509,7 +1505,7 @@ pub(crate) mod ffi {
             client
                 .tag_image(source, target)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1530,7 +1526,7 @@ pub(crate) mod ffi {
             client
                 .untag_image(args?.reference)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1551,7 +1547,7 @@ pub(crate) mod ffi {
             client
                 .remove_image(args?.reference)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1576,13 +1572,13 @@ pub(crate) mod ffi {
                 let ImageDownloadArgs { reference, path } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(Failure::from(error));
                         return;
                     }
                 };
                 let mut download = client.download_image(reference, path);
                 while let Some(event) = download.next().await {
-                    yield event.map_err(|e| e.to_string());
+                    yield event.map_err(Failure::from);
                 }
             }
         })
@@ -1608,13 +1604,13 @@ pub(crate) mod ffi {
                 let ImageUploadArgs { path, reference } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(Failure::from(error));
                         return;
                     }
                 };
                 let mut upload = client.upload_image(path, reference);
                 while let Some(event) = upload.next().await {
-                    yield event.map_err(|e| e.to_string());
+                    yield event.map_err(Failure::from);
                 }
             }
         })
@@ -1632,7 +1628,7 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .future(|client| async move { client.prune_image().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.prune_image().await.map_err(Failure::from) })
     }
 
     /// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
@@ -1648,7 +1644,7 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .future(|client| async move { client.list_snapshot().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.list_snapshot().await.map_err(Failure::from) })
     }
 
     /// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
@@ -1670,7 +1666,7 @@ pub(crate) mod ffi {
             client
                 .create_snapshot(args.name, args.disk_gib)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1688,10 +1684,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Name>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .get_snapshot(args?.name)
-                .await
-                .map_err(|e| e.to_string())
+            client.get_snapshot(args?.name).await.map_err(Failure::from)
         })
     }
 
@@ -1712,7 +1705,7 @@ pub(crate) mod ffi {
             client
                 .remove_snapshot(args?.name)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1726,7 +1719,7 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .future(|client| async move { client.list_volume().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.list_volume().await.map_err(Failure::from) })
     }
 
     /// Keeps a new, empty volume under `name`, or a name the server picks if there is none,
@@ -1747,7 +1740,7 @@ pub(crate) mod ffi {
             client
                 .create_volume(args?.name)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1765,10 +1758,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Name>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .get_volume(args?.name)
-                .await
-                .map_err(|e| e.to_string())
+            client.get_volume(args?.name).await.map_err(Failure::from)
         })
     }
 
@@ -1789,7 +1779,7 @@ pub(crate) mod ffi {
             client
                 .remove_volume(args?.name)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1810,7 +1800,7 @@ pub(crate) mod ffi {
             client
                 .list_volume_mount(args?.volume)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1841,7 +1831,7 @@ pub(crate) mod ffi {
             client
                 .create_volume_mount(volume, path, source)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1862,7 +1852,7 @@ pub(crate) mod ffi {
             client
                 .remove_volume_mount(volume, path)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -1885,10 +1875,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .stat_file(&root, &path)
-                .await
-                .map_err(|e| e.to_string())
+            client.stat_file(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -1907,7 +1894,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.exists(&root, &path).await.map_err(|e| e.to_string())
+            client.exists(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -1926,10 +1913,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .is_file(&root, &path)
-                .await
-                .map_err(|e| e.to_string())
+            client.is_file(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -1948,7 +1932,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.is_dir(&root, &path).await.map_err(|e| e.to_string())
+            client.is_dir(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -1968,10 +1952,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .read_dir(&root, &path)
-                .await
-                .map_err(|e| e.to_string())
+            client.read_dir(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -2000,7 +1981,7 @@ pub(crate) mod ffi {
                 .read_file(&root, &path, offset, length)
                 .await
                 .map(|bytes| bytes.to_vec())
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2019,10 +2000,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .read_text(&root, &path)
-                .await
-                .map_err(|e| e.to_string())
+            client.read_text(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -2059,7 +2037,7 @@ pub(crate) mod ffi {
             client
                 .write_file(&root, &path, content, if_match.as_deref())
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2078,10 +2056,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .create_dir(&root, &path)
-                .await
-                .map_err(|e| e.to_string())
+            client.create_dir(&root, &path).await.map_err(Failure::from)
         })
     }
 
@@ -2104,7 +2079,7 @@ pub(crate) mod ffi {
             client
                 .create_dir_all(&root, &path)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2132,7 +2107,7 @@ pub(crate) mod ffi {
             client
                 .remove_file(&root, &path, missing_ok)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2161,7 +2136,7 @@ pub(crate) mod ffi {
             client
                 .rename_file(&root, &from, &to, overwrite)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2188,7 +2163,7 @@ pub(crate) mod ffi {
             client
                 .copy_file(&root, &from, &to, overwrite)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2204,7 +2179,7 @@ pub(crate) mod ffi {
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
         unsafe { &(*client).0 }
-            .future(|client| async move { client.list_sandbox().await.map_err(|e| e.to_string()) })
+            .future(|client| async move { client.list_sandbox().await.map_err(Failure::from) })
     }
 
     /// Makes a sandbox, given
@@ -2227,10 +2202,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<SandboxCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .create_sandbox(&args?)
-                .await
-                .map_err(|e| e.to_string())
+            client.create_sandbox(&args?).await.map_err(Failure::from)
         })
     }
 
@@ -2248,10 +2220,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .get_sandbox(args?.id)
-                .await
-                .map_err(|e| e.to_string())
+            client.get_sandbox(args?.id).await.map_err(Failure::from)
         })
     }
 
@@ -2269,10 +2238,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_sandbox(args?.id)
-                .await
-                .map_err(|e| e.to_string())
+            client.remove_sandbox(args?.id).await.map_err(Failure::from)
         })
     }
 
@@ -2293,7 +2259,7 @@ pub(crate) mod ffi {
             client
                 .list_sandbox_job(args?.sandbox)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2327,7 +2293,7 @@ pub(crate) mod ffi {
             client
                 .exec_sandbox(sandbox, &args)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2349,7 +2315,7 @@ pub(crate) mod ffi {
             client
                 .get_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2371,7 +2337,7 @@ pub(crate) mod ffi {
             client
                 .remove_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2402,7 +2368,7 @@ pub(crate) mod ffi {
                     signal.ok_or("missing field `signal`")?,
                 )
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2431,7 +2397,7 @@ pub(crate) mod ffi {
             client
                 .write_sandbox_job_stdin(sandbox, job.ok_or("missing field `job`")?, data, eof)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2457,17 +2423,17 @@ pub(crate) mod ffi {
                 let (sandbox, job, after) = match args {
                     Ok(Job { sandbox, job: Some(job), after, .. }) => (sandbox, job, after),
                     Ok(_) => {
-                        yield Err("missing field `job`".to_owned());
+                        yield Err(Failure::from("missing field `job`"));
                         return;
                     }
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(Failure::from(error));
                         return;
                     }
                 };
                 let mut log = client.sandbox_job_log(&sandbox, &job, after);
                 while let Some(entry) = log.next().await {
-                    yield entry.map_err(|e| e.to_string());
+                    yield entry.map_err(Failure::from);
                 }
             }
         })

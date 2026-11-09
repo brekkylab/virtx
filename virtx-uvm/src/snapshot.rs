@@ -111,6 +111,12 @@ impl Snapshot {
         Ok(size)
     }
 
+    /// Delete its disk and its lock, whoever holds them: for a snapshot nothing else names.
+    pub(crate) fn delete(&self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(self.lock_path());
+    }
+
     fn lock_path(&self) -> PathBuf {
         let mut path = self.path.as_os_str().to_owned();
         path.push(".lock");

@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from ._library import args
 from .job import LogEntry, Truncated
+
+if TYPE_CHECKING:
+    from .client import Client
 
 
 @dataclass(frozen=True)
@@ -121,8 +125,12 @@ class ImageJobKind(str, Enum):
 
 @dataclass(frozen=True)
 class ImageJob:
-    """A build, pull or push the server runs: what ``build_image``, ``pull_image`` and
-    ``push_image`` answer. Its log is ``image_job_log``'s."""
+    """A build, pull or push the server runs, as ``build_image``, ``pull_image``,
+    ``push_image`` and ``get_image_job`` answer it, and the client that reaches it: what reads
+    its log. Dropping it leaves the job; ``remove`` removes it."""
+
+    client: Client = field(repr=False, compare=False)
+    """The client its requests go through."""
 
     id: str
     """The job's id, which every request about it names it by."""
@@ -143,8 +151,9 @@ class ImageJob:
     """Once it has failed, why, for a person."""
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ImageJob:
+    def from_dict(cls, client: Client, value: Mapping[str, Any]) -> ImageJob:
         return cls(
+            client,
             value["id"],
             ImageJobKind(value["kind"]),
             value["reference"],
@@ -152,6 +161,23 @@ class ImageJob:
             value.get("digest"),
             value.get("error"),
         )
+
+    async def get(self) -> ImageJob:
+        """It as the server has it now."""
+        output = await self.client._call("virtx_client_get_image_job", args(id=self.id))
+        return ImageJob.from_dict(self.client, output)
+
+    async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[ImageJobEntry]]:
+        """Its log, from its start or after its ``after``th entry, until its ``ImageJobEnd``.
+        Closing it leaves the job as it is."""
+        async for item in self.client._items(
+            "virtx_client_image_job_log", args(id=self.id, after=after)
+        ):
+            yield image_job_entry(item)
+
+    async def remove(self) -> None:
+        """Cancel it if it runs, and forget it."""
+        await self.client._call("virtx_client_remove_image_job", args(id=self.id))
 
 
 @dataclass(frozen=True)
@@ -175,7 +201,7 @@ ImageJobEntry = Log | Truncated | ImageJobEnd
 
 
 def image_job_entry(item: Mapping[str, Any]) -> LogEntry[ImageJobEntry]:
-    """An item of ``image_job_log``'s stream, as ``{"id": n, "log": "..."}`` and the like."""
+    """An item of ``ImageJob.log``'s stream, as ``{"id": n, "log": "..."}`` and the like."""
     entry: ImageJobEntry
     if "log" in item:
         entry = Log(item["log"])

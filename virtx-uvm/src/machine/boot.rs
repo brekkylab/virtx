@@ -141,8 +141,11 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
 pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
     // Before anything is built, so a machine over a snapshot another one holds is refused
-    // with nothing to undo.
-    let lock = machine.snapshot.as_ref().map(Snapshot::lock).transpose()?;
+    // with nothing to undo -- unless whoever started it holds the lock for it.
+    let lock = match machine.snapshot_held {
+        true => None,
+        false => machine.snapshot.as_ref().map(Snapshot::lock).transpose()?,
+    };
 
     // What PID 1 does once the guest is up: run the agent, mounted with its filesystem below,
     // and end the machine when it does. The init binary and this config are injected into the

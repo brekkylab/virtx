@@ -35,8 +35,21 @@ else:
     FILE_NAME = "libvirtx_core.so"
 
 
+def args(**args: Any) -> bytes:
+    """``args`` without the ones left out, as JSON."""
+    return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
+
+
 class VirtxError(Exception):
     """A request failed: the server's error, the transport's, or the library's."""
+
+    status: int | None
+    """The HTTP status the server refused the request with, if it did: ``404`` for what does
+    not exist, ``409`` for what is in use or has ended, and the like."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class _Bytes(ctypes.Structure):
@@ -207,7 +220,10 @@ class Library:
         if status == OK:
             return data if raw else json.loads(data)
         if status == ERROR:
-            raise VirtxError(json.loads(data) if data else "the call failed")
+            if not data:
+                raise VirtxError("the call failed")
+            failure = json.loads(data)
+            raise VirtxError(failure["message"], failure.get("status"))
         raise VirtxError(f"unknown status {status}")
 
     def _poll(

@@ -5,8 +5,9 @@ use std::{
     ffi::{c_int, c_void},
     future::Future,
     marker::PhantomData,
+    mem::ManuallyDrop,
     pin::Pin,
-    slice,
+    ptr, slice,
     task::{Context, Poll, Waker},
 };
 
@@ -27,9 +28,11 @@ pub struct Call<T> {
     api: &'static Api,
     future: *mut Opaque,
     /// What the library writes, read as a `T`.
-    decode: fn(&[u8]) -> Result<T, Error>,
+    decode: Decode<T>,
     output: PhantomData<fn() -> T>,
 }
+
+type Decode<T> = Box<dyn Fn(&[u8]) -> Result<T, Error> + Send + Sync>;
 
 // The library's futures may be polled from any thread, one at a time, which `&mut self` ensures.
 unsafe impl<T> Send for Call<T> {}
@@ -37,13 +40,13 @@ unsafe impl<T> Sync for Call<T> {}
 
 impl<T> Unpin for Call<T> {}
 
-impl<T: DeserializeOwned> Call<T> {
+impl<T: DeserializeOwned + 'static> Call<T> {
     /// A call answered with JSON, read as a `T`.
     pub(crate) fn new(api: &'static Api, future: *mut Opaque) -> Call<T> {
         Call {
             api,
             future,
-            decode: json,
+            decode: Box::new(json),
             output: PhantomData,
         }
     }
@@ -55,7 +58,7 @@ impl Call<Vec<u8>> {
         Call {
             api,
             future,
-            decode: |bytes| Ok(bytes.to_vec()),
+            decode: Box::new(|bytes| Ok(bytes.to_vec())),
             output: PhantomData,
         }
     }
@@ -66,7 +69,23 @@ impl<T> Call<T> {
     pub fn wait(self) -> Result<T, Error> {
         let mut out = VirtxBytes::empty();
         let status = unsafe { (self.api.virtx_future_wait)(self.future, &mut out) };
-        unsafe { take_with(self.api, status, out, self.decode) }
+        unsafe { take_with(self.api, status, out, &self.decode) }
+    }
+
+    /// The same call, answered with `f` of what it answers.
+    pub(crate) fn map<U>(self, f: impl Fn(T) -> U + Send + Sync + 'static) -> Call<U>
+    where
+        T: 'static,
+    {
+        // Its future moves to the new call, so this one must not free it.
+        let this = ManuallyDrop::new(self);
+        let decode = unsafe { ptr::read(&this.decode) };
+        Call {
+            api: this.api,
+            future: this.future,
+            decode: Box::new(move |bytes| decode(bytes).map(&f)),
+            output: PhantomData,
+        }
     }
 }
 
@@ -78,7 +97,7 @@ impl<T> Future for Call<T> {
         let status = unsafe { (self.api.virtx_future_poll)(self.future, waker(cx), &mut out) };
         match status {
             VIRTX_PENDING => Poll::Pending,
-            status => Poll::Ready(unsafe { take_with(self.api, status, out, self.decode) }),
+            status => Poll::Ready(unsafe { take_with(self.api, status, out, &self.decode) }),
         }
     }
 }
@@ -176,12 +195,19 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
     status: c_int,
     out: VirtxBytes,
 ) -> Result<T, Error> {
-    unsafe { take_with(api, status, out, json) }
+    unsafe { take_with(api, status, out, &json) }
 }
 
 /// What the library wrote for `status`, read with `decode` or as the error's message, and
 /// freed.
 ///
+/// What the library writes with `VIRTX_ERROR`.
+#[derive(serde::Deserialize)]
+struct Failure {
+    message: String,
+    status: Option<u16>,
+}
+
 /// # Safety
 ///
 /// As `take`.
@@ -189,7 +215,7 @@ unsafe fn take_with<T>(
     api: &Api,
     status: c_int,
     out: VirtxBytes,
-    decode: fn(&[u8]) -> Result<T, Error>,
+    decode: &dyn Fn(&[u8]) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let read = if out.data.is_null() {
         Err(Error::Json("the library wrote nothing".into()))
@@ -197,8 +223,12 @@ unsafe fn take_with<T>(
         let bytes = unsafe { slice::from_raw_parts(out.data, out.len) };
         match status {
             VIRTX_OK => decode(bytes),
-            VIRTX_ERROR => Err(match serde_json::from_slice::<String>(bytes) {
-                Ok(message) => Error::Call(message),
+            VIRTX_ERROR => Err(match serde_json::from_slice::<Failure>(bytes) {
+                Ok(Failure {
+                    message,
+                    status: Some(status),
+                }) => Error::Status(status, message),
+                Ok(Failure { message, .. }) => Error::Call(message),
                 Err(e) => Error::Json(e.to_string()),
             }),
             other => Err(Error::Library(format!("unknown status {other}"))),

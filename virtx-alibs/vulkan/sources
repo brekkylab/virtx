@@ -1,0 +1,9 @@
+# What build.sh builds: the file, where it is fetched from, and its sha256. `cargo xtask build
+# alib` fetches each and checks it before handing it in.
+#
+# Mesa's venus is the guest's half of the host's virglrenderer: any release speaks to it, and
+# the newest stable one knows the most of what the host's driver can do.
+mesa-26.2.6.tar.xz https://archive.mesa3d.org/mesa-26.2.6.tar.xz b9436b3e1a8be76fbd4823dc884f90596ab7c6ac5e1867a305e66ffccfb31a92
+libdrm-2.4.134.tar.xz https://dri.freedesktop.org/libdrm/libdrm-2.4.134.tar.xz ac5e74d157830eb8bee44c6a6bf3ad49774ef0dd2a72bdad74a8f20308b52a95
+Vulkan-Headers-vulkan-sdk-1.4.363.0.tar.gz https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz 4a078be12bef21cfebc09d878b77a63cff9d68f899254a0b00d0e37ef73e7f7e
+Vulkan-Loader-vulkan-sdk-1.4.363.0.tar.gz https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz 941eff558fc74f248745fb7df367640cf89a8457f216dae498a74ae14b6ba6f7

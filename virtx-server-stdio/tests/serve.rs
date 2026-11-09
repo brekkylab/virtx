@@ -485,7 +485,7 @@ async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
 }
 
 /// `abin/` beside the server is the guest's `/abin`, read-only and first on `PATH`, with what
-/// each program is beside it.
+/// each program is beside it; `alib/` is its `/alib`, read-only too, with what they run.
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_runs_the_programs_in_abin_by_name() {
@@ -509,6 +509,18 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
     }
     let (_, ended) = server.exec(&id, &["touch", "/abin/x"], None).await;
     assert_ne!(ended.unwrap(), 0, "/abin is read-only");
+    let (_, ended) = server.exec(&id, &["test", "-x", "/alib/Xvfb"], None).await;
+    assert_eq!(ended.unwrap(), 0, "/alib/Xvfb");
+    let (lines, ended) = server
+        .exec(
+            &id,
+            &["display", "run", "--", "display", "shot", "/tmp/shot.png"],
+            None,
+        )
+        .await;
+    assert_eq!(ended.unwrap(), 0, "{lines:?}");
+    let (_, ended) = server.exec(&id, &["touch", "/alib/x"], None).await;
+    assert_ne!(ended.unwrap(), 0, "/alib is read-only");
 
     let (lines, ended) = server
         .exec(
@@ -540,6 +552,81 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
         "{lines:?}"
     );
     server.client.remove_sandbox(&id).await.unwrap();
+}
+
+/// A command finds `/alib`'s libraries for its own C library after the image's on
+/// `LD_LIBRARY_PATH`, and is given no Vulkan driver in a sandbox without a GPU.
+#[tokio::test]
+#[ignore]
+async fn a_command_is_given_the_alib_of_its_c_library() {
+    let server = Server::spawn("alib");
+    for (image, libc) in [("alpine:3.20", "musl"), ("debian:bookworm-slim", "glibc")] {
+        server.pull_image(image).await;
+        let id = server
+            .client
+            .create_sandbox(&SandboxCreateArgs::new(image).gpu(false))
+            .await
+            .unwrap()
+            .id;
+        let (lines, ended) = server
+            .exec(
+                &id,
+                &[
+                    "sh",
+                    "-c",
+                    "echo $LD_LIBRARY_PATH; echo ${VK_DRIVER_FILES:-none}",
+                ],
+                None,
+            )
+            .await;
+        assert_eq!(
+            (lines, ended.unwrap()),
+            (vec![format!("/alib/{libc}"), "none".into()], 0),
+            "{image}"
+        );
+        let (_, ended) = server
+            .exec(
+                &id,
+                &["test", "-f", &format!("/alib/{libc}/libvulkan.so.1")],
+                None,
+            )
+            .await;
+        assert_eq!(ended.unwrap(), 0, "{image}");
+        server.client.remove_sandbox(&id).await.unwrap();
+    }
+}
+
+/// In a sandbox with a GPU, Vulkan reaches the host's through `/alib`'s venus, in an image
+/// with no driver of its own: Alpine's `vulkan-tools` brings the loader alone, and Debian
+/// bookworm's Mesa has no venus.
+#[tokio::test]
+#[ignore]
+async fn a_gpu_sandbox_runs_vulkan_with_no_driver_in_the_image() {
+    let server = Server::spawn("alib-gpu");
+    for (image, install) in [
+        ("alpine:3.20", "apk add --no-cache vulkan-tools >/dev/null"),
+        (
+            "debian:bookworm-slim",
+            "apt-get update -qq && apt-get install -y -qq vulkan-tools >/dev/null",
+        ),
+    ] {
+        server.pull_image(image).await;
+        let id = server
+            .client
+            .create_sandbox(&SandboxCreateArgs::new(image).gpu(true))
+            .await
+            .unwrap()
+            .id;
+        let (lines, ended) = server.exec(&id, &["sh", "-c", install], None).await;
+        assert_eq!(ended.unwrap(), 0, "{image}: {lines:?}");
+        let (lines, ended) = server.exec(&id, &["vulkaninfo", "--summary"], None).await;
+        assert_eq!(ended.unwrap(), 0, "{image}: {lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("Venus")),
+            "{image}: {lines:?}"
+        );
+        server.client.remove_sandbox(&id).await.unwrap();
+    }
 }
 
 #[tokio::test]

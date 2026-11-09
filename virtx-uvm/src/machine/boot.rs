@@ -14,6 +14,7 @@
 //! virtio-vsock              the guest's network, on a machine with one or with published
 //!                           ports -- see [`Network`]
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when there are any
+//! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag after the pivot
 //! virtio-fs  virtx          the agent, mounted at /.virtx after the pivot
 //! ```
@@ -46,12 +47,14 @@
 //! on the root above would be left behind by the pivot. The init mounts it at [`AGENT_DIR`]
 //! once the image is the root.
 //!
-//! # `/abin`
+//! # `/abin` and `/alib`
 //!
-//! The `abin/` directory beside this executable, as `cargo xtask install` and a release put it
-//! there, shared read-only and mounted at [`ABIN_DIR`], which goes in front of the guest's
-//! `PATH`. A host with no `abin/` boots a machine without it rather than refusing to boot. It
-//! is mounted before the volumes, so a volume asked for at `/abin` lands over it.
+//! The `abin/` and `alib/` directories beside this executable, as `cargo xtask install` and a
+//! release put them there, each shared read-only and mounted at [`ABIN_DIR`] and [`ALIB_DIR`].
+//! `/abin` is the programs, and goes in front of the guest's `PATH`; `/alib` is what is not a
+//! program to run by name, such as the X server `display` starts. A host without one boots a
+//! machine without it rather than refusing to boot. Both are mounted before the volumes, so a
+//! volume asked for at either lands over it.
 //!
 //! # The host
 //!
@@ -127,6 +130,10 @@ const AGENT_NAME: &str = "virtx-uvm-guest";
 const ABIN_DIR: &str = "/abin";
 const ABIN_TAG: &str = "abin";
 const ABIN_HOST: &str = "abin";
+/// The same for what those programs run and load.
+const ALIB_DIR: &str = "/alib";
+const ALIB_TAG: &str = "alib";
+const ALIB_HOST: &str = "alib";
 
 /// The log target libkrun gives what the guest's console prints.
 const CONSOLE_TARGET: &str = "init_or_kernel";
@@ -167,7 +174,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // below, and `apply` is what appends `init=/init.krun` to the kernel cmdline. The two
     // devices go in as environment because that is how libkrun's init is told where its root
     // is.
-    let abin = abin();
+    let abin = beside(ABIN_HOST);
+    let alib = beside(ALIB_HOST);
     let env = env(&machine.config, abin.is_some());
     let mut init = krun_init::Config::builder()
         .args(&[&format!("{AGENT_DIR}/{AGENT_NAME}")])
@@ -185,12 +193,13 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // order: each volume's files and the stores under them, with each volume held. Refused
     // where one could not be shown where it was asked.
     let mut shares = Vec::new();
-    if let Some(dir) = &abin {
+    for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
+        let Some(dir) = dir else { continue };
         let host = utf8(dir)?;
-        init = init.mount(ABIN_DIR, MOUNT_FSTYPE, ABIN_TAG);
+        init = init.mount(at, MOUNT_FSTYPE, tag);
         shares.push(
-            FsDevice::new_read_only(ABIN_TAG, host)
-                .map_err(|e| Error::vmm(format!("sharing {host} as {ABIN_TAG}"), e))?,
+            FsDevice::new_read_only(tag, host)
+                .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
         );
     }
     let mut holds = Vec::with_capacity(machine.volumes.len());
@@ -538,10 +547,10 @@ fn utf8(path: &Path) -> Result<&str> {
     })
 }
 
-/// The `abin/` beside this executable, if there is one, with its programs made executable in
-/// the guest.
-fn abin() -> Option<std::path::PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.join(ABIN_HOST);
+/// The directory `name` beside this executable, `abin/` or `alib/`, if there is one, with its
+/// files made executable in the guest.
+fn beside(name: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join(name);
     if !dir.is_dir() {
         return None;
     }
@@ -550,8 +559,7 @@ fn abin() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// Mark each file under `dir` executable for the guest, those in its directories too
-/// (`libexec/display/Xvfb`).
+/// Mark each file under `dir` executable for the guest, those in its directories too.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no

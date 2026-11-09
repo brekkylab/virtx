@@ -6,21 +6,22 @@ description: "Give a sandbox the host's GPU through Vulkan, and build an image t
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 The server gives a sandbox the host's GPU through Vulkan, on every host.
-The host needs a Vulkan loader, and the image needs the guest's half of Vulkan.
+The host needs a Vulkan loader.
+The guest's half of Vulkan, the loader and the venus driver that reaches the host's GPU, comes with every sandbox, so the image needs neither.
 
 ## Create a GPU sandbox
 
 Set `gpu=True` when creating a sandbox.
 `gpu_memory_mib` sets how much memory the GPU may hold, apart from the sandbox's own memory, 8 GiB when left out.
-This builds an image with the guest's Vulkan packages, then checks the GPU with `vulkaninfo`:
+This builds an image with `vulkaninfo`, then checks the GPU with it:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
 recipe = Recipe("alpine:latest").run(
-    # The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
-    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
+    # vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
+    "apk add --no-cache vulkan-tools"
 )
 async for entry in client.build_image(recipe, "vulkan:latest"):
     match entry.entry:
@@ -38,8 +39,8 @@ async for entry in sandbox.exec(["vulkaninfo", "--summary"]):
 
 ```js
 const recipe = new Recipe('alpine:latest').run(
-  // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
-  'apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools'
+  // vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
+  'apk add --no-cache vulkan-tools'
 )
 for await (const entry of client.buildImage(recipe, 'vulkan:latest')) {
   if ('log' in entry) console.log(entry.log)
@@ -55,8 +56,8 @@ for await (const entry of sandbox.exec(['vulkaninfo', '--summary'])) console.log
 
 ```rust
 let recipe = Recipe::new("alpine:latest").step(
-    // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
-    "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools",
+    // vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
+    "apk add --no-cache vulkan-tools",
 );
 let mut log = client.build_image(recipe, "vulkan:latest").log();
 while let Some(entry) = log.next().await {
@@ -82,17 +83,13 @@ while let Some(entry) = log.next().await {
 The host's GPU appears in the guest as `Virtio-GPU Venus (<the host's GPU>)`.
 A server built without GPU support refuses a GPU sandbox rather than run it on the CPU, and `gpu_memory_mib` without `gpu` is refused too.
 
-## Guest packages
+## What the sandbox brings
 
-| Component | Alpine | Debian |
-| --- | --- | --- |
-| Vulkan loader (`libvulkan.so.1`) | `vulkan-loader` | `libvulkan1` |
-| venus driver | `mesa-vulkan-virtio`, 3.24 or later | `mesa-vulkan-drivers`, trixie or later |
+Every sandbox has `/alib`, a read-only directory of virtx's own libraries, with the Vulkan loader and venus built twice: in `/alib/musl` for images on musl, such as Alpine, and in `/alib/glibc` for images on glibc 2.28 or later, such as Debian and Ubuntu.
+When the sandbox starts, the directory for the image's C library goes on `LD_LIBRARY_PATH`, after any the image sets.
+In a GPU sandbox, `VK_DRIVER_FILES` names venus from there too, so a program finds the host's GPU whatever the image has installed.
 
-- **Install the loader yourself.** Without it, no program in the guest finds a Vulkan device, whatever the host has.
-  Debian's `vulkan-tools` brings it along; Alpine's does not.
-  Name the loader rather than relying on another package to install it.
-- **An image with no venus driver still runs on the CPU.** Debian bookworm's Mesa has no venus, so Vulkan falls back to `llvmpipe`, a software renderer.
-  Check the `deviceName` your program selects.
+- **An image's own Vulkan driver is passed over in a GPU sandbox.** Set `VK_DRIVER_FILES` in the image to choose another.
+- **A program that links the Vulkan loader finds the one in `/alib` before the image's,** and one that opens `libvulkan.so.1` by name does too.
 
 See [Working with images](/docs/guides/images/) for building the guest image, and [Running commands](/docs/guides/running-commands/) for reading command output.

@@ -1,35 +1,34 @@
 #!/bin/sh
 # Build the X server `display` runs, as static musl executables, into OUT.
 #
-#     sh build.sh OUT [TARBALLS]
+#     sh build.sh OUT SOURCES
 #
 # Run inside Alpine (musl, with `-static` archives for most of what is needed), as root: it
-# installs its build tools with `apk`. What it writes is what `/abin/libexec/display` holds:
+# installs its build tools with `apk`. What it writes goes at the top of `/alib`:
 #
 #     OUT/Xvfb      the X server: a screen in memory, no input devices, no GPU
 #     OUT/xkbcomp   the keymap compiler Xvfb runs at start, found at the path built into it
 #     OUT/xkb/      the keymaps xkbcomp compiles, from Alpine's xkeyboard-config
 #
 # Every piece is MIT-licensed. The libraries Alpine ships no static archive of are built
-# here from X.org's release tarballs, listed in `sources` beside this script and checked against
-# the checksums there; the rest come from `apk`. A tarball in TARBALLS is used as it is, and
-# one not there is downloaded.
+# here from X.org's release tarballs, listed in `sources` beside this script and found in
+# SOURCES, checked already; the rest come from `apk`.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-mkdir -p "${1:?usage: build.sh OUT [TARBALLS]}"
+mkdir -p "${1:?usage: build.sh OUT SOURCES}"
 OUT=$(cd "$1" && pwd)
-TARBALLS=${2:-}
+SOURCES=${2:?usage: build.sh OUT SOURCES}
 # Where the three live in the guest. Built into Xvfb, which runs `$LIBEXEC/xkbcomp` with
 # `-R$LIBEXEC/xkb`, so it is the one path the result cannot be moved from.
-LIBEXEC=/abin/libexec/display
+LIBEXEC=/alib
 
 WORK=/tmp/display-xserver
 PREFIX=$WORK/prefix
 mkdir -p "$WORK/src" "$PREFIX"
 
 apk add --no-cache \
-    build-base meson ninja pkgconf bison flex curl xz perl \
+    build-base meson ninja pkgconf bison flex xz perl \
     xorgproto xtrans util-macros \
     pixman-dev pixman-static \
     nettle-dev nettle-static \
@@ -37,18 +36,8 @@ apk add --no-cache \
     libx11-dev libx11-static libxcb-dev libxcb-static \
     xkeyboard-config >/dev/null
 
-grep -v '^#' "$HERE/sources" | while read -r name dir sum; do
-    [ -n "$name" ] || continue
-    tarball=$WORK/src/$name.tar.xz
-    if [ -n "$TARBALLS" ] && [ -f "$TARBALLS/$name.tar.xz" ]; then
-        cp "$TARBALLS/$name.tar.xz" "$tarball"
-    elif [ ! -f "$tarball" ]; then
-        curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
-            "https://www.x.org/releases/individual/$dir/$name.tar.xz"
-    fi
-    echo "$sum  $tarball" | sha256sum -c - >/dev/null
-    rm -rf "${WORK:?}/src/$name"
-    tar -xJf "$tarball" -C "$WORK/src"
+grep -v '^#' "$HERE/sources" | while read -r file _; do
+    [ -n "$file" ] && tar -xJf "$SOURCES/$file" -C "$WORK/src"
 done
 
 export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig

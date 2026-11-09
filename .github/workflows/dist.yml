@@ -27,9 +27,9 @@
 # The guest kernel is built in a Linux container (see xtask/scripts/build-libkrunfw.sh),
 # which neither GitHub's macOS runners (no Docker) nor its Windows runners (Windows
 # containers) can run -- so the two Linux jobs build every platform's kernel and hand it on.
-# abin goes the same way: it is the guest's, so it depends on the architecture and not on
-# the host, and its C (SQLite) is cross-compiled by `xtask/scripts/musl-cc.sh`, a shell
-# script around clang that Windows cannot run. One build per architecture, then.
+# abin and alib go the same way: they are the guest's, so they depend on the architecture and
+# not on the host, and abin's C (SQLite) is cross-compiled by `xtask/scripts/musl-cc.sh`, a
+# shell script around clang that Windows cannot run. One build per architecture, then.
 #
 # # The glibc floor
 #
@@ -111,14 +111,17 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm
-          cargo xtask build abin
-          ls -la target/release/abin
+          cargo xtask build abin alib
+          ls -la target/release/abin target/release/alib
 
-      - name: Hand the kernel and abin on
+      # alib as `build/alib/`, where `build alib` puts it and `build server-stdio` and `archive`
+      # take it from, as they take the kernel from `build/krunfw/`.
+      - name: Hand the kernel, abin and alib on
         run: |
           mkdir -p "$GITHUB_WORKSPACE/handoff/kernel"
           cp -v build/krunfw/* "$GITHUB_WORKSPACE/handoff/kernel/"
           cp -R target/release/abin "$GITHUB_WORKSPACE/handoff/abin"
+          cp -R build/alib "$GITHUB_WORKSPACE/handoff/alib"
 
       # Through the cache rather than as artifacts: this repository's artifacts count against
       # the organization's storage quota, and its cache does not. One entry per run, which
@@ -245,11 +248,12 @@ jobs:
           esac
           ls -la build/krunfw
 
-      - name: Put abin in place
+      - name: Put abin and alib in place
         run: |
-          mkdir -p target/release
+          mkdir -p target/release build
           cp -R "$GITHUB_WORKSPACE/handoff/abin" target/release/
-          ls -la target/release/abin
+          cp -R "$GITHUB_WORKSPACE/handoff/alib" build/
+          ls -la target/release/abin build/alib
 
       - name: Build
         run: cargo xtask build server-stdio
@@ -269,7 +273,7 @@ jobs:
       - name: What was built
         run: |
           ls -la target/release | grep -E "virtx-stdio|libkrunfw" || true
-          ls target/release/abin || true
+          ls target/release/abin target/release/alib || true
 
       # What a Linux release asks of the machine it runs on -- see "The glibc floor" above.
       # `__isoc23_*` is glibc 2.38's, and comes in unversioned, so the version check alone

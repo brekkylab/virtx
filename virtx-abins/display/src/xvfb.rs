@@ -1,4 +1,4 @@
-//! The X server: Xvfb from `libexec/display/` beside this program, its screen in a file.
+//! The X server: `/alib/Xvfb`, its screen in a file.
 
 use std::{
     path::{Path, PathBuf},
@@ -19,19 +19,8 @@ pub fn framebuffer_path(display: u16) -> PathBuf {
     dir(display).join("Xvfb_screen0")
 }
 
-/// The Xvfb this program runs, at `libexec/display/Xvfb` beside it.
-fn program() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("finding this program: {e}"))?;
-    let path = exe
-        .parent()
-        .unwrap_or(Path::new("/"))
-        .join("libexec/display/Xvfb");
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(format!("no X server at {}", path.display()))
-    }
-}
+/// The Xvfb this program runs. At a fixed path, as Xvfb is built to find `xkbcomp` beside it.
+const PROGRAM: &str = "/alib/Xvfb";
 
 /// A running X server.
 pub struct Server {
@@ -42,7 +31,9 @@ pub struct Server {
 impl Server {
     /// Start `:display` with one `width`×`height` screen at 24 bits, and wait for it to be up.
     pub fn start(display: u16, width: u16, height: u16) -> Result<Self, String> {
-        let program = program()?;
+        if !Path::new(PROGRAM).is_file() {
+            return Err(format!("no X server at {PROGRAM}"));
+        }
         let dir = dir(display);
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let framebuffer = framebuffer_path(display);
@@ -51,7 +42,7 @@ impl Server {
         let log = std::fs::File::create(&log_path)
             .map_err(|e| format!("creating {}: {e}", log_path.display()))?;
 
-        let mut command = Command::new(&program);
+        let mut command = Command::new(PROGRAM);
         command
             .arg(format!(":{display}"))
             .args(["-screen", "0", &format!("{width}x{height}x24")])
@@ -64,7 +55,7 @@ impl Server {
         crate::die_with_parent(&mut command);
         let child = command
             .spawn()
-            .map_err(|e| format!("starting {}: {e}", program.display()))?;
+            .map_err(|e| format!("starting {PROGRAM}: {e}"))?;
         let mut server = Self { child, framebuffer };
 
         let socket = PathBuf::from(format!("/tmp/.X11-unix/X{display}"));

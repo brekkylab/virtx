@@ -1,0 +1,3 @@
+# Where under /alib build.sh writes, /alib itself, and the image it runs in: static musl
+# archives.
+. alpine:3.22

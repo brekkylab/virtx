@@ -8,8 +8,8 @@
 //!
 //! `run` starts an X server with its screen in memory ([`xvfb`]), serves that screen over VNC
 //! ([`rfb`]), and runs the command given with `DISPLAY` pointing at it. The X server is
-//! `/abin/libexec/display/Xvfb`, beside this program, so an image needs the program it shows
-//! and nothing of X's server side.
+//! `/alib/Xvfb`, which virtx mounts beside `/abin`, so an image needs the program it
+//! shows and nothing of X's server side.
 //!
 //! The screen is a file the X server keeps mapped ([`frame`]): what VNC sends and what `shot`
 //! saves are read from it rather than asked of the X server. A viewer's keys and pointer, and

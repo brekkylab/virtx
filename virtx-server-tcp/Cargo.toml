@@ -7,19 +7,25 @@ rust-version.workspace = true
 # The stdio server's: this binary links libkrun and becomes a machine just the same.
 build = "../virtx-server-stdio/build.rs"
 
-# The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names.
+# The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names;
+# and the library it is built from, which a server of its own -- virtx cloud's node -- builds on.
 [features]
 gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
 anyhow = { workspace = true }
-axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "query", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
 http = "1"
+# A job's log, as an event stream; and the hooks' and the keeping's futures.
+futures-util = { version = "0.3", default-features = false }
+# The host's memory, which its machines' capacity is twice of.
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+thiserror = "2"
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 # A token's randomness.

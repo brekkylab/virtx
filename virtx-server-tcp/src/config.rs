@@ -10,6 +10,10 @@
 //! }
 //! ```
 //!
+//! A server built on this one may take the projects from elsewhere -- virtx cloud's node, from
+//! its gateway -- and `users` and `projects` may then be left out; it reads its own part of the
+//! file, and gives the rest to [`Config::parse`].
+//!
 //! A project's snapshots and volumes are under `<home>/project/<name>/`; the images are under
 //! `<home>/images/`, shared by every project. Without `home`, it is
 //! [`virtx_uvm::cache_root`], and the images are where the stdio server keeps them too.
@@ -34,8 +38,27 @@ pub struct Config {
     /// through with the token and the project as any other caller.
     #[serde(default)]
     pub origins: Vec<String>,
+    #[serde(default)]
     users: HashMap<String, User>,
+    #[serde(default)]
     pub projects: HashMap<String, Project>,
+    /// What its machines may take at once, every project's together: four vCPUs for each of
+    /// the host's and twice its memory, without.
+    #[serde(default)]
+    pub capacity: Option<Capacity>,
+    /// How long one of a sandbox's `auto_stop_minutes` lasts, in seconds: 60, unless a test
+    /// that waits on sandboxes stopping by themselves makes it shorter. Sandboxes are looked at
+    /// once a minute so measured, every 60 seconds at most.
+    #[serde(default)]
+    pub minute_secs: Option<u64>,
+}
+
+/// What a server's machines may take at once.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capacity {
+    pub vcpus: u64,
+    pub memory_mib: u64,
 }
 
 #[derive(Deserialize)]
@@ -55,8 +78,14 @@ impl Config {
     /// project by a name that is no directory's.
     pub fn read(path: &Path) -> anyhow::Result<Config> {
         let text = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let config: Config =
+        let value =
             serde_json::from_slice(&text).with_context(|| format!("reading {}", path.display()))?;
+        Config::parse(value).with_context(|| format!("reading {}", path.display()))
+    }
+
+    /// The config `value` is, refused as [`Config::read`] refuses one.
+    pub fn parse(value: serde_json::Value) -> anyhow::Result<Config> {
+        let config: Config = serde_json::from_value(value)?;
         let mut tokens = HashMap::new();
         for (name, user) in &config.users {
             let hash = &user.token_sha256;

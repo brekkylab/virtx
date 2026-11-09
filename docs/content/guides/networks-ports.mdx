@@ -1,0 +1,127 @@
+---
+title: "Networks and ports"
+description: "Let a sandbox reach out to the network, and reach services running in it through its ports."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import portForwarding from "../../images/port-forwarding.svg";
+
+Traffic crosses a sandbox in two directions, set separately:
+
+- **Network** is the way out: connections the guest opens, such as `apk add` or an API call.
+- **Ports** are the way in: connections to a service listening in the guest, such as a web server or a database.
+
+Both are set when the sandbox is created.
+
+## Network
+
+`network` is on by default.
+The guest reaches public addresses, but not this host's loopback or private addresses.
+Pass `network=False` to `create_sandbox` to block its outbound connections and name lookups, for code that should not talk to anything.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox("alpine:latest", network=False)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', { network: false })
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").network(false))
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Ports
+
+A port carries plain TCP, so you can reach any service that listens on one: a web server, SSH, a VNC desktop, a database, or your own protocol.
+virtx passes the bytes through without looking at them.
+
+To reach a sandbox's port, use a `PortForwarder`.
+It forwards the port to an address on your machine, and you connect to that address.
+
+1. Pass `ports` to `create_sandbox` to open those ports in the sandbox.
+2. Each one comes back in `sandbox.ports` with a `url`.
+3. `PortForwarder.open` takes that `url` and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to.
+
+How the forwarding works depends on where the server runs:
+
+- **A server on your machine**, started with `Client.spawn`, already listens on a local address for each port, so the forwarder just gives you that address.
+- **A server over HTTP** is reached through a WebSocket.
+  The forwarder listens on a local port, and opens a WebSocket to the port's `url` for each connection made to it.
+  The server passes the bytes between that WebSocket and the port in the sandbox.
+
+<img src={portForwarding.src} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/ports/<capability> on the virtx server, which connects to port 8000 in the sandbox it runs." />
+
+Because everything goes through the server's own HTTP address, the server's machine needs no other port open.
+The `url` holds the credentials for its port, so keep it secret.
+
+In the example below, the sandbox opens port 8000 and runs an HTTP server on it, and the forwarder makes it reachable at a local address that a browser or `curl` can open:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import PortForwarder
+
+sandbox = await client.create_sandbox("alpine:latest", ports=[8000])
+await sandbox.exec(["httpd", "-f", "-p", "8000"])  # started, left running
+
+with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
+    print(f"http://{forwarder.address}")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { PortForwarder } = require('@brekkylab/virtx')
+
+const sandbox = await client.createSandbox('alpine:latest', { ports: [8000] })
+await sandbox.exec(['httpd', '-f', '-p', '8000']) // started, left running
+
+const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+console.log(`http://${forwarder.address}`)
+forwarder.close()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(8000))
+    .await?;
+sandbox.exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).await?; // started, left running
+
+let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url)?;
+println!("http://{}", forwarder.address());
+drop(forwarder);
+```
+
+</TabItem>
+</Tabs>
+
+Each entry of `sandbox.ports` names the guest's `port` beside its `url`, in the order they were asked for.
+A port given twice, or port `0`, is refused.
+
+A connection made while nothing listens on the port in the guest is closed at once, as a closed port's would be: start the service before connecting.
+
+Ports are opened only when the sandbox is created, and stay open until it is removed.
+Closing a forwarder stops forwarding on this machine; the port in the sandbox stays open, and another forwarder can reach it again.
+
+A server on this machine answers each port with a loopback address already, which a TCP client can also reach as it is.
+A server over HTTP answers a URL that only a `PortForwarder` opens, so use one either way.

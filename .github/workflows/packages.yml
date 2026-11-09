@@ -13,7 +13,7 @@
 # from a directory, as it would choose from PyPI. Each then opens the library it carries and
 # calls into it -- everything short of a server, which is not part of these packages.
 #
-# The Rust crate, `virtx-rs`, is not published (`publish = false`), so it is not built here.
+# The Rust crate, `virtx` in `virtx-rs/`, is not published (`publish = false`), so it is not built here.
 #
 # # Publishing
 #

@@ -2,7 +2,7 @@
 
 A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`), reached with [koffi](https://koffi.dev): the package has no addon of its own, and the library for its platform comes in that platform's package, `@brekkylab/virtx-<platform>`, which npm installs as an optional dependency.
 
-The package also installs the `virtx` command, the one in `libvirtx_core`: `npx @brekkylab/virtx images`, as the [repository README](../README.md#from-a-shell) describes.
+The package also installs the `virtx` command, the one in `libvirtx_core`: `npx @brekkylab/virtx images`.
 
 ```js
 const { Client, Recipe } = require('@brekkylab/virtx')

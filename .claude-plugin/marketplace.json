@@ -1,6 +1,6 @@
 {
   "name": "brekkylab",
-  "description": "Plugins from brekkylab: virtx, for running a task in a disposable Linux micro-VM.",
+  "description": "Plugins from brekkylab: virtx, for running a task in a Linux microVM.",
   "owner": {
     "name": "brekkylab",
     "url": "https://github.com/brekkylab"
@@ -9,7 +9,7 @@
     {
       "name": "virtx",
       "source": "./",
-      "description": "Run tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with a filesystem you compose."
+      "description": "Run tasks in Linux microVMs from Python, Node.js or Rust."
     }
   ]
 }

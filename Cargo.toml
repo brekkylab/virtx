@@ -2,7 +2,7 @@
 # packages (`virtx-py`, `virtx-node`) are not Cargo crates: they load `libvirtx_core` at
 # run time.
 #
-# The client is `virtx-core` and `virtx-rs`. The server is the rest, kept apart because it is
+# The client is `virtx-core` and `virtx` (in `virtx-rs/`). The server is the rest, kept apart because it is
 # built apart: `virtx-uvm` is the whole of the machinery -- images, disks, machines -- and
 # links libkrun. `virtx-server-stdio` is the server on `virtx-core`'s protocol over stdio --
 # the `virtx-stdio` binary -- and, as `virtx-stdio boot`, spawned by itself, the process that

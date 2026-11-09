@@ -1,0 +1,162 @@
+---
+title: "Reading and writing files"
+description: "Put files into a sandbox, get what it wrote back out, and move, copy, or remove files in it, without running a command."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+A sandbox's files can be read and written from your code directly, without a command such as `cat` or `cp` in it.
+A path is the path in the guest without its leading `/`: `etc/hostname` is `/etc/hostname`.
+
+<Aside type="note">
+A [snapshot](/docs/guides/keeping-snapshots/) and a [volume](/docs/guides/mounting-volumes/) share this file API with a sandbox.
+Every call on this page works on them the same way, each on its own files, and needs no sandbox running.
+</Aside>
+
+## Put a file in, and get one out
+
+This writes an input file into the sandbox, runs a command on it, and reads what the command wrote:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await sandbox.create_dir_all("work")
+await sandbox.write_file("work/input.txt", "one two three\n")
+
+async for _ in sandbox.exec(["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"]):
+    pass
+
+print(await sandbox.read_text("work/count.txt"))
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await sandbox.createDirAll('work')
+await sandbox.writeFile('work/input.txt', 'one two three\n')
+
+for await (const _ of sandbox.exec(['sh', '-c', 'wc -w < /work/input.txt > /work/count.txt'])) {}
+
+console.log(await sandbox.readText('work/count.txt'))
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::Files;
+
+sandbox.create_dir_all("work").await?;
+sandbox.write_file("work/input.txt", "one two three\n", None).await?;
+
+let cmd = ["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"];
+let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
+while let Some(entry) = log.next().await {
+    entry?;
+}
+
+println!("{}", sandbox.read_text("work/count.txt").await?);
+```
+
+</TabItem>
+</Tabs>
+
+`write_file` writes a whole file, a string as UTF-8 or bytes, and its parent directory must exist; `create_dir_all` makes it and its parents, as `mkdir -p`.
+`read_text` reads a whole UTF-8 file, and `read_file` reads bytes, all of them or a range from an `offset`.
+
+## Look around
+
+`read_dir` lists a directory, each entry with its `name` and `metadata`.
+`stat_file` answers what is at a path: its size, when it was last modified, and its `etag`.
+`exists`, `is_file` and `is_dir` say whether anything, a file, or a directory is there.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+for entry in await sandbox.read_dir("work"):
+    print(entry.name, entry.metadata.size)
+
+if await sandbox.is_file("work/count.txt"):
+    meta = await sandbox.stat_file("work/count.txt")
+    print(meta.size, meta.etag)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for (const entry of await sandbox.readDir('work')) {
+  console.log(entry.name, entry.metadata.size)
+}
+
+if (await sandbox.isFile('work/count.txt')) {
+  const meta = await sandbox.statFile('work/count.txt')
+  console.log(meta.size, meta.etag)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+for entry in sandbox.read_dir("work").await? {
+    println!("{} {}", entry.name, entry.metadata.size);
+}
+
+if sandbox.is_file("work/count.txt").await? {
+    let meta = sandbox.stat_file("work/count.txt").await?;
+    println!("{} {:?}", meta.size, meta.etag);
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Move, copy, and remove
+
+`rename_file` moves a file or a directory, and `copy_file` copies one with everything in it.
+Both refuse a destination that already exists unless `overwrite` is set.
+`remove_file` removes a file, or a directory with everything in it, and refuses a missing path unless `missing_ok` is set, as `rm -f`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await sandbox.copy_file("work/count.txt", "work/count.bak")
+await sandbox.rename_file("work/count.bak", "work/old.txt", overwrite=True)
+await sandbox.remove_file("work", missing_ok=True)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await sandbox.copyFile('work/count.txt', 'work/count.bak')
+await sandbox.renameFile('work/count.bak', 'work/old.txt', true)
+await sandbox.removeFile('work', true)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+sandbox.copy_file("work/count.txt", "work/count.bak", false).await?;
+sandbox.rename_file("work/count.bak", "work/old.txt", true).await?;
+sandbox.remove_file("work", true).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Write only if unchanged
+
+Pass a file's `etag` from `stat_file` as `if_match` to `write_file`, and the write goes through only while the file still has that tag.
+If something changed it in between, the write is refused with `412`, and nothing is overwritten.
+
+## Reading while the sandbox is stopped
+
+A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
+To read the output of a task that is done, keep it in a snapshot and read it from there instead, with no VM at all; see [Keeping work in snapshots](/docs/guides/keeping-snapshots/#read-what-it-made).

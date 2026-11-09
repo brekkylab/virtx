@@ -3369,6 +3369,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
 
 [[package]]
+name = "virtx"
+version = "0.1.2"
+dependencies = [
+ "futures-core",
+ "libloading",
+ "serde",
+ "serde_json",
+ "virtx-core",
+]
+
+[[package]]
 name = "virtx-cli"
 version = "0.1.2"
 dependencies = [
@@ -3406,17 +3417,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
-]
-
-[[package]]
-name = "virtx-rs"
-version = "0.1.2"
-dependencies = [
- "futures-core",
- "libloading",
- "serde",
- "serde_json",
- "virtx-core",
 ]
 
 [[package]]

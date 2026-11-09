@@ -1,0 +1,234 @@
+---
+title: "Hello world"
+description: "Pull an image, run echo in a sandbox, and read its output, on virtx cloud, on your machine, or on your own server."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import clientServer from "../images/client-server.svg";
+
+This page runs one program that prints `Hello, world!` from a sandbox.
+The program is the same wherever the sandbox runs; only the line that makes the client changes.
+
+## Install
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```sh
+pip install virtx
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```sh
+npm install @brekkylab/virtx
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```sh
+cargo add virtx futures
+cargo add tokio --features macros,rt-multi-thread
+```
+
+</TabItem>
+</Tabs>
+
+## The program
+
+It pulls `alpine`, boots a sandbox from it, runs `echo` in it, prints what it wrote, and removes the sandbox.
+As written, it starts a server on your machine with `Client.spawn()`; [Run it](#run-it) shows the line for each kind of server.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+import asyncio
+
+from virtx import Client, Stdout
+
+
+async def main() -> None:
+    with Client.spawn() as client:
+        async for _ in client.pull_image("alpine:latest"):
+            pass
+
+        sandbox = await client.create_sandbox("alpine:latest")
+        try:
+            async for entry in sandbox.exec(["echo", "Hello, world!"]):
+                match entry.entry:
+                    case Stdout(line):
+                        print(line)
+        finally:
+            await sandbox.remove()
+
+
+asyncio.run(main())
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { Client } = require('@brekkylab/virtx')
+
+async function main() {
+  const client = Client.spawn()
+  try {
+    for await (const _ of client.pullImage('alpine:latest')) {}
+
+    const sandbox = await client.createSandbox('alpine:latest')
+    try {
+      for await (const entry of sandbox.exec(['echo', 'Hello, world!'])) {
+        if ('stdout' in entry) console.log(entry.stdout)
+      }
+    } finally {
+      await sandbox.remove()
+    }
+  } finally {
+    await client.close()
+  }
+}
+
+main()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use futures::StreamExt;
+use virtx::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::spawn_virtx([] as [&str; 0])?;
+
+    let mut log = client.pull_image("alpine:latest", None).log();
+    while let Some(entry) = log.next().await {
+        entry?;
+    }
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
+        .await?;
+    let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).log();
+    while let Some(entry) = log.next().await {
+        if let SandboxJobEntry::Stdout(line) = entry?.entry {
+            println!("{line}");
+        }
+    }
+    sandbox.remove().await?;
+    Ok(())
+}
+```
+
+</TabItem>
+</Tabs>
+
+It prints:
+
+```text frame="terminal" title="Output"
+Hello, world!
+```
+
+
+## Run it
+
+The program is a client, and it needs a server to run the sandbox on.
+Pick one:
+
+- virtx cloud, hosted for you.
+- A server on your machine, which the client starts itself.
+- A server you run on another machine.
+
+<img src={clientServer.src} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
+
+### virtx cloud
+
+TODO
+
+### On your machine (stdio)
+
+Run the program as written.
+`Client.spawn()` starts a server as a child process of your program, talks to it over its stdin and stdout, and stops it when the client closes, so there is nothing to install or keep running.
+Your machine must meet the [requirements](https://github.com/brekkylab/virtx#requirements) for running VMs.
+
+### On your own server (TCP)
+
+Run `virtx-server-tcp` on the machine that should run the VMs.
+It keeps running, serves many users, and can sit on another machine.
+
+On the machine that should run the VMs, make a token.
+This prints the token and its `token_sha256`:
+
+```sh
+virtx-server-tcp token
+```
+
+Write a `server.json` that lets that token's user into a project:
+
+```json
+{
+  "listen": "127.0.0.1:8470",
+  "home": "/var/lib/virtx",
+  "users": { "alice": { "token_sha256": "<token_sha256>" } },
+  "projects": { "demo": { "members": ["alice"] } }
+}
+```
+
+Start the server:
+
+```sh
+virtx-server-tcp serve --config server.json
+```
+
+In the program, connect with the token and the project in place of `Client.spawn()`:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import BearerAuth
+
+with Client.connect(
+    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+) as client:
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.connect(
+  'http://127.0.0.1:8470',
+  { type: 'bearer', token: '<token>' },
+  { 'virtx-project': 'demo' }
+)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::Auth;
+
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::Bearer { token: "<token>".into() },
+    [("virtx-project", "demo")],
+)?;
+```
+
+</TabItem>
+</Tabs>
+
+The `virtx-project` header names the project in `server.json` the requests belong to.
+A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
+
+## Next
+
+- [Running commands](/docs/guides/running-commands/): how the command above is run, followed, and stopped.
+- [Keeping work in snapshots](/docs/guides/keeping-snapshots/): keep what a sandbox wrote for the next one.

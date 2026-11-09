@@ -17,7 +17,7 @@ use futures_core::Stream;
 
 use std::{io::Read, net::TcpStream};
 
-use virtx_rs::{
+use virtx::{
     Auth, Client, Error, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry, MountSource,
     MountType, PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd,
     SandboxJobEntry,
@@ -29,7 +29,7 @@ fn library() -> PathBuf {
     static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
-            if let Some(path) = env::var_os(virtx_rs::LIBRARY_ENV) {
+            if let Some(path) = env::var_os(virtx::LIBRARY_ENV) {
                 return path.into();
             }
             // This binary is in `target/<profile>/deps`.
@@ -479,7 +479,7 @@ trait UnwrapWait {
     fn unwrap_wait(self);
 }
 
-impl UnwrapWait for virtx_rs::Call<()> {
+impl UnwrapWait for virtx::Call<()> {
     fn unwrap_wait(self) {
         self.wait().unwrap();
     }
@@ -496,9 +496,9 @@ fn spawning_nothing_fails_with_a_message() {
 }
 
 fn a_second_library_is_refused() {
-    let error = virtx_rs::load("/nonexistent/libvirtx_core").unwrap_err();
+    let error = virtx::load("/nonexistent/libvirtx_core").unwrap_err();
     assert!(matches!(error, Error::Library(_)));
-    virtx_rs::load(library()).unwrap();
+    virtx::load(library()).unwrap();
 }
 
 fn a_header_that_cannot_be_sent_is_refused_at_connect() {
@@ -556,7 +556,7 @@ fn a_forwarder_is_on_the_loopback_until_it_is_dropped() {
 }
 
 fn main() -> ExitCode {
-    virtx_rs::load(library()).unwrap();
+    virtx::load(library()).unwrap();
 
     macro_rules! tests {
         ($($test:ident),* $(,)?) => {

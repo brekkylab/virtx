@@ -4,7 +4,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 
 ## One behaviour, two ends
 
-- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx-rs`, `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
+- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
 - A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, each package's own `README.md`, and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.
@@ -21,23 +21,51 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the `packages` workflow runs to pack and smoke-test the client's packages. `.github/workflows/dist.yml` builds the server for every platform and attaches the archives to the tag's GitHub release.
 
-## Building, tests and lint
+## Building from source
 
-Every step is `cargo xtask`; `cargo xtask --help` lists them.
+Every step is `cargo xtask`, run from a clone of this repository; `cargo xtask --help` lists them.
 
 ```bash
-git clone https://github.com/brekkylab/virtx
+git clone https://github.com/brekkylab/virtx && cd virtx
+```
+
+### Server
+
+The servers need more of the host than Rust; [virtx-uvm/README.md](virtx-uvm/README.md) lists what each host needs.
+
+```bash
 cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
-cargo xtask build client                          # libvirtx_core
-cargo xtask build kernel server-stdio server-tcp # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
-cargo xtask install                               # what was built, into $VIRTX_HOME/bin
+cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both servers, signed on macOS
+cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
+export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
+```
+
+### Clients
+
+Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+
+```bash
+cargo xtask build client
+cargo xtask install --prefix ~/.local
+export VIRTX_CORE_LIB=~/.local/bin/libvirtx_core.so   # .dylib on macOS, virtx_core.dll on Windows
+```
+
+Then, in your own project, install the package for your language from the clone:
+
+- **Python:** `pip install path/to/virtx/virtx-py`
+- **Node:** `npm install path/to/virtx/virtx-node`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
+
+## Tests and lint
+
+```bash
 cargo xtask check                                 # the gate: format, clippy and tests, of the client always and of the servers once `init` has run
 cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python
 (cd virtx-node && npm install && npm test)        # Node
 ```
 
-- Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
+- Run `cargo xtask check` before pushing. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - A change to the client needs nothing of `init`; `cargo xtask check --client` checks it alone. A change to the servers needs `init`, and a change that reaches a VM runs `cargo xtask test` for the server it touches.
 - A bug fix brings a test that fails without it. A behaviour change brings the test that pins the new behaviour, in the surface the behaviour lives in: `virtx-core`'s in-module tests and `tests/`, the servers' `tests/`, `virtx-py/tests/` and `virtx-node/__test__/`.
 

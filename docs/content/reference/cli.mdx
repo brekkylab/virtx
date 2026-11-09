@@ -1,0 +1,39 @@
+---
+title: "CLI"
+description: "Build and manage a server's images from a shell."
+---
+
+The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
+
+```sh
+uvx virtx images                 # or `pip install virtx`
+npx @brekkylab/virtx images      # or `npm install -g @brekkylab/virtx`
+cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
+```
+
+| Command | What it does |
+| --- | --- |
+| `virtx build -t NAME[:TAG] [PATH]` | Builds an image from the Dockerfile in `PATH`, `.` by default, or the one `-f` names. The log goes to stderr and `NAME:TAG sha256:…` to stdout. |
+| `virtx images` | Lists images. |
+| `virtx inspect IMAGE…` | Prints images as JSON, each by a ref (`name:tag`), image ID or digest. |
+| `virtx tag SOURCE TARGET[:TAG]` | Points a ref at an image, moving the ref if it is in use. |
+| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. |
+| `virtx pull NAME[:TAG]` | Pulls an image from a registry, tagged as it is named. |
+| `virtx push NAME[:TAG]` | Pushes an image to the registry its ref names. |
+| `virtx save -o FILE IMAGE` | Writes an image to an OCI archive. |
+| `virtx load -i FILE -t NAME[:TAG]` | Tags the image in an OCI archive, uploading what the server lacks. |
+| `virtx image prune` | Removes every image no ref points at and no sandbox uses. |
+
+Each command is also `virtx image <command>`, with `ls` and `rm` for `images` and `rmi`. A registry that wants credentials gets them with `-u USER`, its password or access token read from stdin, or `--token-stdin` for a bearer token. Ctrl-C during a build, pull or push cancels the job.
+
+```sh
+virtx build -t jq:latest .
+virtx tag jq:latest ghcr.io/me/jq:1
+echo "$GHCR_TOKEN" | virtx push -u me ghcr.io/me/jq:1
+virtx save -o jq.tar jq:latest
+virtx rmi jq:latest
+```
+
+## Which server
+
+Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Hello world](/docs/hello-world/#run-it) for the two servers.

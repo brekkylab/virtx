@@ -1,7 +1,7 @@
 {
   "name": "virtx",
   "version": "0.1.0",
-  "description": "Run tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with a filesystem you compose.",
+  "description": "Run tasks in Linux microVMs from Python, Node.js or Rust.",
   "author": {
     "name": "brekkylab",
     "url": "https://github.com/brekkylab"
@@ -13,7 +13,6 @@
     "vm",
     "sandbox",
     "microvm",
-    "fuse",
     "agent",
     "python",
     "nodejs",
@@ -22,17 +21,17 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "virtx",
-    "shortDescription": "Disposable Linux micro-VMs from your own code",
+    "shortDescription": "Linux microVMs from your own code",
     "developerName": "brekkylab",
     "category": "Developer Tools",
-    "longDescription": "virtx runs tasks in disposable Linux micro-VMs from Python, Node.js or Rust, with no Docker and no daemon to install. A console boots a VM from an image you declare, runs commands in it, and is gone when you are done; what the VM sees is a filesystem you compose from host directories, in-memory files and remote stores, mounted read-write or read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
+    "longDescription": "virtx runs tasks in Linux microVMs from Python, Node.js or Rust, with no Docker and no daemon to install. A sandbox boots from an image you build or pull, runs commands in it, and is gone when you remove it; what should outlive it is kept in a snapshot or a volume, and remote stores such as Notion or Google Drive can be mounted inside a volume, read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
     "capabilities": [
-      "Boot a Linux micro-VM from an image recipe, in one builder call",
+      "Build or pull an image, and boot Linux microVMs from it",
       "Run commands in it and read their output, from Python, Node.js or Rust",
-      "Mount host directories, in-memory files and remote stores into the VM, read-write or read-only",
+      "Keep work in snapshots and volumes, and read their files without a VM",
       "Cut the network, or give the VM a GPU, CPUs and memory",
-      "Build images ahead of time and start any number of VMs on them",
-      "Fetch the console server with one call; no Docker, no daemon"
+      "Reach a service in the VM through a forwarded port",
+      "Start a local server with one call, or connect to your own; no Docker"
     ],
     "websiteURL": "https://github.com/brekkylab/virtx"
   }

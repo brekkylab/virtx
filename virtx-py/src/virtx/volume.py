@@ -9,7 +9,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from ._library import args
+from .files import Files
+
+if TYPE_CHECKING:
+    from .client import Client
 
 
 class MountType(str, Enum):
@@ -81,24 +87,55 @@ MountSource = NotionSource | GdriveSource | OnedriveSource
 
 
 @dataclass(frozen=True)
-class VolumeListOutputItem:
+class Volume(Files):
     """One volume the server holds, as ``list_volume``, ``get_volume`` and ``create_volume``
-    answer it."""
+    answer it, and the client that reaches it: its files, and the mounts in it. Dropping it
+    leaves the volume; ``remove`` removes it."""
+
+    client: Client = field(repr=False, compare=False)
+    """The client its requests go through."""
 
     name: str
 
     size: int
-    """The bytes the volume's files take on the server."""
+    """The bytes the volume's files took on the server when it was answered."""
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> VolumeListOutputItem:
-        return cls(value["name"], value["size"])
+    def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Volume:
+        return cls(client, value["name"], value["size"])
+
+    @property
+    def _root(self) -> dict[str, str]:
+        return {"volume": self.name}
+
+    async def mounts(self) -> list[VolumeMountListOutputItem]:
+        """The mounts in it, without their credentials."""
+        items = await self.client._call("virtx_client_list_volume_mount", args(volume=self.name))
+        return [VolumeMountListOutputItem.from_dict(item) for item in items]
+
+    async def mount(self, path: str, source: MountSource) -> VolumeMountListOutputItem:
+        """Mount ``source`` at ``path`` in it, a directory the mount creates."""
+        output = await self.client._call(
+            "virtx_client_create_volume_mount",
+            args(volume=self.name, path=path, source=source.to_dict()),
+        )
+        return VolumeMountListOutputItem.from_dict(output)
+
+    async def unmount(self, path: str) -> None:
+        """Take away the mount at ``path``, leaving its source as it is."""
+        await self.client._call(
+            "virtx_client_remove_volume_mount", args(volume=self.name, path=path)
+        )
+
+    async def remove(self) -> None:
+        """Delete it and everything in it."""
+        await self.client._call("virtx_client_remove_volume", args(name=self.name))
 
 
 @dataclass(frozen=True)
 class VolumeMountListOutputItem:
-    """One mount in a volume, as ``list_volume_mount`` and ``create_volume_mount`` answer it.
-    Its credentials are not answered."""
+    """One mount in a volume, as ``Volume.mounts`` and ``Volume.mount`` answer it. Its
+    credentials are not answered."""
 
     path: str
     """Where it is mounted."""

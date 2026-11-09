@@ -75,8 +75,8 @@ export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
 export type ImageJobKind = 'pull' | 'push' | 'build'
 
-/** A build, pull or push the server runs. */
-export interface ImageJob {
+/** What the server answers about a build, pull or push it runs. */
+export interface ImageJobInfo {
   id: string
   kind: ImageJobKind
   /** The tag it points, or the image it pushes. */
@@ -86,6 +86,28 @@ export interface ImageJob {
   digest?: string
   /** Why it failed, once it has. */
   error?: string
+}
+
+/**
+ * A build, pull or push the server runs, as starting it or asking for it answered, and the
+ * client that reaches it: what reads its log. Dropping it leaves the job; `remove` removes it.
+ */
+export class ImageJob implements ImageJobInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  id: string
+  kind: ImageJobKind
+  reference: string
+  running: boolean
+  digest?: string
+  error?: string
+  /** It as the server has it now. */
+  get(): Promise<ImageJob>
+  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  log(after?: number): AsyncGenerator<ImageJobEntry>
+  /** Cancel it if it runs, and forget it. */
+  remove(): Promise<void>
 }
 
 /** How an image job ended. */
@@ -130,16 +152,18 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-export interface SnapshotListOutputItem {
+/** What the server answers about a snapshot. */
+export interface SnapshotInfo {
   name: string
   size: number
-  /** Whether a sandbox holds it now, from its `createSandbox` until its `removeSandbox`. */
+  /** Whether a sandbox held it when it was answered, from the `createSandbox` that made a sandbox on it until that sandbox's `remove`. */
   inUse: boolean
 }
 
-export interface VolumeListOutputItem {
+/** What the server answers about a volume. */
+export interface VolumeInfo {
   name: string
-  /** The bytes the volume's files take on the server. */
+  /** The bytes the volume's files took on the server when it was answered. */
   size: number
 }
 
@@ -178,9 +202,6 @@ export interface VolumeMountListOutputItem {
   mountType: MountType
 }
 
-/** Whose files a request names: a volume's, a snapshot's, or a sandbox's as its processes see them. A snapshot in use, held by a sandbox, refuses every request. */
-export type FileRoot = { volume: string } | { snapshot: string } | { sandbox: string }
-
 /** What a file or directory is. */
 export interface Metadata {
   isDir: boolean
@@ -199,15 +220,104 @@ export interface DirEntry {
   metadata: Metadata
 }
 
-export interface Sandbox {
+/**
+ * The files of a `Volume`, a `Snapshot` or a `Sandbox`. A path is relative to its root, as
+ * `dir/file.txt`; the empty path is the root, and the server refuses one that leads outside.
+ */
+export class Files {
+  protected constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  statFile(path: string): Promise<Metadata>
+  exists(path: string): Promise<boolean>
+  isFile(path: string): Promise<boolean>
+  isDir(path: string): Promise<boolean>
+  readDir(path: string): Promise<DirEntry[]>
+  /** From `offset`, `length` bytes of the file or all that is left. */
+  readFile(path: string, offset?: number, length?: number): Promise<Buffer>
+  /** The whole file as text, which it has to be: UTF-8. */
+  readText(path: string): Promise<string>
+  /**
+   * The whole file, created if it does not exist; its parent directory must exist. With `ifMatch`, the `etag`
+   * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
+   */
+  writeFile(path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
+  /** The parent must exist. */
+  createDir(path: string): Promise<void>
+  /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */
+  createDirAll(path: string): Promise<void>
+  /** A directory goes with everything in it. With `missingOk`, nothing being there is fine, as `rm -f`. */
+  removeFile(path: string, missingOk?: boolean): Promise<void>
+  /** What is at `to` is replaced if `overwrite`, and the move refused if not and something is there. */
+  renameFile(from: string, to: string, overwrite?: boolean): Promise<void>
+  /** A directory with everything in it; `overwrite` as in `renameFile`. */
+  copyFile(from: string, to: string, overwrite?: boolean): Promise<void>
+}
+
+/**
+ * A volume the server holds, as making it or asking for it answered, and the client that reaches
+ * it: its files and the mounts in it. Dropping it leaves the volume; `remove` removes it.
+ */
+export class Volume extends Files implements VolumeInfo {
+  private constructor()
+  name: string
+  size: number
+  /** The mounts in it, without their credentials. */
+  mounts(): Promise<VolumeMountListOutputItem[]>
+  /** Mount `source` at `path` in it, a directory the mount creates. */
+  mount(path: string, source: MountSource): Promise<VolumeMountListOutputItem>
+  /** Take away the mount at `path`, leaving its source as it is. */
+  unmount(path: string): Promise<void>
+  /** Delete it and everything in it. */
+  remove(): Promise<void>
+}
+
+/**
+ * A snapshot the server holds, as making it or asking for it answered, and the client that
+ * reaches it: its files, refused with a `423` while a sandbox holds it. Dropping it leaves the
+ * snapshot; `remove` removes it.
+ */
+export class Snapshot extends Files implements SnapshotInfo {
+  private constructor()
+  name: string
+  size: number
+  inUse: boolean
+  /** Delete it and its upper layer; refused with a `409` while a sandbox holds it. */
+  remove(): Promise<void>
+}
+
+/** What the server answers about a sandbox. */
+export interface SandboxInfo {
   id: string
   /** The digest of the image it was made from. */
   image: string
   snapshot?: string
-  /** Whether its VM is up now. */
+  /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
+}
+
+/**
+ * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
+ * it, to run processes in it and read and write its files, its root as its processes see it, as
+ * `etc/hostname`. Dropping it leaves the sandbox; `remove` removes it.
+ */
+export class Sandbox extends Files implements SandboxInfo {
+  private constructor()
+  id: string
+  image: string
+  snapshot?: string
+  running: boolean
+  ports?: SandboxPort[]
+  /** Start `cmd` in it: the job, and its output as the job's `log`. */
+  exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
+  /** Every job in it. */
+  jobs(): Promise<SandboxJob[]>
+  /** The job `id` in it. */
+  job(id: string): Promise<SandboxJob>
+  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  remove(): Promise<void>
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */
@@ -218,7 +328,8 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  snapshot?: string
+  /** The snapshot it stands on, or its name. */
+  snapshot?: string | Snapshot
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -226,18 +337,19 @@ export interface SandboxCreateOptions {
   memoryMib?: number
   gpu?: boolean
   gpuMemoryMib?: number
-  volumes?: { volume: string; path: string; readonly?: boolean }[]
+  /** Each volume, or its name, and where it is mounted. */
+  volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
 }
 
 export interface SandboxExecOptions {
-  /** Keep its stdin open for `writeSandboxJobStdin`. */
+  /** Keep its stdin open for the job's `writeStdin`. */
   stdin?: boolean
   /** Kill it after this long. */
   timeoutMs?: number
 }
 
-/** A process started in a sandbox. */
-export interface SandboxJob {
+/** What the server answers about a process started in a sandbox. */
+export interface SandboxJobInfo {
   id: string
   kind: 'exec'
   pid: number
@@ -245,6 +357,35 @@ export interface SandboxJob {
   running: boolean
   /** Its exit code, once it has ended. */
   code?: number
+}
+
+/**
+ * A process started in a sandbox, as starting it or asking for it answered, and the client and
+ * sandbox that reach it: what signals it, writes to its stdin and reads its log. Dropping it
+ * leaves the job; `remove` removes it.
+ */
+export class SandboxJob implements SandboxJobInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  /** The id of the sandbox it runs in. */
+  readonly sandboxId: string
+  id: string
+  kind: 'exec'
+  pid: number
+  cmd: string[]
+  running: boolean
+  code?: number
+  /** It as the server has it now. */
+  get(): Promise<SandboxJob>
+  /** Send `signal`, a name such as `'SIGTERM'`, to its process and every one it started. */
+  signal(signal: string): Promise<void>
+  /** Write `data` to its stdin, then close it if `eof`; resolves once it is written. */
+  writeStdin(data?: string, eof?: boolean): Promise<void>
+  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  log(after?: number): AsyncGenerator<SandboxJobEntry>
+  /** Cancel it if it runs, killing its process, and forget it. */
+  remove(): Promise<void>
 }
 
 /** An entry of a sandbox job's log, numbered by `id`; `end` is the last. */
@@ -259,7 +400,7 @@ export type SandboxJobEntry = { id: number } & (
  * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
  * read until its `end` entry. The job starts at the call, as a promise's work does, and once
  * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
- * leaving one leaves the job running, which `removeImageJob` or `removeSandboxJob` cancels.
+ * leaving one leaves the job running, which the job's `remove` cancels.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   [Symbol.asyncIterator](): AsyncGenerator<E>
@@ -310,18 +451,16 @@ export class Client {
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 
-  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is `imageJobLog`'s. */
+  /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
   buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  /** Every image job the server holds. */
   listImageJob(): Promise<ImageJob[]>
+  /** The image job `id`. */
   getImageJob(id: string): Promise<ImageJob>
-  /** Cancel the job if it runs, and forget it. */
-  removeImageJob(id: string): Promise<void>
-  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
-  imageJobLog(id: string, after?: number): AsyncGenerator<ImageJobEntry>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
   listImage(): Promise<ImageListItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
@@ -336,61 +475,17 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<SnapshotListOutputItem[]>
+  listSnapshot(): Promise<Snapshot[]>
   /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<SnapshotListOutputItem>
-  getSnapshot(name: string): Promise<SnapshotListOutputItem>
-  removeSnapshot(name: string): Promise<void>
-  listVolume(): Promise<VolumeListOutputItem[]>
+  createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
+  getSnapshot(name: string): Promise<Snapshot>
+  listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
-  createVolume(name?: string): Promise<VolumeListOutputItem>
-  getVolume(name: string): Promise<VolumeListOutputItem>
-  removeVolume(name: string): Promise<void>
-  listVolumeMount(volume: string): Promise<VolumeMountListOutputItem[]>
-  createVolumeMount(volume: string, path: string, source: MountSource): Promise<VolumeMountListOutputItem>
-  removeVolumeMount(volume: string, path: string): Promise<void>
-  /** A path is relative to its root, as `dir/file.txt`; the empty path is the root. */
-  statFile(root: FileRoot, path: string): Promise<Metadata>
-  exists(root: FileRoot, path: string): Promise<boolean>
-  isFile(root: FileRoot, path: string): Promise<boolean>
-  isDir(root: FileRoot, path: string): Promise<boolean>
-  readDir(root: FileRoot, path: string): Promise<DirEntry[]>
-  /** From `offset`, `length` bytes of the file or all that is left. */
-  readFile(root: FileRoot, path: string, offset?: number, length?: number): Promise<Buffer>
-  /** The whole file as text, which it has to be: UTF-8. */
-  readText(root: FileRoot, path: string): Promise<string>
-  /**
-   * The whole file, created if it does not exist; its parent directory must exist. With `ifMatch`, the `etag`
-   * a stat gave, the write goes only while the file still has it, and is refused with a `412` otherwise.
-   */
-  writeFile(root: FileRoot, path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
-  /** The parent must exist. */
-  createDir(root: FileRoot, path: string): Promise<void>
-  /** As `mkdir -p`: parents created as needed, one there already left as it is; `405` when a file is there. */
-  createDirAll(root: FileRoot, path: string): Promise<void>
-  /** A directory goes with everything in it. With `missingOk`, nothing being there is fine, as `rm -f`. */
-  removeFile(root: FileRoot, path: string, missingOk?: boolean): Promise<void>
-  /** What is at `to` is replaced if `overwrite`, and the move refused if not and something is there. */
-  renameFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
-  /** A directory with everything in it; `overwrite` as in `renameFile`. */
-  copyFile(root: FileRoot, from: string, to: string, overwrite?: boolean): Promise<void>
+  createVolume(name?: string): Promise<Volume>
+  getVolume(name: string): Promise<Volume>
   listSandbox(): Promise<Sandbox[]>
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
-  /** Stop the sandbox, end its jobs and forget it. */
-  removeSandbox(id: string): Promise<void>
-  listSandboxJob(sandbox: string): Promise<SandboxJob[]>
-  /** Start `cmd` in the sandbox. Its output is `sandboxJobLog`'s. */
-  execSandbox(sandbox: string, cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
-  getSandboxJob(sandbox: string, job: string): Promise<SandboxJob>
-  /** Cancel the job if it runs, killing its process, and forget it. */
-  removeSandboxJob(sandbox: string, job: string): Promise<void>
-  /** Send `signal`, a name such as `'SIGTERM'`, to the job's process and every one it started. */
-  signalSandboxJob(sandbox: string, job: string, signal: string): Promise<void>
-  /** Write `data` to the job's stdin, then close it if `eof`; resolves once it is written. */
-  writeSandboxJobStdin(sandbox: string, job: string, data?: string, eof?: boolean): Promise<void>
-  /** The job's log, from its start or after the entry numbered `after`, ending after its `end` entry. */
-  sandboxJobLog(sandbox: string, job: string, after?: number): AsyncGenerator<SandboxJobEntry>
 }
 
 /**

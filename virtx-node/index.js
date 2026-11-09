@@ -538,10 +538,13 @@ class Client {
   }
 
   _imageJob(name, args) {
-    return StartedJob.of(this._call(name, args), (job) => this.imageJobLog(job.id))
+    return StartedJob.of(
+      this._call(name, args).then((info) => new ImageJob(this, info)),
+      (job) => job.log(),
+    )
   }
 
-  // Starts the build: the job, and its log as `imageJobLog`'s.
+  // Starts the build: the job, and its log as the job's `log`.
   buildImage(recipe, reference) {
     const declared = recipe instanceof Recipe ? recipe.toJSON() : recipe
     return this._imageJob('virtx_client_build_image', { recipe: declared, reference })
@@ -555,23 +558,13 @@ class Client {
     return this._imageJob('virtx_client_push_image', { reference, auth })
   }
 
-  listImageJob() {
-    return this._call('virtx_client_list_image_job')
+  async listImageJob() {
+    const infos = await this._call('virtx_client_list_image_job')
+    return infos.map((info) => new ImageJob(this, info))
   }
 
-  getImageJob(id) {
-    return this._call('virtx_client_get_image_job', { id })
-  }
-
-  // Cancels the job if it runs, and forgets it.
-  async removeImageJob(id) {
-    await this._call('virtx_client_remove_image_job', { id })
-  }
-
-  // The job's log entries, from its start or after the entry numbered `after`, ending after
-  // its `end` entry.
-  imageJobLog(id, after) {
-    return this._items('virtx_client_image_job_log', { id, after })
+  async getImageJob(id) {
+    return new ImageJob(this, await this._call('virtx_client_get_image_job', { id }))
   }
 
   listImage() {
@@ -602,173 +595,51 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  listSnapshot() {
-    return this._call('virtx_client_list_snapshot')
+  async listSnapshot() {
+    const infos = await this._call('virtx_client_list_snapshot')
+    return infos.map((info) => new Snapshot(this, info))
   }
 
-  createSnapshot(name, diskGib) {
-    return this._call('virtx_client_create_snapshot', { name, diskGib })
+  async createSnapshot(name, diskGib) {
+    return new Snapshot(this, await this._call('virtx_client_create_snapshot', { name, diskGib }))
   }
 
-  getSnapshot(name) {
-    return this._call('virtx_client_get_snapshot', { name })
+  async getSnapshot(name) {
+    return new Snapshot(this, await this._call('virtx_client_get_snapshot', { name }))
   }
 
-  async removeSnapshot(name) {
-    await this._call('virtx_client_remove_snapshot', { name })
+  async listVolume() {
+    const infos = await this._call('virtx_client_list_volume')
+    return infos.map((info) => new Volume(this, info))
   }
 
-  listVolume() {
-    return this._call('virtx_client_list_volume')
+  async createVolume(name) {
+    return new Volume(this, await this._call('virtx_client_create_volume', { name }))
   }
 
-  createVolume(name) {
-    return this._call('virtx_client_create_volume', { name })
+  async getVolume(name) {
+    return new Volume(this, await this._call('virtx_client_get_volume', { name }))
   }
 
-  getVolume(name) {
-    return this._call('virtx_client_get_volume', { name })
+  async listSandbox() {
+    const infos = await this._call('virtx_client_list_sandbox')
+    return infos.map((info) => new Sandbox(this, info))
   }
 
-  async removeVolume(name) {
-    await this._call('virtx_client_remove_volume', { name })
+  // `snapshot` and each of `volumes`' `volume` are a handle or its name.
+  async createSandbox(image, options = {}) {
+    const { snapshot, volumes } = options
+    const info = await this._call('virtx_client_create_sandbox', {
+      ...options,
+      image: imageName(image),
+      snapshot: snapshot instanceof Snapshot ? snapshot.name : snapshot,
+      volumes: volumes?.map((v) => (v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v)),
+    })
+    return new Sandbox(this, info)
   }
 
-  listVolumeMount(volume) {
-    return this._call('virtx_client_list_volume_mount', { volume })
-  }
-
-  createVolumeMount(volume, at, source) {
-    return this._call('virtx_client_create_volume_mount', { volume, path: at, source })
-  }
-
-  async removeVolumeMount(volume, at) {
-    await this._call('virtx_client_remove_volume_mount', { volume, path: at })
-  }
-
-  // What is at `path` in `root`, `{ volume }`, `{ snapshot }` or `{ sandbox }`, the path relative to its root
-  // as `dir/file.txt`.
-  statFile(root, at) {
-    return this._call('virtx_client_stat_file', { ...root, path: at })
-  }
-
-  readDir(root, at) {
-    return this._call('virtx_client_read_dir', { ...root, path: at })
-  }
-
-  // The file at `path`, from `offset`, `length` bytes of it or all that is left, as a `Buffer`.
-  readFile(root, at, offset, length) {
-    return this._call('virtx_client_read_file', { ...root, path: at, offset, length }, true)
-  }
-
-  // Writes `content` (a `Buffer`, a `Uint8Array` or a string, as UTF-8) as the whole file at
-  // `path`, creating it if it does not exist. Its parent directory must exist.
-  // Whether anything, a file, or a directory is at `at`.
-  async exists(root, at) {
-    return await this._call('virtx_client_file_exists', { ...root, path: at })
-  }
-
-  async isFile(root, at) {
-    return await this._call('virtx_client_is_file', { ...root, path: at })
-  }
-
-  async isDir(root, at) {
-    return await this._call('virtx_client_is_dir', { ...root, path: at })
-  }
-
-  // The whole file as text, which it has to be: UTF-8.
-  async readText(root, at) {
-    return await this._call('virtx_client_read_text', { ...root, path: at })
-  }
-
-  // With `ifMatch`, the `etag` a stat gave, the write goes only while the file still has it,
-  // and is refused with a `412` otherwise.
-  async writeFile(root, at, content, ifMatch) {
-    const bytes = encode({ ...root, path: at, ifMatch })
-    const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    const handle = this._lib.virtx_client_write_file(this._held(), bytes, bytes.length, data, data.length)
-    await this._lib.answer(handle)
-  }
-
-  async createDir(root, at) {
-    await this._call('virtx_client_create_dir', { ...root, path: at })
-  }
-
-  async createDirAll(root, at) {
-    await this._call('virtx_client_create_dir_all', { ...root, path: at })
-  }
-
-  // Removes what is at `path`: a directory with everything in it.
-  // With `missingOk`, nothing being there is fine, as `rm -f`; without it, a `404`.
-  async removeFile(root, at, missingOk = false) {
-    await this._call('virtx_client_remove_file', { ...root, path: at, missingOk: missingOk || undefined })
-  }
-
-  // Moves what is at `from` to `to` in the same root, replacing what is at `to` if `overwrite`,
-  // and refused if not and something is there.
-  async renameFile(root, from, to, overwrite = false) {
-    await this._call('virtx_client_rename_file', { ...root, from, to, overwrite })
-  }
-
-  // Copies what is at `from` to `to`, a directory with everything in it, as `renameFile`
-  // replaces what is at `to`.
-  async copyFile(root, from, to, overwrite = false) {
-    await this._call('virtx_client_copy_file', { ...root, from, to, overwrite })
-  }
-
-  listSandbox() {
-    return this._call('virtx_client_list_sandbox')
-  }
-
-  createSandbox(image, options = {}) {
-    return this._call('virtx_client_create_sandbox', { ...options, image: imageName(image) })
-  }
-
-  getSandbox(id) {
-    return this._call('virtx_client_get_sandbox', { id })
-  }
-
-  // Stops the sandbox, ends its jobs and forgets it.
-  async removeSandbox(id) {
-    await this._call('virtx_client_remove_sandbox', { id })
-  }
-
-  listSandboxJob(sandbox) {
-    return this._call('virtx_client_list_sandbox_job', { sandbox })
-  }
-
-  // Starts `cmd` in the sandbox, its stdin open for `writeSandboxJobStdin` if `stdin`, killed
-  // after `timeoutMs` if given: the job, and its output as `sandboxJobLog`'s.
-  execSandbox(sandbox, cmd, options = {}) {
-    return StartedJob.of(
-      this._call('virtx_client_exec_sandbox', { ...options, sandbox, cmd }),
-      (job) => this.sandboxJobLog(sandbox, job.id),
-    )
-  }
-
-  getSandboxJob(sandbox, job) {
-    return this._call('virtx_client_get_sandbox_job', { sandbox, job })
-  }
-
-  // Cancels the job if it runs, killing its process, and forgets it.
-  async removeSandboxJob(sandbox, job) {
-    await this._call('virtx_client_remove_sandbox_job', { sandbox, job })
-  }
-
-  // Sends `signal`, a name such as `'SIGTERM'`, to the job's process and every one it started.
-  async signalSandboxJob(sandbox, job, signal) {
-    await this._call('virtx_client_signal_sandbox_job', { sandbox, job, signal })
-  }
-
-  // Writes `data`, text, to the job's stdin, then closes it if `eof`; resolves once written.
-  async writeSandboxJobStdin(sandbox, job, data, eof = false) {
-    await this._call('virtx_client_write_sandbox_job_stdin', { sandbox, job, data, eof: eof || undefined })
-  }
-
-  // The job's log entries, from its start or after the entry numbered `after`, ending after
-  // its `end` entry.
-  sandboxJobLog(sandbox, job, after) {
-    return this._items('virtx_client_sandbox_job_log', { sandbox, job, after })
+  async getSandbox(id) {
+    return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
   }
 }
 
@@ -826,16 +697,264 @@ class PortForwarder {
   }
 }
 
+// What the server answered about something, and the client that reaches it. The client is not
+// enumerable, so it reads, logs and compares as what the server answered.
+function held(handle, client, info) {
+  Object.defineProperty(handle, 'client', { value: client })
+  Object.assign(handle, info)
+}
+
+// The files of a volume, a snapshot or a sandbox, at its `_root`, the `{ volume }`,
+// `{ snapshot }` or `{ sandbox }` each request names. A path is relative to the root, as
+// `dir/file.txt`.
+class Files {
+  _call(name, args, raw = false) {
+    return this.client._call(name, { ...this._root, ...args }, raw)
+  }
+
+  // What is at `at`.
+  statFile(at) {
+    return this._call('virtx_client_stat_file', { path: at })
+  }
+
+  // Whether anything, a file, or a directory is at `at`.
+  exists(at) {
+    return this._call('virtx_client_file_exists', { path: at })
+  }
+
+  isFile(at) {
+    return this._call('virtx_client_is_file', { path: at })
+  }
+
+  isDir(at) {
+    return this._call('virtx_client_is_dir', { path: at })
+  }
+
+  readDir(at) {
+    return this._call('virtx_client_read_dir', { path: at })
+  }
+
+  // The file at `at`, from `offset`, `length` bytes of it or all that is left, as a `Buffer`.
+  readFile(at, offset, length) {
+    return this._call('virtx_client_read_file', { path: at, offset, length }, true)
+  }
+
+  // The whole file as text, which it has to be: UTF-8.
+  readText(at) {
+    return this._call('virtx_client_read_text', { path: at })
+  }
+
+  // Writes `content` (a `Buffer`, a `Uint8Array` or a string, as UTF-8) as the whole file at
+  // `at`, creating it if it does not exist. Its parent directory must exist. With `ifMatch`, the
+  // `etag` a stat gave, the write goes only while the file still has it, and is refused with a
+  // `412` otherwise.
+  async writeFile(at, content, ifMatch) {
+    const { _lib: lib } = this.client
+    const bytes = encode({ ...this._root, path: at, ifMatch })
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
+    await lib.answer(lib.virtx_client_write_file(this.client._held(), bytes, bytes.length, data, data.length))
+  }
+
+  async createDir(at) {
+    await this._call('virtx_client_create_dir', { path: at })
+  }
+
+  async createDirAll(at) {
+    await this._call('virtx_client_create_dir_all', { path: at })
+  }
+
+  // Removes what is at `at`: a directory with everything in it. With `missingOk`, nothing being
+  // there is fine, as `rm -f`; without it, a `404`.
+  async removeFile(at, missingOk = false) {
+    await this._call('virtx_client_remove_file', { path: at, missingOk: missingOk || undefined })
+  }
+
+  // Moves what is at `from` to `to`, replacing what is at `to` if `overwrite`, and refused if not
+  // and something is there.
+  async renameFile(from, to, overwrite = false) {
+    await this._call('virtx_client_rename_file', { from, to, overwrite })
+  }
+
+  // Copies what is at `from` to `to`, a directory with everything in it, as `renameFile`
+  // replaces what is at `to`.
+  async copyFile(from, to, overwrite = false) {
+    await this._call('virtx_client_copy_file', { from, to, overwrite })
+  }
+}
+
+// A build, pull or push the server runs (`id`, `kind`, `reference`, `running`, `digest`,
+// `error`), and the client that reaches it. Dropping it leaves the job; `remove` removes it.
+class ImageJob {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // It as the server has it now.
+  async get() {
+    return new ImageJob(this.client, await this.client._call('virtx_client_get_image_job', { id: this.id }))
+  }
+
+  // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
+  // entry.
+  log(after) {
+    return this.client._items('virtx_client_image_job_log', { id: this.id, after })
+  }
+
+  // Cancels it if it runs, and forgets it.
+  async remove() {
+    await this.client._call('virtx_client_remove_image_job', { id: this.id })
+  }
+}
+
+// A volume the server holds (`name`, `size`), and the client that reaches it: its files and the
+// mounts in it. Dropping it leaves the volume; `remove` removes it.
+class Volume extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  get _root() {
+    return { volume: this.name }
+  }
+
+  // The mounts in it, without their credentials.
+  mounts() {
+    return this.client._call('virtx_client_list_volume_mount', { volume: this.name })
+  }
+
+  // Mounts `source` at `at` in it, a directory the mount creates.
+  mount(at, source) {
+    return this.client._call('virtx_client_create_volume_mount', { volume: this.name, path: at, source })
+  }
+
+  // Takes away the mount at `at`, leaving its source as it is.
+  async unmount(at) {
+    await this.client._call('virtx_client_remove_volume_mount', { volume: this.name, path: at })
+  }
+
+  // Deletes it and everything in it.
+  async remove() {
+    await this.client._call('virtx_client_remove_volume', { name: this.name })
+  }
+}
+
+// A snapshot the server holds (`name`, `size`, `inUse`), and the client that reaches it: its
+// files, refused while a sandbox holds it. Dropping it leaves the snapshot; `remove` removes it.
+class Snapshot extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  get _root() {
+    return { snapshot: this.name }
+  }
+
+  // Deletes it and its upper layer; refused with a `409` while a sandbox holds it.
+  async remove() {
+    await this.client._call('virtx_client_remove_snapshot', { name: this.name })
+  }
+}
+
+// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
+// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
+// read and write its files, its root as its processes see it. Dropping it leaves the sandbox;
+// `remove` removes it.
+class Sandbox extends Files {
+  constructor(client, info) {
+    super()
+    held(this, client, info)
+  }
+
+  get _root() {
+    return { sandbox: this.id }
+  }
+
+  // Starts `cmd` in it, its stdin open for `writeStdin` if `stdin`, killed after `timeoutMs` if
+  // given: the job, and its output as its `log`.
+  exec(cmd, options = {}) {
+    return StartedJob.of(
+      this.client
+        ._call('virtx_client_exec_sandbox', { ...options, sandbox: this.id, cmd })
+        .then((info) => new SandboxJob(this.client, this.id, info)),
+      (job) => job.log(),
+    )
+  }
+
+  // Every job in it.
+  async jobs() {
+    const infos = await this.client._call('virtx_client_list_sandbox_job', { sandbox: this.id })
+    return infos.map((info) => new SandboxJob(this.client, this.id, info))
+  }
+
+  // The job `id` in it.
+  async job(id) {
+    const info = await this.client._call('virtx_client_get_sandbox_job', { sandbox: this.id, job: id })
+    return new SandboxJob(this.client, this.id, info)
+  }
+
+  // Stops it, ends its jobs and forgets it, keeping its snapshot and volumes.
+  async remove() {
+    await this.client._call('virtx_client_remove_sandbox', { id: this.id })
+  }
+}
+
+// A process run in a sandbox (`id`, `kind`, `pid`, `cmd`, `running`, `code`), and the client and
+// sandbox, `sandboxId`, that reach it. Dropping it leaves the job; `remove` removes it.
+class SandboxJob {
+  constructor(client, sandbox, info) {
+    Object.defineProperty(this, 'sandboxId', { value: sandbox })
+    held(this, client, info)
+  }
+
+  _call(name, args) {
+    return this.client._call(name, { sandbox: this.sandboxId, job: this.id, ...args })
+  }
+
+  // It as the server has it now.
+  async get() {
+    return new SandboxJob(this.client, this.sandboxId, await this._call('virtx_client_get_sandbox_job'))
+  }
+
+  // Sends `signal`, a name such as `'SIGTERM'`, to its process and every one it started.
+  async signal(signal) {
+    await this._call('virtx_client_signal_sandbox_job', { signal })
+  }
+
+  // Writes `data`, text, to its stdin, then closes it if `eof`; resolves once written.
+  async writeStdin(data, eof = false) {
+    await this._call('virtx_client_write_sandbox_job_stdin', { data, eof: eof || undefined })
+  }
+
+  // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
+  // entry.
+  log(after) {
+    return this.client._items('virtx_client_sandbox_job_log', { sandbox: this.sandboxId, job: this.id, after })
+  }
+
+  // Cancels it if it runs, killing its process, and forgets it.
+  async remove() {
+    await this._call('virtx_client_remove_sandbox_job')
+  }
+}
+
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
 module.exports = {
   Client,
+  Files,
+  ImageJob,
   LIBRARY_ENV,
   PortForwarder,
   Recipe,
+  Sandbox,
+  SandboxJob,
+  Snapshot,
   StartedJob,
   VirtxError,
+  Volume,
   ensureVirtx,
   imageName,
   libraryPath,

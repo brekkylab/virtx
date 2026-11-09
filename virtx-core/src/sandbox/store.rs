@@ -77,7 +77,19 @@ pub struct SandboxCreateArgs {
 }
 
 impl SandboxCreateArgs {
-    /// A sandbox of `image`, with everything else left to the server.
+    /// A sandbox of `image`, with everything else left to the server. Each method after sets
+    /// one field, so they chain.
+    ///
+    /// ```
+    /// # use virtx_core::SandboxCreateArgs;
+    /// let args = SandboxCreateArgs::new("jq:latest")
+    ///     .snapshot("dev")
+    ///     .port(8000)
+    ///     .readonly_volume("data", "/data");
+    ///
+    /// assert_eq!(args.snapshot.as_deref(), Some("dev"));
+    /// assert!(args.volumes[0].readonly);
+    /// ```
     pub fn new(image: impl Into<ImageName>) -> Self {
         Self {
             image: image.into(),
@@ -90,6 +102,62 @@ impl SandboxCreateArgs {
             gpu_memory_mib: None,
             volumes: Vec::new(),
         }
+    }
+
+    /// Stand on the snapshot `name`.
+    pub fn snapshot(mut self, name: impl Into<String>) -> Self {
+        self.snapshot = Some(name.into());
+        self
+    }
+
+    /// Whether its processes reach a network at all.
+    pub fn network(mut self, network: bool) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Open the TCP port `port` in it, beside those given before.
+    pub fn port(mut self, port: u16) -> Self {
+        self.ports.push(port);
+        self
+    }
+
+    pub fn vcpus(mut self, vcpus: u8) -> Self {
+        self.vcpus = Some(vcpus);
+        self
+    }
+
+    pub fn memory_mib(mut self, mib: u32) -> Self {
+        self.memory_mib = Some(mib);
+        self
+    }
+
+    /// Whether it gets a GPU.
+    pub fn gpu(mut self, gpu: bool) -> Self {
+        self.gpu = Some(gpu);
+        self
+    }
+
+    pub fn gpu_memory_mib(mut self, mib: u32) -> Self {
+        self.gpu_memory_mib = Some(mib);
+        self
+    }
+
+    /// Mount the volume `name` at `path` in it, after those given before.
+    pub fn volume(mut self, name: impl Into<String>, path: impl Into<String>) -> Self {
+        self.volumes.push(SandboxVolume {
+            volume: name.into(),
+            path: path.into(),
+            readonly: false,
+        });
+        self
+    }
+
+    /// Mount the volume `name` read-only at `path` in it, as [`volume`](Self::volume) does.
+    pub fn readonly_volume(self, name: impl Into<String>, path: impl Into<String>) -> Self {
+        let mut args = self.volume(name, path);
+        args.volumes.last_mut().unwrap().readonly = true;
+        args
     }
 }
 
@@ -144,5 +212,41 @@ mod tests {
         let decoded: SandboxCreateArgs = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
+    }
+
+    #[test]
+    fn each_method_sets_its_field() {
+        let args = SandboxCreateArgs::new("img:latest")
+            .snapshot("s")
+            .network(false)
+            .port(80)
+            .port(443)
+            .vcpus(2)
+            .memory_mib(512)
+            .gpu(true)
+            .gpu_memory_mib(256)
+            .volume("a", "/a")
+            .readonly_volume("b", "/a/b");
+        let mut expected = SandboxCreateArgs::new("img:latest");
+        expected.snapshot = Some("s".into());
+        expected.network = false;
+        expected.ports = vec![80, 443];
+        expected.vcpus = Some(2);
+        expected.memory_mib = Some(512);
+        expected.gpu = Some(true);
+        expected.gpu_memory_mib = Some(256);
+        expected.volumes = vec![
+            SandboxVolume {
+                volume: "a".into(),
+                path: "/a".into(),
+                readonly: false,
+            },
+            SandboxVolume {
+                volume: "b".into(),
+                path: "/a/b".into(),
+                readonly: true,
+            },
+        ];
+        assert_eq!(args, expected);
     }
 }

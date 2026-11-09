@@ -15,18 +15,24 @@ for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk a
 await client.close()
 ```
 
-A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives the job, whose log `imageJobLog` reads again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; `removeImageJob` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way, or with `sandboxJobLog`.
+A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
-const run = client.execSandbox(sandbox.id, ['echo', 'hi'])
+const run = sandbox.exec(['echo', 'hi'])
 const job = await run
 console.log('started', job.id)
 for await (const entry of run) {
   if ('stdout' in entry) console.log(entry.stdout)
   else if ('end' in entry) console.log('exited', entry.end.code)
 }
-await client.removeSandbox(sandbox.id)
+await sandbox.remove()
+```
+
+```js
+const cat = await sandbox.exec(['cat'], { stdin: true })
+await cat.writeStdin('hello\n', true)
+for await (const entry of cat.log()) console.log(entry)
 ```
 
 A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
@@ -40,15 +46,17 @@ console.log('reach it at', forwarder.address)
 forwarder.close()
 ```
 
-The files of a volume, a snapshot or a sandbox are read and written through the client, each request naming its root as `{ volume }`, `{ snapshot }` or `{ sandbox }`, with a path relative to it. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js
-const volume = { volume: 'data' }
-await client.createDir(volume, 'in')
-await client.writeFile(volume, 'in/notes.txt', 'hello')
-for (const entry of await client.readDir(volume, 'in')) console.log(entry.name, entry.metadata.size)
-console.log((await client.readFile(volume, 'in/notes.txt')).toString())
+const volume = await client.createVolume('data')
+await volume.createDir('in')
+await volume.writeFile('in/notes.txt', 'hello')
+for (const entry of await volume.readDir('in')) console.log(entry.name, entry.metadata.size)
+console.log((await volume.readFile('in/notes.txt')).toString())
 ```
+
+What acts on a sandbox, a volume, a snapshot or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
 
 The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or a copy beside `index.js`, or the one in the platform's package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 

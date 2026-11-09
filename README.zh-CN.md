@@ -261,8 +261,8 @@ let client = Client::connect(
 
 按你使用的语言对照即可。
 
-- **Python：** 3.10 及以上
-- **Node：** 18 及以上
+- **Python：** 3.11 及以上
+- **Node：** 22 及以上
 - **Rust：** 1.89 及以上
 
 ### 服务器

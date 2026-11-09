@@ -145,8 +145,11 @@ pub(crate) fn exec_log<'a>(
             .and_then(|j| j.to_str().ok())
             .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
             .and_then(|j| serde_json::from_str(j).map_err(|e| Error::Json(e.to_string())))?;
+        // Its log, from this answer; and, where the connection breaks, from the job's log
+        // after the last entry read.
+        let at = format!("{}/events", self::job(&id, &job.id));
         yield SandboxExecItem::Job(job);
-        let mut log = std::pin::pin!(sse::client::entries(response, path));
+        let mut log = std::pin::pin!(sse::client::resumed(client, response, at, None));
         while let Some(entry) = log.next().await {
             yield SandboxExecItem::Log(entry?);
         }

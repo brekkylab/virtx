@@ -332,12 +332,27 @@ pub(crate) fn refused<T: std::fmt::Debug>(result: Result<T, Error>) -> (u16, Str
 }
 
 /// Every tag on the server's images, as `name:tag`, with the digest it points at.
+///
+/// A server may answer a reference in full, as `docker.io/library/alpine:3.20` for
+/// `alpine:3.20`, which the protocol leaves to it: each is read back as the scenarios name it.
 pub(crate) async fn tags(client: &Client) -> BTreeMap<String, String> {
     let listed = client.list_image().await.unwrap();
     listed
         .into_iter()
-        .map(|image| (image.reference, image.digest))
+        .map(|image| (familiar(&image.reference), image.digest))
         .collect()
+}
+
+/// `reference` without the registry and namespace Docker Hub's names are filled in with:
+/// `docker.io/library/alpine:3.20` is `alpine:3.20`, and `docker.io/user/app:1` is `user/app:1`.
+fn familiar(reference: &str) -> String {
+    let Some(rest) = reference.strip_prefix("docker.io/") else {
+        return reference.to_owned();
+    };
+    match rest.strip_prefix("library/") {
+        Some(name) if !name.contains('/') => name.to_owned(),
+        _ => rest.to_owned(),
+    }
 }
 
 /// How the image job `id` ended, once it has.

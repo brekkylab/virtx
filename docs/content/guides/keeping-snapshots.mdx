@@ -125,7 +125,7 @@ sandbox.remove().await?;
 </Tabs>
 
 One sandbox holds a snapshot at a time.
-While it does, the snapshot's files are the sandbox's: reading them through the snapshot, or removing the snapshot, is refused with `409` until the sandbox is removed.
+While it does, the snapshot's files are the sandbox's: reading them through the snapshot is refused with `423`, and removing the snapshot with `409`, until the sandbox is removed.
 To read files while the sandbox runs, read them through the sandbox instead, with the same calls.
 
 ## Read what it made

@@ -144,3 +144,77 @@ def test_metadata_reads_as_the_wire_has_it() -> None:
         {"name": "a", "metadata": {"is_dir": False, "size": 1, "modified": 2}}
     )
     assert entry == DirEntry("a", Metadata(False, 1, 2))
+
+
+async def test_a_webdav_non_json_refusal_raises_without_quoting_html() -> None:
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/volumes/v":
+                body = b'{"name": "v", "size": 0}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            body = (
+                b"<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_PUT(self) -> None:
+            body = (
+                b"<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    host, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with Client.connect(f"http://{host}:{port}/") as client:
+            volume = await client.get_volume("v")
+            with pytest.raises(VirtxError) as exc_info:
+                await volume.read_file("a.txt")
+            err = exc_info.value
+            assert err.status == 503
+            assert (
+                err.body
+                == "<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            err_msg = str(err)
+            assert (
+                "the server answered 503 Service Unavailable; not a virtx answer (text/html,"
+                in err_msg
+            )
+            assert "the service is unreachable or restarting" in err_msg
+            assert "<html>" not in err_msg
+
+            with pytest.raises(VirtxError) as exc_info:
+                await volume.write_file("a.txt", "content")
+            err = exc_info.value
+            assert err.status == 503
+            assert (
+                err.body
+                == "<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            assert "<html>" not in str(err)
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -298,7 +298,7 @@ Either way, client and server speak the same plain HTTP protocol; only the trans
 
 | | Local | Remote | Cloud |
 | --- | --- | --- | --- |
-| Server | `virtx-server-stdio` | `virtx-server-tcp` | virtx cloud |
+| Server | `virtx-stdio` | `virtx-server-tcp` | virtx cloud |
 | Where it runs | Child process of client process | Daemon on another machine, separate from the client | virtx's own machines, hosted for you |
 | Transport | HTTP over stdio | HTTP over TCP | HTTPS |
 | Setup | None: nothing to install or keep running | Run the server, and give each user a token | Sign in and create an API key |

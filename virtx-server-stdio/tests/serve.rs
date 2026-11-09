@@ -503,7 +503,7 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["/abin/index".into()], 0));
     for program in ["index", "docread"] {
-        let skill = format!("/abin/skills/{program}/SKILLS.md");
+        let skill = format!("/abin/skills/{program}/SKILL.md");
         let (_, ended) = server.exec(&id, &["test", "-f", &skill], None).await;
         assert_eq!(ended.unwrap(), 0, "{skill}");
     }

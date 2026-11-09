@@ -964,18 +964,18 @@ cargo xtask build alib                     # -> build/alib/<arch>/, in virtx mac
 cargo xtask install --prefix <dir>         # -> <dir>/bin/abin and alib, with the rest
 ```
 
-What each program is travels with it: `virtx-abins/{program}/SKILLS.md` is installed at
-`abin/skills/{program}/SKILLS.md`, so whatever gets the programs gets the reading of them too.
+What each program is travels with it: `virtx-abins/{program}/SKILL.md` is installed at
+`abin/skills/{program}/SKILL.md`, so whatever gets the programs gets the reading of them too.
 Under `skills/` rather than beside the executables, because the top of `/abin` is what would go
 on `PATH` -- a file there that is not a program is something a shell would offer to run. A
-program whose crate carries no `SKILLS.md` has none installed.
+program whose crate carries no `SKILL.md` has none installed.
 
 What is in one is the program's own `--help`, copied out: the front matter's `name` and
 `description` are the usage line and the sentence clap opens with, and the body is that output,
 subcommand by subcommand where there are subcommands. The content is settled on purpose -- a
 program that answers `--help` has already written down what it is, and a second description
 kept beside it is one that drifts from the parser it describes -- but **the copying is by hand
-today**. Nothing checks that a `SKILLS.md` still says what its binary says, so a clap string
+today**. Nothing checks that a `SKILL.md` still says what its binary says, so a clap string
 that moves is a file to regenerate.
 
 ## Where a host keeps things
@@ -1009,7 +1009,7 @@ virtx-server-tcp/          the same server over HTTP, to the users and projects 
 virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
                             own workspace, built for musl by this crate's build script and
                             embedded in it
-virtx-abins/                the programs for /abin and a SKILLS.md each; its own workspace,
+virtx-abins/                the programs for /abin and a SKILL.md each; its own workspace,
                             built for musl
 virtx-alibs/                what /alib holds, a build.sh per part, run in a virtx machine
 3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch

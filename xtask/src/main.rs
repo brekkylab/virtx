@@ -669,7 +669,7 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
 }
 
 /// Build the `/abin` programs for the guest, in the debug or release profile, and place them
-/// and their `SKILLS.md` in `out`.
+/// and their `SKILL.md` in `out`.
 fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
@@ -701,13 +701,13 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     for (_, program) in ABINS {
         place(&built.join(program), &out.join(program))?;
 
-        let skill = crate_dir.join(program).join("SKILLS.md");
+        let skill = crate_dir.join(program).join("SKILL.md");
         let at = out.join("skills").join(program);
         if skill.is_file() {
             fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
-            place(&skill, &at.join("SKILLS.md"))?;
+            place(&skill, &at.join("SKILL.md"))?;
         } else {
-            let _ = fs::remove_file(at.join("SKILLS.md"));
+            let _ = fs::remove_file(at.join("SKILL.md"));
             let _ = fs::remove_dir(&at);
         }
     }

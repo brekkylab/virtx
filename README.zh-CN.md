@@ -3,7 +3,7 @@
   <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
 </p>
 
-<h3 align="center">为代码和 AI 智能体准备的一次性 Linux 虚拟机</h3>
+<h3 align="center">供代码和 AI 智能体使用的一次性 Linux 虚拟机</h3>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -24,7 +24,7 @@
 
 有了 virtx，你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务。
 
-有些任务依赖很重，你不想装到自己的机器上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。
+有些任务需要装一大堆依赖，你不想把它们装在本机上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。
 这些都很适合交给 virtx。
 虚拟机里装过、改过的东西，在删除虚拟机后都会一并清掉，只有写进你保留下来的快照或卷里的内容才会留下。
 
@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
-在服务器上生成一个令牌，再写一份 `server.json`，让这个用户可以访问某个项目：
+在服务器上生成一个令牌，再写一份 `server.json`，允许该令牌对应的用户访问某个项目：
 
 ```sh
 virtx-server-tcp token   # 打印令牌及其 token_sha256
@@ -243,12 +243,12 @@ let client = Client::connect(
 
 ## 功能亮点
 
-- **不可信代码与本机彻底隔离：** 每个沙箱都是拥有独立内核的 microVM，靠 Hypervisor 隔离，而不只是靠命名空间，网络也可以彻底断开。
+- **在隔离环境中运行不可信代码：** 每个沙箱都是拥有独立内核的 microVM，由 Hypervisor 提供隔离，而不只是靠命名空间，需要时还能完全断开网络。
 - **在哪儿开发都能用：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
-- **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也不用另外搭守护进程。
+- **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也无需单独配置守护进程。
 - **现有镜像拿来就用：** 可以从 Docker Hub 或任意 OCI 镜像仓库拉取，也可以用 recipe 或 Dockerfile 构建，之后还能推回仓库或复制到另一台服务器。
 - **不开 shell 也能传文件：** 直接在代码里读写、复制和删除沙箱中的文件。
 - **沙箱里跑的服务都能访问：** 沙箱里的 Web 服务器、SSH、VNC 桌面或数据库，都可以通过本机上的地址直接访问。
@@ -302,7 +302,7 @@ virtx 采用客户端-服务器模型。
 </p>
 
 服务器可以由你自己运行，和代码放在同一台机器上，或者放在另一台机器上；也可以直接用我们托管的 virtx cloud。
-不管哪种方式，客户端和服务器之间说的都是同一套普通的 HTTP 协议，区别只在传输方式。
+无论采用哪种方式，客户端和服务器都使用同一套 HTTP 协议通信，区别只在传输方式。
 
 | | 本地 | 远程 | 云端 |
 | --- | --- | --- | --- |
@@ -328,7 +328,7 @@ virtx 采用客户端-服务器模型。
 下层是只读的**镜像**，上层是接收写入的**快照**。
 
 镜像是基于它创建的所有沙箱的起点。
-镜像用的是 Docker 同款的 OCI 格式，所以 `alpine:latest` 或者镜像仓库里的任何镜像都能直接用。
+镜像采用 OCI 格式，与 Docker 使用的格式相同，所以 `alpine:latest` 或者镜像仓库里的任何镜像都能直接用。
 
 快照用来积累沙箱做出的改动。
 新快照一开始是空的；之后用它创建的沙箱，会带着上一个沙箱写下的全部内容启动。

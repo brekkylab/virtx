@@ -28,7 +28,7 @@ virtx를 쓰면 내 코드에서 일회용 Linux VM을 띄워 작업을 실행�
 VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 스냅샷이나 볼륨에 기록한 것만 그대로 남습니다.
 
 > [!TIP]
-> virtx로 AI 에이전트를 만들고 있다면 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 살펴보세요.
+> virtx로 AI 에이전트를 만들고 있다면 저희가 만든 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 살펴보세요.
 > virtx 위에서 만들어져 에이전트마다 전용 샌드박스를 붙여 주기 때문에, 따로 설정하지 않아도 에이전트의 명령과 파일 도구가 VM 안에서 실행됩니다.
 
 ## 빠르게 시작하기

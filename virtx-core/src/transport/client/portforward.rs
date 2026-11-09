@@ -7,6 +7,8 @@
 //! is carried in one, its bytes as binary messages, opened by the same HTTP client the requests
 //! go by.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -46,6 +48,8 @@ pub struct PortForwarder {
     /// What takes the address's connections and carries each, ended when this drops; nothing
     /// where the address is the server's own.
     _forwarding: Option<JoinSet<()>>,
+    #[cfg(test)]
+    tasks: Arc<AtomicUsize>,
 }
 
 impl PortForwarder {
@@ -79,6 +83,11 @@ impl PortForwarder {
         self.address
     }
 
+    #[cfg(test)]
+    pub(crate) fn tasks(&self) -> usize {
+        self.tasks.load(SeqCst)
+    }
+
     /// The loopback address a server on this machine answered, as `http://127.0.0.1:54123`.
     async fn direct(url: &str) -> Result<PortForwarder, String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
@@ -93,6 +102,8 @@ impl PortForwarder {
         Ok(PortForwarder {
             address,
             _forwarding: None,
+            #[cfg(test)]
+            tasks: Arc::default(),
         })
     }
 
@@ -110,23 +121,42 @@ impl PortForwarder {
         let address = listener
             .local_addr()
             .map_err(|e| format!("opening a loopback port: {e}"))?;
+        #[cfg(test)]
+        let tasks = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let tasks_outer = Arc::clone(&tasks);
         let mut forwarding = JoinSet::new();
         forwarding.spawn(async move {
             let mut connections = JoinSet::new();
-            while let Ok((accepted, _)) = listener.accept().await {
-                let (http, url) = (http.clone(), url.clone());
-                let (auth, headers) = (current(&auth), current(&headers));
-                connections.spawn(async move {
-                    // Refused, the connection closes: as a port nothing listens on does.
-                    if let Ok(socket) = open(&http, &auth, headers, url).await {
-                        carry(accepted, socket).await;
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((accepted, _)) = accepted else { break };
+                        while connections.try_join_next().is_some() {}
+                        let (http, url) = (http.clone(), url.clone());
+                        let (auth, headers) = (current(&auth), current(&headers));
+                        connections.spawn(async move {
+                            // Refused, the connection closes: as a port nothing listens on does.
+                            if let Ok(socket) = open(&http, &auth, headers, url).await {
+                                carry(accepted, socket).await;
+                            }
+                        });
+                        #[cfg(test)]
+                        tasks.store(connections.len(), SeqCst);
                     }
-                });
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {
+                        while connections.try_join_next().is_some() {}
+                        #[cfg(test)]
+                        tasks.store(connections.len(), SeqCst);
+                    }
+                }
             }
         });
         Ok(PortForwarder {
             address,
             _forwarding: Some(forwarding),
+            #[cfg(test)]
+            tasks: tasks_outer,
         })
     }
 }
@@ -312,6 +342,73 @@ mod tests {
             .unwrap();
         assert_eq!(forward.address(), "127.0.0.1:54123".parse().unwrap());
         assert!(PortForwarder::direct("ports/abc").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_connection_tasks_are_reaped() {
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let forward = PortForwarder::open(&client, "ports/open").await.unwrap();
+
+        for i in 0..10 {
+            let mut stream = TcpStream::connect(forward.address()).await.unwrap();
+            let msg = format!("msg{i}");
+            stream.write_all(msg.as_bytes()).await.unwrap();
+            let mut echoed = vec![0u8; msg.len()];
+            stream.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(&echoed, msg.as_bytes());
+            drop(stream);
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while forward.tasks() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(forward.tasks(), 0, "completed tasks were not reaped");
+
+        let forward_shut = PortForwarder::open(&client, "ports/shut").await.unwrap();
+        for _ in 0..5 {
+            let mut stream = TcpStream::connect(forward_shut.address()).await.unwrap();
+            let mut read = Vec::new();
+            assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while forward_shut.tasks() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(forward_shut.tasks(), 0, "failed tasks were not reaped");
+
+        let mut active = TcpStream::connect(forward.address()).await.unwrap();
+        active.write_all(b"active-start").await.unwrap();
+        let mut echoed = [0u8; 12];
+        active.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"active-start");
+
+        {
+            let mut short = TcpStream::connect(forward.address()).await.unwrap();
+            short.write_all(b"short").await.unwrap();
+            let mut echoed = [0u8; 5];
+            short.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(&echoed, b"short");
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while forward.tasks() > 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(forward.tasks(), 1, "active connection was dropped");
+
+        active.write_all(b"active-end").await.unwrap();
+        let mut echoed = [0u8; 10];
+        active.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"active-end");
+        drop(active);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while forward.tasks() > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(forward.tasks(), 0);
     }
 }
 

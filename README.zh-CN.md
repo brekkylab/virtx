@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <b>简体中文</b>
+  <a href="README.md">English</a> · <b>简体中文</b> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -239,12 +239,12 @@ let client = Client::connect(
 
 </details>
 
-客户端只会通过明文 `http` 把令牌发给本机的回环地址，所以部署在其他机器上的服务器，请放到 HTTPS 后面。
+客户端只会通过明文 `http` 把令牌发给本机的回环地址，所以部署在其他机器上的服务器，请务必通过 HTTPS 连接。
 
 ## 功能亮点
 
-- **不可信的代码，不碰你的机器：** 每个沙箱都是拥有独立内核的 microVM，靠虚拟机监控器（hypervisor）隔离，而不只是靠命名空间，网络也可以彻底断开。
-- **在哪儿干活都能用：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
+- **不可信代码与本机彻底隔离：** 每个沙箱都是拥有独立内核的 microVM，靠 Hypervisor 隔离，而不只是靠命名空间，网络也可以彻底断开。
+- **在哪儿开发都能用：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
@@ -252,8 +252,8 @@ let client = Client::connect(
 - **现有镜像拿来就用：** 可以从 Docker Hub 或任意 OCI 镜像仓库拉取，也可以用 recipe 或 Dockerfile 构建，之后还能推回仓库或复制到另一台服务器。
 - **不开 shell 也能传文件：** 直接在代码里读写、复制和删除沙箱中的文件。
 - **沙箱里跑的服务都能访问：** 沙箱里的 Web 服务器、SSH、VNC 桌面或数据库，都可以通过本机上的地址直接访问。
-- **随时接着上次干：** 把沙箱写下的内容存进快照留给下一个沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
-- **GPU 一起带上：** 在沙箱里用宿主机的 GPU 跑深度学习等 Vulkan 任务。
+- **从上次中断的地方继续：** 把沙箱写下的内容存进快照留给下一个沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
+- **同样能用 GPU：** 在沙箱里用宿主机的 GPU 跑深度学习等 Vulkan 任务。
 
 ## 环境要求
 
@@ -270,7 +270,7 @@ let client = Client::connect(
 以下要求针对运行 virtx 服务器的机器。
 客户机（guest）始终是 Linux。
 
-#### 虚拟机监控器
+#### Hypervisor
 
 - **Linux**：内核需支持 KVM，当前用户要能访问 `/dev/kvm`，并且已在固件里开启硬件虚拟化。
   主流的新内核基本都内置了 KVM，通常不需要额外安装。
@@ -313,8 +313,8 @@ virtx 采用客户端-服务器模型。
 | 适用场景 | 在你正在用的机器上跑虚拟机 | 需要更强的机器，或团队共用一台主机 | 没有自己的硬件也能跑虚拟机 |
 
 每个虚拟机都是基于 libkrun 的 microVM：一个拥有独立内核的 Linux 客户机，运行在宿主机的硬件虚拟化之上（Linux 上是 KVM，macOS 上是 Hypervisor.framework，Windows 上是 Windows 虚拟机监控程序平台）。
-里面的代码和你的机器之间隔着一层虚拟机监控器，而不像容器那样只靠命名空间隔开。
-而且 microVM 没有固件和模拟硬件需要初始化，启动时间只是完整虚拟机的零头。
+里面的代码和你的机器之间隔着一层 Hypervisor，而不像容器那样只靠命名空间隔开。
+而且 microVM 没有固件和模拟硬件需要初始化，启动速度比完整虚拟机快得多。
 
 ### 核心概念
 
@@ -352,7 +352,7 @@ Notion、Google Drive、OneDrive 这类远程存储也可以以只读方式挂�
 
 ## 参与贡献
 
-欢迎提交 bug、想法和 Pull Request。
+欢迎提交 bug 报告、分享想法或发起 Pull Request。
 如何提交 PR，请看 [CONTRIBUTING.md](CONTRIBUTING.md)。
 如果发现疑似安全漏洞，请按 [SECURITY.md](SECURITY.md) 的流程报告，不要公开提 issue。
 有问题想问，或者想展示你做的东西，欢迎来 [Discord](https://discord.gg/27rx3EJy3P)。

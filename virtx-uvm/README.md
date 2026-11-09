@@ -951,8 +951,10 @@ Each part is built from source by a `build.sh` under [`virtx-alibs/`](../virtx-a
 The agent reads the image's C library when the machine starts, by whether `/lib` has musl's dynamic linker, and adds `/alib/musl` or `/alib/glibc` after the image's `LD_LIBRARY_PATH`.
 With a GPU, and no `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that directory's venus manifest in both, so the image needs neither a loader nor a driver of its own.
 
-Every machine gets the `abin/` and `alib/` directories beside the server's binary, each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
-A host without one boots machines without it rather than refusing to.
+A sandbox gets the programs it is made with, by its `abins`, from the `abin/` directory beside the server's binary, and every machine gets the `alib/` directory there.
+The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under the snapshots' `sandbox/`, deleted with the sandbox or by the next server's sweep.
+That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
+A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
 On Windows each file in them is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report.
 `cargo xtask test` builds `abin/` beside the server binary it tests, and places `alib/` there when `build alib` has run.
 
@@ -965,7 +967,7 @@ cargo xtask install --prefix <dir>         # -> <dir>/bin/abin and alib, with th
 ```
 
 What each program is travels with it: `virtx-abins/{program}/SKILL.md` is installed at
-`abin/skills/{program}/SKILL.md`, so whatever gets the programs gets the reading of them too.
+`abin/skills/{program}/SKILL.md`, so a sandbox that gets a program gets the reading of it too.
 Under `skills/` rather than beside the executables, because the top of `/abin` is what would go
 on `PATH` -- a file there that is not a program is something a shell would offer to run. A
 program whose crate carries no `SKILL.md` has none installed.

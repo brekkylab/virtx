@@ -24,6 +24,12 @@ use crate::{
 pub const DEFAULT_VCPUS: u8 = 4;
 pub const DEFAULT_MEMORY_MIB: u32 = 4096;
 
+/// The directory beside the server's program its own programs for `/abin` are in, and where each
+/// one's `SKILL.md` is in that.
+const ABIN_HOST: &str = "abin";
+const SKILLS: &str = "skills";
+const SKILL: &str = "SKILL.md";
+
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
 
@@ -110,6 +116,10 @@ pub struct Sandbox {
     snapshot: Option<String>,
     /// The one it made for itself, without one, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// The programs it was made with, by name, and the directory its machines show them from,
+    /// until it is closed.
+    abins: Vec<String>,
+    abin: Mutex<Option<Abin>>,
     /// Its snapshot's lock, held for each of its machines and between them, until it is
     /// closed.
     snapshot_lock: Mutex<Option<SnapshotLock>>,
@@ -179,6 +189,22 @@ impl Sandbox {
                 "gpu_memory_mib: a size is of a GPU, and this sandbox has none".into(),
             ));
         }
+        // The programs are those beside the one its machines run as, as `cargo xtask install`
+        // and a release put them there.
+        let programs = vm.first().and_then(|program| Path::new(program).parent());
+        let programs = programs.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default();
+        let mut given = HashSet::new();
+        for name in &args.abins {
+            if !given.insert(name) {
+                return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
+            }
+            if name.starts_with('.') || name.contains(['/', '\\']) || !programs.join(name).is_file()
+            {
+                return Err(Error::Invalid(format!(
+                    "abins: this server has no program called `{name}`"
+                )));
+            }
+        }
 
         let digest = match &args.image {
             ImageName::Tag { tag } => {
@@ -241,6 +267,14 @@ impl Sandbox {
                 (Some(upper), lock)
             }
         };
+        let abin = match args.abins.is_empty() {
+            true => None,
+            false => {
+                let (dir, names) = (Upper::dir(snapshots), args.abins.clone());
+                let made = move || Abin::create(&dir, &programs, &names);
+                Some(tokio::task::spawn_blocking(made).await??)
+            }
+        };
 
         let config = MachineConfig {
             rootfs,
@@ -258,13 +292,16 @@ impl Sandbox {
                 },
             },
             volumes,
+            abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
         };
         let sandbox = Arc::new(Sandbox {
             image: digest,
             _held: held_image,
             snapshot: args.snapshot.clone(),
+            abins: args.abins.clone(),
             upper: Mutex::new(upper),
+            abin: Mutex::new(abin),
             snapshot_lock: Mutex::new(Some(snapshot_lock)),
             config,
             vm,
@@ -292,6 +329,7 @@ impl Sandbox {
             snapshot: self.snapshot.clone(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
+            abins: self.abins.clone(),
         }
     }
 
@@ -415,6 +453,7 @@ impl Sandbox {
         }
         drop(self.snapshot_lock.lock().unwrap().take());
         drop(self.upper.lock().unwrap().take());
+        drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);
             job.remove();
@@ -613,14 +652,7 @@ impl Upper {
 
     fn create(dir: &Path) -> Result<Upper, Error> {
         let io = |context: String| move |source| SnapshotError::Io { context, source };
-        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
-        let name = pick(|name| dir.join(format!("{name}.owner")).exists());
-        let owner = dir.join(format!("{name}.owner"));
-        let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
-        held.try_lock().map_err(|e| SnapshotError::Io {
-            context: format!("locking {}", owner.display()),
-            source: e.into(),
-        })?;
+        let (name, owner, held) = own(dir)?;
         let path = dir.join(format!("{name}.ext4"));
         // Owned from here, so a disk that failed to format is deleted too.
         let upper = Upper {
@@ -642,6 +674,72 @@ impl Drop for Upper {
         self.snapshot.delete();
         let _ = fs::remove_file(&self.owner);
     }
+}
+
+/// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
+/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own, and deleted
+/// as an [`Upper`] is.
+///
+/// Each is `<name>.abin/` in `<root>/sandbox/`, beside `<name>.owner`.
+struct Abin {
+    dir: PathBuf,
+    owner: PathBuf,
+    _held: File,
+}
+
+impl Abin {
+    /// `names`, each a program in `programs`, and the `SKILL.md` of each that has one.
+    fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
+        let (name, owner, held) = own(dir)?;
+        // Owned from here, so one that failed half made is deleted too.
+        let abin = Abin {
+            dir: dir.join(format!("{name}.abin")),
+            owner,
+            _held: held,
+        };
+        for program in names {
+            link(&programs.join(program), &abin.dir.join(program))?;
+            let skill = Path::new(SKILLS).join(program).join(SKILL);
+            if programs.join(&skill).is_file() {
+                link(&programs.join(&skill), &abin.dir.join(&skill))?;
+            }
+        }
+        Ok(abin)
+    }
+}
+
+impl Drop for Abin {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+        let _ = fs::remove_file(&self.owner);
+    }
+}
+
+/// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one, such
+/// as on another filesystem.
+fn link(from: &Path, to: &Path) -> Result<(), Error> {
+    let io = |context: String| move |source| SnapshotError::Io { context, source };
+    let parent = to.parent().unwrap_or(to);
+    fs::create_dir_all(parent).map_err(io(format!("making {}", parent.display())))?;
+    if fs::hard_link(from, to).is_err() {
+        fs::copy(from, to).map_err(io(format!("copying {}", from.display())))?;
+    }
+    Ok(())
+}
+
+/// A name in `dir` no other sandbox's has, and `<name>.owner` there, locked for as long as the
+/// file answered is held.
+fn own(dir: &Path) -> Result<(String, PathBuf, File), Error> {
+    let io = |context: String| move |source| SnapshotError::Io { context, source };
+    fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
+    let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+    let owner = dir.join(format!("{name}.owner"));
+    let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
+    held.try_lock().map_err(|e| SnapshotError::Io {
+        context: format!("locking {}", owner.display()),
+        source: e.into(),
+    })?;
+    Ok((name, owner, held))
 }
 
 impl Sandbox {
@@ -672,6 +770,7 @@ impl Sandbox {
                 path,
             }
             .delete();
+            let _ = fs::remove_dir_all(dir.join(format!("{name}.abin")));
             let _ = fs::remove_file(&owner);
         }
     }
@@ -684,5 +783,39 @@ fn pick(taken: impl Fn(&str) -> bool) -> String {
         if !taken(&name) {
             return name;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_abin_holds_the_programs_named_with_their_skills_until_it_is_dropped() {
+        let host = tempfile::tempdir().unwrap();
+        let programs = host.path().join(ABIN_HOST);
+        fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
+        for program in ["index", "docread", "display"] {
+            fs::write(programs.join(program), program).unwrap();
+        }
+        fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
+
+        let dir = host.path().join("sandbox");
+        let names = ["index".to_string(), "display".to_string()];
+        let abin = Abin::create(&dir, &programs, &names).unwrap();
+        assert_eq!(fs::read(abin.dir.join("index")).unwrap(), b"index");
+        assert_eq!(fs::read(abin.dir.join("display")).unwrap(), b"display");
+        assert!(!abin.dir.join("docread").exists());
+        let skills = abin.dir.join(SKILLS);
+        assert_eq!(
+            fs::read(skills.join("index").join(SKILL)).unwrap(),
+            b"skill"
+        );
+        assert!(!skills.join("display").exists());
+
+        let (made, owner) = (abin.dir.clone(), abin.owner.clone());
+        drop(abin);
+        assert!(!made.exists() && !owner.exists());
+        assert!(programs.join("index").is_file(), "the server's own stay");
     }
 }

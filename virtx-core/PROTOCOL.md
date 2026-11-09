@@ -248,9 +248,9 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running}` |
-| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running, abins?}` |
+| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, snapshot?, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running, abins?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -258,6 +258,7 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
+- `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).

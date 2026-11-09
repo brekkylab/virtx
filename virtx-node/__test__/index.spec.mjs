@@ -245,8 +245,10 @@ test('a volume is created and got', async () => {
 test('a command in a sandbox is a job whose log ends with its code', async () => {
   const client = Client.spawn(testServer)
   try {
-    const sandbox = await client.createSandbox('alpine:3.20')
+    const sandbox = await client.createSandbox('alpine:3.20', { abins: ['index'] })
     assert.equal(sandbox.running, true)
+    assert.deepEqual(sandbox.abins, ['index'])
+    assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
     const job = await sandbox.exec(['echo', 'hi'])

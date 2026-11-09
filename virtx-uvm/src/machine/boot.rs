@@ -13,7 +13,7 @@
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
 //!                           ports -- see [`Network`]
-//! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when there are any
+//! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag after the pivot
 //! virtio-fs  virtx          the agent, mounted at /.virtx after the pivot
@@ -49,12 +49,12 @@
 //!
 //! # `/abin` and `/alib`
 //!
-//! The `abin/` and `alib/` directories beside this executable, as `cargo xtask install` and a
-//! release put them there, each shared read-only and mounted at [`ABIN_DIR`] and [`ALIB_DIR`].
-//! `/abin` is the programs, and goes in front of the guest's `PATH`; `/alib` is what is not a
-//! program to run by name, such as the X server `display` starts. A host without one boots a
-//! machine without it rather than refusing to boot. Both are mounted before the volumes, so a
-//! volume asked for at either lands over it.
+//! [`MachineConfig::abin`], the programs a sandbox was made with, and the `alib/` directory beside
+//! this executable, as `cargo xtask install` and a release put it there, each shared read-only
+//! and mounted at [`ABIN_DIR`] and [`ALIB_DIR`]. `/abin` goes in front of the guest's `PATH`;
+//! `/alib` is what is not a program to run by name, such as the X server `display` starts. A
+//! machine with no `abin`, or a host with no `alib/`, boots without it rather than refusing to.
+//! Both are mounted before the volumes, so a volume asked for at either lands over it.
 //!
 //! # The host
 //!
@@ -125,12 +125,11 @@ const AGENT_DIR: &str = "/.virtx";
 const AGENT_TAG: &str = "virtx";
 const AGENT_NAME: &str = "virtx-uvm-guest";
 
-/// Where virtx's own programs are mounted in the guest, the tag they are attached under, and the
-/// directory beside this executable they are shared from.
+/// Where virtx's own programs are mounted in the guest, and the tag they are attached under.
 const ABIN_DIR: &str = "/abin";
 const ABIN_TAG: &str = "abin";
-const ABIN_HOST: &str = "abin";
-/// The same for what those programs run and load.
+/// The same for what those programs run and load, and the directory beside this executable it
+/// is shared from.
 const ALIB_DIR: &str = "/alib";
 const ALIB_TAG: &str = "alib";
 const ALIB_HOST: &str = "alib";
@@ -174,7 +173,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // below, and `apply` is what appends `init=/init.krun` to the kernel cmdline. The two
     // devices go in as environment because that is how libkrun's init is told where its root
     // is.
-    let abin = beside(ABIN_HOST);
+    let abin = machine.abin.clone();
+    #[cfg(windows)]
+    if let Some(dir) = &abin {
+        executable(dir);
+    }
     let alib = beside(ALIB_HOST);
     let env = env(&machine.config, abin.is_some());
     let mut init = krun_init::Config::builder()
@@ -547,7 +550,7 @@ fn utf8(path: &Path) -> Result<&str> {
     })
 }
 
-/// The directory `name` beside this executable, `abin/` or `alib/`, if there is one, with its
+/// The directory `name` beside this executable, such as `alib/`, if there is one, with its
 /// files made executable in the guest.
 fn beside(name: &str) -> Option<std::path::PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.join(name);
@@ -564,7 +567,7 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
 /// mode for an unpacked release to have brought. Every boot, so a directory replaced since is
-/// marked again. A file it fails on is said and skipped, as a host with no `abin/` is a machine
+/// marked again. A file it fails on is said and skipped, as a host with no `alib/` is a machine
 /// without it.
 #[cfg(windows)]
 fn executable(dir: &Path) {

@@ -35,7 +35,7 @@ components:
   server-stdio  the server a client spawns, as the `virtx-stdio` binary; also the VM process
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
-  abin          the executables every VM gets at /abin
+  abin          the executables a sandbox gets at /abin, those it names
   alib          what every VM gets at /alib, built from virtx-alibs/ in virtx machines into
                 build/alib/ -- on the server built into the same profile if there is one, else
                 on a downloaded one

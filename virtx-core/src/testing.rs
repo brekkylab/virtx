@@ -4,7 +4,8 @@
 //!
 //! It starts with the volume `v`, the snapshot `s`, and the snapshot `locked`, held by the
 //! sandbox `holder`, so its files answer `423` to everything. Each volume, snapshot and sandbox
-//! is a filesystem of its own, a sandbox's empty as it is made.
+//! is a filesystem of its own, a sandbox's empty as it is made. A sandbox has the `abins` it is
+//! made with, whatever they name.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
@@ -162,6 +163,7 @@ pub fn router() -> Router {
                 snapshot: Some("locked".into()),
                 running: true,
                 ports: Vec::new(),
+                abins: Vec::new(),
             },
             jobs: BTreeMap::new(),
             files: dav("/sandboxes/holder/files"),
@@ -654,6 +656,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
         snapshot: args.snapshot,
         running: true,
         ports: Vec::new(),
+        abins: args.abins,
     };
     data.sandboxes.insert(
         id.clone(),

@@ -51,8 +51,10 @@ async def test_a_volume_is_created_and_got(test_server: str) -> None:
 
 async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server: str) -> None:
     with Client.spawn(test_server) as client:
-        sandbox = await client.create_sandbox("alpine:3.20", snapshot="s", ports=[8000])
-        assert sandbox.snapshot == "s" and sandbox.running
+        sandbox = await client.create_sandbox(
+            "alpine:3.20", snapshot="s", ports=[8000], abins=["index"]
+        )
+        assert sandbox.snapshot == "s" and sandbox.running and sandbox.abins == ["index"]
         made = await client.create_snapshot("handed")
         on_handle = await client.create_sandbox(
             "alpine:3.20",
@@ -68,7 +70,7 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server
         await on_handle.remove()
         assert [port.port for port in sandbox.ports] == [8000]
         got = await client.get_sandbox(sandbox.id)
-        assert got.id == sandbox.id and got.ports == []
+        assert got.id == sandbox.id and got.ports == [] and got.abins == ["index"]
         assert sandbox.id in [item.id for item in await client.list_sandbox()]
 
         job = await sandbox.exec(["echo", "hi"])

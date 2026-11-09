@@ -484,19 +484,26 @@ async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
     server.client.remove_snapshot("work").await.unwrap();
 }
 
-/// `abin/` beside the server is the guest's `/abin`, read-only and first on `PATH`, with what
-/// each program is beside it; `alib/` is its `/alib`, read-only too, with what they run.
+/// The programs a sandbox is made with, from `abin/` beside the server, are the guest's `/abin`,
+/// read-only and first on `PATH`, with what each program is beside it, and no others; `alib/` is
+/// its `/alib`, read-only too, with what they run.
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_runs_the_programs_in_abin_by_name() {
     let server = Server::spawn("abin");
     server.pull_image("alpine:3.20").await;
-    let id = server
+    let made = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(
+            &SandboxCreateArgs::new("alpine:3.20")
+                .abin("index")
+                .abin("docread")
+                .abin("display"),
+        )
         .await
-        .unwrap()
-        .id;
+        .unwrap();
+    assert_eq!(made.abins, ["index", "docread", "display"]);
+    let id = made.id;
 
     let (lines, ended) = server
         .exec(&id, &["sh", "-c", "command -v index"], None)
@@ -509,6 +516,8 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
     }
     let (_, ended) = server.exec(&id, &["touch", "/abin/x"], None).await;
     assert_ne!(ended.unwrap(), 0, "/abin is read-only");
+    let (_, ended) = server.exec(&id, &["rm", "-f", "/abin/index"], None).await;
+    assert_ne!(ended.unwrap(), 0, "/abin/index cannot be removed");
     let (_, ended) = server.exec(&id, &["test", "-x", "/alib/Xvfb"], None).await;
     assert_eq!(ended.unwrap(), 0, "/alib/Xvfb");
     let (lines, ended) = server
@@ -552,6 +561,42 @@ async fn a_sandbox_runs_the_programs_in_abin_by_name() {
         "{lines:?}"
     );
     server.client.remove_sandbox(&id).await.unwrap();
+
+    let only = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").abin("index"))
+        .await
+        .unwrap()
+        .id;
+    let (lines, ended) = server.exec(&only, &["ls", "-R", "/abin"], None).await;
+    assert_eq!(ended.unwrap(), 0, "{lines:?}");
+    assert!(lines.iter().any(|line| line == "index"), "{lines:?}");
+    assert!(!lines.iter().any(|line| line == "docread"), "{lines:?}");
+    server.client.remove_sandbox(&only).await.unwrap();
+
+    let none = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let (_, ended) = server
+        .exec(&none, &["test", "-e", "/abin/index"], None)
+        .await;
+    assert_ne!(
+        ended.unwrap(),
+        0,
+        "a sandbox made with no abins has no /abin"
+    );
+    server.client.remove_sandbox(&none).await.unwrap();
+
+    for refused in ["nope", "skills", "../virtx-stdio"] {
+        let args = SandboxCreateArgs::new("alpine:3.20").abin(refused);
+        assert!(
+            server.client.create_sandbox(&args).await.is_err(),
+            "{refused}"
+        );
+    }
 }
 
 /// A command finds `/alib`'s libraries for its own C library after the image's on

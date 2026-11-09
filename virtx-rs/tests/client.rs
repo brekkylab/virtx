@@ -210,11 +210,14 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .create_sandbox(
             &SandboxCreateArgs::new("alpine:3.20")
                 .snapshot(snapshot.name())
-                .readonly_volume(volume.name(), "/data"),
+                .readonly_volume(volume.name(), "/data")
+                .abin("index"),
         )
         .wait()
         .unwrap();
     assert_eq!(on_handles.info().snapshot.as_deref(), Some("handed"));
+    let got = client.get_sandbox(on_handles.id()).wait().unwrap();
+    assert_eq!(got.info().abins, ["index"]);
     on_handles.remove().unwrap_wait();
     sandbox.create_dir_all("work/dir").unwrap_wait();
     sandbox

@@ -18,8 +18,9 @@ pub struct Sandbox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
 
-    /// Whether its VM is up now. One that is not, such as one whose VM has exited, is still held
-    /// until it is removed.
+    /// Whether it takes processes: `false` once its VM has exited on its own. One whose VM the
+    /// server stopped for want of use is booted again by the next job, and is `true`; one that
+    /// is `false` is still held until it is removed.
     pub running: bool,
 
     /// Where each port it opened is reached from, in the order asked for: in what making it

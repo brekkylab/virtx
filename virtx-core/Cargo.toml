@@ -116,6 +116,8 @@ server = [
     "dep:http",
     "dep:http-body",
     "dep:tokio",
+    "dep:serde_json",
+    "dep:futures-util",
 ]
 ffi = ["client"]
 cli = ["client", "dep:clap", "dep:libc", "tokio/signal"]

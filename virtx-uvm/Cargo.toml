@@ -21,8 +21,8 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"
 ruzstd = "0.9"
-# A mount's source, as the protocol spells it.
-virtx-core = { workspace = true }
+# A mount's source, as the protocol spells it, and a sandbox's args, jobs and their logs.
+virtx-core = { workspace = true, features = ["server"] }
 # A layer's conversion is CPU that is moved off the runtime's threads, a served volume's
 # stores are waited on from libkrun's threads, and a VM is a process of its own.
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }

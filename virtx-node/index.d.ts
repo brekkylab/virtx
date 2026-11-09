@@ -4,7 +4,13 @@
 export const LIBRARY_ENV: 'VIRTX_CORE_LIB'
 
 /** A request failed: the server's error, the transport's, or the library's. */
-export class VirtxError extends Error {}
+export class VirtxError extends Error {
+  /**
+   * The HTTP status the server refused the request with, if it did: `404` for what does not
+   * exist, `409` for what is in use or has ended, and the like.
+   */
+  status: number | null
+}
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
 export function load(file: string): void

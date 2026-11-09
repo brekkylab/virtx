@@ -20,7 +20,6 @@
 
 use std::{
     collections::BTreeMap,
-    convert::Infallible,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -33,11 +32,8 @@ use axum::{
 };
 use bytes::Bytes;
 use dav_server::{DavHandler, memfs::MemFs};
-use futures_util::Stream;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
-use sse_stream::{Sse, SseBody};
-use tokio::sync::watch;
 
 use crate::{
     image::{
@@ -49,6 +45,7 @@ use crate::{
         SandboxJobKind, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
     },
     snapshot::{SnapshotCreateArgs, SnapshotListOutputItem},
+    transport::Log,
     volume::{
         VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
     },
@@ -59,97 +56,6 @@ use crate::{
 /// cbindgen:ignore
 pub const LOG_LIMIT: usize = 8;
 
-/// A job's log, and who waits on it.
-struct Log<E> {
-    state: Mutex<LogState<E>>,
-    changed: watch::Sender<()>,
-}
-
-struct LogState<E> {
-    entries: Vec<E>,
-    truncated: bool,
-    ended: bool,
-    /// The job was removed: a reader's stream ends where it is.
-    removed: bool,
-}
-
-impl<E: Clone> Log<E> {
-    fn new() -> Arc<Log<E>> {
-        Arc::new(Log {
-            state: Mutex::new(LogState {
-                entries: Vec::new(),
-                truncated: false,
-                ended: false,
-                removed: false,
-            }),
-            changed: watch::channel(()).0,
-        })
-    }
-
-    /// Keep `entry`, unless the log is past its limit, where `truncated` is kept once instead.
-    fn push(&self, entry: E, truncated: E) {
-        let mut state = self.state.lock().unwrap();
-        if state.ended {
-            return;
-        }
-        if state.entries.len() < LOG_LIMIT {
-            state.entries.push(entry);
-        } else if !state.truncated {
-            state.truncated = true;
-            state.entries.push(truncated);
-        }
-        drop(state);
-        self.changed.send_replace(());
-    }
-
-    /// Keep `end` last. False if the log had ended already.
-    fn end(&self, end: E) -> bool {
-        let mut state = self.state.lock().unwrap();
-        if state.ended {
-            return false;
-        }
-        state.ended = true;
-        state.entries.push(end);
-        drop(state);
-        self.changed.send_replace(());
-        true
-    }
-
-    fn remove(&self) {
-        self.state.lock().unwrap().removed = true;
-        self.changed.send_replace(());
-    }
-
-    /// The entries after the `after`th, as each comes, until the end or the job's removal.
-    fn read(self: Arc<Self>, after: usize) -> impl Stream<Item = (usize, E)> + Send
-    where
-        E: Send + 'static,
-    {
-        async_stream::stream! {
-            let mut changed = self.changed.subscribe();
-            let mut next = after;
-            loop {
-                let (entries, done) = {
-                    let state = self.state.lock().unwrap();
-                    let entries = state.entries.get(next..).unwrap_or_default().to_vec();
-                    // Ended, every entry is among these.
-                    (entries, state.removed || state.ended)
-                };
-                for entry in entries {
-                    next += 1;
-                    yield (next, entry);
-                }
-                if done {
-                    break;
-                }
-                if changed.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
-
 /// An image job, and its log.
 struct ImageJobState {
     job: Mutex<ImageJob>,
@@ -158,13 +64,12 @@ struct ImageJobState {
 
 impl ImageJobState {
     fn end(&self, end: ImageJobEnd) {
-        {
+        let (digest, error) = (end.digest.clone(), end.error.clone());
+        self.log.end(ImageJobEntry::End(end), || {
             let mut job = self.job.lock().unwrap();
             job.running = false;
-            job.digest.clone_from(&end.digest);
-            job.error.clone_from(&end.error);
-        }
-        self.log.end(ImageJobEntry::End(end));
+            (job.digest, job.error) = (digest, error);
+        });
     }
 }
 
@@ -178,21 +83,17 @@ struct SandboxJobState {
 
 impl SandboxJobState {
     fn write(&self, entry: SandboxJobEntry) {
-        self.log.push(entry, SandboxJobEntry::Truncated {});
+        self.log.push(entry);
     }
 
     /// End its process with `code`, if it runs still.
     fn end(&self, code: i32) {
-        {
-            let mut job = self.job.lock().unwrap();
-            if !job.running {
-                return;
-            }
-            job.running = false;
-            job.code = Some(code);
-        }
-        *self.stdin.lock().unwrap() = false;
-        self.log.end(SandboxJobEntry::End(SandboxJobEnd { code }));
+        self.log
+            .end(SandboxJobEntry::End(SandboxJobEnd { code }), || {
+                let mut job = self.job.lock().unwrap();
+                (job.running, job.code) = (false, Some(code));
+                *self.stdin.lock().unwrap() = false;
+            });
     }
 }
 
@@ -352,20 +253,11 @@ fn body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
 }
 
 /// The entries of `log` after the one `Last-Event-ID` in `headers` names, as an event stream.
-fn events<E: Serialize + Clone + Send + 'static>(
+fn events<E: Serialize + Clone + Send + Sync + 'static>(
     log: Arc<Log<E>>,
     headers: &HeaderMap,
 ) -> Response {
-    let after = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let events = futures_util::StreamExt::map(log.read(after), |(id, entry)| {
-        let data = serde_json::to_string(&entry).unwrap();
-        Ok::<_, Infallible>(Sse::default().id(id.to_string()).data(data))
-    });
-    let mut response = axum::body::Body::new(SseBody::new(events)).into_response();
+    let mut response = axum::body::Body::from_stream(log.events(headers)).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
@@ -436,11 +328,9 @@ async fn start_image_job(
             digest: None,
             error: None,
         }),
-        log: Log::new(),
+        log: Log::new(LOG_LIMIT, ImageJobEntry::Truncated {}),
     });
-    state
-        .log
-        .push(ImageJobEntry::Log(line), ImageJobEntry::Truncated {});
+    state.log.push(ImageJobEntry::Log(line));
     if fails {
         state.end(ImageJobEnd {
             digest: None,
@@ -850,7 +740,7 @@ async fn exec(State(shared): State<Shared>, Path(id): Path<String>, request: Byt
             code: None,
         }),
         stdin: Mutex::new(args.stdin),
-        log: Log::new(),
+        log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
     });
     let rest = &args.cmd[1..];
     match program.as_str() {

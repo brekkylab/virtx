@@ -45,6 +45,12 @@ pub struct MachineConfig {
     /// Where the machine's writes go. `None` is a temporary one, gone with the machine.
     pub snapshot: Option<Snapshot>,
 
+    /// Whether whoever starts the machine holds [`snapshot`](MachineConfig::snapshot)'s lock
+    /// for it, for as long as the machine runs and past it; else the machine takes the lock
+    /// itself, and lets go of it as it ends.
+    #[serde(default)]
+    pub snapshot_held: bool,
+
     /// How big it is, and where it may connect to.
     pub spec: MachineSpec,
 
@@ -411,6 +417,7 @@ mod tests {
                 name: "work".to_string(),
                 path: PathBuf::from("/snapshot/work.ext4"),
             }),
+            snapshot_held: true,
             spec: MachineSpec {
                 vcpus: 2,
                 ram_mib: 2048,

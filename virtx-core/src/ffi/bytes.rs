@@ -5,6 +5,44 @@ use std::{ffi::c_int, ptr, slice};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{VIRTX_ERROR, VIRTX_OK};
+use crate::Error;
+
+/// Why a call failed, as C reads it: `{"message": "..."}`, with `"status": 404` beside it when
+/// the server refused the request with that HTTP status.
+#[derive(Debug, Serialize)]
+pub(crate) struct Failure {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Failure {
+        Failure {
+            message,
+            status: None,
+        }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Failure {
+        message.to_owned().into()
+    }
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Failure {
+        let status = match &error {
+            Error::Status(status, _) => Some(*status),
+            _ => None,
+        };
+        Failure {
+            message: error.to_string(),
+            status,
+        }
+    }
+}
 
 /// Bytes this library wrote, for C to free with `virtx_bytes_free`.
 #[repr(C)]
@@ -35,17 +73,19 @@ pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Re
 }
 
 /// `output` as a status, and its JSON or its error's.
-pub(crate) fn encode<T: Serialize>(output: Result<T, String>) -> (c_int, Vec<u8>) {
-    let encoded = output.and_then(|output| serde_json::to_vec(&output).map_err(|e| e.to_string()));
-    match encoded {
-        Ok(bytes) => (VIRTX_OK, bytes),
-        Err(message) => failure(message),
+pub(crate) fn encode<T: Serialize>(output: Result<T, impl Into<Failure>>) -> (c_int, Vec<u8>) {
+    match output.map_err(Into::into) {
+        Ok(output) => match serde_json::to_vec(&output) {
+            Ok(bytes) => (VIRTX_OK, bytes),
+            Err(e) => failure(e.to_string()),
+        },
+        Err(failed) => failure(failed),
     }
 }
 
-/// `VIRTX_ERROR`, and `message` as a JSON string.
-pub(crate) fn failure(message: impl Into<String>) -> (c_int, Vec<u8>) {
-    let bytes = serde_json::to_vec(&message.into()).expect("a string encodes");
+/// `VIRTX_ERROR`, and `failed` as a [`Failure`]'s JSON.
+pub(crate) fn failure(failed: impl Into<Failure>) -> (c_int, Vec<u8>) {
+    let bytes = serde_json::to_vec(&failed.into()).expect("a failure encodes");
     (VIRTX_ERROR, bytes)
 }
 
@@ -60,4 +100,32 @@ pub(crate) unsafe fn write(out: *mut VirtxBytes, bytes: Vec<u8>) {
         len: bytes.len(),
     };
     unsafe { *out = written };
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn written(failed: impl Into<Failure>) -> Value {
+        let (status, bytes) = failure(failed);
+        assert_eq!(status, VIRTX_ERROR);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_failure_carries_the_status_the_server_refused_with() {
+        assert_eq!(
+            written(Error::Status(404, "not_found: no such file".into())),
+            json!({
+                "message": "the server answered 404 Not Found: not_found: no such file",
+                "status": 404,
+            })
+        );
+        assert_eq!(
+            written(Error::Transport("the session ended".into())),
+            json!({"message": "the session ended"})
+        );
+    }
 }

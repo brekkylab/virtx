@@ -1,7 +1,8 @@
 //! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
 //! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
-//! ([`sse`]), and the files of a volume or a snapshot over WebDAV ([`webdav`]).
+//! ([`sse`], whose server end keeps the log too), and the files of a volume or a snapshot over
+//! WebDAV ([`webdav`]).
 //!
 //! The client end is the `client` feature, the server end the `server` feature; the types
 //! [`webdav`]'s requests name are always built.
@@ -26,6 +27,8 @@ pub(crate) use http::{segment, segments};
 #[cfg(feature = "server")]
 pub use server::serve_stdio;
 pub use sse::LogEntry;
+#[cfg(feature = "server")]
+pub use sse::server::Log;
 pub use webdav::{
     DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot, FileWriteArgs,
     Metadata,

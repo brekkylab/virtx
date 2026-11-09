@@ -29,7 +29,7 @@ A page is rendered twice, by the preview and by virtx.sh, so it uses only what b
   `tableOfContents`, ...).
 - Starlight's own components, imported from `@astrojs/starlight/components` (`Tabs`, `TabItem`,
   `Aside`, ...). Nothing imported from anywhere else: virtx.sh's files are not here.
-- Links to other pages as absolute paths with `/docs/`: `[Ports](/docs/guides/ports/)`. They
+- Links to other pages as absolute paths with `/docs/`: `[Networks and ports](/docs/guides/networks-ports/)`. They
   resolve the same in both, and the link check verifies them.
 - Links to virtx.sh's own pages (`/signin/`, `/signup/`) as plain paths. The preview does not
   have them; add one to `SITE_PAGES` in `preview/linkcheck.mjs` before linking to it.

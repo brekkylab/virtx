@@ -37,10 +37,10 @@ impl From<&str> for Failure {
 
 impl From<Error> for Failure {
     fn from(error: Error) -> Failure {
-        let (status, body) = match &error {
-            Error::Status(status, _) => (Some(*status), None),
-            Error::Refusal { status, body, .. } => (Some(*status), body.clone()),
-            _ => (None, None),
+        let status = error.status();
+        let body = match &error {
+            Error::Refusal { body, .. } => body.clone(),
+            _ => None,
         };
         Failure {
             message: error.to_string(),

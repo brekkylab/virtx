@@ -218,3 +218,46 @@ async def test_a_webdav_non_json_refusal_raises_without_quoting_html() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+async def test_a_webdav_plain_text_refusal_keeps_its_message() -> None:
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/volumes/v":
+                body = b'{"name": "v", "size": 0}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            body = b"no volume here is named v"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    host, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with Client.connect(f"http://{host}:{port}/") as client:
+            volume = await client.get_volume("v")
+            with pytest.raises(VirtxError) as exc_info:
+                await volume.read_file("a.txt")
+            err = exc_info.value
+            assert err.status == 404
+            assert err.body is None
+            assert str(err) == "the server answered 404 Not Found: no volume here is named v"
+    finally:
+        server.shutdown()
+        server.server_close()

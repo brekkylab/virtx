@@ -7,13 +7,17 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 
-    /// An image, a job or anything else asked for that is not there.
+    /// A sandbox, an image, a job or anything else asked for that is not there.
     #[error("{0}")]
     NotFound(String),
 
     /// What this host cannot give, such as a GPU it was built without.
     #[error("{0}")]
     Unsupported(String),
+
+    /// A name, an id or a port another has already.
+    #[error("{0}")]
+    Exists(String),
 
     /// A command the guest did not start, with why.
     #[error("{0}")]
@@ -27,6 +31,27 @@ pub enum Error {
     #[error("{0}")]
     JobEnded(&'static str),
 
+    /// What is asked of a sandbox while it runs, and it is stopped.
+    #[error("{0}")]
+    Stopped(String),
+
+    /// What is asked of a sandbox while it is stopped, and it runs.
+    #[error("{0}")]
+    Running(String),
+
+    /// Refused by the server's [`Hooks`](super::Hooks), as it says: an HTTP status, and the
+    /// `code` and `message` of its body.
+    #[error("{message}")]
+    Refused {
+        status: u16,
+        code: &'static str,
+        message: String,
+    },
+
+    /// Something on this host that should not have failed.
+    #[error("{0}")]
+    Failed(String),
+
     #[error(transparent)]
     Image(#[from] ImageStoreError),
 
@@ -38,6 +63,9 @@ pub enum Error {
 
     #[error(transparent)]
     Machine(#[from] MachineError),
+
+    #[error(transparent)]
+    Build(#[from] crate::BuildError),
 
     /// Blocking work moved off the runtime that panicked or was cancelled.
     #[error(transparent)]

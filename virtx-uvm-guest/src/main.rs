@@ -664,7 +664,7 @@ fn exec_tty(out: &Out, terminals: &Terminals, cmd: Vec<String>, cols: u16, rows:
 /// A new pty, `cols` by `rows`: its master end, and the end the process is given.
 fn pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (-1, -1);
-    let mut size = window(cols, rows);
+    let size = window(cols, rows);
     // SAFETY: both out-pointers are valid; no name or termios is asked for.
     let opened = unsafe {
         libc::openpty(
@@ -672,7 +672,7 @@ fn pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            &size,
         )
     };
     if opened == -1 {

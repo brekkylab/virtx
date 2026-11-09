@@ -291,6 +291,7 @@ dependencies = [
  "axum-core",
  "base64 0.22.1",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -304,6 +305,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sha1",
  "sync_wrapper",
  "tokio",
@@ -1957,7 +1960,7 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 [[package]]
 name = "krun-arch"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "acpi_tables",
  "krun-arch-gen",
@@ -1977,12 +1980,12 @@ dependencies = [
 [[package]]
 name = "krun-arch-gen"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 
 [[package]]
 name = "krun-cpuid"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -1992,7 +1995,7 @@ dependencies = [
 [[package]]
 name = "krun-devices"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "bitflags 1.3.2",
  "caps",
@@ -2025,7 +2028,7 @@ dependencies = [
 [[package]]
 name = "krun-display"
 version = "0.1.0"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",
@@ -2037,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "krun-hvf"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "crossbeam-channel",
  "krun-arch",
@@ -2048,7 +2051,7 @@ dependencies = [
 [[package]]
 name = "krun-init-blob"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "ffier",
  "libkrun",
@@ -2060,7 +2063,7 @@ dependencies = [
 [[package]]
 name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "krun-utils",
  "vm-memory",
@@ -2069,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "krun-polly"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "krun-utils",
  "libc",
@@ -2078,7 +2081,7 @@ dependencies = [
 [[package]]
 name = "krun-smbios"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "vm-memory",
 ]
@@ -2086,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "krun-utils"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -2101,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "krun-whp"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "log",
  "windows-sys 0.61.2",
@@ -2147,7 +2150,7 @@ dependencies = [
 [[package]]
 name = "libkrun"
 version = "2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=eef24aa8#eef24aa820ab048f0bad78e2d01d6dd1e18a3fad"
+source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
 dependencies = [
  "bitflags 2.13.1",
  "bzip2",
@@ -3299,6 +3302,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_repr"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4040,10 +4054,12 @@ dependencies = [
  "clap",
  "futures-util",
  "http",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tower-http",
@@ -4068,6 +4084,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "imago",
  "krun-display",
  "krun-init-blob",
  "libc",

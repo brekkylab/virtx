@@ -1,6 +1,6 @@
 //! The built binary, called as a client calls it: spawned, and spoken to on its stdin and
 //! stdout, over a `VIRTX_HOME` of its own -- the endpoints, and the files of its volumes and
-//! snapshots among them.
+//! sandboxes among them.
 
 use std::path::PathBuf;
 
@@ -9,8 +9,9 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
-    Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, MountSource,
-    MountType, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, SandboxVolume, Step,
+    Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, MountSource,
+    MountType, PortProtocol, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs, SandboxState, SandboxVolume, Step,
 };
 use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 
@@ -51,6 +52,19 @@ impl Server {
             home: self.home.clone(),
             owns: false,
         }
+    }
+
+    /// This server's client gone, and another server spawned over its home, as the next client
+    /// spawns one.
+    async fn again(mut self) -> Server {
+        // Gone before the next is spawned: its sandboxes stopped, and kept.
+        let nowhere = Client::connect("http://127.0.0.1:9", Auth::None, Default::default());
+        let gone = std::mem::replace(&mut self.client, nowhere.unwrap());
+        gone.close().await;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-stdio"));
+        command.env("VIRTX_HOME", &self.home);
+        self.client = Client::spawn(command).unwrap();
+        self
     }
 
     /// File an empty image under `tag` in the store the server reads, and answer its digest.
@@ -133,21 +147,13 @@ impl Drop for Server {
 
 fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
     match answered {
-        Err(Error::Status(status, _)) => status,
+        Err(Error::Status(status, _) | Error::Refusal { status, .. }) => status,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
 
 fn names(entries: Vec<DirEntry>) -> Vec<String> {
     entries.into_iter().map(|entry| entry.name).collect()
-}
-
-/// A snapshot held by this process, as a machine over it would hold it.
-fn hold(server: &Server, snapshot: &str) -> std::fs::File {
-    let lock =
-        std::fs::File::create(server.home.join(format!("snapshot/{snapshot}.ext4.lock"))).unwrap();
-    lock.try_lock().unwrap();
-    lock
 }
 
 #[tokio::test]
@@ -164,68 +170,6 @@ async fn what_cannot_be_built_is_refused_before_it_starts() {
         .await;
     assert_eq!(status(built), 400);
     assert_eq!(server.client.list_image_job().await.unwrap(), []);
-}
-
-#[tokio::test]
-async fn creates_lists_and_removes_a_snapshot() {
-    let server = Server::spawn("snapshot");
-    let created = server
-        .client
-        .create_snapshot(Some("work"), Some(1))
-        .await
-        .unwrap();
-    assert_eq!(created.name, "work");
-    assert!(!created.in_use);
-
-    let listed = server.client.list_snapshot().await.unwrap();
-    assert_eq!(listed, std::slice::from_ref(&created));
-    assert_eq!(server.client.get_snapshot("work").await.unwrap(), created);
-    assert!(server.home.join("snapshot/work.ext4").is_file());
-
-    server.client.remove_snapshot("work").await.unwrap();
-    assert_eq!(server.client.list_snapshot().await.unwrap(), []);
-    assert_eq!(status(server.client.remove_snapshot("work").await), 404);
-    assert_eq!(status(server.client.get_snapshot("work").await), 404);
-}
-
-#[tokio::test]
-async fn what_cannot_be_a_snapshot_is_refused() {
-    let server = Server::spawn("snapshot-refused");
-    let create =
-        async |name: Option<&str>, disk_gib| server.client.create_snapshot(name, disk_gib).await;
-    create(Some("taken"), Some(1)).await.unwrap();
-
-    assert_eq!(status(create(Some("taken"), Some(1)).await), 409);
-    assert_eq!(status(create(Some("zero"), Some(0)).await), 400);
-    for name in ["../out", ".hidden", "-flag", "spa ce"] {
-        assert_eq!(status(create(Some(name), Some(1)).await), 400, "{name:?}");
-    }
-
-    // One with no name is given one.
-    let picked = create(None, None).await.unwrap().name;
-    let listed = server.client.list_snapshot().await.unwrap();
-    assert!(listed.iter().any(|item| item.name == picked), "{listed:?}");
-}
-
-#[tokio::test]
-async fn a_snapshot_in_use_is_listed_so_and_not_removed() {
-    let server = Server::spawn("snapshot-held");
-    server
-        .client
-        .create_snapshot(Some("held"), Some(1))
-        .await
-        .unwrap();
-
-    // Locked by this process, as a VM over it would: the lock is the file beside the snapshot.
-    let lock = std::fs::File::create(server.home.join("snapshot/held.ext4.lock")).unwrap();
-    lock.try_lock().unwrap();
-    let listed = server.client.list_snapshot().await.unwrap();
-    assert!(listed[0].in_use);
-    assert_eq!(status(server.client.remove_snapshot("held").await), 409);
-
-    drop(lock);
-    server.client.remove_snapshot("held").await.unwrap();
-    assert!(!server.home.join("snapshot/held.ext4.lock").exists());
 }
 
 #[tokio::test]
@@ -313,7 +257,7 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
 
     for ports in [vec![0], vec![8080, 8080]] {
         let mut args = here();
-        args.ports = ports;
+        args.ports = ports.into_iter().map(Into::into).collect();
         assert_eq!(refused(args).await, 400);
     }
     let mut args = here();
@@ -331,8 +275,8 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
         404
     );
     let mut args = here();
-    args.snapshot = Some("missing".into());
-    assert_eq!(refused(args).await, 404);
+    args.disk_gib = Some(0);
+    assert_eq!(refused(args).await, 400);
     let mut args = here();
     args.volumes = vec![SandboxVolume {
         volume: "missing".into(),
@@ -355,40 +299,27 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
 /// guest kernel where libkrun finds it.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
+async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
     let server = Server::spawn("sandbox");
     server.pull_image("alpine:3.20").await;
-    server
-        .client
-        .create_snapshot(Some("work"), Some(1))
-        .await
-        .unwrap();
     server.client.create_volume(Some("data")).await.unwrap();
-    let create = async || {
-        let mut args = SandboxCreateArgs::new("alpine:3.20");
-        args.snapshot = Some("work".into());
-        args.volumes = vec![SandboxVolume {
-            volume: "data".into(),
-            path: "/data".into(),
-            readonly: false,
-        }];
-        server.client.create_sandbox(&args).await
-    };
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.name = Some("work".into());
+    args.volumes = vec![SandboxVolume {
+        volume: "data".into(),
+        path: "/data".into(),
+        readonly: false,
+    }];
 
-    let id = create().await.unwrap().id;
-    // One sandbox at a time on a snapshot, and its files are its alone meanwhile.
-    assert_eq!(status(create().await), 409);
-    let snapshot = FileRoot::Snapshot("work".into());
-    assert_eq!(status(server.client.read_dir(&snapshot, "").await), 423);
-    assert_eq!(
-        status(server.client.write_file(&snapshot, "x", "y", None).await),
-        423
-    );
+    let id = server.client.create_sandbox(&args).await.unwrap().id;
+    // One name to one sandbox.
+    assert_eq!(status(server.client.create_sandbox(&args).await), 409);
     let listed = server.client.list_sandbox().await.unwrap();
     assert_eq!(listed.len(), 1);
     // Its machine is up from its making.
-    assert!(listed[0].running);
-    assert_eq!(listed[0].snapshot.as_deref(), Some("work"));
+    assert_eq!(listed[0].state, SandboxState::Running);
+    assert_eq!(listed[0].name.as_deref(), Some("work"));
+    assert!(server.home.join(format!("snapshot/{id}.ext4")).is_file());
 
     let (mut lines, ended) = server
         .exec(&id, &["sh", "-c", "echo one; echo two >&2; exit 3"], None)
@@ -439,7 +370,7 @@ async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
         .await;
     assert_eq!(lines, ["0"]);
 
-    // What is written to the snapshot needs no `sync`: removing the sandbox does it.
+    // What is written to its disk needs no `sync`: stopping the sandbox does it.
     let (_, ended) = server
         .exec(
             &id,
@@ -456,32 +387,49 @@ async fn a_sandbox_runs_jobs_on_its_snapshot_and_volumes() {
         std::fs::read_to_string(server.home.join("volume/data/files/shared")).unwrap(),
         "shared\n"
     );
+    let stopped = server.client.stop_sandbox(&id).await.unwrap();
+    assert_eq!(stopped.state, SandboxState::Stopped);
+
+    // Started again, by a job: what it wrote is on its disk still.
+    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+    assert_eq!(
+        server
+            .client
+            .find_sandbox("work")
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        SandboxState::Running
+    );
+
+    // Committed: an image another sandbox begins as this one is.
+    let job = server.client.commit_image(&id, "kept:v1").await.unwrap();
+    let ended: Vec<_> = server.client.image_job_log(&job.id, None).collect().await;
+    assert!(
+        server
+            .client
+            .get_image_job(&job.id)
+            .await
+            .unwrap()
+            .digest
+            .is_some(),
+        "{ended:?}"
+    );
+    let other = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("kept:v1"))
+        .await
+        .unwrap()
+        .id;
+    let (lines, ended) = server.exec(&other, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(server.client.remove_sandbox(&id).await), 404);
-
-    // What it wrote to its snapshot reads back over the files endpoint, and what is put there
-    // is in the snapshot for the next one, beside it.
-    let read = server
-        .client
-        .read_file(&snapshot, "root/kept", 0, None)
-        .await
-        .unwrap();
-    assert_eq!(&read[..], b"kept\n");
-    server
-        .client
-        .write_file(&snapshot, "root/put", "put\n", None)
-        .await
-        .unwrap();
-    let id = create().await.unwrap().id;
-    let (lines, ended) = server
-        .exec(&id, &["cat", "/root/kept", "/root/put"], None)
-        .await;
-    assert_eq!(
-        (lines, ended.unwrap()),
-        (vec!["kept".into(), "put".into()], 0)
-    );
-    server.client.remove_sandbox(&id).await.unwrap();
-    server.client.remove_snapshot("work").await.unwrap();
+    assert!(!server.home.join(format!("snapshot/{id}.ext4")).exists());
+    server.client.remove_sandbox(&other).await.unwrap();
 }
 
 #[tokio::test]
@@ -585,10 +533,57 @@ async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     }
 }
 
+/// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
-async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
-    let server = Server::spawn_with("sandbox-park", &[("VIRTX_PARK_AFTER_MS", "500")]);
+async fn a_sandbox_is_kept_across_a_server_started_again() {
+    let server = Server::spawn("kept");
+    server.pull_image("alpine:3.20").await;
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.name = Some("kept".into());
+    args.ports = vec![8000.into()];
+    let id = server.client.create_sandbox(&args).await.unwrap().id;
+    let (_, ended) = server
+        .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+    let ephemeral = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").ephemeral(true))
+        .await
+        .unwrap()
+        .id;
+
+    // Its client gone, the server stops it, and the next one over the home knows it stopped.
+    let server = server.again().await;
+    let found = server.client.find_sandbox("kept").await.unwrap().unwrap();
+    assert_eq!(
+        (found.id.as_str(), found.state),
+        (id.as_str(), SandboxState::Stopped)
+    );
+    assert_eq!(status(server.client.get_sandbox(&ephemeral).await), 404);
+    assert!(
+        !server
+            .home
+            .join(format!("snapshot/{ephemeral}.ext4"))
+            .exists()
+    );
+
+    // Started again, as it was left, its port answered where this server answers it.
+    let started = server.client.start_sandbox(&id).await.unwrap();
+    assert_eq!(started.state, SandboxState::Running);
+    assert_eq!(started.ports.len(), 1);
+    assert!(started.ports[0].url.starts_with("http://127.0.0.1:"));
+    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+    server.client.remove_sandbox(&id).await.unwrap();
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_sandbox_running_in_another_server_is_refused() {
+    let server = Server::spawn("beside");
     server.pull_image("alpine:3.20").await;
     let id = server
         .client
@@ -596,10 +591,47 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
         .await
         .unwrap()
         .id;
+    let (_, ended) = server
+        .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await;
+    assert_eq!(ended.unwrap(), 0);
+
+    // Its disk is held by the machine the first runs: the second starts it not, nor deletes
+    // it, nor reads its files.
+    let other = server.beside();
+    assert_eq!(
+        other.client.get_sandbox(&id).await.unwrap().state,
+        SandboxState::Stopped
+    );
+    assert_eq!(status(other.client.start_sandbox(&id).await), 409);
+    assert_eq!(status(other.client.remove_sandbox(&id).await), 409);
+    let root = FileRoot::Sandbox(id.clone());
+    assert_eq!(
+        status(other.client.read_text(&root, "root/kept").await),
+        409
+    );
+    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+
+    // Stopped there, it is the other's to start.
+    server.client.stop_sandbox(&id).await.unwrap();
+    let (lines, ended) = other.exec(&id, &["cat", "/root/kept"], None).await;
+    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
+    other.client.remove_sandbox(&id).await.unwrap();
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
+    let server = Server::spawn_with("auto-stop", &[("VIRTX_MINUTE_MS", "500")]);
+    server.pull_image("alpine:3.20").await;
+    let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
+    let id = server.client.create_sandbox(&args).await.unwrap().id;
+    let state = async || server.client.get_sandbox(&id).await.unwrap().state;
     let root = FileRoot::Sandbox(id.clone());
     // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
-    let still = ["sh", "-c", "ps | grep -c '[s]leep 1000'"];
 
     let (_, ended) = server
         .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
@@ -611,26 +643,22 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
     let (lines, ended) = server
         .exec(
             &id,
-            &["sh", "-c", "sleep 2; ps | grep -c '[s]leep 1000'"],
+            &["sh", "-c", "sleep 3; ps | grep -c '[s]leep 1000'"],
             None,
         )
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["1".into()], 0));
 
-    // Idle, it stops; a request to its files boots it again, over what it wrote.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    assert!(server.client.get_sandbox(&id).await.unwrap().running);
+    // Unused, it stops, and says so; its files are not read then, nor is it started for them.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(state().await, SandboxState::Stopped);
     assert_eq!(
-        server.client.read_text(&root, "root/kept").await.unwrap(),
-        "kept\n"
+        status(server.client.read_text(&root, "root/kept").await),
+        409
     );
-    let (lines, _) = server.exec(&id, &still, None).await;
-    assert_eq!(lines, ["0"]);
+    assert_eq!(state().await, SandboxState::Stopped);
 
-    // And so does a job.
-    let (_, ended) = server.exec(&id, &behind, None).await;
-    assert_eq!(ended.unwrap(), 0);
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // A job starts it again, over what it wrote.
     let (lines, _) = server
         .exec(
             &id,
@@ -639,29 +667,19 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
         )
         .await;
     assert_eq!(lines, ["kept", "0"]);
+    assert_eq!(state().await, SandboxState::Running);
 
-    // A write to its files boots it too, and what it wrote is there after it stops again.
-    let (_, ended) = server.exec(&id, &behind, None).await;
-    assert_eq!(ended.unwrap(), 0);
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // A request to its files is a use of it, and what it wrote is there after it stops again.
     server
         .client
         .write_file(&root, "root/written", "written\n", None)
         .await
         .unwrap();
-    let (lines, _) = server.exec(&id, &still, None).await;
-    assert_eq!(lines, ["0"]);
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    assert_eq!(
-        server
-            .client
-            .read_text(&root, "root/written")
-            .await
-            .unwrap(),
-        "written\n"
-    );
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(state().await, SandboxState::Stopped);
+    let (lines, _) = server.exec(&id, &["cat", "/root/written"], None).await;
+    assert_eq!(lines, ["written"]);
 
-    // Its own snapshot goes with it.
     server.client.remove_sandbox(&id).await.unwrap();
     let left = std::fs::read_dir(server.home.join("sandbox"))
         .unwrap()
@@ -669,82 +687,204 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote() {
     assert_eq!(left, 0);
 }
 
+/// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
-async fn a_parked_sandbox_holds_its_snapshot_against_another_server() {
-    let server = Server::spawn_with("snapshot-park", &[("VIRTX_PARK_AFTER_MS", "500")]);
+async fn a_sandbox_stopped_while_it_stops_unused_answers_once_it_has_synced() {
+    let server = Server::spawn_with("auto-stop-stop", &[("VIRTX_MINUTE_MS", "500")]);
     server.pull_image("alpine:3.20").await;
-    server
-        .client
-        .create_snapshot(Some("work"), Some(1))
-        .await
-        .unwrap();
-    let on_work = || {
-        let mut args = SandboxCreateArgs::new("alpine:3.20");
-        args.snapshot = Some("work".into());
-        args
-    };
-    let id = server.client.create_sandbox(&on_work()).await.unwrap().id;
-    let (_, ended) = server
-        .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
-        .await;
-    assert_eq!(ended.unwrap(), 0);
-
-    // Its machine stopped, the snapshot is still the sandbox's, to a server over the same home
-    // as much as to its own.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let other = server.beside();
-    let snapshot = FileRoot::Snapshot("work".into());
-    assert_eq!(status(other.client.remove_snapshot("work").await), 409);
-    assert_eq!(status(other.client.create_sandbox(&on_work()).await), 409);
-    assert_eq!(
-        status(other.client.write_file(&snapshot, "x", "y", None).await),
-        423
-    );
-    let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
-    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
-
-    // Removed, the sandbox lets it go.
-    server.client.remove_sandbox(&id).await.unwrap();
-    other.client.remove_snapshot("work").await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn a_sandbox_removed_while_its_machine_stops_answers_once_it_has_synced() {
-    let server = Server::spawn_with("snapshot-park-remove", &[("VIRTX_PARK_AFTER_MS", "500")]);
-    server.pull_image("alpine:3.20").await;
-    // The machine is parked about 500 ms after its last job ends, and syncs for a hundred or so:
-    // one removal per delay across that, each a sandbox on a snapshot of its own.
-    for delay in (450..=700).step_by(50) {
-        let name = format!("work-{delay}");
-        server
-            .client
-            .create_snapshot(Some(name.as_str()), Some(1))
-            .await
-            .unwrap();
-        let mut args = SandboxCreateArgs::new("alpine:3.20");
-        args.snapshot = Some(name.clone());
+    // It stops some 500 to 1000 ms after its last job ends, and syncs for a while: one stop
+    // asked for per delay across that.
+    for delay in (400..=1100).step_by(100) {
+        let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
         let id = server.client.create_sandbox(&args).await.unwrap().id;
         // Left in the guest's page cache, so stopping the machine takes the while it syncs.
         let (_, ended) = server
             .exec(
                 &id,
-                &["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=256"],
+                &["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=64"],
                 None,
             )
             .await;
         assert_eq!(ended.unwrap(), 0);
 
-        // Removed as its machine may be being parked, it answers once that machine has synced,
-        // so the snapshot holds all it wrote.
+        // Asked to stop as it may be stopping already, it answers once its machine has synced,
+        // so its disk holds all it wrote.
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        server.client.stop_sandbox(&id).await.unwrap();
+        let disk = std::fs::File::open(server.home.join(format!("snapshot/{id}.ext4"))).unwrap();
+        let tree = FsTree::from_ext4(disk).unwrap();
+        let size = match tree.entry(b"upper/root/big").unwrap() {
+            Some(Entry::File { data, .. }) => data.len(),
+            other => panic!("{other:?}, stopped after {delay} ms"),
+        };
+        assert_eq!(size, 64 << 20, "stopped after {delay} ms");
         server.client.remove_sandbox(&id).await.unwrap();
-        let snapshot = FileRoot::Snapshot(name);
-        let big = server.client.stat_file(&snapshot, "root/big").await;
-        let size = big.map(|big| big.size).map_err(|e| e.to_string());
-        assert_eq!(size, Ok(256 << 20), "removed after {delay} ms");
     }
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_port_is_opened_and_closed_as_the_sandbox_runs() {
+    let server = Server::spawn("port-opened");
+    server.pull_image("alpine:3.20").await;
+    let id = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let mut serve = SandboxExecArgs::new([
+        "sh",
+        "-c",
+        "while true; do echo hello | nc -l -p 8000; done",
+    ]);
+    serve.timeout_ms = Some(30_000);
+    server.client.exec_sandbox(&id, &serve).await.unwrap();
+
+    let args = SandboxPortOpenArgs {
+        label: Some("hello".into()),
+        protocol: Some(PortProtocol::Http),
+    };
+    let open = server
+        .client
+        .open_sandbox_port_with(&id, 8000, &args)
+        .await
+        .unwrap();
+    assert_eq!(open.label.as_deref(), Some("hello"));
+    let at = address(&open.url).to_owned();
+    assert_eq!(said(&at).await, b"hello\n");
+    // Opened again: where it is, its protocol kept.
+    let tcp = SandboxPortOpenArgs {
+        label: None,
+        protocol: Some(PortProtocol::Tcp),
+    };
+    let again = server.client.open_sandbox_port_with(&id, 8000, &tcp).await;
+    assert_eq!(status(again), 409);
+    let again = SandboxPortOpenArgs {
+        label: Some("hi".into()),
+        protocol: None,
+    };
+    let again = server
+        .client
+        .open_sandbox_port_with(&id, 8000, &again)
+        .await
+        .unwrap();
+    assert_eq!(
+        (again.url.as_str(), again.label.as_deref()),
+        (open.url.as_str(), Some("hi"))
+    );
+    let started = server.client.start_sandbox(&id).await.unwrap();
+    assert_eq!(started.ports, [again]);
+
+    // Closed: reached no more, and not opened again as it starts.
+    server.client.close_sandbox_port(&id, 8000).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(TcpStream::connect(&at).await.is_err());
+    assert!(server.client.close_sandbox_port(&id, 8000).await.is_err());
+    server.client.stop_sandbox(&id).await.unwrap();
+    assert_eq!(server.client.start_sandbox(&id).await.unwrap().ports, []);
+    server.client.remove_sandbox(&id).await.unwrap();
+}
+
+/// What a listener at `at` says, once something listens behind it.
+async fn said(at: &str) -> Vec<u8> {
+    let reading = async {
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(at).await {
+                let mut said = Vec::new();
+                let mut chunk = [0u8; 64];
+                while let Ok(n @ 1..) = stream.read(&mut chunk).await {
+                    said.extend_from_slice(&chunk[..n]);
+                    if said.ends_with(b"hello\n") {
+                        return said;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), reading)
+        .await
+        .expect("nothing answered")
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_job_s_stdin_is_written_and_its_log_answers_its_exec() {
+    let server = Server::spawn("stdin");
+    server.pull_image("alpine:3.20").await;
+    let id = server
+        .client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let client = &server.client;
+
+    let mut cat = SandboxExecArgs::new(["sh", "-c", "cat; echo done"]);
+    cat.stdin = true;
+    let job = client.exec_sandbox(&id, &cat).await.unwrap();
+    client
+        .write_sandbox_job_stdin(&id, &job.id, Some("one\ntwo\n"), false)
+        .await
+        .unwrap();
+    client
+        .write_sandbox_job_stdin(&id, &job.id, None::<String>, true)
+        .await
+        .unwrap();
+    let mut lines = Vec::new();
+    let mut log = client.sandbox_job_log(&id, &job.id, None);
+    while let Some(entry) = log.next().await {
+        match entry.unwrap().entry {
+            SandboxJobEntry::Stdout(line) => lines.push(line),
+            SandboxJobEntry::End(end) => {
+                assert_eq!(end.code, 0);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(lines, ["one", "two", "done"]);
+    // Its stdin closed, or one never given: refused.
+    let written = client
+        .write_sandbox_job_stdin(&id, &job.id, Some("x"), false)
+        .await;
+    assert_eq!(status(written), 409);
+    let plain = client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["sleep", "5"]))
+        .await
+        .unwrap();
+    let written = client
+        .write_sandbox_job_stdin(&id, &plain.id, Some("x"), false)
+        .await;
+    assert_eq!(status(written), 409);
+
+    // Its exec answered with its log, in one request.
+    let args = SandboxExecArgs::new(["sh", "-c", "echo héllo; exit 4"]);
+    let items: Vec<_> = client.exec_sandbox_with_log(&id, &args).collect().await;
+    let items: Vec<_> = items.into_iter().map(Result::unwrap).collect();
+    let SandboxExecItem::Job(job) = &items[0] else {
+        panic!("{items:?}");
+    };
+    assert_eq!(job.cmd, args.cmd);
+    let entries: Vec<_> = items[1..]
+        .iter()
+        .map(|item| match item {
+            SandboxExecItem::Log(entry) => entry.entry.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            SandboxJobEntry::Stdout("héllo".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 4 })
+        ]
+    );
+    server.client.remove_sandbox(&id).await.unwrap();
 }
 
 #[tokio::test]
@@ -865,122 +1005,15 @@ async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     let read = tokio::time::timeout(std::time::Duration::from_secs(10), fifo).await;
     assert_eq!(read.expect("a pipe held the files up"), "made\n");
 
+    // Stopped, its files are not reached, and it is not started for them.
+    server.client.stop_sandbox(&id).await.unwrap();
+    assert_eq!(status(client.read_dir(&root, "").await), 409);
+    assert_eq!(
+        server.client.get_sandbox(&id).await.unwrap().state,
+        SandboxState::Stopped
+    );
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.read_dir(&root, "").await), 404);
-}
-
-#[tokio::test]
-async fn the_files_of_a_snapshot_are_kept_in_its_image() {
-    let server = Server::spawn("snapshot-files");
-    server
-        .client
-        .create_snapshot(Some("work"), Some(1))
-        .await
-        .unwrap();
-    let client = &server.client;
-    let snapshot = FileRoot::Snapshot("work".into());
-
-    // What the format made, and nothing else.
-    assert_eq!(
-        names(client.read_dir(&snapshot, "").await.unwrap()),
-        [] as [&str; 0]
-    );
-
-    client.create_dir(&snapshot, "etc").await.unwrap();
-    client
-        .write_file(&snapshot, "etc/hostname", "guest\n", None)
-        .await
-        .unwrap();
-    assert_eq!(
-        status(client.write_file(&snapshot, "no/file", "x", None).await),
-        409
-    );
-    assert_eq!(status(client.create_dir(&snapshot, "etc").await), 405);
-    let read = client
-        .read_file(&snapshot, "etc/hostname", 0, None)
-        .await
-        .unwrap();
-    assert_eq!(&read[..], b"guest\n");
-    let read = client
-        .read_file(&snapshot, "etc/hostname", 1, Some(2))
-        .await
-        .unwrap();
-    assert_eq!(&read[..], b"ue");
-    let metadata = client.stat_file(&snapshot, "etc/hostname").await.unwrap();
-    assert_eq!((metadata.is_dir, metadata.size), (false, 6));
-    assert!(metadata.modified.is_some());
-    assert_eq!(
-        names(client.read_dir(&snapshot, "etc").await.unwrap()),
-        ["hostname"]
-    );
-
-    client
-        .rename_file(&snapshot, "etc/hostname", "hostname", false)
-        .await
-        .unwrap();
-    client
-        .copy_file(&snapshot, "hostname", "etc/copy", false)
-        .await
-        .unwrap();
-    assert_eq!(
-        status(
-            client
-                .copy_file(&snapshot, "hostname", "etc/copy", false)
-                .await
-        ),
-        412
-    );
-    client
-        .remove_file(&snapshot, "hostname", false)
-        .await
-        .unwrap();
-    assert_eq!(status(client.stat_file(&snapshot, "hostname").await), 404);
-
-    // In the image, as the next machine over it finds it.
-    let image = std::fs::File::open(server.home.join("snapshot/work.ext4")).unwrap();
-    let tree = FsTree::from_ext4(image).unwrap();
-    let paths: Vec<_> = tree
-        .walk()
-        .into_iter()
-        .map(|(path, ..)| String::from_utf8(path).unwrap())
-        .collect();
-    assert_eq!(
-        paths,
-        ["", "lost+found", "upper", "upper/etc", "upper/etc/copy"]
-    );
-    assert!(matches!(
-        tree.entry(b"upper/etc/copy").unwrap(),
-        Some(Entry::File { data, .. }) if data == b"guest\n"
-    ));
-
-    // At once: each request reads and writes the image whole, one after another.
-    let paths = ["etc/0", "etc/1", "etc/2", "etc/3"];
-    let writes = paths
-        .iter()
-        .map(|path| client.write_file(&snapshot, path, "x", None));
-    for written in futures_util::future::join_all(writes).await {
-        written.unwrap();
-    }
-    assert_eq!(
-        names(client.read_dir(&snapshot, "etc").await.unwrap()),
-        ["0", "1", "2", "3", "copy"]
-    );
-
-    // Held by a machine: nothing is read or written until it is let go.
-    let held = hold(&server, "work");
-    assert_eq!(status(client.read_dir(&snapshot, "").await), 423);
-    assert_eq!(
-        status(client.write_file(&snapshot, "x", "y", None).await),
-        423
-    );
-    drop(held);
-    client.remove_file(&snapshot, "etc", false).await.unwrap();
-    assert_eq!(
-        names(client.read_dir(&snapshot, "").await.unwrap()),
-        [] as [&str; 0]
-    );
-    let nobody = FileRoot::Snapshot("nobody".into());
-    assert_eq!(status(client.read_dir(&nobody, "").await), 404);
 }
 
 /// What a port's URL names, as `host:port`.
@@ -989,14 +1022,13 @@ fn address(url: &str) -> &str {
         .unwrap_or_else(|| panic!("{url} is a loopback URL"))
 }
 
-/// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
 async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let server = Server::spawn("port-reached");
     server.pull_image("alpine:3.20").await;
     let mut args = SandboxCreateArgs::new("alpine:3.20");
-    args.ports = vec![8000];
+    args.ports = vec![8000.into()];
     let created = server.client.create_sandbox(&args).await.unwrap();
     let at = address(&created.ports[0].url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
@@ -1044,19 +1076,13 @@ async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 /// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
-async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed() {
+async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
     let server = Server::spawn("killed");
     server.pull_image("alpine:3.20").await;
-    server
-        .client
-        .create_snapshot(Some("work"), Some(1))
-        .await
-        .unwrap();
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
-    args.snapshot = Some("work".into());
+    let args = SandboxCreateArgs::new("alpine:3.20");
     let id = server.client.create_sandbox(&args).await.unwrap().id;
 
-    // Synced, so committed, and then killed with the snapshot still mounted.
+    // Synced, so committed, and then stopped with its disk still mounted.
     let (lines, ended) = server
         .exec(
             &id,
@@ -1070,9 +1096,9 @@ async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed() {
         )
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["synced".into()], 0));
-    server.client.remove_sandbox(&id).await.unwrap();
+    server.client.stop_sandbox(&id).await.unwrap();
 
-    let path = server.home.join("snapshot/work.ext4");
+    let path = server.home.join(format!("snapshot/{id}.ext4"));
     let image = std::fs::read(&path).unwrap();
     let incompat = u32::from_le_bytes(image[1024 + 0x60..1024 + 0x64].try_into().unwrap());
     assert_ne!(incompat & 0x4, 0, "left needing its journal replayed");
@@ -1084,8 +1110,8 @@ async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed() {
         .count();
     assert_eq!(kept, 100);
 
-    // And the next machine over it finds the same.
-    let id = server.client.create_sandbox(&args).await.unwrap().id;
+    // And its next machine finds the same.
+    server.client.start_sandbox(&id).await.unwrap();
     let (lines, ended) = server.exec(&id, &["cat", "/root/kept/100"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["100".into()], 0));
 }

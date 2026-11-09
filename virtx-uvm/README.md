@@ -96,10 +96,12 @@ stacked over it by [`machine`](src/machine/):
 /dev/vda  erofs, read-only   the image's disk              ─┘
 ```
 
-A sandbox made without a snapshot gets one of its own, gone with it. A sandbox's machine is
-stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
-unless it says otherwise, `0` for never) and booted again over the same snapshot when something
-does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
+A sandbox's disk is a snapshot of its own, named by its id, kept from its making until it is
+deleted, with what lasts of the sandbox past its machine beside it, `sandbox/<id>.json`: a server
+started again knows each sandbox, stopped. A sandbox stops once nothing has used it for its
+`auto_stop_minutes` -- a minute being `VIRTX_MINUTE_MS` milliseconds where that is set -- or when
+told to, and starts again over the same disk when told to or for a job: see
+[`sandbox`](src/sandbox/). The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem

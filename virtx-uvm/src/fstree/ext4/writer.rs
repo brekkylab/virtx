@@ -593,8 +593,6 @@ fn journal_superblock(blocks: u32) -> Vec<u8> {
     sb
 }
 
-/// A directory entry as it is gathered: its name, inode number and file type.
-
 /// Every inode the tree has, numbered, with its directory entries packed: the root as
 /// inode 2 and the rest from 11 in the order the tree walks them. A hard link is one more
 /// name for an inode already numbered.

@@ -99,7 +99,7 @@ A request that fails is answered with an HTTP error status and a body:
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
-| `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
+| `409 Conflict` | `exists`, `in_use`, `ended`, `stopped` | A name already in use, something held by a sandbox, a job or a sandbox's VM that has ended, or what is asked of a sandbox while it runs and it is stopped. |
 | `413 Content Too Large` | `too_large` | The body is over the server's limit. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
@@ -443,6 +443,6 @@ A sandbox's files are its root filesystem as its processes see it, the volumes m
 - The server MAY leave out what is not a file to read or write, such as `/proc`, `/sys` and `/dev`, and what is neither a file nor a directory, such as a link or a device: it is not listed, and a request naming it is answered as if nothing were there.
 - A file a `PUT` makes is owned as one a process in the sandbox makes is; one it replaces keeps its mode and owner.
 - A write to a volume mounted `readonly` is refused with `403 Forbidden`.
-- A request to a sandbox that is stopped is refused with `409 Conflict`, `ended`: its files are read and written while it runs.
+- A request to a sandbox that is stopped is refused with `409 Conflict`, `stopped`, and does not start it: its files are read and written while it runs.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.

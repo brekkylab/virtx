@@ -1,5 +1,10 @@
 //! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, answered from this
 //! host's [`Home`]: one client is on the other end of stdio, so all of it is its.
+//!
+//! A sandbox's disk is a snapshot of the store's, named by its id, and what lasts past its
+//! machine is kept on disk beside it ([`Sandboxes`]): a server spawned again knows each,
+//! stopped. Its ports are on this host's loopback, each at an address this server picks once
+//! it first starts or opens it ([`Loopback`]).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -13,25 +18,27 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Path as Segments};
+use axum::extract::{Extension, Path as Segments, RawQuery};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
+use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpListener;
-use tokio::task::{AbortHandle, JoinSet};
+use tokio::task::AbortHandle;
 
 use virtx_core::{
-    ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
-    ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
+    ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs,
+    SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
+use virtx_uvm::sandbox::{Held, Hooks};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    Sandbox, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
+    build_step, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -41,87 +48,114 @@ type ImageJobOf = Job<ImageJob, ImageJobEntry>;
 /// flight has put it there and not yet pointed a reference at it.
 const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
+/// The header an exec answered with its log carries its job in, as JSON.
+const JOB_HEADER: &str = "virtx-job";
+
 /// What the endpoints answer from: the stores, and the sandboxes and jobs made from them.
 pub struct Home {
     images: ImageStore,
-    snapshots: SnapshotStore,
     volumes: VolumeStore,
-    /// The files of the snapshots and volumes, over WebDAV.
+    /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
-    /// The sandboxes, by id, until each is removed.
-    sandboxes: Mutex<HashMap<String, Held>>,
+    sandboxes: Sandboxes,
     /// The image jobs, by id, and what cancels each, until each is removed.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
 }
 
 impl Home {
-    /// The images in `images`, and the snapshots and volumes under `root`.
+    /// The images in `images`, and the volumes, sandboxes' disks and records under `root`.
     pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
-        Sandbox::sweep(&snapshots);
         let volumes = VolumeStore::new(root)?;
+        let vm: Vec<OsString> = vec![
+            std::env::current_exe()?.into(),
+            crate::MACHINE_SUBCOMMAND.into(),
+        ];
+        let sandboxes = Sandboxes::new(
+            images.clone(),
+            snapshots.clone(),
+            volumes.clone(),
+            root,
+            vm.clone(),
+            Arc::new(Loopback),
+        )?;
         Ok(Home {
             images,
-            files: Files::new(snapshots.clone(), volumes.clone()),
-            snapshots,
+            files: Files::new(snapshots, volumes.clone()),
             volumes,
-            vm: vec![
-                std::env::current_exe()?.into(),
-                crate::MACHINE_SUBCOMMAND.into(),
-            ],
-            sandboxes: Mutex::default(),
+            vm,
+            sandboxes,
             image_jobs: Mutex::default(),
         })
     }
 
-    /// Close every sandbox here, as removing each does, side by side: blocks until each
-    /// machine has stopped and synced what it wrote.
+    /// Its sandboxes, stopped once unused for their `auto_stop_minutes` and deleted once kept
+    /// past their `auto_delete_days`, from now on.
+    pub fn tend(&self) {
+        self.sandboxes.spawn_tending();
+    }
+
+    /// Stop every sandbox here, side by side: blocks until each machine has stopped and synced
+    /// what it wrote. Each is kept, stopped, for the next server over this home -- an ephemeral
+    /// one, deleted.
     pub fn close_all(&self) {
-        let closed: Vec<_> = self
-            .sandboxes
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, held)| held.sandbox)
-            .collect();
-        std::thread::scope(|scope| {
-            for sandbox in &closed {
-                scope.spawn(|| sandbox.close());
-            }
-        });
+        self.sandboxes.close_all_blocking();
     }
+}
 
-    fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .get(id)
-            .map(|held| Arc::clone(&held.sandbox))
-            .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
-    }
+/// What answers a sandbox's ports on this host: each on its loopback, which only this machine
+/// reaches, at an address picked as the port is first started or opened, and taken to the
+/// sandbox's machine while it runs.
+struct Loopback;
 
-    /// Whether a sandbox here stands on the snapshot `name`.
-    fn holds(&self, name: &str) -> bool {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .any(|held| held.sandbox.snapshot() == Some(name))
-    }
-
-    fn snapshot(&self, snapshot: Snapshot) -> Result<SnapshotListOutputItem, Refused> {
-        Ok(SnapshotListOutputItem {
-            size: snapshot.size()?,
-            in_use: snapshot.in_use()? || self.holds(&snapshot.name),
-            name: snapshot.name,
+impl Hooks for Loopback {
+    fn listen<'a>(
+        &'a self,
+        sandbox: &'a Arc<Sandbox>,
+        port: &'a SandboxPort,
+    ) -> BoxFuture<'a, Result<Option<(String, Held)>, SandboxError>> {
+        Box::pin(async move {
+            let port = port.port;
+            let opening =
+                |e: std::io::Error| SandboxError::Failed(format!("opening port {port}: {e}"));
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(opening)?;
+            let at = listener.local_addr().map_err(opening)?;
+            let sandbox = Arc::downgrade(sandbox);
+            let task = tokio::spawn(async move {
+                while let Ok((mut accepted, _)) = listener.accept().await {
+                    let Some(sandbox) = sandbox.upgrade() else {
+                        return;
+                    };
+                    let activity = sandbox.activity();
+                    tokio::spawn(async move {
+                        // Closed at once when no machine runs, as a port nothing listens on is.
+                        if let Ok(mut reached) = activity.sandbox().connect(port).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
+                        }
+                    });
+                }
+            });
+            // On this host's loopback, an `http` one is reached as HTTP at its address as is.
+            Ok(Some((
+                format!("http://{at}"),
+                Box::new(Listening(task)) as Held,
+            )))
         })
     }
 }
 
-/// A sandbox, and what takes each of its ports' connections, until the sandbox goes.
-struct Held {
-    sandbox: Arc<Sandbox>,
-    _listening: JoinSet<()>,
+/// What takes a port's connections, until it drops.
+struct Listening(tokio::task::JoinHandle<()>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -183,17 +217,13 @@ pub fn router() -> Router {
         .route("/images/jobs/pull/", post(image_pull))
         .route("/images/jobs/push/", post(image_push))
         .route("/images/jobs/build/", post(image_build))
+        .route("/images/jobs/commit/", post(image_commit))
         .route(
             "/images/jobs/{id}",
             get(image_job_get).delete(image_job_remove),
         )
         .route("/images/jobs/{id}/events", get(image_job_events))
         .route("/images/prune", post(image_prune))
-        .route("/snapshots/", get(snapshot_list).post(snapshot_create))
-        .route(
-            "/snapshots/{name}",
-            get(snapshot_get).delete(snapshot_remove),
-        )
         .route("/volumes/", get(volume_list).post(volume_create))
         .route("/volumes/{name}", get(volume_get).delete(volume_remove))
         .route("/volumes/{name}/mounts/", get(volume_mount_list))
@@ -204,14 +234,17 @@ pub fn router() -> Router {
         .route("/volumes/{name}/files", any(files))
         .route("/volumes/{name}/files/", any(files))
         .route("/volumes/{name}/files/{*path}", any(files))
-        .route("/snapshots/{name}/files", any(files))
-        .route("/snapshots/{name}/files/", any(files))
-        .route("/snapshots/{name}/files/{*path}", any(files))
         .route("/sandboxes/{id}/files", any(sandbox_files))
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
+        .route("/sandboxes/{id}/start", post(sandbox_start))
+        .route("/sandboxes/{id}/stop", post(sandbox_stop))
+        .route(
+            "/sandboxes/{id}/ports/{port}",
+            put(sandbox_port_open).delete(sandbox_port_close),
+        )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -345,6 +378,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
+                let before = layers.len();
                 build_step(
                     &images,
                     &mut image,
@@ -361,7 +395,10 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
                     &mut report,
                 )
                 .await?;
+                let layered = layers.len() > before;
+                virtx_uvm::history_kept(&mut image, step.to_string(), layered, layers.len());
             }
+            virtx_uvm::recipe_kept(&mut image, &recipe);
             let digest = images.insert_image(&image, &layers)?;
             images.insert_tag(&reference, &digest)?;
             Ok(digest)
@@ -397,6 +434,20 @@ async fn base(
         .get_image(&image)?
         .ok_or(ImageStoreError::Missing(image))?;
     Ok((config, layers, Some(held)))
+}
+
+/// A commit: the image the sandbox stands on, with what it has written as one more layer, and
+/// that image's config, tagged `reference`; see [`Sandbox::commit`].
+async fn image_commit(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+    let args: ImageCommitArgs = body(&request)?;
+    let reference = reference(&args.reference)?;
+    let sandbox = home.sandboxes.get(&args.sandbox)?;
+    Ok(image_job(
+        &home,
+        ImageJobKind::Commit,
+        args.reference,
+        move |mut report| async move { Ok(sandbox.commit(&reference, &mut *report).await?) },
+    ))
 }
 
 async fn image_job_get(
@@ -454,54 +505,6 @@ async fn image_prune(Extension(home): Extension<Arc<Home>>) -> Answer {
         images: pruned.images.iter().map(Digest::to_string).collect(),
         reclaimed: pruned.reclaimed,
     }))
-}
-
-async fn snapshot_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let mut listed = Vec::new();
-    for snapshot in home.snapshots.list()? {
-        listed.push(home.snapshot(snapshot)?);
-    }
-    Ok(json(&listed))
-}
-
-async fn snapshot_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
-    let args: SnapshotCreateArgs = body(&request)?;
-    if args.disk_gib == Some(0) {
-        return Err(invalid("disk_gib: 0 is a disk nothing fits on"));
-    }
-    let size = args
-        .disk_gib
-        .map_or(Snapshot::SIZE, |gib| u64::from(gib) << 30);
-    // Formatting a disk is blocking work.
-    let made = Arc::clone(&home);
-    let snapshot = tokio::task::spawn_blocking(move || {
-        let name = args
-            .name
-            .unwrap_or_else(|| pick(|name| made.snapshots.open(name).is_ok()));
-        made.snapshots.create(&name, size)
-    })
-    .await??;
-    let location = format!("/snapshots/{}", snapshot.name);
-    Ok(created(location, &home.snapshot(snapshot)?))
-}
-
-async fn snapshot_get(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(name): Segments<String>,
-) -> Answer {
-    Ok(json(&home.snapshot(home.snapshots.open(&name)?)?))
-}
-
-async fn snapshot_remove(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(name): Segments<String>,
-) -> Answer {
-    // Held from its sandbox's making until its removal, whether its machine runs or not.
-    if home.holds(&name) {
-        return Err(SnapshotError::InUse(name).into());
-    }
-    home.snapshots.remove(&name)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
@@ -582,113 +585,127 @@ async fn volume_mount_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// A request to the files of a volume or a snapshot, over WebDAV: a snapshot a sandbox stands
-/// on answers `423`.
+/// A request to the files of a volume, over WebDAV.
 async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Request) -> Response {
-    home.files.handle(request, &|name| home.holds(name)).await
+    home.files.handle(request, &|_| false).await
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it
-/// was parked: one whose machine has exited answers `409`.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine while it runs: one
+/// that is stopped answers `409`, `stopped`, and is not started for it.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> Answer {
     let id = &segments["id"];
-    let sandbox = home.sandbox(id)?;
-    // In use from here until the answer has been sent, booting it again if it was parked.
+    let sandbox = home.sandboxes.get(id)?;
+    // In use from here until the answer has been sent.
     let activity = sandbox.activity();
-    let machine = sandbox.machine().await?;
+    let machine = sandbox.running_machine()?;
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let sandboxes = home.sandboxes.lock().unwrap();
-    let listed: Vec<_> = sandboxes
-        .iter()
-        .map(|(id, held)| held.sandbox.answer(id.clone()))
-        .collect();
-    Ok(json(&listed))
+/// Every sandbox, running or stopped; `?name=` those named so, one at most.
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+    let name = query.as_deref().and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let value = pair.strip_prefix("name=")?;
+            Some(percent_decode(value).map_err(|e| invalid(format!("name: {e}"))))
+        })
+    });
+    let name = name.transpose()?;
+    Ok(json(&home.sandboxes.list(name.as_deref())))
+}
+
+/// `value` with each `%XX` decoded, and each `+` a space, as UTF-8.
+fn percent_decode(value: &str) -> Result<String, String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.bytes();
+    while let Some(b) = rest.next() {
+        match b {
+            b'%' => {
+                let hex = [rest.next(), rest.next()];
+                let [Some(high), Some(low)] = hex else {
+                    return Err("a % at its end".into());
+                };
+                let digit = |d: u8| (d as char).to_digit(16).ok_or("not a hex digit");
+                bytes.push((digit(high)? * 16 + digit(low)?) as u8);
+            }
+            b'+' => bytes.push(b' '),
+            b => bytes.push(b),
+        }
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-
-    // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
-    let mut opened = Vec::new();
-    let mut listeners = Vec::new();
-    for &port in &args.ports {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
-        let at = listener
-            .local_addr()
-            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
-        opened.push(SandboxPort {
-            port,
-            url: format!("http://{at}"),
-        });
-        listeners.push((port, listener));
-    }
-
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.snapshots,
-        &home.volumes,
-        |name| home.holds(name),
-        &args,
-        home.vm.clone(),
-        park_after(),
-    )
-    .await?;
-    let mut listening = JoinSet::new();
-    for (port, listener) in listeners {
-        let sandbox = Arc::clone(&sandbox);
-        listening.spawn(async move {
-            while let Ok((mut accepted, _)) = listener.accept().await {
-                let activity = sandbox.activity();
-                tokio::spawn(async move {
-                    // Closed at once when the machine has ended, as a port nothing listens on is.
-                    if let Ok(mut reached) = activity.sandbox().connect(port).await {
-                        let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
-                    }
-                });
-            }
-        });
-    }
-    let id = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let id = pick(|id| sandboxes.contains_key(id));
-        let held = Held {
-            sandbox: Arc::clone(&sandbox),
-            _listening: listening,
-        };
-        sandboxes.insert(id.clone(), held);
-        id
-    };
-    let answer = virtx_core::Sandbox {
-        ports: opened,
-        ..sandbox.answer(id.clone())
-    };
-    Ok(created(format!("/sandboxes/{id}"), &answer))
+    let answer = home.sandboxes.create(args, None, true).await?;
+    Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
 async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.answer(id)))
+    Ok(json(&home.sandboxes.get(&id)?.answer(false)))
+}
+
+/// Started if it is stopped; answered with where its ports are.
+async fn sandbox_start(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(id): Segments<String>,
+) -> Answer {
+    Ok(json(&home.sandboxes.get(&id)?.start().await?))
+}
+
+async fn sandbox_stop(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(id): Segments<String>,
+) -> Answer {
+    Ok(json(&home.sandboxes.stop(&id).await?))
 }
 
 async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    let removed = home.sandboxes.lock().unwrap().remove(&id);
-    let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
+    home.sandboxes.delete(&id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Port `port` opened: `201` and where it is reached, or `200` and where, for one open
+/// already.
+async fn sandbox_port_open(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    request: Bytes,
+) -> Answer {
+    let asked = port_args(&request)?;
+    let sandbox = home.sandboxes.get(&id)?;
+    match sandbox.open_port(port, asked.label, asked.protocol).await? {
+        (open, true) => Ok(created(format!("/sandboxes/{id}/ports/{port}"), &open)),
+        (open, false) => Ok(json(&open)),
+    }
+}
+
+/// What a port's opening asks: none, `null` or `{}` for TCP, named nothing.
+fn port_args(request: &Bytes) -> Result<SandboxPortOpenArgs, Refused> {
+    match request.iter().all(u8::is_ascii_whitespace) {
+        true => Ok(SandboxPortOpenArgs::default()),
+        false => Ok(
+            serde_json::from_slice::<Option<SandboxPortOpenArgs>>(request)
+                .map_err(invalid)?
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+async fn sandbox_port_close(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+) -> Answer {
+    home.sandboxes.get(&id)?.close_port(port)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -696,36 +713,65 @@ async fn sandbox_job_list(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.jobs()))
+    Ok(json(&home.sandboxes.get(&id)?.jobs()))
 }
 
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to one that accepts
+/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and
+/// its path in `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
+    headers: HeaderMap,
     request: Bytes,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
     if args.cmd.is_empty() {
         return Err(invalid("cmd: an exec names a command"));
     }
-    if args.stdin {
-        return Err(refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "not_started",
-            "stdin: this server gives a process none to write to",
-        ));
-    }
-    let sandbox = home.sandbox(&id)?;
+    let sandbox = home.sandboxes.get(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
-    Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
+    let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
+    let answered = job.get();
+    let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
+    let streamed = headers
+        .get(header::ACCEPT)
+        .and_then(|accept| accept.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/event-stream"));
+    if !streamed {
+        return Ok(created(location, &answered));
+    }
+    let said = ascii(&serde_json::to_string(&answered).expect("a job serializes"));
+    let mut log = events(job.log(), &HeaderMap::new());
+    *log.status_mut() = StatusCode::CREATED;
+    let header = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
+    log.headers_mut()
+        .insert(header::LOCATION, header(&location)?);
+    log.headers_mut().insert(JOB_HEADER, header(&said)?);
+    Ok(log)
+}
+
+/// `json` with every character past ASCII escaped, `\uXXXX` as JSON writes one: the same
+/// JSON, and a header value.
+fn ascii(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            escaped.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    escaped
 }
 
 async fn sandbox_job_get(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.job(&job)?.get()))
+    Ok(json(&home.sandboxes.get(&id)?.job(&job)?.get()))
 }
 
 /// Kill it if it runs, and remove it.
@@ -733,7 +779,7 @@ async fn sandbox_job_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
 ) -> Answer {
-    home.sandbox(&id)?.remove_job(&job)?;
+    home.sandboxes.get(&id)?.remove_job(&job)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -745,16 +791,19 @@ async fn sandbox_job_signal(
     let args: SandboxSignalArgs = body(&request)?;
     let signal = signal_number(&args.signal)
         .ok_or_else(|| invalid(format!("signal: no signal is named {}", args.signal)))?;
-    home.sandbox(&id)?.signal(&job, signal)?;
+    home.sandboxes.get(&id)?.signal(&job, signal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Refused for every job: none is started with a stdin to write to.
+/// Write to the stdin of a job started with one, and close it if `eof`.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
+    request: Bytes,
 ) -> Answer {
-    home.sandbox(&id)?.stdin(&job)?;
+    let args: SandboxStdinArgs = body(&request)?;
+    let sandbox = home.sandboxes.get(&id)?;
+    sandbox.write_stdin(&job, args.data.unwrap_or_default(), args.eof)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -763,7 +812,7 @@ async fn sandbox_job_events(
     Segments((id, job)): Segments<(String, String)>,
     headers: HeaderMap,
 ) -> Answer {
-    Ok(events(home.sandbox(&id)?.job(&job)?.log(), &headers))
+    Ok(events(home.sandboxes.get(&id)?.job(&job)?.log(), &headers))
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
@@ -903,12 +952,25 @@ impl From<SandboxError> for Refused {
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::NotStarted(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "not_started", e)
             }
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
+            SandboxError::Stopped(_) => refused(StatusCode::CONFLICT, "stopped", e),
+            SandboxError::Running(_) => refused(StatusCode::CONFLICT, "running", e),
+            SandboxError::Refused {
+                status,
+                code,
+                message,
+            } => refused(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                code,
+                message,
+            ),
+            SandboxError::Failed(_) | SandboxError::Build(_) => internal(e),
             SandboxError::Image(e) => e.into(),
             SandboxError::Snapshot(e) => e.into(),
             SandboxError::Volume(e) => e.into(),
@@ -921,5 +983,28 @@ impl From<SandboxError> for Refused {
 impl From<tokio::task::JoinError> for Refused {
     fn from(e: tokio::task::JoinError) -> Refused {
         internal(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_escaped_to_ascii_reads_as_it_was() {
+        let job = serde_json::json!({"cmd": ["echo", "héllo 世界 🎉"]});
+        let escaped = ascii(&job.to_string());
+        assert!(escaped.is_ascii(), "{escaped}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&escaped).unwrap(),
+            job
+        );
+    }
+
+    #[test]
+    fn a_name_asked_for_is_decoded() {
+        assert_eq!(percent_decode("my%20box+2").unwrap(), "my box 2");
+        assert_eq!(percent_decode("%E4%B8%96").unwrap(), "世");
+        assert!(percent_decode("a%2").is_err());
     }
 }

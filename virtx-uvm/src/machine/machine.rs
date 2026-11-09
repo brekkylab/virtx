@@ -216,8 +216,11 @@ impl Machine {
         if cmd.is_empty() {
             return Err(Error::NoCommand);
         }
-        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Exec { cmd, stdin })
-            .map_err(|e| Error::io("sending the command", e))
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Exec { cmd, stdin },
+        )
+        .map_err(|e| Error::io("sending the command", e))
     }
 
     /// Start `cmd` in the guest on a terminal of its own, `cols` by `rows`: answered as
@@ -281,21 +284,15 @@ impl Machine {
     /// Mark its disk `mark`, before a copy of it: answered by a
     /// [`Marked`](CtrlResp::Marked) from [`recv`](Machine::recv).
     pub fn mark(&self, mark: u64) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Mark { mark },
-        )
-        .map_err(|e| Error::io("marking its disk", e))
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Mark { mark })
+            .map_err(|e| Error::io("marking its disk", e))
     }
 
     /// Make what the copy at mark `mark` was kept as its disk's base: answered by a
     /// [`Rebased`](CtrlResp::Rebased) from [`recv`](Machine::recv).
     pub fn rebase(&self, mark: u64) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Rebase { mark },
-        )
-        .map_err(|e| Error::io("rebasing its disk", e))
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Rebase { mark })
+            .map_err(|e| Error::io("rebasing its disk", e))
     }
 
     /// Have the guest put what it has written on its disks: answered by a
@@ -436,6 +433,8 @@ fn exchange(
         _ => Vec::new(),
     };
     Ok((answer, read))
+}
+
 /// A machine paused by [`Machine::pause`], resumed as this drops.
 #[cfg(unix)]
 pub struct Paused<'a> {

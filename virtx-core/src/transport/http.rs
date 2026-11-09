@@ -31,8 +31,9 @@ pub(crate) fn segments(path: &str) -> String {
         .join("/")
 }
 
-/// `response`, a refusal, as the [`Error::Status`] it is: its body read for a person, the
-/// `{"error": {"code", "message"}}` a resource answers as `code: message`.
+/// `response`, a refusal, as the [`Error::Status`] or [`Error::Refusal`] it is: its body read
+/// for a person, the `{"error": {"code", "message"}}` a resource answers as `code: message`, or
+/// what a non-JSON refusal was rather than its body.
 pub(crate) async fn refused(response: http::Response<Body>) -> Error {
     #[derive(Deserialize)]
     struct Refusal {
@@ -43,18 +44,45 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
         code: String,
         message: String,
     }
-    let status = response.status().as_u16();
-    let body = response
-        .into_body()
+    let (parts, body) = response.into_parts();
+    let status = parts.status.as_u16();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or("");
+    let body = body
         .collect()
         .await
         .map(|body| body.to_bytes())
         .unwrap_or_default();
-    let message = match serde_json::from_slice::<Refusal>(&body) {
-        Ok(Refusal { error }) => format!("{}: {}", error.code, error.message),
-        Err(_) => String::from_utf8_lossy(&body).trim().to_owned(),
-    };
-    Error::Status(status, message)
+    if body.is_empty() {
+        return Error::Status(status, String::new());
+    }
+    match serde_json::from_slice::<Refusal>(&body) {
+        Ok(Refusal { error }) => {
+            Error::Status(status, format!("{}: {}", error.code, error.message))
+        }
+        Err(_) => {
+            let desc = if content_type.is_empty() {
+                format!("{} bytes", body.len())
+            } else {
+                format!("{content_type}, {} bytes", body.len())
+            };
+            let mut description = format!("not a virtx answer ({desc})");
+            if matches!(status, 502..=504) {
+                description.push_str(": the service is unreachable or restarting");
+            }
+            let raw_body = String::from_utf8_lossy(&body).into_owned();
+            Error::Refusal {
+                status,
+                description,
+                body: Some(raw_body),
+            }
+        }
+    }
 }
 
 /// Send `method` to `path` with `body` as JSON, if any, and answer the body of a success. A
@@ -147,5 +175,82 @@ mod tests {
         assert_eq!(segments("/dir//a b.txt/"), "dir/a%20b.txt");
         assert_eq!(segments("한글/#?"), "%ED%95%9C%EA%B8%80/%23%3F");
         assert_eq!(segments(""), "");
+    }
+
+    #[tokio::test]
+    async fn a_non_json_refusal_says_what_it_was_without_quoting_it() {
+        let response = http::Response::builder()
+            .status(503)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(full(Bytes::from(
+                "<html><title>503 Service Unavailable</title></html>",
+            )))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(
+            error.to_string(),
+            "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes): the service is unreachable or restarting"
+        );
+        let Error::Refusal { status, body, .. } = &error else {
+            panic!("expected Error::Refusal, got {error:?}");
+        };
+        assert_eq!(*status, 503);
+        assert_eq!(
+            body.as_deref(),
+            Some("<html><title>503 Service Unavailable</title></html>")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_json_refusal_without_content_type() {
+        let response = http::Response::builder()
+            .status(502)
+            .body(full(Bytes::from("bad gateway")))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(
+            error.to_string(),
+            "the server answered 502 Bad Gateway; not a virtx answer (11 bytes): the service is unreachable or restarting"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_json_refusal_without_restarting_suffix() {
+        let response = http::Response::builder()
+            .status(500)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(full(Bytes::from("internal crash")))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(
+            error.to_string(),
+            "the server answered 500 Internal Server Error; not a virtx answer (text/plain, 14 bytes)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protocol_refusal_keeps_its_code_and_message() {
+        let response = http::Response::builder()
+            .status(422)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(full(Bytes::from(
+                r#"{"error": {"code": "not_started", "message": "no such binary"}}"#,
+            )))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(
+            error.to_string(),
+            "the server answered 422 Unprocessable Entity: not_started: no such binary"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_refusal_says_only_the_status() {
+        let response = http::Response::builder()
+            .status(401)
+            .body(full(Bytes::new()))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(error.to_string(), "the server answered 401 Unauthorized");
     }
 }

@@ -8,12 +8,15 @@ use super::{VIRTX_ERROR, VIRTX_OK};
 use crate::Error;
 
 /// Why a call failed, as C reads it: `{"message": "..."}`, with `"status": 404` beside it when
-/// the server refused the request with that HTTP status.
+/// the server refused the request with that HTTP status, and `"body"` where the refusal had a
+/// body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
 }
 
 impl From<String> for Failure {
@@ -21,6 +24,7 @@ impl From<String> for Failure {
         Failure {
             message,
             status: None,
+            body: None,
         }
     }
 }
@@ -33,13 +37,15 @@ impl From<&str> for Failure {
 
 impl From<Error> for Failure {
     fn from(error: Error) -> Failure {
-        let status = match &error {
-            Error::Status(status, _) => Some(*status),
-            _ => None,
+        let (status, body) = match &error {
+            Error::Status(status, _) => (Some(*status), None),
+            Error::Refusal { status, body, .. } => (Some(*status), body.clone()),
+            _ => (None, None),
         };
         Failure {
             message: error.to_string(),
             status,
+            body,
         }
     }
 }
@@ -121,6 +127,18 @@ mod tests {
             json!({
                 "message": "the server answered 404 Not Found: not_found: no such file",
                 "status": 404,
+            })
+        );
+        assert_eq!(
+            written(Error::Refusal {
+                status: 503,
+                description: "not a virtx answer (text/html, 51 bytes)".into(),
+                body: Some("<html>503</html>".into()),
+            }),
+            json!({
+                "message": "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes)",
+                "status": 503,
+                "body": "<html>503</html>",
             })
         );
         assert_eq!(

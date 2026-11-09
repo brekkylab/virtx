@@ -13,6 +13,13 @@ pub enum Error {
     /// `401` or a `403` from any endpoint says the headers are not what it wants: a client may
     /// set new ones and send the request again.
     Status(u16, String),
+    /// An HTTP response that is not the protocol's error: its status, what it was rather than
+    /// its body for a person, and its raw body if it had one.
+    Refusal {
+        status: u16,
+        description: String,
+        body: Option<String>,
+    },
     /// The body did not encode, or the answer did not read as the type asked for.
     Json(String),
     /// The server's image registry answered with an error, or with what is not an image.
@@ -37,6 +44,21 @@ impl fmt::Display for Error {
                 write!(f, "the server answered {status} {reason}")?;
                 if !body.is_empty() {
                     write!(f, ": {body}")?;
+                }
+                Ok(())
+            }
+            Error::Refusal {
+                status,
+                description,
+                ..
+            } => {
+                let reason = http::StatusCode::from_u16(*status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or("");
+                write!(f, "the server answered {status} {reason}")?;
+                if !description.is_empty() {
+                    write!(f, "; {description}")?;
                 }
                 Ok(())
             }

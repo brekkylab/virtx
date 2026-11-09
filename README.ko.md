@@ -34,7 +34,7 @@ VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 
 ## 빠르게 시작하기
 
 > [!TIP]
-> 코딩 에이전트를 쓰고 있다면 [virtx 스킬](skills/virtx/SKILL.md)을 설치하고 아래 코드를 대신 작성하게 해 보세요.
+> 코딩 에이전트를 쓰고 있다면 아래 명령으로 [virtx 스킬](skills/virtx/SKILL.md)을 설치하고, 이어지는 예제 코드는 에이전트에게 맡겨 보세요.
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab

@@ -31,7 +31,8 @@
 //! The guest's. The kernel tries its own stack first and falls back to the host only for
 //! what its own stack cannot reach, so two programs in the guest talking over its loopback
 //! never leave it, and a `listen` the host is not asked to take stays a listener in the
-//! guest.
+//! guest. One on a port published after it is reached still: through the agent, which
+//! connects to it on the guest's loopback for each connection to the port (`relay`).
 //!
 //! # A machine with neither
 //!
@@ -42,7 +43,7 @@ mod policy;
 mod relay;
 mod resolver;
 
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
 
 use krun::{TsiFlags, VsockDevice};
@@ -77,7 +78,10 @@ pub enum Network {
 /// -- each one bound by the caller, which is the end that knows where it is and says so.
 /// Each gets a thread that carries its connections to wherever the guest is listening on
 /// that port by then.
-pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
+pub(crate) fn attach(
+    network: Network,
+    published: Vec<(u16, TcpListener)>,
+) -> Result<(VsockDevice, Publisher)> {
     let resolver = match network {
         Network::None => None,
         Network::Host | Network::Public => resolver::host_resolvers().first().copied(),
@@ -89,17 +93,74 @@ pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Re
                 .filter_map(|(port, listener)| Some((*port, listener.local_addr().ok()?))),
         ),
     );
+    let mut device = VsockDevice::new(GUEST_CID, TsiFlags::HIJACK_INET)
+        .map_err(|e| Error::vmm("attaching the guest's network", e))?;
+    device.set_policy(policy.clone());
+    let dial = dial(&mut device);
+
     for (port, listener) in published {
-        relay::spawn(port, listener, policy.clone()).map_err(|e| Error::Io {
+        relay::spawn(port, listener, policy.clone(), dial.clone()).map_err(|e| Error::Io {
             context: format!("relaying into guest port {port}"),
             source: e,
         })?;
     }
+    Ok((device, Publisher { policy, dial }))
+}
 
-    let mut device = VsockDevice::new(GUEST_CID, TsiFlags::HIJACK_INET)
-        .map_err(|e| Error::vmm("attaching the guest's network", e))?;
-    device.set_policy(policy);
-    Ok(device)
+/// Where the agent is asked to connect to a guest port, for a program that listened before
+/// its port was published (`relay`): a Unix socket of this process's, which libkrun listens on
+/// and carries into the guest's vsock [`DIAL_PORT`](super::wire::DIAL_PORT). None on a host
+/// whose standard library has no Unix socket to connect it with.
+#[cfg(unix)]
+fn dial(device: &mut VsockDevice) -> relay::Dial {
+    let path = std::env::temp_dir().join(format!("virtx-uvm-dial-{}.sock", std::process::id()));
+    // A process before this one under the same pid left its socket: libkrun binds the name.
+    let _ = std::fs::remove_file(&path);
+    match path.to_str() {
+        Some(at) => {
+            device.add_unix_port(super::wire::DIAL_PORT, at, true);
+            relay::Dial(Some(path))
+        }
+        None => relay::Dial(None),
+    }
+}
+
+#[cfg(not(unix))]
+fn dial(_: &mut VsockDevice) -> relay::Dial {
+    relay::Dial(None)
+}
+
+/// Publishes a guest port while the machine runs, as [`attach`] did those it booted with.
+pub(crate) struct Publisher {
+    policy: Arc<Policy>,
+    dial: relay::Dial,
+}
+
+impl Publisher {
+    /// Publish `port`: a listener on this host's loopback relayed to the guest's listener on it
+    /// -- one a program in the guest listens on from now on, or one listening already. Answers where the listener is; again for one
+    /// already published, whose listener stays where it is.
+    pub(crate) fn publish(&self, port: u16) -> std::result::Result<(u16, SocketAddr), String> {
+        if port == 0 {
+            return Err("0 is not a port".into());
+        }
+        if self.policy.publishes(port) {
+            return self
+                .policy
+                .relay(port)
+                .map(|at| (port, at))
+                .ok_or_else(|| format!("guest port {port} is published, but not where"));
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .map_err(|e| format!("binding a relay for guest port {port}: {e}"))?;
+        let at = listener
+            .local_addr()
+            .map_err(|e| format!("reading where guest port {port}'s relay is: {e}"))?;
+        self.policy.publish(port, at);
+        relay::spawn(port, listener, self.policy.clone(), self.dial.clone())
+            .map_err(|e| format!("relaying into guest port {port}: {e}"))?;
+        Ok((port, at))
+    }
 }
 
 /// Told to libkrun's init as `KRUN_NAMESERVER`, which is what it writes into the guest's

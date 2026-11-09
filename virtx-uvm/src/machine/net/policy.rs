@@ -57,7 +57,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use super::{NAMESERVER, Network};
 
@@ -73,8 +73,9 @@ pub(crate) struct Policy {
     /// whose guest then resolves no names, which is what every other process here gets.
     resolver: Option<Ipv4Addr>,
 
-    /// The console ports a connection from this host may reach.
-    published: HashSet<u16>,
+    /// The console ports a connection from this host may reach: those the machine booted
+    /// with, and any [`publish`](Policy::publish)ed since.
+    published: RwLock<HashSet<u16>>,
 
     /// Where on this host's loopback each published console port is listened on, once the
     /// guest has listened on it -- in each family apart, because a program listens in both
@@ -84,7 +85,7 @@ pub(crate) struct Policy {
 
     /// Where each published console port's relay listens on this host -- see
     /// [`relay`](super::relay) -- for a guest reaching its own port over v4.
-    relays: HashMap<u16, SocketAddr>,
+    relays: RwLock<HashMap<u16, SocketAddr>>,
 }
 
 /// Where on this host's loopback a guest's listeners on one console port are, in each
@@ -118,10 +119,30 @@ impl Policy {
         Policy {
             network,
             resolver,
-            published: published.into_iter().collect(),
+            published: RwLock::new(published.into_iter().collect()),
             listening: Mutex::new(HashMap::new()),
-            relays: HashMap::new(),
+            relays: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Publish `console` as a port the machine booted with is, its relay listening at `relay`:
+    /// a guest's `listen` on it from now on is carried to this host. One the guest listens on
+    /// already stays the guest's own until its program listens again.
+    pub(crate) fn publish(&self, console: u16, relay: SocketAddr) {
+        self.published.write().unwrap().insert(console);
+        if relay.is_ipv4() {
+            self.relays.write().unwrap().insert(console, relay);
+        }
+    }
+
+    /// Whether `console` is published.
+    pub(crate) fn publishes(&self, console: u16) -> bool {
+        self.published.read().unwrap().contains(&console)
+    }
+
+    /// Where `console`'s relay listens on this host, if it is published with one.
+    pub(crate) fn relay(&self, console: u16) -> Option<SocketAddr> {
+        self.relays.read().unwrap().get(&console).copied()
     }
 
     /// Say where each published console port's relay listens, so a guest's own v4 `connect`
@@ -130,7 +151,7 @@ impl Policy {
         mut self,
         relays: impl IntoIterator<Item = (u16, SocketAddr)>,
     ) -> Self {
-        self.relays = relays.into_iter().filter(|(_, at)| at.is_ipv4()).collect();
+        self.relays = RwLock::new(relays.into_iter().filter(|(_, at)| at.is_ipv4()).collect());
         self
     }
 
@@ -184,9 +205,9 @@ impl krun::TsiPolicy for Policy {
                 // families: a program that listened on `::` alone takes v4 in the guest, but on
                 // this host it has only a v6 listener, which a v4 socket cannot connect to.
                 if ip.is_ipv4()
-                    && let Some(relay) = self.relays.get(&to.port())
+                    && let Some(relay) = self.relays.read().unwrap().get(&to.port()).copied()
                 {
-                    return Some(*relay);
+                    return Some(relay);
                 }
                 return listeners
                     .get(ip)
@@ -196,7 +217,7 @@ impl krun::TsiPolicy for Policy {
             // it is without a network. Not carried out to the door on this host that leads
             // back in, which would take the connection and close it: a program waiting for
             // its own server to come up would hear "closed" where it retries on "refused".
-            if self.published.contains(&to.port()) || self.network != Network::Host {
+            if self.publishes(to.port()) || self.network != Network::Host {
                 return None;
             }
             // `0.0.0.0` is this host's loopback in the socket's family; any other loopback
@@ -216,7 +237,7 @@ impl krun::TsiPolicy for Policy {
     }
 
     fn listen(&self, at: SocketAddr) -> Option<SocketAddr> {
-        if !self.published.contains(&at.port()) {
+        if !self.publishes(at.port()) {
             return None;
         }
         let port = self.listen_port(at.port(), at.ip())?;

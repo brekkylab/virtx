@@ -167,6 +167,33 @@ impl Store {
         fs::remove_dir_all(&dir).map_err(|e| Error::io(format!("removing {}", dir.display()), e))
     }
 
+    /// Put the files at `files` in place as volume `name`'s, over those there if any -- refused
+    /// while a machine holds the volume. Its mounts are kept. `files` is moved, not copied, so
+    /// it has to be on this store's filesystem: under [`root`](Store::root).
+    pub fn replace(&self, name: &str, files: &Path) -> Result<Volume> {
+        let dir = self.dir(name)?;
+        fs::create_dir_all(&dir).map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
+        let lock = lock(&dir, name)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(Error::InUse(name.to_owned())),
+            Err(fs::TryLockError::Error(e)) => return Err(Error::io(format!("locking {name}"), e)),
+        }
+        let at = dir.join("files");
+        let old = dir.join("files.old");
+        let _ = fs::remove_dir_all(&old);
+        match fs::rename(&at, &old) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(format!("moving {} aside", at.display()), e)),
+        }
+        fs::rename(files, &at)
+            .map_err(|e| Error::io(format!("moving {} into place", at.display()), e))?;
+        drop(lock);
+        let _ = fs::remove_dir_all(&old);
+        self.open(name)
+    }
+
     /// Volume `name`'s own directory, refused unless `name` [is one](crate::is_name).
     fn dir(&self, name: &str) -> Result<PathBuf> {
         match crate::is_name(name) {
@@ -262,6 +289,23 @@ impl Volume {
     pub fn hold(&self) -> Result<Hold> {
         let lock = lock(&self.dir, &self.name)?;
         match lock.try_lock_shared() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(Error::InUse(self.name.clone())),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(Error::io(format!("locking {}", self.name), e));
+            }
+        }
+        if !self.files().is_dir() {
+            return Err(Error::Unknown(self.name.clone()));
+        }
+        Ok(Hold(lock))
+    }
+
+    /// Hold it alone, as its files are read whole: no machine mounts it, and it is not removed,
+    /// until this drops. Refused while a machine holds it.
+    pub fn hold_alone(&self) -> Result<Hold> {
+        let lock = lock(&self.dir, &self.name)?;
+        match lock.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => return Err(Error::InUse(self.name.clone())),
             Err(fs::TryLockError::Error(e)) => {
@@ -574,7 +618,15 @@ fn lock(dir: &Path, name: &str) -> Result<File> {
         return Err(Error::Unknown(name.to_owned()));
     }
     let at = dir.join("lock");
-    File::create(&at).map_err(|e| Error::io(format!("opening {}", at.display()), e))
+    // Read and write: where `flock` is emulated with byte-range locks, as on NFS, a shared lock
+    // takes a file open for reading, and an exclusive one for writing.
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&at)
+        .map_err(|e| Error::io(format!("opening {}", at.display()), e))
 }
 
 /// `path` as a volume spells it -- relative, `/`-separated, the empty path the root --
@@ -817,6 +869,35 @@ mod tests {
         store.remove("data").unwrap();
         assert!(store.list().unwrap().is_empty());
         assert!(matches!(store.open("data"), Err(Error::Unknown(_))));
+    }
+
+    #[tokio::test]
+    async fn files_replace_a_volume_s_unless_a_machine_holds_it() {
+        let scratch = Scratch::new("replace");
+        let store = &scratch.0;
+        let volume = store.create("data").unwrap();
+        volume.write("old", b"old", None).unwrap();
+        let incoming = store.root().join("incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        fs::write(incoming.join("new"), b"new").unwrap();
+
+        // Alone only while nothing else holds it, and nothing holds it meanwhile.
+        let held = volume.hold().unwrap();
+        assert!(matches!(volume.hold_alone(), Err(Error::InUse(_))));
+        assert!(matches!(
+            store.replace("data", &incoming),
+            Err(Error::InUse(_))
+        ));
+        drop(held);
+        let alone = volume.hold_alone().unwrap();
+        assert!(matches!(volume.hold(), Err(Error::InUse(_))));
+        drop(alone);
+
+        let replaced = store.replace("data", &incoming).unwrap();
+        assert_eq!(replaced.read("new", 0, None).await.unwrap(), b"new");
+        assert!(replaced.stat("old").await.is_err());
+        assert!(!incoming.exists());
+        assert_eq!(store.list().unwrap(), ["data"]);
     }
 
     #[test]

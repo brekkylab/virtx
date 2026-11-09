@@ -56,17 +56,23 @@ libc = { workspace = true }
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
-# guest's root. Our fork, at a commit on its `virtx` branch; what each commit there is for is
-# in README.md. To work on libkrun from a local clone, override the source outside the
-# repository, in `~/.cargo/config.toml`:
+# guest's root. Our fork, at a commit on its `cloud` branch -- its `virtx` branch, and what
+# virtx cloud needs beside: a block device reading through the embedder's storage
+# (with-storage), the kernel copied into the guest's memory (kernel-pages), a socket listened on
+# again left where it is (tsi); what each commit there is for is in README.md. To work on
+# libkrun from a local clone, override the source outside the repository, in
+# `~/.cargo/config.toml`:
 #     [patch."https://github.com/brekkylab/libkrun"]
 #     libkrun = { path = "../libkrun/src/libkrun" }
 #     krun-init-blob = { path = "../libkrun/init/init-blob" }
 #     krun-display = { path = "../libkrun/src/display" }
-krun = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "libkrun", features = ["blk"] }
-krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "krun-init-blob", features = ["direct"] }
+krun = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "libkrun", features = ["blk"] }
+krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "krun-init-blob", features = ["direct"] }
+# A disk restored lazily (`lazy`): a storage libkrun's block device reads through, imago's as
+# libkrun's own is, synchronous.
+imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "eef24aa8", package = "krun-display", optional = true }
+krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic

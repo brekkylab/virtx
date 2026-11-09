@@ -270,6 +270,18 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
     init.apply(&mut overlay, &mut payload)
         .map_err(Error::Init)?;
+    // Under nested virtualization -- an EC2 node -- each check the guest kernel makes of its
+    // clock, and each PCI slot it probes, is a trip to the outer hypervisor: some 70 ms of a
+    // boot there. Its TSC is the host's, invariant; and a machine without a GPU has no PCI
+    // device, its devices being virtio-mmio's. x86_64's own: elsewhere the kernel would not
+    // know them, and would pass them to the init as its environment.
+    #[cfg(target_arch = "x86_64")]
+    {
+        payload.append_cmdline("tsc=reliable no_timer_check");
+        if !machine.spec.gpu {
+            payload.append_cmdline("pci=off");
+        }
+    }
 
     let mut root =
         FsDevice::new_null(ROOT_TAG).map_err(|e| Error::vmm("making the boot root", e))?;
@@ -326,8 +338,50 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     lower.set_read_only(true);
 
     let upper_path = utf8(&upper)?;
-    let upper_device = BlockDevice::new("vdb", upper_path, DiskFormat::Raw)
-        .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    // A snapshot with a base: read and written through it, what is written told apart for
+    // its next save; and, lazy, its chunks fetched over the host's socket as they are first
+    // read, and the rest in the background until it is whole.
+    #[cfg(unix)]
+    let lazy = match &machine.snapshot {
+        Some(_) if crate::lazy::has_base(&upper) => {
+            let source: Arc<dyn crate::lazy::ChunkSource> = match &machine.chunks {
+                Some(socket) => Arc::new(crate::lazy::SocketSource::new(socket.clone())),
+                None => Arc::new(crate::lazy::NoChunks),
+            };
+            Some(
+                crate::lazy::LazyDisk::open(&upper, source)
+                    .map_err(|e| Error::io(format!("opening {upper_path} by its base"), e))?,
+            )
+        }
+        // One with no base, new: its boot set noted, for its first lazy boot elsewhere.
+        Some(_) => Some(
+            crate::lazy::LazyDisk::open_unbased(&upper)
+                .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+        ),
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let lazy: Option<std::convert::Infallible> = None;
+    let upper_device = match &lazy {
+        #[cfg(unix)]
+        Some(disk) => {
+            BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, Box::new(disk.clone()))
+        }
+        #[cfg(not(unix))]
+        Some(never) => match *never {},
+        None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
+    }
+    .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    // Told its machine has booted, as its agent says it is ready: its boot set ends there.
+    #[cfg(unix)]
+    let booting = lazy.clone();
+    // Marked and rebased as the host keeps it while it runs.
+    #[cfg(unix)]
+    let kept = lazy.clone();
+    #[cfg(unix)]
+    if let Some(disk) = lazy.filter(|disk| !disk.whole()) {
+        std::thread::spawn(move || fill(disk));
+    }
 
     let mut devices = MmioDeviceManager::new();
     devices.add(root);
@@ -347,10 +401,15 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         devices.add(gpu::device(machine.spec.gpu_memory_mib)?);
     }
 
-    // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network != Network::None || !published.is_empty() {
-        devices.add(net::attach(machine.spec.network, published)?);
-    }
+    // The whole of what having neither is: no device -- see `net`. And so no port published
+    // later either: a guest with no device has nothing a listen could be carried over.
+    let publisher = if machine.spec.network != Network::None || !published.is_empty() {
+        let (device, publisher) = net::attach(machine.spec.network, published)?;
+        devices.add(device);
+        Some(publisher)
+    } else {
+        None
+    };
 
     // In this order, and the order is the whole of what names them -- see the module
     // doc.
@@ -388,6 +447,41 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut ctrlin = ctrlin;
     std::thread::spawn(move || {
         while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
+            match message {
+                CtrlReq::Mark { mark } => {
+                    #[cfg(unix)]
+                    let marked = match &kept {
+                        Some(disk) => disk.mark(mark).map(|()| true).map_err(|e| e.to_string()),
+                        None => Ok(false),
+                    };
+                    #[cfg(not(unix))]
+                    let marked = Ok(false);
+                    let _ = send(&CtrlResp::Marked { mark, marked });
+                    continue;
+                }
+                CtrlReq::Rebase { mark } => {
+                    #[cfg(unix)]
+                    let rebased = match &kept {
+                        Some(disk) => disk.rebase(mark).map_err(|e| e.to_string()),
+                        None => Ok(false),
+                    };
+                    #[cfg(not(unix))]
+                    let rebased = Ok(false);
+                    let _ = send(&CtrlResp::Rebased { mark, rebased });
+                    continue;
+                }
+                _ => {}
+            }
+            if let CtrlReq::Publish { port } = message {
+                let published = match &publisher {
+                    Some(publisher) => publisher.publish(port),
+                    None => Err(format!(
+                        "guest port {port} cannot be published: the machine was started with no network and no ports"
+                    )),
+                };
+                let _ = send(&CtrlResp::Published(published));
+                continue;
+            }
             let _ = wire::send(&mut for_guest, &message);
         }
         let _ = wire::send(&mut for_guest, &CtrlReq::Shutdown);
@@ -397,7 +491,13 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     std::thread::spawn(move || {
         while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
             let _ = send(&match message {
-                CtrlResp::Ready(_) => CtrlResp::Ready(addresses.clone()),
+                CtrlResp::Ready(_) => {
+                    #[cfg(unix)]
+                    if let Some(disk) = &booting {
+                        disk.booted();
+                    }
+                    CtrlResp::Ready(addresses.clone())
+                }
                 message => message,
             });
         }
@@ -423,7 +523,11 @@ pub(super) unsafe fn hold(ctrlin: u64, ctrlout: u64) -> File {
     let (ctrlin, ctrlout) = unsafe { (from_raw(ctrlin), from_raw(ctrlout)) };
     let _ = CTRLOUT.set(Mutex::new(ctrlout));
     if log::set_logger(&Logger).is_ok() {
-        log::set_max_level(log::LevelFilter::Warn);
+        // Everything with `VIRTX_MACHINE_LOG` set, as its host says everything then too.
+        log::set_max_level(match std::env::var_os("VIRTX_MACHINE_LOG") {
+            Some(_) => log::LevelFilter::Debug,
+            None => log::LevelFilter::Warn,
+        });
     }
     ctrlin
 }
@@ -527,6 +631,18 @@ fn env(config: &Config) -> Vec<String> {
         env.push("HOME=/root".to_string());
     }
     env
+}
+
+/// `disk` fetched whole, in the background of its machine: tried again a while after a chunk
+/// could not be, until it is.
+#[cfg(unix)]
+fn fill(disk: crate::lazy::LazyDisk) {
+    // What its last boot touched first, ahead of the guest asking for it; then the rest.
+    disk.fetch_boot_set(crate::lazy::BOOT_AT_ONCE);
+    while let Err(e) = disk.fill(crate::lazy::FILL_AT_ONCE) {
+        log::warn!("filling {disk}: {e}; again in 5 s");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
 }
 
 #[cfg(test)]

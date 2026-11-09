@@ -593,6 +593,8 @@ fn journal_superblock(blocks: u32) -> Vec<u8> {
     sb
 }
 
+/// A directory entry as it is gathered: its name, inode number and file type.
+
 /// Every inode the tree has, numbered, with its directory entries packed: the root as
 /// inode 2 and the rest from 11 in the order the tree walks them. A hard link is one more
 /// name for an inode already numbered.
@@ -609,7 +611,7 @@ fn place(tree: &FsTree) -> Result<Vec<Node<'_>>> {
     };
     let mut dirs: HashMap<&[u8], u32> = HashMap::new();
     // Each directory's entries, by its inode number, and its parent's.
-    let mut entries: HashMap<u32, Vec<DirEntry>> = HashMap::new();
+    let mut entries: HashMap<u32, Vec<DirEntry<'_>>> = HashMap::new();
     let mut parents: HashMap<u32, u32> = HashMap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut at: HashMap<u32, usize> = HashMap::new();

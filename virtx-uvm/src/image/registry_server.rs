@@ -15,6 +15,7 @@
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -55,6 +56,18 @@ pub struct RegistryServer {
     /// Each blob being pushed, until it is whole, and each whole one that is not a layer, until
     /// a manifest names it: in the temp directory, and gone with this.
     uploads: PathBuf,
+    /// Tags listed beside the store's, as [`listing_too`](Self::listing_too) says.
+    listed_too: Option<ListedToo>,
+}
+
+/// Tags listed beside a store's.
+#[derive(Clone)]
+struct ListedToo(Arc<dyn Fn() -> Vec<Reference> + Send + Sync>);
+
+impl std::fmt::Debug for ListedToo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ListedToo")
+    }
 }
 
 impl Drop for RegistryServer {
@@ -112,6 +125,7 @@ impl RegistryServer {
             store,
             base: base.into(),
             uploads,
+            listed_too: None,
         })
     }
 
@@ -257,14 +271,28 @@ impl RegistryServer {
         }
     }
 
+    /// The tags `also` answers listed beside the store's, as though they were here: tags
+    /// whose images are elsewhere, to be brought here when they are named.
+    pub fn listing_too(
+        mut self,
+        also: impl Fn() -> Vec<Reference> + Send + Sync + 'static,
+    ) -> Self {
+        self.listed_too = Some(ListedToo(Arc::new(also)));
+        self
+    }
+
+    /// The tags listed: the store's, and those [`listing_too`](Self::listing_too) adds.
+    fn listed(&self) -> Result<Vec<Reference>> {
+        let mut listed: Vec<Reference> = self.store.tags()?.into_iter().map(|(r, _)| r).collect();
+        if let Some(ListedToo(also)) = &self.listed_too {
+            listed.extend(also());
+        }
+        Ok(listed)
+    }
+
     /// Every repository a tag is in, as the spec pages a tag listing.
     fn catalog(&self, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
-        let mut repositories: Vec<String> = self
-            .store
-            .tags()?
-            .iter()
-            .map(|(reference, _)| repository(reference))
-            .collect();
+        let mut repositories: Vec<String> = self.listed()?.iter().map(repository).collect();
         repositories.sort();
         repositories.dedup();
         let (page, more) = paged(repositories, n, last)?;
@@ -286,16 +314,16 @@ impl RegistryServer {
     fn tags(&self, name: &str, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
         let wanted = repository(&tagged(name, "latest")?);
         let mut tags: Vec<String> = self
-            .store
-            .tags()?
+            .listed()?
             .iter()
-            .filter(|(reference, _)| repository(reference) == wanted)
-            .filter_map(|(reference, _)| reference.tag().map(str::to_owned))
+            .filter(|reference| repository(reference) == wanted)
+            .filter_map(|reference| reference.tag().map(str::to_owned))
             .collect();
         if tags.is_empty() {
             return Err(refusal(StatusCode::NOT_FOUND, "NAME_UNKNOWN", name));
         }
         tags.sort();
+        tags.dedup();
         let (page, more) = paged(tags, n, last)?;
         let mut response = json_response(StatusCode::OK, &json!({"name": name, "tags": page}));
         if more && let Some(last) = page.last() {

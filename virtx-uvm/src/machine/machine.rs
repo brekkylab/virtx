@@ -63,6 +63,13 @@ pub struct MachineConfig {
     /// [`network`](MachineSpec::network).
     #[serde(default)]
     pub ports: Vec<u16>,
+
+    /// Where its snapshot's chunks are fetched from, its disk being lazy
+    /// ([`lazy`](crate::lazy)): a socket the host answers them on
+    /// ([`chunks_socket`](crate::lazy::chunks_socket)). `None`, or a disk that is not lazy, and
+    /// the disk is its file alone.
+    #[serde(default)]
+    pub chunks: Option<std::path::PathBuf>,
 }
 
 /// How big a machine is and where it may connect to, whatever it boots and runs.
@@ -203,12 +210,114 @@ impl Machine {
     /// Start `cmd` in the guest, beside whatever else runs there. Answered by a
     /// [`Started`](CtrlResp::Started) from [`recv`](Machine::recv), each `exec` in turn,
     /// with its pid there: the id its output and its end come back under.
-    pub fn exec(&self, cmd: Vec<String>) -> Result<()> {
+    /// Its stdin a pipe to write with [`write_stdin`](Machine::write_stdin) if `stdin`, empty if
+    /// not.
+    pub fn exec(&self, cmd: Vec<String>, stdin: bool) -> Result<()> {
         if cmd.is_empty() {
             return Err(Error::NoCommand);
         }
-        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Exec { cmd })
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Exec { cmd, stdin })
             .map_err(|e| Error::io("sending the command", e))
+    }
+
+    /// Start `cmd` in the guest on a terminal of its own, `cols` by `rows`: answered as
+    /// [`exec`](Machine::exec) is, in the same turn, and what it writes comes back as
+    /// [`Output`](CtrlResp::Output).
+    pub fn exec_tty(&self, cmd: Vec<String>, cols: u16, rows: u16) -> Result<()> {
+        if cmd.is_empty() {
+            return Err(Error::NoCommand);
+        }
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::ExecTty { cmd, cols, rows },
+        )
+        .map_err(|e| Error::io("sending the command", e))
+    }
+
+    /// Write `data` to the terminal of the process `id`, as typed.
+    pub fn stdin(&self, id: u32, data: String) -> Result<()> {
+        self.write_stdin(id, data, false)
+    }
+
+    /// Write `data` to the stdin of the process `id`, started with one by
+    /// [`exec`](Machine::exec), and close it after if `eof`.
+    pub fn write_stdin(&self, id: u32, data: String, eof: bool) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Stdin { id, data, eof },
+        )
+        .map_err(|e| Error::io("writing to a process's stdin", e))
+    }
+
+    /// Make the terminal of the process `id` `cols` by `rows`.
+    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Resize { id, cols, rows },
+        )
+        .map_err(|e| Error::io("resizing the terminal", e))
+    }
+
+    /// Publish guest port `port` from now on, as those it booted with are: answered by a
+    /// [`Published`](CtrlResp::Published) from [`recv`](Machine::recv), each in turn.
+    pub fn publish(&self, port: u16) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Publish { port },
+        )
+        .map_err(|e| Error::io("publishing the port", e))
+    }
+
+    /// Ask whether the process `id`, on a terminal, runs another in its foreground: answered by
+    /// a [`Foreground`](CtrlResp::Foreground) from [`recv`](Machine::recv).
+    pub fn foreground(&self, id: u32) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Foreground { id },
+        )
+        .map_err(|e| Error::io("asking about the terminal", e))
+    }
+
+    /// Mark its disk `mark`, before a copy of it: answered by a
+    /// [`Marked`](CtrlResp::Marked) from [`recv`](Machine::recv).
+    pub fn mark(&self, mark: u64) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Mark { mark },
+        )
+        .map_err(|e| Error::io("marking its disk", e))
+    }
+
+    /// Make what the copy at mark `mark` was kept as its disk's base: answered by a
+    /// [`Rebased`](CtrlResp::Rebased) from [`recv`](Machine::recv).
+    pub fn rebase(&self, mark: u64) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Rebase { mark },
+        )
+        .map_err(|e| Error::io("rebasing its disk", e))
+    }
+
+    /// Have the guest put what it has written on its disks: answered by a
+    /// [`Synced`](CtrlResp::Synced) from [`recv`](Machine::recv).
+    pub fn sync(&self) -> Result<()> {
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Sync)
+            .map_err(|e| Error::io("asking the guest to sync", e))
+    }
+
+    /// Pause the machine -- its vCPUs and its devices, the whole process -- until what this
+    /// answers drops: its disks are left as they are meanwhile, to be copied whole.
+    #[cfg(unix)]
+    pub fn pause(&self) -> Result<Paused<'_>> {
+        let pid = self.process.lock().unwrap().id() as libc::pid_t;
+        // SAFETY: a signal to this machine's own process, which is ours until it is reaped.
+        if unsafe { libc::kill(pid, libc::SIGSTOP) } == -1 {
+            return Err(Error::io("pausing the machine", io::Error::last_os_error()));
+        }
+        Ok(Paused {
+            pid,
+            _machine: self,
+        })
     }
 
     /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.
@@ -327,6 +436,19 @@ fn exchange(
         _ => Vec::new(),
     };
     Ok((answer, read))
+/// A machine paused by [`Machine::pause`], resumed as this drops.
+#[cfg(unix)]
+pub struct Paused<'a> {
+    pid: libc::pid_t,
+    _machine: &'a Machine,
+}
+
+#[cfg(unix)]
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        // SAFETY: as in `pause`.
+        unsafe { libc::kill(self.pid, libc::SIGCONT) };
+    }
 }
 
 /// A pipe end as the command line names it.
@@ -431,6 +553,7 @@ mod tests {
                 read_only: true,
             }],
             ports: vec![3000],
+            chunks: None,
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();

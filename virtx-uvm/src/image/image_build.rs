@@ -11,8 +11,8 @@ use std::fs::{self, File};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oci_spec::image::{Digest, ImageConfiguration};
-use virtx_core::Step;
+use oci_spec::image::{Digest, HistoryBuilder, ImageConfiguration};
+use virtx_core::{Recipe, Step};
 
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
@@ -56,6 +56,64 @@ impl From<tokio::task::JoinError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The label a built image keeps the recipe it was built from under, as its JSON.
+pub const RECIPE_LABEL: &str = "sh.virtx.recipe";
+
+/// `recipe` kept in the config of `image`, built from it: under [`RECIPE_LABEL`].
+pub fn recipe_kept(image: &mut ImageConfiguration, recipe: &Recipe) {
+    let mut config = image.config().clone().unwrap_or_default();
+    let mut labels = config.labels().clone().unwrap_or_default();
+    labels.insert(
+        RECIPE_LABEL.into(),
+        serde_json::to_string(recipe).expect("a recipe serializes"),
+    );
+    config.set_labels(Some(labels));
+    image.set_config(Some(config));
+}
+
+/// The recipe kept in `image`'s config let go of: an image made of it otherwise -- a sandbox
+/// committed -- was not built from it.
+pub fn recipe_forgotten(image: &mut ImageConfiguration) {
+    let Some(mut config) = image.config().clone() else {
+        return;
+    };
+    if let Some(labels) = config.labels_mut() {
+        labels.remove(RECIPE_LABEL);
+    }
+    image.set_config(Some(config));
+}
+
+/// What made `image` as it is now -- `created_by`, as a Dockerfile's instruction, or what
+/// committed it -- kept in its history, as `docker history` reads it: with whether it added a
+/// layer, of the `layers` it has now. Not kept where its history did not already tell each layer
+/// apart -- one its base kept none of -- as it would then name the wrong ones.
+pub fn history_kept(
+    image: &mut ImageConfiguration,
+    created_by: String,
+    layered: bool,
+    layers: usize,
+) {
+    let mut history = image.history().clone().unwrap_or_default();
+    let told = history
+        .iter()
+        .filter(|h| !h.empty_layer().unwrap_or(false))
+        .count();
+    if told + usize::from(layered) != layers {
+        return;
+    }
+    let Ok(entry) = HistoryBuilder::default()
+        .created(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .created_by(created_by)
+        .comment("virtx")
+        .empty_layer(!layered)
+        .build()
+    else {
+        return;
+    };
+    history.push(entry);
+    image.set_history(Some(history));
+}
 
 /// Take the image of `layers` and `image`'s config one `step` further: an `ENV` or a
 /// `WORKDIR` into the config, and what a `RUN` wrote onto `layers`, filed in `store` --
@@ -127,6 +185,7 @@ pub async fn build_step(
         spec: spec.clone(),
         volumes: Vec::new(),
         ports: Vec::new(),
+        chunks: None,
     };
     let vm = vm.to_vec();
     let machine =
@@ -143,7 +202,7 @@ pub async fn build_step(
     let cmd = cmd.map(str::to_owned).to_vec();
     let (lines, mut said) = tokio::sync::mpsc::unbounded_channel();
     let ran = tokio::task::spawn_blocking(move || {
-        machine.exec(cmd)?;
+        machine.exec(cmd, false)?;
         let id = loop {
             match machine.recv() {
                 Some(CtrlResp::Started(started)) => {
@@ -195,8 +254,15 @@ pub async fn build_step(
 /// What a machine wrote to `snapshot`, filed as a layer: the overlay's upper directory,
 /// without what the overlay said of itself. `None` for a command that wrote nothing.
 fn written(store: &Store, snapshot: &Snapshot) -> Result<Option<Digest>> {
-    let file = File::open(&snapshot.path).map_err(|e| Error::Io {
-        context: format!("opening {}", snapshot.path.display()),
+    written_layer(store, &snapshot.path)
+}
+
+/// What machines wrote to the snapshot disk at `disk` -- a copy of one, or one no machine
+/// runs over -- filed in `store` as a layer, as a `RUN` files what it wrote: how a sandbox is
+/// committed to an image. `None` for a disk nothing was written to.
+pub fn written_layer(store: &Store, disk: &std::path::Path) -> Result<Option<Digest>> {
+    let file = File::open(disk).map_err(|e| Error::Io {
+        context: format!("opening {}", disk.display()),
         source: e,
     })?;
     // The guest's init makes it on every boot, so only a snapshot no machine booted over
@@ -230,5 +296,79 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(self.0.root());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oci_spec::image::{History, HistoryBuilder};
+
+    use super::*;
+
+    fn layered(created_by: &str) -> History {
+        HistoryBuilder::default()
+            .created_by(created_by)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_built_image_keeps_its_recipe_and_a_committed_one_does_not() {
+        let recipe = Recipe::new("alpine:3.20")
+            .step("apk add --no-cache jq")
+            .step(Step::env("TZ", "UTC"));
+        let mut image = ImageConfiguration::default();
+        recipe_kept(&mut image, &recipe);
+        let kept =
+            image.config().as_ref().unwrap().labels().as_ref().unwrap()[RECIPE_LABEL].clone();
+        assert_eq!(serde_json::from_str::<Recipe>(&kept).unwrap(), recipe);
+
+        recipe_forgotten(&mut image);
+        assert!(
+            !image
+                .config()
+                .as_ref()
+                .unwrap()
+                .labels()
+                .as_ref()
+                .unwrap()
+                .contains_key(RECIPE_LABEL)
+        );
+    }
+
+    #[test]
+    fn each_step_is_kept_in_the_history_where_it_tells_each_layer_apart() {
+        // A base of one layer, its history telling it.
+        let mut image = ImageConfiguration::default();
+        image.set_history(Some(vec![layered("ADD rootfs /")]));
+        history_kept(&mut image, "RUN apk add jq".into(), true, 2);
+        history_kept(&mut image, "ENV TZ=UTC".into(), false, 2);
+        let history = image.history().clone().unwrap();
+        let told: Vec<_> = history
+            .iter()
+            .map(|h| {
+                (
+                    h.created_by().clone().unwrap(),
+                    h.empty_layer().unwrap_or(false),
+                )
+            })
+            .collect();
+        assert_eq!(
+            told,
+            [
+                ("ADD rootfs /".to_string(), false),
+                ("RUN apk add jq".to_string(), false),
+                ("ENV TZ=UTC".to_string(), true),
+            ]
+        );
+
+        // A base whose history tells none of its layers: none is told after it either.
+        let mut bare = ImageConfiguration::default();
+        history_kept(&mut bare, "RUN apk add jq".into(), true, 3);
+        assert!(bare.history().is_none());
+        // From scratch: every one.
+        let mut scratch = ImageConfiguration::default();
+        history_kept(&mut scratch, "RUN true".into(), true, 1);
+        assert_eq!(scratch.history().as_ref().unwrap().len(), 1);
     }
 }

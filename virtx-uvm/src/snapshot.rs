@@ -76,6 +76,49 @@ impl Snapshot {
     /// How large a snapshot may grow when nothing says otherwise.
     pub const SIZE: u64 = 2 << 30;
 
+    /// How large it may grow, in bytes: what its filesystem was made to hold.
+    pub fn capacity(&self) -> Result<u64> {
+        Ok(fs::metadata(&self.path)
+            .map_err(|e| Error::io(format!("reading {}", self.path.display()), e))?
+            .len())
+    }
+
+    /// Made able to grow to `size` bytes, larger than it is, with what is on it kept. Its
+    /// filesystem -- laid out by [`FsTree::to_ext4`] with no room to grow in place, which a
+    /// kernel will not grow either -- is read whole and written again at `size`: a new image
+    /// beside it, moved over it once whole, so a failure leaves it as it was. What it costs is
+    /// what is written to it, not `size`. Held while it is, and refused while anything else
+    /// holds it.
+    pub fn grow(&self, size: u64) -> Result<()> {
+        let _held = self.lock()?;
+        if self.capacity()? >= size {
+            return Ok(());
+        }
+        let tree = FsTree::from_ext4(io::BufReader::new(
+            File::open(&self.path)
+                .map_err(|e| Error::io(format!("opening {}", self.path.display()), e))?,
+        ))?;
+        let part = self.path.with_extension("ext4.growing");
+        let _ = fs::remove_file(&part);
+        let written = File::create_new(&part)
+            .map_err(|e| Error::io(format!("creating {}", part.display()), e))
+            .and_then(|file| tree.to_ext4(file, size).map_err(Error::from))
+            .and_then(|()| {
+                fs::rename(&part, &self.path)
+                    .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
+            });
+        // Written again whole: no base says what it is now.
+        #[cfg(unix)]
+        if written.is_ok() {
+            crate::lazy::forget(&self.path)
+                .map_err(|e| Error::io(format!("forgetting {}'s base", self.path.display()), e))?;
+        }
+        if written.is_err() {
+            let _ = fs::remove_file(&part);
+        }
+        written
+    }
+
     /// Hold it, refused while anything else does.
     pub fn lock(&self) -> Result<Lock> {
         let path = self.lock_path();
@@ -227,9 +270,30 @@ impl Store {
         let lock = snapshot.lock()?;
         fs::remove_file(&snapshot.path)
             .map_err(|e| Error::io(format!("removing {}", snapshot.path.display()), e))?;
+        #[cfg(unix)]
+        let _ = crate::lazy::forget(&snapshot.path);
         drop(lock);
         let _ = fs::remove_file(snapshot.lock_path());
         Ok(())
+    }
+
+    /// Put the disk at `disk` in place as snapshot `name`, over the one there if any -- refused
+    /// while a machine runs over that one. `disk` is moved, not copied, so it has to be on this
+    /// store's filesystem: under [`root`](Store::root).
+    pub fn replace(&self, name: &str, disk: &Path) -> Result<Snapshot> {
+        let snapshot = Snapshot {
+            name: name.to_owned(),
+            path: self.path(name)?,
+        };
+        let lock = snapshot.lock()?;
+        fs::rename(disk, &snapshot.path)
+            .map_err(|e| Error::io(format!("moving {} into place", snapshot.path.display()), e))?;
+        // A lazy disk's sidecar with it; and none left of the disk it replaced.
+        #[cfg(unix)]
+        crate::lazy::move_beside(disk, &snapshot.path)
+            .map_err(|e| Error::io(format!("moving {}'s sidecar", snapshot.path.display()), e))?;
+        drop(lock);
+        Ok(snapshot)
     }
 
     /// Snapshot `name`'s disk, refused unless `name` [is one](crate::is_name).
@@ -336,6 +400,30 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_disk_replaces_a_snapshot_unless_it_is_in_use() {
+        let scratch = Scratch::new("replace");
+        let store = &scratch.0;
+        let old = store.create("work", Snapshot::SIZE).unwrap();
+        let disk = store.root().join("incoming.ext4");
+        fs::write(&disk, b"new").unwrap();
+
+        let held = old.lock().unwrap();
+        assert!(matches!(store.replace("work", &disk), Err(Error::InUse(_))));
+        drop(held);
+        assert_eq!(store.replace("work", &disk).unwrap(), old);
+        assert_eq!(fs::read(&old.path).unwrap(), b"new");
+        assert!(!disk.exists());
+
+        // And one not here yet is put in place as it is.
+        fs::write(&disk, b"other").unwrap();
+        store.replace("other", &disk).unwrap();
+        assert_eq!(
+            fs::read(store.open("other").unwrap().path).unwrap(),
+            b"other"
         );
     }
 

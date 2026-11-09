@@ -42,7 +42,7 @@ See [Working with images](/docs/guides/images/).
 | `prune_image()` | `ImagePruneOutput` | Deletes images no tag points at and no sandbox uses, once they are an hour old. |
 
 A `Recipe(base)` is chained with `.run(command)`, `.env(key, value)` and `.workdir(directory)`.
-In Rust, `Recipe::new(base).step(..)` takes a `Step::run`, `Step::env` or `Step::workdir`, and `Recipe::from_dockerfile(text)` reads a Dockerfile.
+In Rust, `Recipe::new(base).step(..)` takes a `Step::run`, `Step::env` or `Step::workdir`, or a plain string as a `run` step, and `Recipe::from_dockerfile(text)` reads a Dockerfile.
 
 ## Sandboxes
 

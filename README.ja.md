@@ -260,8 +260,8 @@ let client = Client::connect(
 
 使う言語に合わせて確認してください。
 
-- **Python:** 3.10以降
-- **Node:** 18以降
+- **Python:** 3.11以降
+- **Node:** 22以降
 - **Rust:** 1.89以降
 
 ### サーバー

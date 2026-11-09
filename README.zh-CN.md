@@ -35,7 +35,7 @@
 ## 快速上手
 
 > [!TIP]
-> 在用编程智能体？装上 [virtx skill](skills/virtx/SKILL.md)，下面这些代码就可以交给它来写：
+> 在用编程智能体？装上 [virtx skill](skills/virtx/SKILL.md)，后面的示例代码就可以交给它来写。安装命令如下：
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab

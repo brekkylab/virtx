@@ -5,7 +5,7 @@ folder and serves it at <https://virtx.sh/docs/> with the site's own look; this 
 the docs say, not how they look.
 
 ```
-content/      the pages, as MDX; the path is the address: guides/gpu.mdx is /docs/guides/gpu/
+content/      the pages, as MDX; the path is the address: guides/using-gpus.mdx is /docs/guides/using-gpus/
 sidebar.json  the sidebar: its groups and the order of the pages
 preview/      the preview's own code: its content config and the link check
 ```

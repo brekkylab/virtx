@@ -43,7 +43,7 @@ type Out = Arc<Mutex<File>>;
 type Terminals = Arc<Mutex<HashMap<u32, File>>>;
 
 /// The cgroup every command run here goes under -- each in one of its own within it -- its
-/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads, and its CPU weighed under
+/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, and its CPU weighed under
 /// one of this agent's threads: so that a command forking without end -- a fork bomb -- leaves
 /// this agent the processes and the CPU it needs to answer the host and to stop, and a command
 /// run beside it the CPU of one command, not one of the bomb's thousands of processes. None
@@ -54,7 +54,8 @@ const AGENT_PIDS: u64 = 256;
 /// The next command's cgroup.
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The cgroup for commands, made: its `pids.max` the kernel's threads less [`AGENT_PIDS`].
+/// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
+/// [`AGENT_PIDS`].
 fn jobs_cgroup() -> Option<PathBuf> {
     let root = std::path::Path::new("/sys/fs/cgroup");
     std::fs::write(root.join("cgroup.subtree_control"), "+pids").ok()?;
@@ -64,11 +65,12 @@ fn jobs_cgroup() -> Option<PathBuf> {
     let weighed = std::fs::write(root.join("cgroup.subtree_control"), "+cpu").is_ok();
     let jobs = root.join("jobs");
     std::fs::create_dir_all(&jobs).ok()?;
-    let threads: u64 = std::fs::read_to_string("/proc/sys/kernel/threads-max")
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    // The kernel's own default for its pids, where it was built with fewer: a machine's
+    // processes held by its memory (`threads-max`), not by 4096 whatever its size.
+    let _ = std::fs::write("/proc/sys/kernel/pid_max", "32768");
+    let read = |path: &str| -> Option<u64> { std::fs::read_to_string(path).ok()?.trim().parse().ok() };
+    // Whichever runs out first: threads, or pids.
+    let threads = read("/proc/sys/kernel/threads-max")?.min(read("/proc/sys/kernel/pid_max")?);
     let most = threads.saturating_sub(AGENT_PIDS).max(64);
     std::fs::write(jobs.join("pids.max"), most.to_string()).ok()?;
     if weighed {

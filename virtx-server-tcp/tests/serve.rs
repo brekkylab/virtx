@@ -1763,11 +1763,10 @@ async fn a_fork_bomb_leaves_the_sandbox_answering() {
     let served = Served::spawn("fork-bomb").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("a-token");
-    let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap()
-        .id;
+    // Large enough for more threads than the kernel's pids, as most are.
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.memory_mib = Some(2048);
+    let id = client.create_sandbox(&args).await.unwrap().id;
     let ran = async |cmd: &str| {
         let job = client
             .exec_sandbox(&id, &SandboxExecArgs::new(["sh", "-c", cmd]))
@@ -1788,7 +1787,7 @@ async fn a_fork_bomb_leaves_the_sandbox_answering() {
     ran("sh -c 'f(){ f & f & wait; }; f' >/dev/null 2>&1 </dev/null & echo started").await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     let asked = std::time::Instant::now();
-    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), ran("echo alive"))
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), ran("echo alive; cat /proc/sys/kernel/pid_max"))
         .await
         .expect("a command answered beside the bomb");
     eprintln!("BOMB {answered:?} in {:?}", asked.elapsed());

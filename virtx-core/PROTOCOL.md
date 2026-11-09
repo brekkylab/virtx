@@ -11,15 +11,16 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/pull/` | [HTTP](#image-jobs) | Starting an image pull from another registry |
 | `/images/jobs/push/` | [HTTP](#image-jobs) | Starting an image push to another registry |
 | `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
+| `/images/jobs/commit/` | [HTTP](#image-jobs) | Starting an image made of a sandbox |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
-| `/snapshots/` | [HTTP](#snapshots) | Snapshot CRUD |
-| `/snapshots/{name}/files/` | [WebDAV](#files) | The files in a snapshot |
 | `/volumes/` | [HTTP](#volumes) | Volume CRUD |
 | `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
 | `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
 | `/sandboxes/` | [HTTP](#sandboxes) | Sandbox CRUD |
 | `/sandboxes/{id}/files/` | [WebDAV](#files) | The files in a sandbox, as its processes see them |
+| `/sandboxes/{id}/start`, `/sandboxes/{id}/stop` | [HTTP](#sandboxes) | Starting and stopping a sandbox |
+| `/sandboxes/{id}/ports/{port}` | [HTTP](#ports) | Opening a port in a sandbox |
 | `/sandboxes/{id}/jobs/` | [HTTP](#sandbox-jobs) | Sandbox jobs: read, signal, cancel |
 | `/sandboxes/{id}/jobs/exec/` | [HTTP](#sandbox-jobs) | Starting a process in a sandbox |
 | `/sandboxes/{id}/jobs/{job}/stdin` | [HTTP](#sandbox-jobs) | Writing to a process's stdin |
@@ -59,7 +60,7 @@ The client starts the server as a child process, and the server's stdin and stdo
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
 - The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin).
-- The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then delete every sandbox and cancel every job, as `DELETE` does, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
+- The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then stop every sandbox, as [`stop`](#sandboxes) does -- deleting those that are ephemeral -- cancel every job, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
 
 ## Authentication
 
@@ -69,6 +70,10 @@ The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bea
 How the client obtains the token is outside this protocol.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
+
+A server that keeps organizations apart, each with its own images, volumes and sandboxes, takes the organization a request is for in the `virtx-org` header.
+A credential that is an organization's own, such as an API key, names its organization already, and the header MAY be left out.
+A server answers `400 Bad Request` to a request that names no organization when it needs one, and `403 Forbidden` to one naming an organization the credentials do not reach.
 
 ## Resources
 
@@ -82,7 +87,7 @@ A `DELETE` answers `204 No Content` once what it names is gone.
 A request that fails is answered with an HTTP error status and a body:
 
 ```text
-{"error": {"code": "in_use", "message": "snapshot `dev` is held by a sandbox"}}
+{"error": {"code": "in_use", "message": "volume `data` is mounted by a sandbox"}}
 ```
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
@@ -140,7 +145,7 @@ A slow reader slows only its own stream: the server does not buffer for it beyon
 
 ### Image jobs
 
-An image job copies an image between the server's [images](#images) and another registry, or builds one into them.
+An image job copies an image between the server's [images](#images) and another registry, or makes one into them: built from a recipe, or of a sandbox.
 
 | Request | Body | Answer |
 | --- | --- | --- |
@@ -148,6 +153,7 @@ An image job copies an image between the server's [images](#images) and another 
 | `POST /images/jobs/pull/` | `{reference, auth?}` | `201`, the job |
 | `POST /images/jobs/push/` | `{reference, auth?}` | `201`, the job |
 | `POST /images/jobs/build/` | `{recipe, reference}` | `201`, the job |
+| `POST /images/jobs/commit/` | `{sandbox, reference}` | `201`, the job |
 | `GET /images/jobs/{id}` | | `200`, the job |
 | `DELETE /images/jobs/{id}` | | `204` |
 | `GET /images/jobs/{id}/events` | | `200`, its [log](#events) |
@@ -155,8 +161,8 @@ An image job copies an image between the server's [images](#images) and another 
 
 An image job is `{id, kind, reference, running, digest?, error?}`:
 
-- `kind` is `"pull"`, `"push"` or `"build"`, and `reference` the one it was started with.
-- `digest`, once it has succeeded, is that of the image a pull or build left here, as the [images](#images) list it, or of the manifest a push put on the registry.
+- `kind` is `"pull"`, `"push"`, `"build"` or `"commit"`, and `reference` the one it was started with.
+- `digest`, once it has succeeded, is the digest of the manifest it copied or built; for an image index, the index's own.
 - `error`, once it has failed, is why, for a person to read.
 
 Its log's entries are `{"log": "..."}`, a line of it, and `{"truncated": {}}`, then `{"end": {"digest": "..."}}` or `{"end": {"error": "..."}}`, as the job has them.
@@ -171,36 +177,26 @@ The server uses `auth` for that job alone: it MUST NOT keep it beyond the job, s
 
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
 
+A commit makes an image of [sandbox](#sandboxes) `sandbox` and tags it `reference`: the image it stands on, with what it has written to its root filesystem as one more layer, and that image's config.
+It is how a sandbox is kept to start others from: any number boot the image, each with a disk of its own.
+
+- Of a running sandbox, it is what its processes had written by the time the job started, as one moment: as a disk is when its machine stops, with everything written flushed first. The server MAY pause the sandbox while it copies, and its processes then go on as they were.
+- Of a stopped one, it is its disk as it was left.
+- It holds files, not processes, and the root filesystem alone: what the sandbox's volumes hold stays in them.
+- The sandbox goes on as it was: a commit does not use it, and does not start a stopped one.
+
 Cancelling one stops it:
 
 - A build leaves no tag changed. Layers already built MAY be kept for reuse.
+- A commit leaves no tag changed.
 - A pull leaves no tag changed. Blobs already fetched MAY be kept for reuse.
 - A push puts no manifest to the other registry. Blobs already pushed there stay.
 
 The server MAY remove an image job that has ended, once a time it chooses has passed.
 
-`POST /images/prune` deletes each image no reference points at and no sandbox uses, and what only such images held, such as their layers.
+`POST /images/prune` deletes each image no reference points at and no [sandbox](#sandboxes), running or stopped, stands on, and what only such images held, such as their layers.
 `images` is the digest of each image it deleted, and `reclaimed` how many bytes that freed.
 It MAY leave what is too new to tell from what a running image job will point a reference at.
-
-### Snapshots
-
-A snapshot is the upper layer of a sandbox's root filesystem, kept under a name.
-A sandbox started on one begins with the changes in it, and writes into it.
-Its files are reached at [`/snapshots/{name}/files/`](#files).
-
-| Request | Body | Answer |
-| --- | --- | --- |
-| `GET /snapshots/` | | `200`, array of `{name, size, in_use}` |
-| `POST /snapshots/` | `{name?, disk_gib?}` | `201`, `{name, size, in_use}` |
-| `GET /snapshots/{name}` | | `200`, `{name, size, in_use}` |
-| `DELETE /snapshots/{name}` | | `204` |
-
-Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
-`disk_gib` is how much a sandbox standing on it may write over its image, in GiB; without it the server picks it, and `0` is refused.
-`size` is the bytes the upper layer takes on the server.
-`in_use` is whether a sandbox holds the snapshot now, from its `POST` until its `DELETE`.
-`DELETE` refuses a snapshot in use with `409`, `in_use`.
 
 ### Volumes
 
@@ -244,27 +240,68 @@ The mount is a directory it creates, not the root and not inside another mount, 
 
 ### Sandboxes
 
-A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), with [volumes](#volumes) mounted into it.
+A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it, and a disk of its own: what its processes write to its root filesystem, over its image.
+Its disk outlives its VM. A sandbox stops, when it is not used or is told to, and starts again as it was left, under the same id, until it is deleted.
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running}` |
-| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running}` |
+| `GET /sandboxes/` | | `200`, array of sandboxes |
+| `POST /sandboxes/` | `{image, name?, ephemeral?, auto_stop_minutes?, auto_delete_days?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, the sandbox, with `ports` |
+| `GET /sandboxes/{id}` | | `200`, the sandbox |
+| `POST /sandboxes/{id}/start` | `{}` | `200`, the sandbox, with `ports` |
+| `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
+| `PUT /sandboxes/{id}/ports/{port}` | | `201`, `{port, url}`; `200` for one open already |
+
+A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at}`, and in the answer to its `POST` and to `start`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
+- `name`, if given, names it among its organization's sandboxes -- the server's, on one that keeps no organizations apart -- so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
+- `state` is `"running"`, its VM up, or `"stopped"`, its VM down and its disk kept.
+- `ephemeral`, `false` without it, is whether it is deleted when it stops, rather than kept.
+- `auto_stop_minutes` is how long it runs [unused](#use) before it stops. Without it the server picks it; the server MAY refuse a longer one than it allows.
+- `auto_delete_days` is how long it is kept stopped and unused before it is deleted. `null` keeps it until its `DELETE`. Without it the server picks it.
+- `used_at` is when it was last [used](#use), as RFC 3339.
+- `disk_gib` is how much it may write to its root filesystem over its image, in GiB. Without it the server picks it, and `0` is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
-- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
+Its files are reached at [`/sandboxes/{id}/files/`](#files) while it runs.
 
-Its files are reached at [`/sandboxes/{id}/files/`](#files).
+A sandbox stands on the image it booted, by digest, for as long as it exists: started again, it boots that image, whatever its tag points at by then.
+So the server keeps that image while the sandbox exists, as [Images](#images) says.
 
-A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
-One whose VM has exited is still held until then.
+#### Use
+
+A sandbox is used while a [job](#sandbox-jobs) runs in it or a connection through one of its [ports](#ports) is open, and when a job is started in it.
+`used_at` is the last of these; a `GET` and a listing do not use it.
+
+#### Stopping
+
+A sandbox stops after `auto_stop_minutes` unused, or at its `POST /sandboxes/{id}/stop`:
+
+- Every job in it ends as a cancellation does, and every connection through its ports is closed.
+- What its processes had written is put on its disk, and its VM is stopped. Its disk is kept with all of it.
+- An ephemeral sandbox is deleted then, as its `DELETE` does.
+
+`stop` answers once it has stopped, and answers a stopped one as it is.
+
+#### Starting
+
+A stopped sandbox starts at its `POST /sandboxes/{id}/start`, and when a job is started in it, which then runs once it has:
+
+- Its VM boots again, from the image it stands on, over its disk as it was left.
+- Its files are as they were when it stopped. Its processes are not: nothing that ran in it before runs, until something starts it anew.
+- Its volumes are mounted again, and its ports opened again: at the same `url`s where the server can, and otherwise at others -- a server that runs it somewhere else this time, or one on the client's machine at other loopback addresses -- which `start` answers.
+
+`start` answers once it runs, and answers a running one as it is.
+A `GET`, a listing, and a connection to one of its ports do not start it.
+
+#### Deleting
+
+A sandbox is deleted by its `DELETE`, when it stops if it is ephemeral, and after `auto_delete_days` stopped and unused.
+The server deletes one in no other way.
+Deleting one stops it first if it runs, and then removes its disk; its volumes stay, and every request naming it is answered `404`, `not_found`.
 
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
 Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
@@ -273,9 +310,12 @@ A connection to one of its ports while its VM is stopped is closed, as one to a 
 #### Ports
 
 `ports` in the body are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
-They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
+They are reserved when the sandbox is made, and kept through every stop and start until it is deleted. `0` and a port given twice are refused.
+A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
-The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+
+The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
@@ -304,6 +344,7 @@ A sandbox job is `{id, kind, pid, cmd, running, code?}`:
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
 
+A job started in a stopped sandbox [starts](#starting) it first.
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
 Its log's entries are each an object with one member:
@@ -315,7 +356,7 @@ Its log's entries are each an object with one member:
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
-The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
+The job, and its log, are kept until its `DELETE` or its sandbox's deletion: a sandbox that stops ends its jobs and keeps them.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.
@@ -350,11 +391,11 @@ Images are listed, tagged and removed with the specification's requests:
 | List images | `GET /images/oci/v2/_catalog`, then `GET /images/oci/v2/{name}/tags/list` |
 | Tag an image | `PUT /images/oci/v2/{name}/manifests/{tag}` with its manifest |
 | Untag a reference | `DELETE /images/oci/v2/{name}/manifests/{tag}` |
-| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it |
+| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it; refused with `409 Conflict` and the code `DENIED` for one a sandbox stands on |
 | Export an image | `GET` its manifest, and each blob it names |
 | Import an image | Push each blob, then `PUT` its manifest by tag |
 
-A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
+A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time -- but not one a [sandbox](#sandboxes) stands on, running or stopped, which is kept while the sandbox is.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 
 The server copies images to and from other registries with [pull and push jobs](#image-jobs), which take that registry's credentials.
@@ -364,8 +405,8 @@ A request that fails is answered with the specification's error codes, in its `{
 
 ## Files
 
-The files in a volume are reached at `/volumes/{name}/files/`, those in a snapshot at `/snapshots/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
-The path after the root is the file's path in the volume, snapshot or sandbox, each segment percent-encoded.
+The files in a volume are reached at `/volumes/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
+The path after the root is the file's path in the volume or sandbox, each segment percent-encoded.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -383,19 +424,17 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume, snapshot or sandbox is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `502 Bad Gateway`.
-- A request naming a volume, snapshot or sandbox that does not exist is answered `404 Not Found`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume or sandbox is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume or sandbox, and refuse any other with `502 Bad Gateway`.
+- A request naming a volume or sandbox that does not exist is answered `404 Not Found`.
 
 ### A sandbox's files
 
-A sandbox's files are its root filesystem as its processes see it, the volumes mounted into it among them, while its VM runs: what a process writes is read here at once, and what is written here a process reads.
+A sandbox's files are its root filesystem as its processes see it, the volumes mounted into it among them, while it runs: what a process writes is read here at once, and what is written here a process reads.
 
 - The server MAY leave out what is not a file to read or write, such as `/proc`, `/sys` and `/dev`, and what is neither a file nor a directory, such as a link or a device: it is not listed, and a request naming it is answered as if nothing were there.
 - A file a `PUT` makes is owned as one a process in the sandbox makes is; one it replaces keeps its mode and owner.
 - A write to a volume mounted `readonly` is refused with `403 Forbidden`.
-- A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
+- A request to a sandbox that is stopped is refused with `409 Conflict`, `ended`: its files are read and written while it runs.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.
-
-A snapshot in use, held by a sandbox from its `POST` until its `DELETE` or its reclaiming, is answered `423 Locked` to every request, reads included: its files are the sandbox's until then.

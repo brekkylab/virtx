@@ -8,7 +8,10 @@ The package also installs the `virtx` command, the one in `libvirtx_core`: `npx 
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 const client = Client.spawn()
-for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
+for await (const entry of client.buildImage(
+  new Recipe('alpine:3.20').run('apk add jq'),
+  'jq:latest',
+)) {
   if ('log' in entry) console.log(entry.log)
   else if ('end' in entry) console.log('ended', entry.end)
 }
@@ -35,6 +38,16 @@ await cat.writeStdin('hello\n', true)
 for await (const entry of cat.log()) console.log(entry)
 ```
 
+A sandbox is kept until it is deleted: its disk, what it writes over its image, outlives its VM, which stops when it is unused or told to, and starts again as it was left, under the same id. `stop` and `start` do that on the handle, as `client.stopSandbox(id)` and `client.startSandbox(id)` do by its id; a job started in a stopped sandbox starts it too. One made with a `name` is found again by it, with `client.findSandbox(name)`. `commit(reference)` makes an image of it, a job as a build is, to start other sandboxes from.
+
+```js
+const dev =
+  (await client.findSandbox('dev')) ?? (await client.createSandbox('alpine:3.20', { name: 'dev' }))
+await dev.stop()
+const again = await dev.start()
+await again.commit('dev:latest')
+```
+
 A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```js
@@ -46,7 +59,7 @@ console.log('reach it at', forwarder.address)
 forwarder.close()
 ```
 
-A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js
 const volume = await client.createVolume('data')
@@ -56,7 +69,7 @@ for (const entry of await volume.readDir('in')) console.log(entry.name, entry.me
 console.log((await volume.readFile('in/notes.txt')).toString())
 ```
 
-What acts on a sandbox, a volume, a snapshot or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
+What acts on a sandbox, a volume or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
 
 The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or a copy beside `index.js`, or the one in the platform's package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 

@@ -1,7 +1,6 @@
-//! The files of a volume, a snapshot or a sandbox, which `PROTOCOL.md`'s Files has a server
-//! serve with WebDAV (RFC 4918) under `/volumes/{name}/files/`, `/snapshots/{name}/files/` or
-//! `/sandboxes/{id}/files/`: what each request names, and what a `PROPFIND` reads into. The
-//! client's end is [`client`].
+//! The files of a volume or a sandbox, which `PROTOCOL.md`'s Files has a server serve with
+//! WebDAV (RFC 4918) under `/volumes/{name}/files/` or `/sandboxes/{id}/files/`: what each
+//! request names, and what a `PROPFIND` reads into. The client's end is [`client`].
 //!
 //! A path is relative to the root, `/`-separated, as `dir/file.txt`; the empty path is the
 //! root. The server refuses one that leads outside.
@@ -11,13 +10,12 @@ pub(crate) mod client;
 
 use serde::{Deserialize, Serialize};
 
-/// Whose files: a volume's, a snapshot's, or a sandbox's as its processes see them. As JSON,
-/// `{"volume": "name"}`, `{"snapshot": "name"}` or `{"sandbox": "id"}`.
+/// Whose files: a volume's, or a sandbox's as its processes see them. As JSON,
+/// `{"volume": "name"}` or `{"sandbox": "id"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileRoot {
     Volume(String),
-    Snapshot(String),
     Sandbox(String),
 }
 
@@ -127,8 +125,8 @@ mod tests {
     fn a_root_is_tagged_by_its_kind() {
         let root = FileRoot::Volume("v".into());
         assert_eq!(serde_json::to_value(&root).unwrap(), json!({"volume": "v"}));
-        let decoded: FileRoot = serde_json::from_value(json!({"snapshot": "s"})).unwrap();
-        assert_eq!(decoded, FileRoot::Snapshot("s".into()));
+        let decoded: FileRoot = serde_json::from_value(json!({"volume": "s"})).unwrap();
+        assert_eq!(decoded, FileRoot::Volume("s".into()));
         let decoded: FileRoot = serde_json::from_value(json!({"sandbox": "sb1"})).unwrap();
         assert_eq!(decoded, FileRoot::Sandbox("sb1".into()));
     }
@@ -136,10 +134,10 @@ mod tests {
     #[test]
     fn a_path_s_root_is_beside_it() {
         let args = FilePathArgs {
-            root: FileRoot::Snapshot("s".into()),
+            root: FileRoot::Volume("s".into()),
             path: "a/b".into(),
         };
-        let value = json!({"snapshot": "s", "path": "a/b"});
+        let value = json!({"volume": "s", "path": "a/b"});
         assert_eq!(serde_json::to_value(&args).unwrap(), value);
         assert_eq!(serde_json::from_value::<FilePathArgs>(value).unwrap(), args);
         let read: FileReadArgs =

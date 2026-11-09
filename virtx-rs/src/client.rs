@@ -10,17 +10,17 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use virtx_core::{
     Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
+    FileWriteArgs, ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
     ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
-    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxJob as SandboxJobInfo,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs,
+    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, VolumeCreateArgs,
     VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Sandbox, SandboxJob, Snapshot, Volume,
+    Error, ImageJob, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -118,6 +118,45 @@ impl Client {
             )
         };
         unsafe { opened(api, status, raw, error) }
+    }
+
+    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+    /// `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+    /// `virtx token --json` prints, again as it runs out ([`Auth::Command`]).
+    ///
+    /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
+    /// `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS
+    /// answers with the cell nearest this machine. A sandbox of another cell is reached
+    /// through it as well.
+    pub fn from_env() -> Result<Client, Error> {
+        let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
+        let (key, org, domain) = (var("VIRTX_API_KEY"), var("VIRTX_ORG"), var("VIRTX_DOMAIN"));
+        let mut url = var("VIRTX_URL").or_else(|| {
+            var("VIRTX_REGION").map(|region| {
+                format!(
+                    "https://{region}.api.{}",
+                    domain.as_deref().unwrap_or(DOMAIN)
+                )
+            })
+        });
+        if url.is_none() && (key.is_some() || org.is_some()) {
+            url = Some(format!(
+                "https://run.{}",
+                domain.as_deref().unwrap_or(DOMAIN)
+            ));
+        }
+        let url = url.ok_or_else(|| {
+            Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())
+        })?;
+        let auth = match (key, &org) {
+            (Some(token), _) => Auth::Bearer { token },
+            (None, Some(_)) => Auth::Command {
+                program: "virtx".into(),
+                args: vec!["token".into(), "--json".into()],
+            },
+            (None, None) => Auth::None,
+        };
+        Client::connect(url, auth, org.map(|org| (ORG_HEADER, org)))
     }
 
     /// Send `auth` with every request from now on, in place of what was given at
@@ -349,60 +388,28 @@ impl Client {
         )
     }
 
-    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
+    /// Start making an image of the sandbox `sandbox` -- its image, with what it has written
+    /// as one more layer -- to point `reference` at: how a sandbox is kept to start others
+    /// from. Of a running one, as it is when the job starts; of a stopped one, as it was left.
+    /// Its log is [`ImageJob::log`]'s, or [`StartedJob::log`].
+    pub fn commit_image(
+        &self,
+        sandbox: impl Into<String>,
+        reference: impl Into<String>,
+    ) -> StartedJob<ImageJob, ImageJobEntry> {
+        let args = ImageCommitArgs {
+            sandbox: sandbox.into(),
+            reference: reference.into(),
+        };
+        self.start_image_job(self.call(self.api.virtx_client_commit_image, args))
+    }
+
+    /// Delete each image no tag points at and no sandbox stands on, and what only such images
+    /// held.
     pub fn prune_image(&self) -> Call<ImagePruneOutput> {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_prune_image)(self.raw)
         })
-    }
-
-    /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<Snapshot>> {
-        let client = self.clone();
-        let call: Call<Vec<SnapshotInfo>> = Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_snapshot)(self.raw)
-        });
-        call.map(move |infos| {
-            infos
-                .into_iter()
-                .map(|info| Snapshot::new(client.clone(), info))
-                .collect()
-        })
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Call<Snapshot> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_create_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
-    }
-
-    /// The snapshot `info` describes, reached through this client, without asking the server.
-    pub fn snapshot(&self, info: SnapshotInfo) -> Snapshot {
-        Snapshot::new(self.clone(), info)
-    }
-
-    /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<Snapshot> {
-        let args = json!({ "name": name.as_ref() });
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_get_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub(crate) fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
-        let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_remove_snapshot, args)
     }
 
     /// Every volume the server holds.
@@ -634,7 +641,7 @@ impl Client {
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
-    /// here only.
+    /// here and by [`start_sandbox`](Self::start_sandbox) only.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
         let client = self.clone();
         let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);
@@ -655,7 +662,42 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// The sandbox named `name`, without its ports, if one is.
+    pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<Option<SandboxInfo>> = self.call(self.api.virtx_client_find_sandbox, args);
+        call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
+    }
+
+    /// Start the sandbox `id` if it is stopped -- its VM booted over its disk as it was left --
+    /// and answer it once it runs, with where its ports are now. A job started in a stopped
+    /// sandbox starts it too.
+    pub fn start_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
+        let args = json!({ "id": id.as_ref() });
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_start_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// Stop the sandbox `id` if it runs: its jobs end, and its disk is kept -- or, for an
+    /// ephemeral one, deleted with it.
+    pub fn stop_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
+        let args = json!({ "id": id.as_ref() });
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_stop_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
+    /// where it is reached from.
+    pub fn open_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<SandboxPort> {
+        let args = json!({ "id": id.as_ref(), "port": port });
+        self.call(self.api.virtx_client_open_sandbox_port, args)
+    }
+
+    /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes
+    /// stay.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)
@@ -765,6 +807,27 @@ impl Client {
         )
     }
 
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log (virtx cloud's), two elsewhere; [`exec_sandbox`](Self::exec_sandbox)'s
+    /// log is always two. Dropping it leaves the job running.
+    pub(crate) fn exec_sandbox_with_log(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> Events<SandboxExecItem> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "cmd": args.cmd,
+            "stdin": args.stdin,
+            "timeout_ms": args.timeout_ms,
+        });
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_exec_sandbox_log, args),
+        )
+    }
+
     /// The image job `call` starts, its log read with a clone of this client.
     fn start_image_job(&self, call: Call<ImageJobInfo>) -> StartedJob<ImageJob, ImageJobEntry> {
         let client = self.clone();
@@ -854,3 +917,11 @@ unsafe fn opened(
         Ok(()) => Err(Error::Library(format!("unknown status {status}"))),
     }
 }
+
+/// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
+/// for one.
+pub const DOMAIN: &str = "virtx.sh";
+
+/// The header a request names its organization in, on a server that keeps organizations
+/// apart (PROTOCOL.md, Authentication).
+const ORG_HEADER: &str = "virtx-org";

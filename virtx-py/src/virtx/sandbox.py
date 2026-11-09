@@ -1,5 +1,6 @@
-"""Sandboxes: a VM booted from an image, standing on a snapshot, with volumes mounted into it;
-and the processes run in one, each a job whose log is its output."""
+"""Sandboxes: a VM booted from an image, with volumes mounted into it and a disk of its own that
+outlives the VM -- it stops when unused or told to, and starts again as it was left, under the
+same id, until it is deleted; and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
@@ -8,12 +9,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ._library import args
+from ._library import VirtxError, args
 from .files import Files
+from .image import ImageJob, ImageJobEntry
 from .job import LogEntry, StartedJob, Truncated
 from .volume import Volume
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
     from .client import Client
 
 
@@ -44,41 +48,96 @@ class SandboxVolume:
         return {"volume": volume, "path": self.path, "readonly": self.readonly}
 
 
+class SandboxState(str, Enum):
+    """Whether a sandbox's VM is up."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    """Its VM is down and its disk kept: a job started in it, or ``Sandbox.start``, starts
+    it."""
+
+
 @dataclass(frozen=True)
 class Sandbox(Files):
-    """One sandbox the server holds, and the client that reaches it: what runs processes in it
-    and reads and writes its files. Dropping it leaves the sandbox; ``remove`` removes it."""
+    """One sandbox the server holds, running or stopped, and the client that reaches it: what
+    starts and stops it, runs processes in it and reads and writes its files while it runs.
+    Dropping it leaves the sandbox; ``remove`` deletes it, as leaving ``async with`` does:
+    ``async with await client.create_sandbox(...) as sandbox:`` makes one for a block."""
 
     client: Client = field(repr=False, compare=False)
     """The client its requests go through."""
 
     id: str
 
+    name: str | None
+    """The name it was given, which ``find_sandbox`` finds it by."""
+
     image: str
-    """The digest of the image it booted, as ``algorithm:hex``."""
+    """The digest of the image it stands on, as ``algorithm:hex``: what it boots every time it
+    starts, whatever its tag points at by then."""
 
-    snapshot: str | None
-    """The snapshot it stands on, if it has one."""
+    state: SandboxState
 
-    running: bool
+    ephemeral: bool
+    """Whether it is deleted when it stops, rather than kept."""
+
+    auto_stop_minutes: int
+    """How long it runs unused before it stops."""
+
+    auto_delete_days: int | None
+    """How long it is kept stopped and unused before it is deleted; ``None`` keeps it until it
+    is deleted."""
+
+    used_at: str
+    """When it was last used, as RFC 3339."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` only."""
+    """Its opened ports: answered by ``create_sandbox`` and ``start`` only."""
+
+    @property
+    def running(self) -> bool:
+        """Whether its VM is up."""
+        return self.state == SandboxState.RUNNING
 
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Sandbox:
         return cls(
             client,
             value["id"],
+            value.get("name"),
             value["image"],
-            value.get("snapshot"),
-            value["running"],
+            SandboxState(value["state"]),
+            value["ephemeral"],
+            value["auto_stop_minutes"],
+            value.get("auto_delete_days"),
+            value["used_at"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
         )
 
     @property
     def _root(self) -> dict[str, str]:
         return {"sandbox": self.id}
+
+    async def start(self) -> Sandbox:
+        """Start it if it is stopped -- its VM booted over its disk as it was left -- and answer
+        it once it runs, with where its ports are now. A job started in it while it is stopped
+        starts it too."""
+        return await self.client.start_sandbox(self.id)
+
+    async def stop(self) -> Sandbox:
+        """Stop it if it runs: its jobs end, and its disk is kept -- or, if it is ephemeral,
+        deleted with it. Answered once it has stopped."""
+        return await self.client.stop_sandbox(self.id)
+
+    async def open_port(self, port: int) -> SandboxPort:
+        """Open the TCP port ``port`` in it, as those it was made with are, and answer where it
+        is reached from. A program in it listening on ``port`` already is reached once it
+        listens again."""
+        return await self.client.open_sandbox_port(self.id, port)
+
+    def commit(self, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Make an image of it, as ``Client.commit_image`` does, to point ``reference`` at."""
+        return self.client.commit_image(self.id, reference)
 
     def exec(
         self, cmd: Iterable[str], *, stdin: bool = False, timeout_ms: int | None = None
@@ -92,7 +151,14 @@ class Sandbox(Files):
             output = await self.client._call("virtx_client_exec_sandbox", request)
             return SandboxJob.from_dict(self.client, self.id, output)
 
-        return StartedJob(start, lambda job: job.log())
+        async def run() -> AsyncIterator[SandboxJob | LogEntry[SandboxJobEntry]]:
+            async for item in self.client._items("virtx_client_exec_sandbox_log", request):
+                if "job" in item:
+                    yield SandboxJob.from_dict(self.client, self.id, item["job"])
+                else:
+                    yield sandbox_job_entry(item)
+
+        return StartedJob(start, lambda job: job.log(), run)
 
     async def jobs(self) -> list[SandboxJob]:
         """Every job in it."""
@@ -107,8 +173,19 @@ class Sandbox(Files):
         return SandboxJob.from_dict(self.client, self.id, output)
 
     async def remove(self) -> None:
-        """Stop it, end its jobs, and forget it, keeping its snapshot and volumes."""
+        """Delete it: stopped first if it runs, and its disk removed. Its volumes stay."""
         await self.client._call("virtx_client_remove_sandbox", args(id=self.id))
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Delete it, as ``remove`` does; one deleted already is left so."""
+        try:
+            await self.remove()
+        except VirtxError as error:
+            if error.status != 404:
+                raise
 
 
 class SandboxJobKind(str, Enum):

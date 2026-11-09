@@ -10,7 +10,7 @@ import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from ._library import args as _args
@@ -28,8 +28,7 @@ from .image import (
     image_name,
 )
 from .job import StartedJob
-from .sandbox import Sandbox, SandboxVolume
-from .snapshot import Snapshot
+from .sandbox import Sandbox, SandboxPort, SandboxVolume
 from .volume import Volume
 
 if TYPE_CHECKING:
@@ -74,7 +73,25 @@ def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_ch
     return (ctypes.c_char_p * len(strings))(*strings)
 
 
-def _auth_bytes(auth: BearerAuth | None) -> bytes:
+@dataclass(frozen=True)
+class CommandAuth:
+    """The token ``program`` with ``args`` prints, sent as ``Authorization: Bearer <token>``:
+    a token alone, or ``{"token": ..., "expires_in": <seconds>}``. It is run for the first
+    request, and again when its token is a minute from running out or the server refuses it:
+    a person's short-lived token, as ``virtx token --json`` prints it."""
+
+    program: str
+    args: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"type": "command", "program": self.program, "args": list(self.args)}
+
+
+Auth = BearerAuth | CommandAuth
+
+
+def _auth_bytes(auth: Auth | None) -> bytes:
     """``auth`` as ``virtx_client_connect`` takes it: JSON, or nothing for none."""
     return b"" if auth is None else json.dumps(auth.to_dict()).encode()
 
@@ -146,7 +163,7 @@ class Client:
     def connect(
         cls,
         url: str,
-        auth: BearerAuth | None = None,
+        auth: Auth | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the credentials it wants, and ``headers``, whatever else it asks
@@ -169,7 +186,7 @@ class Client:
         )
         return cls._opened(lib, status, raw, error)
 
-    def set_auth(self, auth: BearerAuth | None) -> None:
+    def set_auth(self, auth: Auth | None) -> None:
         """Send ``auth`` with every request from now on, in place of what was given at
         ``connect``: a new token, when the server's are short-lived. A forwarder already open
         sends it with its next connection. Over stdio, where none is sent, nothing changes.
@@ -194,6 +211,34 @@ class Client:
         )
         if status != OK:
             self._lib.take(status, error)
+
+    @classmethod
+    def from_env(cls) -> Client:
+        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set:
+        with ``VIRTX_ORG`` and no key, as the person signed in with ``virtx login``, whose token
+        ``virtx token --json`` prints, again as it runs out.
+
+        Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
+        cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
+        which DNS answers with the cell nearest this machine. A sandbox of another cell is
+        reached through it as well."""
+        key = os.environ.get("VIRTX_API_KEY") or None
+        org = os.environ.get("VIRTX_ORG") or None
+        domain = os.environ.get("VIRTX_DOMAIN") or None
+        region = os.environ.get("VIRTX_REGION") or None
+        url = os.environ.get("VIRTX_URL") or None
+        if not url and region:
+            url = f"https://{region}.api.{domain or DOMAIN}"
+        if not url and (key or org):
+            url = f"https://run.{domain or DOMAIN}"
+        if not url:
+            raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
+        auth: Auth | None = None
+        if key:
+            auth = BearerAuth(key)
+        elif org:
+            auth = CommandAuth(*SIGNED_IN)
+        return cls.connect(url, auth, {ORG_HEADER: org} if org else None)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
@@ -291,6 +336,19 @@ class Client:
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
         )
 
+    def commit_image(
+        self, sandbox: str | Sandbox, reference: str
+    ) -> StartedJob[ImageJob, ImageJobEntry]:
+        """Make an image of ``sandbox``, a ``Sandbox`` or its id -- its image, with what it has
+        written as one more layer -- to point ``reference`` at: how a sandbox is kept to start
+        others from. Of a running one, as it is when the job starts; of a stopped one, as it was
+        left. Awaited, the job; iterated, its log, as ``ImageJob.log``'s. Sent when first
+        awaited or iterated."""
+        sandbox = sandbox.id if isinstance(sandbox, Sandbox) else sandbox
+        return self._image_job(
+            "virtx_client_commit_image", _args(sandbox=sandbox, reference=reference)
+        )
+
     def pull_image(
         self, reference: str, auth: RegistryAuth | None = None
     ) -> StartedJob[ImageJob, ImageJobEntry]:
@@ -369,26 +427,6 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
-    async def list_snapshot(self) -> list[Snapshot]:
-        """Every snapshot the server holds."""
-        items = await self._call("virtx_client_list_snapshot")
-        return [Snapshot.from_dict(self, item) for item in items]
-
-    async def create_snapshot(
-        self, name: str | None = None, disk_gib: int | None = None
-    ) -> Snapshot:
-        """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
-        without either the server picks it."""
-        output = await self._call(
-            "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
-        )
-        return Snapshot.from_dict(self, output)
-
-    async def get_snapshot(self, name: str) -> Snapshot:
-        """The snapshot ``name``."""
-        output = await self._call("virtx_client_get_snapshot", _args(name=name))
-        return Snapshot.from_dict(self, output)
-
     async def list_volume(self) -> list[Volume]:
         """Every volume the server holds."""
         items = await self._call("virtx_client_list_volume")
@@ -413,7 +451,11 @@ class Client:
         self,
         image: str | ImageName,
         *,
-        snapshot: str | Snapshot | None = None,
+        name: str | None = None,
+        ephemeral: bool = False,
+        auto_stop_minutes: int | None = None,
+        auto_delete_days: int | Literal["never"] | None = None,
+        disk_gib: int | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
@@ -422,30 +464,74 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
-        given, with ``volumes`` mounted into it, each a ``SandboxVolume``. ``ports`` are TCP
-        ports in it to open, reserved as it is made and answered here only, each with the
-        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
+        """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
+        ``SandboxVolume``. It is kept when it stops -- after ``auto_stop_minutes`` unused, or at
+        ``Sandbox.stop`` -- and starts again as it was left, until it is deleted: at
+        ``Sandbox.remove``, when it stops if ``ephemeral``, or after ``auto_delete_days`` stopped
+        and unused, ``"never"`` keeping it until then. ``name`` finds it again with
+        ``find_sandbox``. ``ports`` are TCP ports in it to open, each answered here and by
+        ``Sandbox.start`` with the ``url`` a ``PortForwarder`` reaches it by. Whatever is left
+        out the server picks."""
+        args = json.loads(
+            _args(
+                image=image_name(image).to_dict(),
+                name=name,
+                ephemeral=ephemeral or None,
+                auto_stop_minutes=auto_stop_minutes,
+                auto_delete_days=None if auto_delete_days == "never" else auto_delete_days,
+                disk_gib=disk_gib,
+                network=network,
+                ports=list(ports),
+                vcpus=vcpus,
+                memory_mib=memory_mib,
+                gpu=gpu,
+                gpu_memory_mib=gpu_memory_mib,
+                volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
+            )
+        )
+        if auto_delete_days == "never":
+            args["auto_delete_days"] = None
         return Sandbox.from_dict(
-            self,
-            await self._call(
-                "virtx_client_create_sandbox",
-                _args(
-                    image=image_name(image).to_dict(),
-                    snapshot=snapshot.name if isinstance(snapshot, Snapshot) else snapshot,
-                    network=network,
-                    ports=list(ports),
-                    vcpus=vcpus,
-                    memory_mib=memory_mib,
-                    gpu=gpu,
-                    gpu_memory_mib=gpu_memory_mib,
-                    volumes=[
-                        v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
-                    ],
-                ),
-            ),
+            self, await self._call("virtx_client_create_sandbox", json.dumps(args).encode())
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
-        """The sandbox ``id``, without its ports."""
+        """The sandbox ``id``, running or stopped, without its ports."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
+
+    async def find_sandbox(self, name: str) -> Sandbox | None:
+        """The sandbox named ``name``, without its ports, if one is."""
+        found = await self._call("virtx_client_find_sandbox", _args(name=name))
+        return None if found is None else Sandbox.from_dict(self, found)
+
+    async def start_sandbox(self, id: str) -> Sandbox:
+        """Start the sandbox ``id`` if it is stopped -- its VM booted over its disk as it was
+        left -- and answer it once it runs, with where its ports are now. A job started in a
+        stopped sandbox starts it too."""
+        return Sandbox.from_dict(self, await self._call("virtx_client_start_sandbox", _args(id=id)))
+
+    async def stop_sandbox(self, id: str) -> Sandbox:
+        """Stop the sandbox ``id`` if it runs: its jobs end, and its disk is kept -- or, for an
+        ephemeral one, deleted with it. Answered once it has stopped."""
+        return Sandbox.from_dict(self, await self._call("virtx_client_stop_sandbox", _args(id=id)))
+
+    async def open_sandbox_port(self, id: str, port: int) -> SandboxPort:
+        """Open the TCP port ``port`` in the sandbox ``id``, as those it was made with are, and
+        answer where it is reached from. A program in it listening on ``port`` already is
+        reached once it listens again."""
+        return SandboxPort.from_dict(
+            await self._call("virtx_client_open_sandbox_port", _args(id=id, port=port))
+        )
+
+
+DOMAIN = "virtx.sh"
+"""Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and
+``<cell>.api.<DOMAIN>`` for one."""
+
+ORG_HEADER = "virtx-org"
+"""The header a request names its organization in, on a server that keeps organizations apart
+(PROTOCOL.md, Authentication)."""
+
+SIGNED_IN = ("virtx", ("token", "--json"))
+"""The command that prints the token of the person signed in with ``virtx login``, and its
+arguments."""

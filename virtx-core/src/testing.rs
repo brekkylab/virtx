@@ -2,14 +2,16 @@
 //! axum router for the crate's own tests and for the `test_server` example the bindings' tests
 //! spawn.
 //!
-//! It starts with the volume `v`, the snapshot `s`, and the snapshot `locked`, held by the
-//! sandbox `holder`, so its files answer `423` to everything. Each volume, snapshot and sandbox
-//! is a filesystem of its own, a sandbox's empty as it is made.
+//! It starts with the volumes `v` and `s`, each a filesystem of its own, and no sandbox. A
+//! sandbox is made running, stopped by its `stop` -- deleted then, if ephemeral -- and started
+//! by its `start` or a job started in it; nothing stops one for want of use. Each sandbox's
+//! files are a filesystem of its own too, empty as it is made.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
 //! - A build logs `pulling <base>`, and fails for the base `missing`; a pull logs
-//!   `pulling <reference>` and fails for `missing`; a push logs `pushing <reference> as <auth>`,
+//!   `pulling <reference>` and fails for `missing`; a commit logs `committing <sandbox>`, and
+//!   fails for a sandbox that is not; a push logs `pushing <reference> as <auth>`,
 //!   the type of its credentials or `anonymous`. Each succeeds with `sha256:0`, but for the base
 //!   or reference `hang`, which runs until it is cancelled. A prune deletes `sha256:0`, of 1024
 //!   bytes.
@@ -37,14 +39,13 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     image::{
-        ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-        ImagePruneOutput, ImagePullArgs, ImagePushArgs, RegistryAuth,
+        ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+        ImageName, ImagePruneOutput, ImagePullArgs, ImagePushArgs, RegistryAuth,
     },
     sandbox::{
         Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEnd, SandboxJobEntry,
-        SandboxJobKind, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
+        SandboxJobKind, SandboxPort, SandboxSignalArgs, SandboxState, SandboxStdinArgs,
     },
-    snapshot::{SnapshotCreateArgs, SnapshotListOutputItem},
     transport::Log,
     volume::{
         VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
@@ -97,18 +98,29 @@ impl SandboxJobState {
     }
 }
 
-struct SandboxState {
+/// A sandbox held here, with where its ports are, which only making and starting it answer.
+struct Held {
     sandbox: Sandbox,
+    ports: Vec<SandboxPort>,
     jobs: BTreeMap<String, Arc<SandboxJobState>>,
     files: DavHandler,
+}
+
+impl Held {
+    /// Stopped: each job that runs ends as a cancellation does, and is kept.
+    fn stop(&mut self) {
+        for job in self.jobs.values() {
+            job.end(137);
+        }
+        self.sandbox.state = SandboxState::Stopped;
+    }
 }
 
 #[derive(Default)]
 struct Data {
     next: u64,
-    snapshots: BTreeMap<String, DavHandler>,
     volumes: BTreeMap<String, (DavHandler, BTreeMap<String, VolumeMountListOutputItem>)>,
-    sandboxes: BTreeMap<String, SandboxState>,
+    sandboxes: BTreeMap<String, Held>,
     image_jobs: BTreeMap<String, Arc<ImageJobState>>,
 }
 
@@ -117,20 +129,6 @@ impl Data {
     fn id(&mut self, prefix: &str) -> String {
         self.next += 1;
         format!("{prefix}{}", self.next)
-    }
-
-    fn in_use(&self, snapshot: &str) -> bool {
-        self.sandboxes
-            .values()
-            .any(|s| s.sandbox.snapshot.as_deref() == Some(snapshot))
-    }
-
-    fn snapshot(&self, name: &str) -> SnapshotListOutputItem {
-        SnapshotListOutputItem {
-            name: name.to_owned(),
-            size: 0,
-            in_use: self.in_use(name),
-        }
     }
 }
 
@@ -144,29 +142,15 @@ fn dav(prefix: &str) -> DavHandler {
         .build_handler()
 }
 
-/// Every endpoint but the images' registry, with `v`, `s` and `locked` in it.
+/// Every endpoint but the images' registry, with the volumes `v` and `s` in it.
 pub fn router() -> Router {
     let mut data = Data::default();
-    data.volumes
-        .insert("v".into(), (dav("/volumes/v/files"), BTreeMap::new()));
-    for name in ["s", "locked"] {
-        data.snapshots
-            .insert(name.into(), dav(&format!("/snapshots/{name}/files")));
+    for name in ["v", "s"] {
+        data.volumes.insert(
+            name.into(),
+            (dav(&format!("/volumes/{name}/files")), BTreeMap::new()),
+        );
     }
-    data.sandboxes.insert(
-        "holder".into(),
-        SandboxState {
-            sandbox: Sandbox {
-                id: "holder".into(),
-                image: "sha256:0".into(),
-                snapshot: Some("locked".into()),
-                running: true,
-                ports: Vec::new(),
-            },
-            jobs: BTreeMap::new(),
-            files: dav("/sandboxes/holder/files"),
-        },
-    );
     let shared: Shared = Arc::new(Mutex::new(data));
     Router::new()
         .route("/images/jobs/", get(list_image_jobs))
@@ -177,11 +161,6 @@ pub fn router() -> Router {
         )
         .route("/images/jobs/{id}/events", get(image_job_events))
         .route("/images/prune", post(prune))
-        .route("/snapshots/", get(list_snapshots).post(create_snapshot))
-        .route(
-            "/snapshots/{name}",
-            get(get_snapshot).delete(remove_snapshot),
-        )
         .route("/volumes/", get(list_volumes).post(create_volume))
         .route("/volumes/{name}", get(get_volume).delete(remove_volume))
         .route("/volumes/{name}/mounts/", get(list_mounts))
@@ -192,14 +171,13 @@ pub fn router() -> Router {
         .route("/volumes/{name}/files", any(volume_files))
         .route("/volumes/{name}/files/", any(volume_files))
         .route("/volumes/{name}/files/{*path}", any(volume_files))
-        .route("/snapshots/{name}/files", any(snapshot_files))
-        .route("/snapshots/{name}/files/", any(snapshot_files))
-        .route("/snapshots/{name}/files/{*path}", any(snapshot_files))
         .route("/sandboxes/{id}/files", any(sandbox_files))
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(list_sandboxes).post(create_sandbox))
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
+        .route("/sandboxes/{id}/start", post(start_sandbox))
+        .route("/sandboxes/{id}/stop", post(stop_sandbox))
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
         .route("/sandboxes/{id}/jobs/exec/", post(exec))
         .route(
@@ -315,6 +293,14 @@ async fn start_image_job(
             }
             Err(refused) => return refused,
         },
+        "commit" => match body::<ImageCommitArgs>(&request) {
+            Ok(args) => {
+                let fails = !shared.lock().unwrap().sandboxes.contains_key(&args.sandbox);
+                let line = format!("committing {}", args.sandbox);
+                (ImageJobKind::Commit, args.reference, line, fails)
+            }
+            Err(refused) => return refused,
+        },
         _ => return not_found("such job kind"),
     };
     let mut data = shared.lock().unwrap();
@@ -383,67 +369,6 @@ async fn prune() -> Response {
         images: vec!["sha256:0".into()],
         reclaimed: 1024,
     })
-}
-
-async fn list_snapshots(State(shared): State<Shared>) -> Response {
-    let data = shared.lock().unwrap();
-    let snapshots: Vec<_> = data
-        .snapshots
-        .keys()
-        .map(|name| data.snapshot(name))
-        .collect();
-    json(&snapshots)
-}
-
-async fn create_snapshot(State(shared): State<Shared>, request: Bytes) -> Response {
-    let args = match body::<SnapshotCreateArgs>(&request) {
-        Ok(args) => args,
-        Err(refused) => return refused,
-    };
-    if args.disk_gib == Some(0) {
-        return refuse(StatusCode::BAD_REQUEST, "invalid", "a disk of 0 GiB");
-    }
-    let mut data = shared.lock().unwrap();
-    let name = match args.name {
-        Some(name) => name,
-        None => data.id("snapshot-"),
-    };
-    if data.snapshots.contains_key(&name) {
-        return refuse(
-            StatusCode::CONFLICT,
-            "exists",
-            format!("snapshot `{name}` exists"),
-        );
-    }
-    let path = format!("/snapshots/{}", crate::transport::segment(&name));
-    // dav-server strips the prefix from the path it has decoded.
-    data.snapshots
-        .insert(name.clone(), dav(&format!("/snapshots/{name}/files")));
-    created(path, &data.snapshot(&name))
-}
-
-async fn get_snapshot(State(shared): State<Shared>, Path(name): Path<String>) -> Response {
-    let data = shared.lock().unwrap();
-    if !data.snapshots.contains_key(&name) {
-        return not_found("such snapshot");
-    }
-    json(&data.snapshot(&name))
-}
-
-async fn remove_snapshot(State(shared): State<Shared>, Path(name): Path<String>) -> Response {
-    let mut data = shared.lock().unwrap();
-    if !data.snapshots.contains_key(&name) {
-        return not_found("such snapshot");
-    }
-    if data.in_use(&name) {
-        return refuse(
-            StatusCode::CONFLICT,
-            "in_use",
-            format!("snapshot `{name}` is held by a sandbox"),
-        );
-    }
-    data.snapshots.remove(&name);
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn volume(name: &str) -> VolumeListOutputItem {
@@ -582,23 +507,6 @@ async fn volume_files(State(shared): State<Shared>, request: axum::extract::Requ
     }
 }
 
-/// Answers a request under `/snapshots/{name}/files/` from that snapshot's filesystem, or
-/// `423` while a sandbox holds it.
-async fn snapshot_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
-    let name = root_name(&request);
-    let dav = {
-        let data = shared.lock().unwrap();
-        if data.in_use(&name) {
-            return StatusCode::LOCKED.into_response();
-        }
-        data.snapshots.get(&name).cloned()
-    };
-    match dav {
-        Some(dav) => dav.handle(request).await.map(axum::body::Body::new),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 /// Answers a request under `/sandboxes/{id}/files/` from that sandbox's filesystem.
 async fn sandbox_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
     let id = root_name(&request);
@@ -607,20 +515,35 @@ async fn sandbox_files(State(shared): State<Shared>, request: axum::extract::Req
         .unwrap()
         .sandboxes
         .get(&id)
-        .map(|state| state.files.clone());
+        .map(|held| held.files.clone());
     match dav {
         Some(dav) => dav.handle(request).await.map(axum::body::Body::new),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-async fn list_sandboxes(State(shared): State<Shared>) -> Response {
+async fn list_sandboxes(
+    State(shared): State<Shared>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    // `?name=`, the one query it takes, percent-decoded.
+    let name = query.as_deref().and_then(|q| {
+        q.split('&').find_map(|pair| {
+            let value = pair.strip_prefix("name=")?;
+            Some(
+                percent_encoding::percent_decode_str(value)
+                    .decode_utf8_lossy()
+                    .into_owned(),
+            )
+        })
+    });
     let sandboxes: Vec<_> = shared
         .lock()
         .unwrap()
         .sandboxes
         .values()
-        .map(|state| state.sandbox.clone())
+        .map(|held| held.sandbox.clone())
+        .filter(|s| name.is_none() || s.name == name)
         .collect();
     json(&sandboxes)
 }
@@ -630,18 +553,21 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
         Ok(args) => args,
         Err(refused) => return refused,
     };
+    if args.disk_gib == Some(0) {
+        return refuse(StatusCode::BAD_REQUEST, "invalid", "a disk of 0 GiB");
+    }
     let mut data = shared.lock().unwrap();
-    if let Some(snapshot) = &args.snapshot {
-        if !data.snapshots.contains_key(snapshot) {
-            return not_found("such snapshot");
-        }
-        if data.in_use(snapshot) {
-            return refuse(
-                StatusCode::CONFLICT,
-                "in_use",
-                format!("snapshot `{snapshot}` is held by a sandbox"),
-            );
-        }
+    if let Some(name) = &args.name
+        && data
+            .sandboxes
+            .values()
+            .any(|held| held.sandbox.name.as_ref() == Some(name))
+    {
+        return refuse(
+            StatusCode::CONFLICT,
+            "exists",
+            format!("a sandbox is named `{name}`"),
+        );
     }
     let id = data.id("sb");
     let image = match args.image {
@@ -650,20 +576,16 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
     };
     let sandbox = Sandbox {
         id: id.clone(),
+        name: args.name,
         image,
-        snapshot: args.snapshot,
-        running: true,
+        state: SandboxState::Running,
+        ephemeral: args.ephemeral,
+        auto_stop_minutes: args.auto_stop_minutes.unwrap_or(15),
+        auto_delete_days: args.auto_delete_days.unwrap_or(Some(30)),
+        used_at: "2026-01-01T00:00:00Z".into(),
         ports: Vec::new(),
     };
-    data.sandboxes.insert(
-        id.clone(),
-        SandboxState {
-            sandbox: sandbox.clone(),
-            jobs: BTreeMap::new(),
-            files: dav(&format!("/sandboxes/{id}/files")),
-        },
-    );
-    let ports = args
+    let ports: Vec<_> = args
         .ports
         .iter()
         .map(|&port| SandboxPort {
@@ -671,22 +593,60 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
             url: format!("http://127.0.0.1:{port}"),
         })
         .collect();
+    data.sandboxes.insert(
+        id.clone(),
+        Held {
+            sandbox: sandbox.clone(),
+            ports: ports.clone(),
+            jobs: BTreeMap::new(),
+            files: dav(&format!("/sandboxes/{id}/files")),
+        },
+    );
     created(format!("/sandboxes/{id}"), &Sandbox { ports, ..sandbox })
 }
 
 async fn get_sandbox(State(shared): State<Shared>, Path(id): Path<String>) -> Response {
     match shared.lock().unwrap().sandboxes.get(&id) {
-        Some(state) => json(&state.sandbox),
+        Some(held) => json(&held.sandbox),
         None => not_found("such sandbox"),
     }
 }
 
-async fn remove_sandbox(State(shared): State<Shared>, Path(id): Path<String>) -> Response {
-    let Some(state) = shared.lock().unwrap().sandboxes.remove(&id) else {
+async fn start_sandbox(State(shared): State<Shared>, Path(id): Path<String>) -> Response {
+    let mut data = shared.lock().unwrap();
+    let Some(held) = data.sandboxes.get_mut(&id) else {
         return not_found("such sandbox");
     };
-    for job in state.jobs.values() {
-        job.end(137);
+    held.sandbox.state = SandboxState::Running;
+    json(&Sandbox {
+        ports: held.ports.clone(),
+        ..held.sandbox.clone()
+    })
+}
+
+async fn stop_sandbox(State(shared): State<Shared>, Path(id): Path<String>) -> Response {
+    let mut data = shared.lock().unwrap();
+    let Some(held) = data.sandboxes.get_mut(&id) else {
+        return not_found("such sandbox");
+    };
+    held.stop();
+    let stopped = held.sandbox.clone();
+    if stopped.ephemeral
+        && let Some(held) = data.sandboxes.remove(&id)
+    {
+        for job in held.jobs.values() {
+            job.log.remove();
+        }
+    }
+    json(&stopped)
+}
+
+async fn remove_sandbox(State(shared): State<Shared>, Path(id): Path<String>) -> Response {
+    let Some(mut held) = shared.lock().unwrap().sandboxes.remove(&id) else {
+        return not_found("such sandbox");
+    };
+    held.stop();
+    for job in held.jobs.values() {
         job.log.remove();
     }
     StatusCode::NO_CONTENT.into_response()
@@ -730,6 +690,8 @@ async fn exec(State(shared): State<Shared>, Path(id): Path<String>, request: Byt
     let Some(sandbox) = data.sandboxes.get_mut(&id) else {
         return not_found("such sandbox");
     };
+    // A job started in a stopped sandbox starts it first.
+    sandbox.sandbox.state = SandboxState::Running;
     let state = Arc::new(SandboxJobState {
         job: Mutex::new(SandboxJob {
             id: job_id.clone(),

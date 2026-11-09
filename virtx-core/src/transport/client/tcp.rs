@@ -7,7 +7,7 @@ use http::{HeaderMap, header};
 use http_body_util::BodyExt;
 use reqwest::{RequestBuilder, Url};
 
-use super::Body;
+use super::{Body, credentials::Credentials};
 use crate::Auth;
 
 /// What is sent with every request, read as each is sent, so that a change reaches the next
@@ -27,7 +27,7 @@ pub(super) struct Tcp {
     pub(super) http: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
     pub(super) base: Url,
-    pub(super) auth: Shared<Auth>,
+    pub(super) credentials: Arc<Credentials>,
     pub(super) headers: Shared<HeaderMap>,
 }
 
@@ -47,7 +47,7 @@ impl Tcp {
         Ok(Tcp {
             http: reqwest::Client::new(),
             base,
-            auth: Arc::new(RwLock::new(auth)),
+            credentials: Arc::new(Credentials::new(auth)),
             headers: Arc::new(RwLock::new(headers)),
         })
     }
@@ -55,7 +55,7 @@ impl Tcp {
     /// Send `auth` with every request from now on, in place of what was sent until now.
     pub(super) fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
         not_in_the_clear(&self.base, &auth)?;
-        *self.auth.write().unwrap_or_else(PoisonError::into_inner) = auth;
+        self.credentials.set(auth);
         Ok(())
     }
 
@@ -64,7 +64,7 @@ impl Tcp {
         *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
     }
 
-    /// Send `request`, whose URI is a path under the base, such as `/snapshots/`.
+    /// Send `request`, whose URI is a path under the base, such as `/volumes/`.
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,
@@ -81,24 +81,28 @@ impl Tcp {
             .http
             .request(parts.method, url)
             .body(reqwest::Body::wrap(body));
-        let response = authorized(request, headers, &current(&self.auth))
+        let token = self.credentials.token().await?;
+        let response = authorized(request, headers, token.as_deref())
             .send()
             .await
             .map_err(|e| format!("{e:#}"))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            self.credentials.refused();
+        }
         let response: http::Response<reqwest::Body> = response.into();
         Ok(response.map(|body| body.map_err(std::io::Error::other).boxed()))
     }
 }
 
-/// `request` with `headers`, and `auth`'s `Authorization` in place of any among them.
+/// `request` with `headers`, and `token` as its `Authorization` in place of any among them.
 pub(super) fn authorized(
     request: RequestBuilder,
     mut headers: HeaderMap,
-    auth: &Auth,
+    token: Option<&str>,
 ) -> RequestBuilder {
-    match auth {
-        Auth::None => request.headers(headers),
-        Auth::Bearer { token } => {
+    match token {
+        None => request.headers(headers),
+        Some(token) => {
             headers.remove(header::AUTHORIZATION);
             request.headers(headers).bearer_auth(token)
         }

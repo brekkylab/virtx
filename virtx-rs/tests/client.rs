@@ -19,8 +19,8 @@ use std::{io::Read, net::TcpStream};
 
 use virtx::{
     Auth, Client, Error, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry, MountSource,
-    MountType, PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd,
-    SandboxJobEntry,
+    MountType, PortForwarder, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJobEnd, SandboxJobEntry, SandboxState,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -205,16 +205,12 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .wait()
         .unwrap();
     let volume = client.get_volume("v").wait().unwrap();
-    let snapshot = client.create_snapshot(Some("handed"), None).wait().unwrap();
     let on_handles = client
         .create_sandbox(
-            &SandboxCreateArgs::new("alpine:3.20")
-                .snapshot(snapshot.name())
-                .readonly_volume(volume.name(), "/data"),
+            &SandboxCreateArgs::new("alpine:3.20").readonly_volume(volume.name(), "/data"),
         )
         .wait()
         .unwrap();
-    assert_eq!(on_handles.info().snapshot.as_deref(), Some("handed"));
     on_handles.remove().unwrap_wait();
     sandbox.create_dir_all("work/dir").unwrap_wait();
     sandbox
@@ -239,26 +235,31 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
-fn a_snapshot_is_created_got_and_removed() {
+fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
     let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
-    let created = client.create_snapshot(Some("t"), None).wait().unwrap();
-    assert_eq!(
-        (created.name(), created.info().in_use),
-        ("t", false),
-        "{created:?}"
-    );
-    created.write_file("a.txt", "kept", None).unwrap_wait();
-    let got = client.get_snapshot("t").wait().unwrap();
-    assert_eq!(got.info(), created.info());
-    assert_eq!(got.read_text("a.txt").wait().unwrap(), "kept");
-    created.remove().unwrap_wait();
-    let gone = client.get_snapshot("t").wait().unwrap_err();
+    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    args.name = Some("work".into());
+    let made = client.create_sandbox(&args).wait().unwrap();
+    assert_eq!(made.info().state, SandboxState::Running);
+    assert_eq!(made.name(), Some("work"));
+    let found = client.find_sandbox("work").wait().unwrap().unwrap();
+    assert_eq!(found.id(), made.id());
+    assert!(client.find_sandbox("nobody").wait().unwrap().is_none());
+    let stopped = found.stop().wait().unwrap();
+    assert_eq!(stopped.info().state, SandboxState::Stopped);
+    let started = stopped.start().wait().unwrap();
+    assert_eq!(started.info().state, SandboxState::Running);
+    let stopped = client.stop_sandbox(made.id()).wait().unwrap();
+    assert_eq!(stopped.info().state, SandboxState::Stopped);
+    let started = client.start_sandbox(made.id()).wait().unwrap();
+    assert_eq!(started.info().state, SandboxState::Running);
+    let job = made.commit("mine:v1").wait().unwrap();
+    assert_eq!(job.info().kind, ImageJobKind::Commit);
+    let job = client.commit_image(made.id(), "mine:v2").wait().unwrap();
+    assert_eq!(job.info().kind, ImageJobKind::Commit);
+    made.remove().unwrap_wait();
+    let gone = client.get_sandbox(made.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
-
-    let locked = client.get_snapshot("locked").wait().unwrap();
-    assert!(locked.info().in_use);
-    let refused = locked.read_dir("").wait().unwrap_err();
-    assert_eq!(refused.status(), Some(423), "{refused}");
 }
 
 fn a_process_run_in_a_sandbox_is_read_from_its_log() {
@@ -414,6 +415,29 @@ fn a_started_job_is_read_as_its_log() {
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .wait()
         .unwrap();
+    // Started and read as one: its job, then its log.
+    let mut items = sandbox.exec_with_log(&SandboxExecArgs::new(["echo", "hi"]));
+    let mut read = Vec::new();
+    while let Some(item) = items.wait_next() {
+        read.push(item.unwrap());
+    }
+    let [SandboxExecItem::Job(job), rest @ ..] = &read[..] else {
+        panic!("not its job first: {read:?}");
+    };
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    assert_eq!(
+        rest.iter()
+            .map(|item| match item {
+                SandboxExecItem::Log(entry) => entry.entry.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        [
+            SandboxJobEntry::Stdout("hi".into()),
+            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+        ]
+    );
+
     let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "hi"])).log();
     assert!(log.job().is_none());
     let mut entries = Vec::new();
@@ -529,6 +553,18 @@ fn a_token_does_not_go_in_the_clear_to_another_machine() {
     assert!(client.set_auth(token).is_ok());
 }
 
+fn a_command_is_run_for_the_token_before_a_request_is_sent() {
+    let failing = Auth::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "echo 'not signed in' >&2; exit 1".into()],
+    };
+    let client = Client::connect("http://127.0.0.1:9/", failing, [] as [(&str, &str); 0]).unwrap();
+    let Err(error) = client.list_sandbox().wait() else {
+        panic!("listed");
+    };
+    assert!(error.to_string().contains("not signed in"), "{error}");
+}
+
 fn a_header_that_cannot_be_sent_is_refused_when_set() {
     let client =
         Client::connect("http://127.0.0.1:9/", Auth::None, [] as [(&str, &str); 0]).unwrap();
@@ -568,12 +604,13 @@ fn main() -> ExitCode {
         a_header_that_cannot_be_sent_is_refused_at_connect,
         a_header_that_cannot_be_sent_is_refused_when_set,
         a_token_does_not_go_in_the_clear_to_another_machine,
+        a_command_is_run_for_the_token_before_a_request_is_sent,
         a_second_library_is_refused,
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
         the_files_of_a_volume_are_written_listed_moved_and_read_back,
         a_volume_carries_its_client_to_its_files_and_mounts,
-        a_snapshot_is_created_got_and_removed,
         a_sandbox_s_files_are_its_own_and_go_with_it,
+        a_sandbox_stops_starts_again_and_is_found_by_its_name,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,

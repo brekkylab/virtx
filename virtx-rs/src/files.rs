@@ -17,9 +17,9 @@ pub(crate) mod sealed {
     }
 }
 
-/// The files of a [`Volume`](crate::Volume), a [`Snapshot`](crate::Snapshot) or a
-/// [`Sandbox`](crate::Sandbox). A path is relative to the handle's root, `/`-separated, as
-/// `dir/file.txt`; the empty path is the root. The server refuses one that leads outside.
+/// The files of a [`Volume`](crate::Volume) or a [`Sandbox`](crate::Sandbox). A path is
+/// relative to the handle's root, `/`-separated, as `dir/file.txt`; the empty path is the root.
+/// The server refuses one that leads outside.
 pub trait Files: sealed::Root {
     /// What is at `path`.
     fn stat_file(&self, path: impl Into<String>) -> Call<Metadata> {

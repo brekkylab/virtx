@@ -38,8 +38,8 @@ async fn a_child_process_answers_requests_and_logs() {
     command.env(SERVER, "1");
     let client = Client::spawn(command).unwrap();
 
-    let snapshot = client.create_snapshot(Some("dev"), None).await.unwrap();
-    assert_eq!(snapshot.name, "dev");
+    let volume = client.create_volume(Some("dev")).await.unwrap();
+    assert_eq!(volume.name, "dev");
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))

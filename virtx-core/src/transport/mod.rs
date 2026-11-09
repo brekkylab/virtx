@@ -1,7 +1,7 @@
 //! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
 //! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
-//! ([`sse`], whose server end keeps the log too), and the files of a volume or a snapshot over
+//! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
 //! WebDAV ([`webdav`]).
 //!
 //! The client end is the `client` feature, the server end the `server` feature; the types

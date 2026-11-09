@@ -4,7 +4,7 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
+A build, pull, push or commit of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
 
 ```python
 import asyncio
@@ -68,7 +68,7 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
-A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python
 volume = await client.create_volume("data")
@@ -79,7 +79,7 @@ for entry in await volume.read_dir("in"):
 print(await volume.read_file("in/notes.txt"))
 ```
 
-What acts on a sandbox, a volume, a snapshot or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume`, `get_snapshot` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
+What acts on a sandbox, a volume or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `find_sandbox`, `get_volume` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
 
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 

@@ -1,4 +1,4 @@
-"""Snapshots, volumes, sandboxes and the jobs of images and sandboxes, against ``virtx-core``'s
+"""Volumes, sandboxes and the jobs of images and sandboxes, against ``virtx-core``'s
 ``test_server`` example over stdio."""
 
 import pytest
@@ -14,8 +14,8 @@ from virtx import (
     SandboxJob,
     SandboxJobEnd,
     SandboxJobKind,
+    SandboxState,
     SandboxVolume,
-    Snapshot,
     Stderr,
     Stdout,
     Truncated,
@@ -24,17 +24,54 @@ from virtx import (
 )
 
 
-async def test_a_snapshot_is_created_got_listed_and_removed(test_server: str) -> None:
+async def test_a_sandbox_stops_starts_again_and_is_found_by_its_name(test_server: str) -> None:
     with Client.spawn(test_server) as client:
-        created = await client.create_snapshot("new", disk_gib=4)
-        assert created == Snapshot(client, "new", 0, False)
-        assert await client.get_snapshot("new") == created
-        assert created in await client.list_snapshot()
-        assert (await client.get_snapshot("locked")).in_use
-        await created.remove()
+        made = await client.create_sandbox("alpine:3.20", name="work", ports=[8000])
+        assert made.state == SandboxState.RUNNING and made.running
+        assert made.name == "work" and not made.ephemeral
+        assert made.auto_stop_minutes == 15 and made.auto_delete_days == 30
+        found = await client.find_sandbox("work")
+        assert found is not None and found.id == made.id and found.client is client
+        assert await client.find_sandbox("nobody") is None
         with pytest.raises(VirtxError) as refused:
-            await client.get_snapshot("new")
+            await client.create_sandbox("alpine:3.20", name="work")
+        assert refused.value.status == 409
+
+        stopped = await made.stop()
+        assert stopped.state == SandboxState.STOPPED and stopped.client is client
+        started = await stopped.start()
+        assert started.running and started.ports == made.ports
+        assert (await client.stop_sandbox(made.id)).state == SandboxState.STOPPED
+        assert (await client.start_sandbox(made.id)).running
+
+        kept = await client.create_sandbox("alpine:3.20", auto_delete_days="never")
+        assert kept.auto_delete_days is None
+        gone = await client.create_sandbox("alpine:3.20", ephemeral=True)
+        await gone.stop()
+        with pytest.raises(VirtxError) as refused:
+            await client.get_sandbox(gone.id)
         assert refused.value.status == 404
+
+        job = await made.commit("mine:v1")
+        assert job.kind == ImageJobKind.COMMIT and job.reference == "mine:v1"
+        assert (await client.commit_image(made, "mine:v2")).reference == "mine:v2"
+        await made.remove()
+        with pytest.raises(VirtxError) as refused:
+            await client.get_sandbox(made.id)
+        assert refused.value.status == 404
+
+
+async def test_a_sandbox_made_for_a_block_is_deleted_on_leaving_it(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        async with await client.create_sandbox("alpine:3.20") as sandbox:
+            assert sandbox.running
+            id = sandbox.id
+        with pytest.raises(VirtxError) as refused:
+            await client.get_sandbox(id)
+        assert refused.value.status == 404
+
+        async with await client.create_sandbox("alpine:3.20") as sandbox:
+            await sandbox.remove()
 
 
 async def test_a_volume_is_created_and_got(test_server: str) -> None:
@@ -51,15 +88,12 @@ async def test_a_volume_is_created_and_got(test_server: str) -> None:
 
 async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(test_server: str) -> None:
     with Client.spawn(test_server) as client:
-        sandbox = await client.create_sandbox("alpine:3.20", snapshot="s", ports=[8000])
-        assert sandbox.snapshot == "s" and sandbox.running
-        made = await client.create_snapshot("handed")
+        sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
+        assert sandbox.running
         on_handle = await client.create_sandbox(
             "alpine:3.20",
-            snapshot=made,
             volumes=[SandboxVolume(await client.get_volume("v"), "/data", readonly=True)],
         )
-        assert on_handle.snapshot == "handed"
         assert SandboxVolume(Volume(client, "v", 0), "/data").to_dict() == {
             "volume": "v",
             "path": "/data",
@@ -168,6 +202,17 @@ async def test_an_exec_iterated_yields_its_output_and_how_it_ended(test_server: 
         sandbox = await client.create_sandbox("alpine:3.20")
         log = [entry async for entry in sandbox.exec(["echo", "hi"])]
         assert log == [LogEntry(1, Stdout("hi")), LogEntry(2, SandboxJobEnd(0))]
+
+
+async def test_an_exec_iterated_then_awaited_answers_the_job_it_read(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20")
+        echo = sandbox.exec(["echo", "hi"])
+        log = [entry async for entry in echo]
+        assert log[-1] == LogEntry(2, SandboxJobEnd(0))
+        job = await echo
+        assert job.cmd == ["echo", "hi"] and job.client is client
+        assert [j.id for j in await sandbox.jobs()] == [job.id]
 
 
 async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: str) -> None:

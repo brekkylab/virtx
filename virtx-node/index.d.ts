@@ -14,6 +14,9 @@ export class VirtxError extends Error {
   body: string | null
 }
 
+/** Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>` for one. */
+export const DOMAIN: string
+
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
 export function load(file: string): void
 
@@ -75,7 +78,7 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-export type ImageJobKind = 'pull' | 'push' | 'build'
+export type ImageJobKind = 'pull' | 'push' | 'build' | 'commit'
 
 /** What the server answers about a build, pull or push it runs. */
 export interface ImageJobInfo {
@@ -117,18 +120,16 @@ export type ImageJobEnd = { digest: string } | { error: string }
 
 /** An entry of an image job's log, numbered by `id`; `end` is the last. */
 export type ImageJobEntry = { id: number } & (
-  | { log: string }
-  | { truncated: Record<string, never> }
-  | { end: ImageJobEnd }
+  { log: string } | { truncated: Record<string, never> } | { end: ImageJobEnd }
 )
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
-  | { type: 'basic'; username: string; password: string }
-  | { type: 'bearer'; token: string }
+  { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string }
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
-export type Auth = { type: 'bearer'; token: string }
+export type Auth =
+  { type: 'bearer'; token: string } | { type: 'command'; program: string; args?: string[] }
 
 export interface ImageListOutputItem {
   /** The tag, as `name:tag`. */
@@ -152,14 +153,6 @@ export interface ImagePruneOutput {
   images: string[]
   /** How many bytes the server freed. */
   reclaimed: number
-}
-
-/** What the server answers about a snapshot. */
-export interface SnapshotInfo {
-  name: string
-  size: number
-  /** Whether a sandbox held it when it was answered, from the `createSandbox` that made a sandbox on it until that sandbox's `remove`. */
-  inUse: boolean
 }
 
 /** What the server answers about a volume. */
@@ -223,7 +216,7 @@ export interface DirEntry {
 }
 
 /**
- * The files of a `Volume`, a `Snapshot` or a `Sandbox`. A path is relative to its root, as
+ * The files of a `Volume` or a `Sandbox`. A path is relative to its root, as
  * `dir/file.txt`; the empty path is the root, and the server refuses one that leads outside.
  */
 export class Files {
@@ -274,51 +267,63 @@ export class Volume extends Files implements VolumeInfo {
   remove(): Promise<void>
 }
 
-/**
- * A snapshot the server holds, as making it or asking for it answered, and the client that
- * reaches it: its files, refused with a `423` while a sandbox holds it. Dropping it leaves the
- * snapshot; `remove` removes it.
- */
-export class Snapshot extends Files implements SnapshotInfo {
-  private constructor()
-  name: string
-  size: number
-  inUse: boolean
-  /** Delete it and its upper layer; refused with a `409` while a sandbox holds it. */
-  remove(): Promise<void>
-}
-
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
-  /** The digest of the image it was made from. */
+  /** The name it was given, which `findSandbox` finds it by. */
+  name?: string
+  /** The digest of the image it stands on: what it boots every time it starts. */
   image: string
-  snapshot?: string
-  /** Whether it takes processes: `false` once its VM has exited on its own. */
-  running: boolean
-  /** Only as `createSandbox` answers it, if it was given some. */
+  /** `'stopped'`: its VM down and its disk kept; a job started in it, or `startSandbox`, starts it. */
+  state: 'running' | 'stopped'
+  /** Whether it is deleted when it stops, rather than kept. */
+  ephemeral: boolean
+  /** How long it runs unused before it stops. */
+  autoStopMinutes: number
+  /** How long it is kept stopped and unused before it is deleted; absent, until it is deleted. */
+  autoDeleteDays?: number
+  /** When it was last used, as RFC 3339. */
+  usedAt: string
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
   ports?: SandboxPort[]
 }
 
 /**
  * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
  * it, to run processes in it and read and write its files, its root as its processes see it, as
- * `etc/hostname`. Dropping it leaves the sandbox; `remove` removes it.
+ * `etc/hostname`. Its disk -- what it writes over its image -- outlives its VM: it stops when
+ * unused or told to, and starts again as it was left, under the same id, until it is deleted.
+ * Dropping it leaves the sandbox; `remove` removes it.
  */
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
+  name?: string
   image: string
-  snapshot?: string
-  running: boolean
+  state: 'running' | 'stopped'
+  ephemeral: boolean
+  autoStopMinutes: number
+  autoDeleteDays?: number
+  usedAt: string
   ports?: SandboxPort[]
-  /** Start `cmd` in it: the job, and its output as the job's `log`. */
+  /**
+   * Start `cmd` in it: the job, and its output as the job's `log`. Iterated at once, the job is
+   * started and its log read as one request.
+   */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
   jobs(): Promise<SandboxJob[]>
   /** The job `id` in it. */
   job(id: string): Promise<SandboxJob>
-  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  /** Start it if it is stopped; answered once it runs, with where its ports are now. A job started in it while stopped starts it too. */
+  start(): Promise<Sandbox>
+  /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
+  stop(): Promise<Sandbox>
+  /** Open the TCP port `port` in it, as those it was made with are; where it is reached from. */
+  openPort(port: number): Promise<SandboxPort>
+  /** Start making an image of it, as `Client.commitImage` does, to point `reference` at. */
+  commit(reference: string): StartedJob<ImageJob, ImageJobEntry>
+  /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
 }
 
@@ -330,8 +335,15 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** The snapshot it stands on, or its name. */
-  snapshot?: string | Snapshot
+  /** A name to find it again by, with `findSandbox`. */
+  name?: string
+  /** Delete it when it stops, rather than keep it. */
+  ephemeral?: boolean
+  autoStopMinutes?: number
+  /** `'never'` keeps it until it is deleted. */
+  autoDeleteDays?: number | 'never'
+  /** How much it may write over its image, in GiB. */
+  diskGib?: number
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -422,6 +434,14 @@ export class Client {
    */
   static spawn(program?: string | null, args?: string[]): Client
   /**
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
+   * `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
+   * `virtx token --json` prints, again as it runs out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
+   * nearest this machine.
+   */
+  static fromEnv(): Client
+  /**
    * Reach the server at `url`, its base `http` or `https` URL, sending
    * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
    * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
@@ -454,11 +474,19 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+  /**
+   * Start making an image of `sandbox`, a handle or its id -- its image, with what it has written
+   * as one more layer -- to point `reference` at: how a sandbox is kept to start others from.
+   */
+  commitImage(sandbox: string | Sandbox, reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Every image job the server holds. */
   listImageJob(): Promise<ImageJob[]>
   /** The image job `id`. */
@@ -475,12 +503,8 @@ export class Client {
   downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>
   /** Upload the image in the OCI image layout archive at `path`, and point the tag `reference` (`name:tag`) at it: the archive's only image, or the one it names by that tag. Its events are a line of log a blob, then what it uploaded. */
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
-  /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
+  /** Delete each image no tag points at and no sandbox stands on, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<Snapshot[]>
-  /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
-  getSnapshot(name: string): Promise<Snapshot>
   listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
@@ -488,6 +512,12 @@ export class Client {
   listSandbox(): Promise<Sandbox[]>
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
+  /** The sandbox named `name`, if one is. */
+  findSandbox(name: string): Promise<Sandbox | undefined>
+  /** Start it if it is stopped; answered once it runs, with where its ports are now. A job started in a stopped sandbox starts it too. */
+  startSandbox(id: string): Promise<Sandbox>
+  /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
+  stopSandbox(id: string): Promise<Sandbox>
 }
 
 /**

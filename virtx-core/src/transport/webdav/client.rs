@@ -25,7 +25,6 @@ const DAV: &str = "DAV:";
 fn uri(root: &FileRoot, path: &str) -> String {
     let (kind, name) = match root {
         FileRoot::Volume(name) => ("volumes", name),
-        FileRoot::Snapshot(name) => ("snapshots", name),
         FileRoot::Sandbox(id) => ("sandboxes", id),
     };
     format!("/{kind}/{}/files/{}", segment(name), segments(path))
@@ -487,8 +486,6 @@ mod tests {
             uri(&volume, "/dir//a b.txt/"),
             "/volumes/my%20vol/files/dir/a%20b.txt"
         );
-        let snapshot = FileRoot::Snapshot("s".into());
-        assert_eq!(uri(&snapshot, "a"), "/snapshots/s/files/a");
         let sandbox = FileRoot::Sandbox("sb1".into());
         assert_eq!(uri(&sandbox, "etc/hosts"), "/sandboxes/sb1/files/etc/hosts");
     }
@@ -697,12 +694,9 @@ mod round_trips {
             assert_eq!(status(read_dir(&client, &root, "missing").await), 404);
             assert_eq!(status(remove(&client, &root, "missing", false).await), 404);
             remove(&client, &root, "missing", true).await.unwrap();
-            // A root that does not exist, and a snapshot in use.
+            // A root that does not exist.
             let nowhere = FileRoot::Volume("nowhere".into());
             assert_eq!(status(stat(&client, &nowhere, "").await), 404);
-            let locked = FileRoot::Snapshot("locked".into());
-            assert_eq!(status(read_dir(&client, &locked, "").await), 423);
-            assert_eq!(status(write(&client, &locked, "a", "x", None).await), 423);
             client.close().await;
         }
     }
@@ -746,10 +740,6 @@ mod round_trips {
                     .await
                     .unwrap()
             );
-            assert_eq!(
-                status(exists(&client, &FileRoot::Snapshot("locked".into()), "").await),
-                423
-            );
             client.close().await;
         }
     }
@@ -776,7 +766,7 @@ mod round_trips {
     #[tokio::test]
     async fn a_rename_and_a_copy_replace_only_when_told_to() {
         for client in clients().await {
-            let root = FileRoot::Snapshot("s".into());
+            let root = FileRoot::Volume("s".into());
             write(&client, &root, "a", "A", None).await.unwrap();
             write(&client, &root, "b", "B", None).await.unwrap();
 

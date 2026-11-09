@@ -58,6 +58,17 @@ def test_a_token_does_not_go_in_the_clear_to_another_machine() -> None:
         client.set_auth(token)
 
 
+async def test_a_command_is_run_for_the_token_before_a_request_is_sent() -> None:
+    failing = virtx.CommandAuth("sh", ("-c", "echo 'not signed in' >&2; exit 1"))
+    with pytest.raises(VirtxError, match="in the clear"):
+        Client.connect("http://example.com/", failing)
+    with (
+        Client.connect("http://127.0.0.1:9/", failing) as client,
+        pytest.raises(VirtxError, match="not signed in"),
+    ):
+        await client.list_sandbox()
+
+
 def test_a_header_that_cannot_be_sent_is_refused_when_set() -> None:
     with Client.connect("http://127.0.0.1:9/") as client:
         client.set_headers({"authorization": "Bearer x"})

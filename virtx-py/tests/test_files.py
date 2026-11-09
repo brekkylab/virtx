@@ -67,10 +67,6 @@ async def test_the_files_of_a_volume_are_written_listed_moved_and_read_back(
         assert refused.value.status == 404
         assert await (await client.get_volume("v")).read_file("c.txt") == b"hello world"
 
-        with pytest.raises(VirtxError) as refused:
-            await (await client.get_snapshot("locked")).read_dir("")
-        assert refused.value.status == 423
-
 
 async def test_a_volume_carries_its_client_to_its_files_and_mounts(test_server: str) -> None:
     with Client.spawn(test_server) as client:
@@ -99,23 +95,6 @@ async def test_a_volume_carries_its_client_to_its_files_and_mounts(test_server: 
         with pytest.raises(VirtxError) as refused:
             await client.get_volume("w")
         assert refused.value.status == 404
-
-
-async def test_a_snapshot_carries_its_client_to_its_files(test_server: str) -> None:
-    with Client.spawn(test_server) as client:
-        snapshot = await client.create_snapshot("t")
-        await snapshot.write_file("a.txt", "kept")
-        assert await (await client.get_snapshot("t")).read_text("a.txt") == "kept"
-        await snapshot.remove()
-        with pytest.raises(VirtxError) as refused:
-            await client.get_snapshot("t")
-        assert refused.value.status == 404
-
-        locked = await client.get_snapshot("locked")
-        assert locked.in_use
-        with pytest.raises(VirtxError) as refused:
-            await locked.read_dir("")
-        assert refused.value.status == 423
 
 
 async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) -> None:

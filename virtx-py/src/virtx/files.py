@@ -1,6 +1,5 @@
-"""The files in a volume, a snapshot or a sandbox, reached with WebDAV at
-``/volumes/{name}/files/``, ``/snapshots/{name}/files/`` or ``/sandboxes/{id}/files/``: the
-requests on them, and what they answer.
+"""The files in a volume or a sandbox, reached with WebDAV at ``/volumes/{name}/files/`` or
+``/sandboxes/{id}/files/``: the requests on them, and what they answer.
 
 A path is relative to the root, ``/``-separated, as ``dir/file.txt``; the empty path is the
 root. The server refuses one that leads outside.
@@ -19,8 +18,8 @@ if TYPE_CHECKING:
 
 
 class Files:
-    """The files of a ``Volume``, a ``Snapshot`` or a ``Sandbox``. A path is relative to its
-    root, ``/``-separated, as ``dir/file.txt``; the empty path is the root."""
+    """The files of a ``Volume`` or a ``Sandbox``. A path is relative to its root,
+    ``/``-separated, as ``dir/file.txt``; the empty path is the root."""
 
     if TYPE_CHECKING:
         client: Client

@@ -121,13 +121,14 @@ class ImageJobKind(str, Enum):
     PULL = "pull"
     PUSH = "push"
     BUILD = "build"
+    COMMIT = "commit"
 
 
 @dataclass(frozen=True)
 class ImageJob:
-    """A build, pull or push the server runs, as ``build_image``, ``pull_image``,
-    ``push_image`` and ``get_image_job`` answer it, and the client that reaches it: what reads
-    its log. Dropping it leaves the job; ``remove`` removes it."""
+    """A build, pull, push or commit the server runs, as ``build_image``, ``pull_image``,
+    ``push_image``, ``commit_image`` and ``get_image_job`` answer it, and the client that
+    reaches it: what reads its log. Dropping it leaves the job; ``remove`` removes it."""
 
     client: Client = field(repr=False, compare=False)
     """The client its requests go through."""
@@ -144,8 +145,8 @@ class ImageJob:
     """Whether it runs still."""
 
     digest: str | None = None
-    """Once it has succeeded, as ``algorithm:hex``: the digest of the image a pull or build
-    left here, or of the manifest a push put on the registry."""
+    """Once it has succeeded, as ``algorithm:hex``: the digest of the image a pull, build or
+    commit left here, or of the manifest a push put on the registry."""
 
     error: str | None = None
     """Once it has failed, why, for a person."""

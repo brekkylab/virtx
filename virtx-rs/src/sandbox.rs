@@ -1,18 +1,18 @@
 //! A sandbox and the jobs in it, each with the client its requests go through.
 
 use virtx_core::{
-    FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxJob as SandboxJobInfo,
-    SandboxJobEntry,
+    FileRoot, ImageJobEntry, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort,
 };
 
-use crate::{Call, Client, Events, StartedJob, files};
+use crate::{Call, Client, Events, ImageJob, StartedJob, files};
 
-/// A sandbox the server holds, as making it or asking for it answered, and the client that
-/// reaches it: what is needed to run processes in it, and its files, through
-/// [`Files`](crate::Files).
+/// A sandbox the server holds, as making, finding or asking for it answered, and the client
+/// that reaches it: what is needed to start and stop it, run processes in it, open its ports,
+/// make an image of it, and reach its files, through [`Files`](crate::Files).
 ///
-/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it goes
-/// with [`remove`](Self::remove).
+/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is, running
+/// or stopped; it is kept until [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Sandbox {
     client: Client,
@@ -33,16 +33,55 @@ impl Sandbox {
         &self.info.id
     }
 
-    /// What the server answered about it: its image, its snapshot, whether it runs, and its
-    /// ports, which only making it answers.
+    /// The name it was given, which finds it again ([`Client::find_sandbox`]).
+    pub fn name(&self) -> Option<&str> {
+        self.info.name.as_deref()
+    }
+
+    /// What the server answered about it, as it was then: its image, whether it runs, when it
+    /// stops and is deleted unused, and its ports, which only making and starting it answer.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
+    }
+
+    /// Start it if it is stopped -- its VM booted over its disk as it was left -- and answer it
+    /// once it runs, with where its ports are now. A job started in a stopped sandbox starts
+    /// it too.
+    pub fn start(&self) -> Call<Sandbox> {
+        self.client.start_sandbox(&self.info.id)
+    }
+
+    /// Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one,
+    /// deleted with it.
+    pub fn stop(&self) -> Call<Sandbox> {
+        self.client.stop_sandbox(&self.info.id)
+    }
+
+    /// Open the TCP port `port` in it, as those it was made with are, and answer where it is
+    /// reached from.
+    pub fn open_port(&self, port: u16) -> Call<SandboxPort> {
+        self.client.open_sandbox_port(&self.info.id, port)
+    }
+
+    /// Start making an image of it -- its image, with what it has written as one more layer --
+    /// to point `reference` at: how a sandbox is kept to start others from. Of a running one,
+    /// as it is when the job starts; of a stopped one, as it was left.
+    pub fn commit(&self, reference: impl Into<String>) -> StartedJob<ImageJob, ImageJobEntry> {
+        self.client.commit_image(&self.info.id, reference)
     }
 
     /// Start a process in it as `args` says; see [`SandboxExecArgs::new`]. Its output and how
     /// it ended are the job's [`log`](SandboxJob::log), or [`StartedJob::log`].
     pub fn exec(&self, args: &SandboxExecArgs) -> StartedJob<SandboxJob, SandboxJobEntry> {
         self.client.exec_sandbox(&self.info.id, args)
+    }
+
+    /// Start a process in it as `args` says, and read its log: its job, once, first, then each
+    /// entry until its `end`. One request where the server answers an exec with its log (virtx
+    /// cloud's), two elsewhere; [`exec`](Self::exec)'s log is always two. Dropping it leaves
+    /// the job running.
+    pub fn exec_with_log(&self, args: &SandboxExecArgs) -> Events<SandboxExecItem> {
+        self.client.exec_sandbox_with_log(&self.info.id, args)
     }
 
     /// Every job in it.
@@ -60,7 +99,7 @@ impl Sandbox {
         SandboxJob::new(self.client.clone(), self.info.id.clone(), info)
     }
 
-    /// Stop it, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Delete it: stopped first if it runs, and its disk removed. Its volumes stay.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox(&self.info.id)
     }

@@ -22,7 +22,11 @@ const library =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-const testServer = path.join(target, 'examples', process.platform === 'win32' ? 'test_server.exe' : 'test_server')
+const testServer = path.join(
+  target,
+  'examples',
+  process.platform === 'win32' ? 'test_server.exe' : 'test_server',
+)
 
 before(() => {
   execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })
@@ -61,7 +65,10 @@ function read(host, port) {
 }
 
 test('a header that cannot be sent is refused at connect', () => {
-  assert.throws(() => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }), /not a name/)
+  assert.throws(
+    () => Client.connect('http://127.0.0.1:9/', null, { 'not a name': 'x' }),
+    /not a name/,
+  )
 })
 
 test('a token does not go in the clear to another machine', async () => {
@@ -120,8 +127,6 @@ test('the files of a volume are written, listed, moved and read back', async () 
     await volume.removeFile('dir')
     await assert.rejects(volume.statFile('dir'), { status: 404 })
     assert.equal((await volume.readFile('c.txt')).toString(), 'hello world')
-
-    await assert.rejects((await client.getSnapshot('locked')).readDir(''), { status: 423 })
   } finally {
     await client.close()
   }
@@ -161,7 +166,10 @@ test('a volume carries its client to its files and mounts', async () => {
     await volume.copyFile('in/b.txt', 'c.txt')
     assert.equal(await (await client.getVolume('w')).readText('c.txt'), 'hello')
     assert.equal(await volume.isDir('in/dir'), true)
-    assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), ['b.txt', 'dir'])
+    assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), [
+      'b.txt',
+      'dir',
+    ])
 
     const mount = await volume.mount('notion', { type: 'notion', apiKey: 'k' })
     assert.deepEqual(mount, { path: 'notion', mountType: 'notion' })
@@ -180,27 +188,17 @@ test('a volume carries its client to its files and mounts', async () => {
   }
 })
 
-test('a snapshot carries its client to its files', async () => {
+test('a sandbox takes a volume by its handle or its name', async () => {
   const client = Client.spawn(testServer)
   try {
-    const snapshot = await client.createSnapshot('t')
-    await snapshot.writeFile('a.txt', 'kept')
-    assert.equal(await (await client.getSnapshot('t')).readText('a.txt'), 'kept')
-    await snapshot.remove()
-    await assert.rejects(client.getSnapshot('t'), { status: 404 })
-
-    const handed = await client.createSnapshot('handed')
     const sandbox = await client.createSandbox('alpine:3.20', {
-      snapshot: handed,
-      volumes: [{ volume: await client.getVolume('v'), path: '/data', readonly: true }],
+      volumes: [
+        { volume: await client.getVolume('v'), path: '/data', readonly: true },
+        { volume: 's', path: '/shared' },
+      ],
     })
-    assert.equal(sandbox.snapshot, 'handed')
-    assert.equal((await client.getSnapshot('handed')).inUse, true)
+    assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
     await sandbox.remove()
-
-    const locked = await client.getSnapshot('locked')
-    assert.equal(locked.inUse, true)
-    await assert.rejects(locked.readDir(''), { status: 423 })
   } finally {
     await client.close()
   }
@@ -213,17 +211,44 @@ async function entries(log) {
   return read
 }
 
-test('a snapshot is created, got and removed', async () => {
+test('a sandbox stops, starts again, is found by its name and committed', async () => {
   const client = Client.spawn(testServer)
   try {
-    const snapshot = await client.createSnapshot('made', 1)
-    assert.equal(snapshot.name, 'made')
-    assert.equal(snapshot.inUse, false)
-    assert.deepEqual(await client.getSnapshot('made'), snapshot)
-    assert.ok((await client.listSnapshot()).some((s) => s.name === 'made'))
-    assert.equal((await client.getSnapshot('locked')).inUse, true)
-    await snapshot.remove()
-    await assert.rejects(client.getSnapshot('made'), { status: 404 })
+    const made = await client.createSandbox('alpine:3.20', { name: 'work', ports: [8000] })
+    assert.ok(made instanceof virtx.Sandbox)
+    assert.equal(made.client, client)
+    assert.equal(made.state, 'running')
+    assert.equal(made.name, 'work')
+    assert.equal(made.ephemeral, false)
+    assert.equal(made.autoStopMinutes, 15)
+    assert.equal(made.autoDeleteDays, 30)
+    const found = await client.findSandbox('work')
+    assert.ok(found instanceof virtx.Sandbox)
+    assert.equal(found.id, made.id)
+    assert.equal(await client.findSandbox('nobody'), undefined)
+    await assert.rejects(client.createSandbox('alpine:3.20', { name: 'work' }), { status: 409 })
+
+    const stopped = await made.stop()
+    assert.ok(stopped instanceof virtx.Sandbox)
+    assert.equal(stopped.state, 'stopped')
+    const started = await stopped.start()
+    assert.equal(started.state, 'running')
+    assert.deepEqual(started.ports, made.ports)
+    assert.equal((await client.stopSandbox(made.id)).state, 'stopped')
+    assert.equal((await client.startSandbox(made.id)).state, 'running')
+
+    const kept = await client.createSandbox('alpine:3.20', { autoDeleteDays: 'never' })
+    assert.equal(kept.autoDeleteDays, undefined)
+    const gone = await client.createSandbox('alpine:3.20', { ephemeral: true })
+    await gone.stop()
+    await assert.rejects(client.getSandbox(gone.id), { status: 404 })
+
+    const job = await made.commit('mine:v1')
+    assert.ok(job instanceof virtx.ImageJob)
+    assert.equal(job.kind, 'commit')
+    assert.equal((await client.commitImage(made, 'mine:v2')).kind, 'commit')
+    await made.remove()
+    await assert.rejects(client.getSandbox(made.id), { status: 404 })
   } finally {
     await client.close()
   }
@@ -246,7 +271,7 @@ test('a command in a sandbox is a job whose log ends with its code', async () =>
   const client = Client.spawn(testServer)
   try {
     const sandbox = await client.createSandbox('alpine:3.20')
-    assert.equal(sandbox.running, true)
+    assert.equal(sandbox.state, 'running')
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
     const job = await sandbox.exec(['echo', 'hi'])
@@ -334,10 +359,32 @@ test('an image build is a job whose log ends with its digest', async () => {
 test('a started build is iterated to its end', async () => {
   const client = Client.spawn(testServer)
   try {
-    const log = await entries(client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'))
+    const log = await entries(
+      client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'),
+    )
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+    )
+  } finally {
+    await client.close()
+  }
+})
+
+test('a command iterated then awaited answers the job it read', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20')
+    const echo = sandbox.exec(['echo', 'hi'])
+    const log = await entries(echo)
+    assert.deepEqual(log.at(-1), { id: 2, end: { code: 0 } })
+    const job = await echo
+    assert.ok(job instanceof virtx.SandboxJob)
+    assert.equal(job.sandboxId, sandbox.id)
+    assert.deepEqual(job.cmd, ['echo', 'hi'])
+    assert.deepEqual(
+      (await sandbox.jobs()).map((j) => j.id),
+      [job.id],
     )
   } finally {
     await client.close()

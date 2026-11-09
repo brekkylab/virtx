@@ -471,13 +471,30 @@ impl RegistryServer {
     }
 
     /// A tag takes only itself away; a digest takes every tag naming its image in this
-    /// repository, and the image too once no tag in any other names it.
+    /// repository, and the image too once no tag in any other names it. Either is refused `409`
+    /// where it would leave an image a machine runs on named by no tag -- held and unseen at
+    /// once -- as the protocol's remove is.
     fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
         let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
+        let in_use = |image: &Digest| {
+            refusal(
+                StatusCode::CONFLICT,
+                "DENIED",
+                format!("in use: a machine runs on {image}, which no other tag names"),
+            )
+        };
         if !reference.contains(':') {
-            self.store
-                .remove_tag(&tagged(name, reference)?)?
-                .ok_or_else(unknown)?;
+            let tag = tagged(name, reference)?;
+            let image = self.store.get_tag(&tag)?.ok_or_else(unknown)?;
+            let named_otherwise = self
+                .store
+                .tags()?
+                .iter()
+                .any(|(other, named)| *named == image && *other != tag);
+            if !named_otherwise && self.store.image_held(&image)? {
+                return Err(in_use(&image));
+            }
+            self.store.remove_tag(&tag)?.ok_or_else(unknown)?;
             return Ok(empty(StatusCode::ACCEPTED));
         }
         let digest = reference
@@ -497,6 +514,9 @@ impl RegistryServer {
         if tags_here.is_empty() && !tags_elsewhere.is_empty() {
             return Err(unknown());
         }
+        if tags_elsewhere.is_empty() && self.store.image_held(&digest)? {
+            return Err(in_use(&digest));
+        }
         for (tag, _) in tags_here {
             self.store.remove_tag(&tag)?;
         }
@@ -504,9 +524,7 @@ impl RegistryServer {
             return Ok(empty(StatusCode::ACCEPTED));
         }
         self.store.remove_image(&digest).map_err(|e| match e {
-            store::Error::InUse(..) => {
-                refusal(StatusCode::METHOD_NOT_ALLOWED, "DENIED", e.to_string())
-            }
+            store::Error::InUse(..) => refusal(StatusCode::CONFLICT, "DENIED", e.to_string()),
             e => e.into(),
         })?;
         Ok(empty(StatusCode::ACCEPTED))
@@ -1284,6 +1302,53 @@ mod tests {
         let (status, _, _) = send(server, Method::DELETE, &delete, b"").await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(store.get_image(&image).unwrap().is_none());
+    }
+
+    /// An image a machine runs on is not left named by no tag: its last tag, or its digest,
+    /// is refused `409`; another tag of it may go. Let go, it may be removed.
+    #[tokio::test]
+    async fn an_image_a_machine_runs_on_keeps_its_last_tag() {
+        let scratch = Scratch::new("held");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let image = store
+            .insert_image(&ImageConfiguration::default(), &[layer])
+            .unwrap();
+        for tag in ["alpine:3.21", "alpine:copy"] {
+            store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
+        }
+        let hold = store.hold_image(&image).unwrap();
+        let (status, _, _) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/copy",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "another tag names it still");
+        let (status, _, body) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/3.21",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(String::from_utf8_lossy(&body).contains("in use"));
+        let by_digest = format!("/images/v2/alpine/manifests/{image}");
+        let (status, _, _) = send(server, Method::DELETE, &by_digest, b"").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(store.tags().unwrap().len(), 1, "its tag kept");
+
+        drop(hold);
+        let (status, _, _) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/3.21",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
     }
 
     #[tokio::test]

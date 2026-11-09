@@ -462,6 +462,24 @@ impl Store {
         removed
     }
 
+    /// Whether a machine holds `image` now ([`Store::hold_image`]): removing it would be
+    /// refused.
+    pub fn image_held(&self, image: &Digest) -> Result<bool> {
+        let lock = self.shelf("image", image, "lock");
+        let held = match File::open(&lock) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(Error::io(format!("opening {}", lock.display()), e)),
+        };
+        match held.try_lock() {
+            Ok(()) => Ok(false),
+            Err(fs::TryLockError::WouldBlock) => Ok(true),
+            Err(fs::TryLockError::Error(e)) => {
+                Err(Error::io(format!("locking {}", lock.display()), e))
+            }
+        }
+    }
+
     /// Hold `image` for a machine, for as long as the answer lives: a prune leaves it, and
     /// removing it is refused. Waits while it is being taken away, and is then refused.
     pub fn hold_image(&self, image: &Digest) -> Result<ImageHold> {

@@ -109,11 +109,83 @@ println!("{} {:?}", job.info().running, job.info().code);
 </TabItem>
 </Tabs>
 
+It prints:
+
+```text frame="terminal" title="Output"
+4ea37caf True
+1 Stdout(line='1')
+2 Stdout(line='2')
+3 Stdout(line='3')
+4 SandboxJobEnd(code=0)
+False 0
+```
+
 A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes last.
 
 <Aside type="tip">
 Building, pulling, and pushing an image are jobs too, read the same way: iterate `build_image`, `pull_image`, or `push_image` for the log, or await it for the job. See [Working with images](/docs/guides/images/).
 </Aside>
+
+## Run several commands at once
+
+Awaiting `exec` starts a job and returns without waiting for it to end, so a command can run in the background while others run beside it.
+Here one job writes a line to a file every second, and another waits a few seconds and reads what has been written so far.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+writer = await sandbox.exec(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"])
+
+async for entry in sandbox.exec(["sh", "-c", "sleep $((RANDOM % 5 + 1)); cat /tmp/events"]):
+    print(entry.entry)  # Stdout(line='tick 1'), Stdout(line='tick 2'), ...
+
+await writer.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const writer = await sandbox.exec(['sh', '-c', 'i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done'])
+
+for await (const entry of sandbox.exec(['sh', '-c', 'sleep $((RANDOM % 5 + 1)); cat /tmp/events'])) {
+  console.log(entry) // { id: 1, stdout: 'tick 1' }, { id: 2, stdout: 'tick 2' }, ...
+}
+
+await writer.remove()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxExecArgs::new(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"]);
+let writer = sandbox.exec(&args).await?;
+
+let mut log = sandbox.exec(&SandboxExecArgs::new(["sh", "-c", "sleep $((RANDOM % 5 + 1)); cat /tmp/events"])).log();
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry); // Stdout("tick 1"), Stdout("tick 2"), ...
+}
+
+writer.remove().await?;
+```
+
+</TabItem>
+</Tabs>
+
+The reader prints as many ticks as seconds it waited, since the writer kept going the whole time.
+For example:
+
+```text frame="terminal" title="Output (Python, random wait: 4 s)"
+Stdout(line='tick 1')
+Stdout(line='tick 2')
+Stdout(line='tick 3')
+Stdout(line='tick 4')
+SandboxJobEnd(code=0)
+```
+
+A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it.
 
 ## Set a timeout
 

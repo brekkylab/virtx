@@ -1665,9 +1665,10 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
     assert!(log.contains(r#"data: {"stdout":"no newline"}"#), "{log}");
     assert!(log.ends_with("data: {\"end\":{\"code\":0}}\n\n"), "{log}");
     // One that goes on writing: none of what it writes after is the job's, and it is not held
-    // up by a pipe no one reads.
+    // up by a pipe no one reads. It writes to stderr: on the job's stdout, its lines -- longer
+    // than a pipe writes at once -- would be cut by `seq`'s, and `seq`'s by them.
     let (log, took) =
-        exec("(while true; do head -c 8000 /dev/zero | tr '\\0' x; echo; date >> /tmp/w; sleep 0.01; done) & seq 1 20000; echo done").await;
+        exec("(while true; do head -c 8000 /dev/zero | tr '\\0' x; echo; date >> /tmp/w; sleep 0.01; done) >&2 & seq 1 20000; echo done").await;
     assert!(took < std::time::Duration::from_secs(30), "{took:?}");
     let lines: Vec<&str> = log.lines().filter(|l| l.starts_with("data: ")).collect();
     assert!(
@@ -1675,7 +1676,14 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
         "{}",
         lines.len()
     );
-    assert_eq!(lines.iter().filter(|l| l.contains("\"1\"")).count(), 1);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with(r#"data: {"stdout":"#))
+            .count(),
+        20001,
+        "every line of seq's and done, whole"
+    );
     assert_eq!(lines.last().unwrap(), &"data: {\"end\":{\"code\":0}}");
     let (log, _) = exec("sleep 3; a=$(wc -l < /tmp/w); sleep 2; b=$(wc -l < /tmp/w); [ $b -gt $((a + 20)) ] && echo moving").await;
     assert!(
@@ -1787,9 +1795,12 @@ async fn a_fork_bomb_leaves_the_sandbox_answering() {
     ran("sh -c 'f(){ f & f & wait; }; f' >/dev/null 2>&1 </dev/null & echo started").await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     let asked = std::time::Instant::now();
-    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), ran("echo alive; cat /proc/sys/kernel/pid_max"))
-        .await
-        .expect("a command answered beside the bomb");
+    let answered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ran("echo alive; cat /proc/sys/kernel/pid_max"),
+    )
+    .await
+    .expect("a command answered beside the bomb");
     eprintln!("BOMB {answered:?} in {:?}", asked.elapsed());
     assert_eq!(answered[0], "alive", "{answered:?}");
     client.stop_sandbox(&id).await.unwrap();

@@ -1,11 +1,14 @@
-"""The ``virtx`` command the package installs, run as a process of its own against
-``virtx-core``'s ``test_server`` example."""
+"""The ``virtx`` command the package installs, run as a process of its own against the
+fixture's ``virtx-stdio``."""
 
 import os
 import subprocess
 import sys
 
+from conftest import ALPINE, familiar, tags
+
 import virtx
+from virtx import Client
 
 
 def virtx_command(*args: str) -> subprocess.CompletedProcess[str]:
@@ -19,12 +22,13 @@ def virtx_command(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-async def test_the_command_runs_against_a_server(test_server: str) -> None:
-    with virtx.Client.spawn(test_server) as client:
-        listed = {item.reference: item.digest for item in await client.list_image()}
-    pulled = virtx_command("--server", test_server, "pull", "-q", "alpine:3.20")
-    expected = f"alpine:3.20 {listed['alpine:3.20']}\n"
-    assert (pulled.returncode, pulled.stdout) == (0, expected), pulled.stderr
+async def test_the_command_runs_against_a_server(server: str) -> None:
+    pulled = virtx_command("--server", server, "pull", "-q", ALPINE)
+    assert pulled.returncode == 0, pulled.stderr
+    with Client.spawn(server) as client:
+        digest = (await tags(client))[ALPINE]
+    reference, said = pulled.stdout.split()
+    assert (familiar(reference), said) == (ALPINE, digest)
 
 
 def test_a_bad_argument_exits_as_clap_does() -> None:

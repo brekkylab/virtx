@@ -31,34 +31,3 @@ pub(crate) async fn load(client: &Client, args: LoadArgs) -> anyhow::Result<()> 
     println!("{reference} {}", loaded.digest);
     Ok(())
 }
-
-#[cfg(all(test, feature = "testing"))]
-mod tests {
-    use super::*;
-    use crate::cli::{
-        job::tests::{client, tags},
-        save::{SaveArgs, save},
-    };
-
-    #[tokio::test]
-    async fn an_image_saved_loads_back_under_its_digest() {
-        let client = client().await;
-        let alpine = tags(&client).await["alpine:3.20"].clone();
-        let archive =
-            std::env::temp_dir().join(format!("virtx-cli-{}-load.tar", std::process::id()));
-        let saved = SaveArgs {
-            output: archive.clone(),
-            quiet: true,
-            image: "alpine:3.20".into(),
-        };
-        save(&client, saved).await.unwrap();
-        let loaded = LoadArgs {
-            input: archive.clone(),
-            tag: "copy".into(),
-            quiet: true,
-        };
-        load(&client, loaded).await.unwrap();
-        assert_eq!(tags(&client).await.get("copy:latest"), Some(&alpine));
-        std::fs::remove_file(&archive).unwrap();
-    }
-}

@@ -17,8 +17,3 @@ futures-core = "0.3"
 # What crosses the C ABI is JSON.
 serde_json = "1"
 serde = "1"
-
-[[test]]
-# Its own `main`, which opens the library once before every test.
-name = "client"
-harness = false

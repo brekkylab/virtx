@@ -78,16 +78,4 @@ mod tests {
             "{error:#}"
         );
     }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test]
-    async fn a_host_is_reached_over_http() {
-        let url = crate::cli::job::tests::serve().await;
-        let args = ServerArgs {
-            host: Some(url),
-            server: None,
-        };
-        let client = connect(&args).await.unwrap();
-        assert!(client.list_image_job().await.unwrap().is_empty());
-    }
 }

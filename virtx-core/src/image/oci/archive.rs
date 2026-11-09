@@ -451,3 +451,259 @@ impl Archive {
         Ok(StreamBody::new(chunks).boxed())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+    use crate::{image::oci::manifest::sha256, transport::full};
+
+    const IMAGE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+    /// A directory of the test's own, removed when it drops.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let dir = std::env::temp_dir().join(format!("virtx-archive-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn descriptor(media_type: &str, bytes: &[u8]) -> Value {
+        json!({"mediaType": media_type, "digest": sha256(bytes), "size": bytes.len()})
+    }
+
+    /// An image of the config `{}` and the one layer `layer`: its manifest, and its blobs.
+    fn image(layer: &'static [u8]) -> (Manifest, [&'static [u8]; 2]) {
+        let config: &[u8] = b"{}";
+        let bytes = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": IMAGE,
+            "config": descriptor("application/vnd.oci.image.config.v1+json", config),
+            "layers": [descriptor("application/vnd.oci.image.layer.v1.tar", layer)],
+        }))
+        .unwrap();
+        (
+            Manifest::new(bytes.into(), None, None).unwrap(),
+            [config, layer],
+        )
+    }
+
+    /// `manifest`'s descriptor, named by the annotation `key` as `name`.
+    fn named(manifest: &Manifest, key: &str, name: &str) -> Descriptor {
+        let mut annotations = Map::new();
+        annotations.insert(key.into(), name.into());
+        Descriptor {
+            annotations: Some(annotations),
+            ..manifest.descriptor()
+        }
+    }
+
+    /// An archive at `path` whose `index.json` names `index`, holding `manifests` and `blobs`.
+    async fn write(path: &Path, index: &[Descriptor], manifests: &[&Manifest], blobs: &[&[u8]]) {
+        let mut archive = Writer::create(path).await.unwrap();
+        archive.file("oci-layout", b"{}").await.unwrap();
+        let index = json!({"schemaVersion": 2, "mediaType": OCI_INDEX, "manifests": index});
+        let index = serde_json::to_vec(&index).unwrap();
+        archive.file("index.json", &index).await.unwrap();
+        for manifest in manifests {
+            let name = blob_path(&manifest.digest);
+            archive.file(&name, &manifest.bytes).await.unwrap();
+        }
+        for blob in blobs {
+            let (digest, size) = (sha256(blob), blob.len() as u64);
+            let body = full(Bytes::copy_from_slice(blob));
+            archive.blob(&digest, size, body).await.unwrap();
+        }
+        archive.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_archive_written_reads_back_its_image() {
+        let scratch = Scratch::new();
+        let path = scratch.path("image.tar");
+        let (manifest, blobs) = image(b"layer");
+        write(&path, &[manifest.descriptor()], &[&manifest], &blobs).await;
+
+        let archive = Archive::open(path.clone()).await.unwrap();
+        assert_eq!(&archive.read("oci-layout").await.unwrap()[..], b"{}");
+        let selected = archive.select("any", "any:tag").await.unwrap();
+        assert_eq!(selected, manifest.descriptor());
+        let read = archive.manifest(&selected).await.unwrap();
+        assert_eq!((read.digest, read.bytes), (manifest.digest, manifest.bytes));
+        for blob in blobs {
+            let body = archive.blob(&sha256(blob), blob.len() as u64).unwrap();
+            assert_eq!(&body.collect().await.unwrap().to_bytes()[..], blob);
+        }
+        assert!(!scratch.path("image.tar.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_blob_that_is_not_its_digest_leaves_no_archive() {
+        let scratch = Scratch::new();
+        let path = scratch.path("image.tar");
+        let mut archive = Writer::create(&path).await.unwrap();
+        let refused = archive.blob(&sha256(b"a"), 1, full("b")).await;
+        assert!(matches!(refused, Err(Error::Registry(_))), "{refused:?}");
+        drop(archive);
+        assert!(!path.exists());
+        assert!(!scratch.path("image.tar.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn a_blob_of_more_or_fewer_bytes_than_its_size_is_refused() {
+        let scratch = Scratch::new();
+        let mut archive = Writer::create(&scratch.path("image.tar")).await.unwrap();
+        let digest = sha256(b"ab");
+        for (size, body) in [(2, "abc"), (3, "ab")] {
+            let refused = archive.blob(&digest, size, full(body)).await;
+            assert!(matches!(refused, Err(Error::Registry(_))), "{refused:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn of_several_images_the_one_its_tag_or_reference_names_is_selected() {
+        let scratch = Scratch::new();
+        let path = scratch.path("images.tar");
+        let (one, one_blobs) = image(b"one");
+        let (two, two_blobs) = image(b"two");
+        let index = [
+            named(&one, REF_NAME, "1"),
+            named(&two, IMAGE_NAME, "docker.io/library/app:2"),
+        ];
+        write(
+            &path,
+            &index,
+            &[&one, &two],
+            &[one_blobs[0], one_blobs[1], two_blobs[1]],
+        )
+        .await;
+
+        let archive = Archive::open(path).await.unwrap();
+        let by_tag = archive.select("1", "app:1").await.unwrap();
+        assert_eq!(by_tag.digest, one.digest);
+        let by_reference = archive
+            .select("2", "docker.io/library/app:2")
+            .await
+            .unwrap();
+        assert_eq!(by_reference.digest, two.digest);
+        let Err(Error::File(message)) = archive.select("3", "app:3").await else {
+            panic!("selected an image named by neither");
+        };
+        assert!(
+            message.contains("1") && message.contains("docker.io/library/app:2"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blob_not_there_or_not_the_size_its_manifest_says_is_refused() {
+        let scratch = Scratch::new();
+        let path = scratch.path("image.tar");
+        let (manifest, blobs) = image(b"layer");
+        write(&path, &[manifest.descriptor()], &[&manifest], &blobs).await;
+
+        let archive = Archive::open(path).await.unwrap();
+        let layer = sha256(blobs[1]);
+        assert!(matches!(archive.blob(&layer, 99), Err(Error::File(_))));
+        let missing = sha256(b"missing");
+        assert!(matches!(archive.blob(&missing, 7), Err(Error::File(_))));
+        assert!(matches!(
+            archive.manifest_by_digest(&missing).await,
+            Err(Error::File(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_manifest_named_by_what_is_not_a_digest_is_refused() {
+        let scratch = Scratch::new();
+        let path = scratch.path("image.tar");
+        let (manifest, blobs) = image(b"layer");
+        write(&path, &[manifest.descriptor()], &[&manifest], &blobs).await;
+
+        let archive = Archive::open(path).await.unwrap();
+        let by_path = Descriptor {
+            digest: "../../index.json".into(),
+            ..manifest.descriptor()
+        };
+        assert!(matches!(
+            archive.manifest(&by_path).await,
+            Err(Error::File(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_entry_written_under_dot_slash_is_found_without_it() {
+        let scratch = Scratch::new();
+        let path = scratch.path("image.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&path).unwrap());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "./index.json", &b"{}"[..])
+            .unwrap();
+        builder.finish().unwrap();
+        drop(builder);
+
+        let archive = Archive::open(path).await.unwrap();
+        assert_eq!(&archive.read("index.json").await.unwrap()[..], b"{}");
+    }
+
+    #[tokio::test]
+    async fn a_plan_moves_each_blob_once_and_each_manifest_after_what_it_names() {
+        let (one, one_blobs) = image(b"one");
+        let (two, two_blobs) = image(b"two");
+        let index = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_INDEX,
+            "manifests": [one.descriptor(), two.descriptor()],
+        }))
+        .unwrap();
+        let index = Manifest::new(index.into(), None, None).unwrap();
+        let manifests: HashMap<String, Manifest> =
+            [&one, &two].map(|m| (m.digest.clone(), m.clone())).into();
+
+        let mut steps = Vec::new();
+        let mut fetch = |digest: String| {
+            let found = manifests.get(&digest).cloned();
+            async move { found.ok_or(Error::Registry(digest)) }
+        };
+        plan(&mut fetch, &index, &mut steps, &mut HashSet::new())
+            .await
+            .unwrap();
+        let steps: Vec<_> = steps
+            .into_iter()
+            .map(|step| match step {
+                Step::Blob(descriptor) => ("blob", descriptor.digest),
+                Step::Manifest(manifest) => ("manifest", manifest.digest),
+            })
+            .collect();
+        // The config both images share is moved with the first.
+        assert_eq!(
+            steps,
+            [
+                ("blob", sha256(one_blobs[0])),
+                ("blob", sha256(one_blobs[1])),
+                ("manifest", one.digest),
+                ("blob", sha256(two_blobs[1])),
+                ("manifest", two.digest),
+                ("manifest", index.digest),
+            ]
+        );
+    }
+}

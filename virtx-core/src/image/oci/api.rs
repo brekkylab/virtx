@@ -300,3 +300,76 @@ async fn failure(response: Response<Body>) -> String {
         _ => format!("{status}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(
+        status: StatusCode,
+        headers: &[(&str, &str)],
+        body: &'static str,
+    ) -> Response<Body> {
+        let mut response = Response::builder().status(status);
+        for (name, value) in headers {
+            response = response.header(*name, *value);
+        }
+        response.body(full(body)).unwrap()
+    }
+
+    #[test]
+    fn an_upload_is_where_its_location_says_under_v2() {
+        let path = "app/blobs/uploads/u1?state=s";
+        for location in [
+            "http://127.0.0.1:8470/images/oci/v2/app/blobs/uploads/u1?state=s",
+            "/images/oci/v2/app/blobs/uploads/u1?state=s",
+            "/v2/app/blobs/uploads/u1?state=s",
+        ] {
+            let started = response(StatusCode::ACCEPTED, &[("location", location)], "");
+            assert_eq!(
+                Upload::from(&started, "app").unwrap().path,
+                path,
+                "{location}"
+            );
+        }
+        let elsewhere = response(StatusCode::ACCEPTED, &[("location", "/elsewhere/u1")], "");
+        assert!(matches!(
+            Upload::from(&elsewhere, "app"),
+            Err(Error::Registry(_))
+        ));
+        let none = response(StatusCode::ACCEPTED, &[], "");
+        assert!(matches!(
+            Upload::from(&none, "app"),
+            Err(Error::Registry(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failure_is_its_status_and_each_error_the_registry_names() {
+        let errors = r#"{"errors": [{"code": "BLOB_UNKNOWN", "message": "no such blob"}, {"code": "DENIED"}]}"#;
+        assert_eq!(
+            failure(response(StatusCode::NOT_FOUND, &[], errors)).await,
+            "404 Not Found: BLOB_UNKNOWN no such blob; DENIED"
+        );
+        for body in [r#"{"errors": []}"#, "not json", ""] {
+            assert_eq!(
+                failure(response(StatusCode::BAD_GATEWAY, &[], body)).await,
+                "502 Bad Gateway",
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_that_is_not_text_is_not_read() {
+        let mut response = response(StatusCode::OK, &[(CONTENT_DIGEST, "sha256:0")], "");
+        assert_eq!(
+            header_value(&response, CONTENT_DIGEST).as_deref(),
+            Some("sha256:0")
+        );
+        let opaque = header::HeaderValue::from_bytes(&[0xff]).unwrap();
+        response.headers_mut().insert(CONTENT_DIGEST, opaque);
+        assert_eq!(header_value(&response, CONTENT_DIGEST), None);
+        assert_eq!(header_value(&response, "location"), None);
+    }
+}

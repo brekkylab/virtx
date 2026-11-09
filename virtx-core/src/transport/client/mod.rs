@@ -91,7 +91,7 @@ impl TransportClient {
     }
 
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.
-    #[cfg(all(test, feature = "server"))]
+    #[cfg(any(feature = "test-util", all(test, feature = "server")))]
     pub(crate) fn over<T>(io: T) -> Self
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,

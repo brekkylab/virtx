@@ -157,6 +157,17 @@ impl Sandbox {
                 "ports: {port} is not a port, or is given twice"
             )));
         }
+        let mut at = HashSet::new();
+        if let Some(twice) = args
+            .volumes
+            .iter()
+            .find(|volume| !at.insert(volume.path.trim_end_matches('/')))
+        {
+            return Err(Error::Invalid(format!(
+                "volumes: two are at {}",
+                twice.path
+            )));
+        }
         for (what, given) in [
             ("vcpus", args.vcpus.map(u32::from)),
             ("memory_mib", args.memory_mib),

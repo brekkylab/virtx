@@ -34,7 +34,6 @@ virtx-uvm = { workspace = true }
 # at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }
-tokio = { workspace = true, features = ["io-util", "process"] }
+tokio = { workspace = true, features = ["io-util"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }

@@ -45,3 +45,27 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_reads_as_its_status_and_why() {
+        let refused = Error::Status(409, "in_use: held".into());
+        assert_eq!(
+            refused.to_string(),
+            "the server answered 409 Conflict: in_use: held"
+        );
+        assert_eq!(
+            Error::Status(404, String::new()).to_string(),
+            "the server answered 404 Not Found"
+        );
+        // A status HTTP gives no reason has none.
+        assert_eq!(
+            Error::Status(599, "odd".into()).to_string(),
+            "the server answered 599 : odd"
+        );
+        assert_eq!(Error::Transport("gone".into()).to_string(), "gone");
+    }
+}

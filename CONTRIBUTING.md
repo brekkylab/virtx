@@ -20,17 +20,27 @@ cargo xtask build kernel server-stdio        # the guest kernel and the `virtx-s
 cargo xtask install --prefix ~/.local        # -> ~/.local/bin/virtx-stdio, beside its kernel
 ```
 
-## Running tests and lint
+## Running tests
+
+The crates have unit tests; the packages are tested against the real servers, which `cargo xtask fixture` serves for them. [AGENTS.md](AGENTS.md#tests) says where a test goes.
 
 ```bash
-cargo xtask check                            # format, clippy and tests: the client always, the servers once `init` has run
-cargo xtask test                             # the client's tests, the e2e scenarios against the servers once `init` has run
-cargo xtask test -p virtx-server-stdio       # the servers' own tests, which boot VMs
-(cd virtx-py && uv run pytest)               # Python
-(cd virtx-node && npm install && npm test)   # Node
+cargo xtask test                             # every suite, each summed up at the end; those that need the servers are skipped until they can be built
+cargo xtask test -p virtx-uvm                # its unit tests, and the tests that boot machines
+cargo xtask test -p virtx-server-stdio       # a server's own, its app served in the test's process
+cargo xtask test -p virtx-rs                 # Rust, against the servers
+(cd virtx-py && uv run pytest)               # Python; its conftest serves them
+(cd virtx-node && npm install && npm test)   # Node; `npm test` serves them
 ```
 
-There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command. `cargo xtask check --client` checks the client alone, without `init`.
+## Lint
+
+```bash
+cargo xtask check                            # format, clippy and the crates' unit tests: the client always, the servers once `init` has run
+cargo xtask check --client                   # the client alone, without `init`
+```
+
+There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 
 ## Pull requests
 

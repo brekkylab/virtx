@@ -46,7 +46,7 @@ These apply to the machine that runs the virtx server.
   Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
   ```
 
-- **Clients:** Python 3.10 or later, Node 18 or later, or Rust.
+- **Clients:** Python 3.10 or later, Node 22 or later, or Rust.
 - **GPU:** a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [GPU](#gpu).
 
 ## Quickstart

@@ -140,7 +140,7 @@ writer = await sandbox.exec(["sh", "-c", "i=0; while true; do i=$((i+1)); echo t
 async for entry in sandbox.exec(["sh", "-c", "sleep $((RANDOM % 5 + 1)); cat /tmp/events"]):
     print(entry.entry)  # Stdout(line='tick 1'), Stdout(line='tick 2'), ...
 
-await writer.remove()
+await writer.remove()  # kills the writer, which never ends on its own
 ```
 
 </TabItem>
@@ -153,7 +153,7 @@ for await (const entry of sandbox.exec(['sh', '-c', 'sleep $((RANDOM % 5 + 1)); 
   console.log(entry) // { id: 1, stdout: 'tick 1' }, { id: 2, stdout: 'tick 2' }, ...
 }
 
-await writer.remove()
+await writer.remove() // kills the writer, which never ends on its own
 ```
 
 </TabItem>
@@ -168,7 +168,7 @@ while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry); // Stdout("tick 1"), Stdout("tick 2"), ...
 }
 
-writer.remove().await?;
+writer.remove().await?; // kills the writer, which never ends on its own
 ```
 
 </TabItem>

@@ -7,14 +7,17 @@
 //! Over TCP the test server lets a request through only with a token and a project header the
 //! harness makes up, as a server for many would, so a scenario fails where the client leaves
 //! either off a request of any kind. `VIRTX_E2E_SERVER` names a server to spawn instead, its
-//! arguments split on whitespace, and `VIRTX_E2E_URL` one to connect to, which is sent no
-//! credentials: every token here is one the harness makes up, never one given it. Against
-//! those only the scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves
-//! to the server, run no command but `echo`, `cat` and `sleep`, and name what they make
-//! uniquely. The scenarios of several clients run over TCP or against the one at the URL; a
-//! spawned server carries one client, so they are passed by. `cargo xtask test` names the
-//! stdio server, built and signed, with a `VIRTX_HOME` of its own, once the servers can be
-//! built on the host.
+//! arguments split on whitespace, or a directory the servers were built into, which the run
+//! takes as the test server's: `virtx-stdio` spawned over stdio, and `virtx-server-tcp` served
+//! on the loopback over a config the harness makes up, with one user and one project, kept
+//! under `VIRTX_HOME`. `VIRTX_E2E_URL` names one to connect to, which is sent no credentials:
+//! every token here is one the harness makes up, never one given it. Against those only the
+//! scenarios every server passes run: they assert nothing `PROTOCOL.md` leaves to the server,
+//! run no command but `echo`, `cat` and `sleep`, and name what they make uniquely. The
+//! scenarios of several clients run over TCP or against the one at the URL; a spawned server
+//! carries one client, so they are passed by. `cargo xtask test` names the directory it built
+//! the servers into and signed them in, with a `VIRTX_HOME` of their own, once the servers can
+//! be built on the host.
 //!
 //! Against another server, what a scenario made is removed once it ends, passed or not, and a
 //! `sleep` it started is killed at its timeout if it is not. Each name it removes is its own,
@@ -77,16 +80,8 @@ fn main() -> ExitCode {
         access::SCENARIOS,
     ];
 
-    // The test server is taken over stdio and over TCP, a scenario over each it runs on; a
-    // server the environment names, over its own.
-    let transports = if server.is_test() {
-        vec![
-            (Some("stdio"), Server::Test),
-            (Some("tcp"), Server::TestTcp),
-        ]
-    } else {
-        vec![(None, server)]
-    };
+    // A scenario runs over each transport it can.
+    let (transports, serving) = runtime.block_on(server.transports());
     let wanted =
         |name: &str| filters.is_empty() || filters.iter().any(|f| name.contains(f.as_str()));
 
@@ -149,6 +144,9 @@ fn main() -> ExitCode {
         }
     }
 
+    if let Some(serving) = serving {
+        runtime.block_on(serving.stop());
+    }
     let result = if failed.is_empty() { "ok" } else { "FAILED" };
     eprintln!(
         "\ntest result: {result}. {passed} passed; {} failed; {ignored} ignored",

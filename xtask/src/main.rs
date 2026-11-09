@@ -27,8 +27,8 @@ usage: cargo xtask init     [--force]
             carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      cargo test, the same way; virtx-core's e2e scenarios, among the tests, run against
-            the stdio server, built and signed, once `init` has run and the kernel is built,
-            and against the test server until then
+            the servers over stdio and HTTP, built and signed, once `init` has run and the
+            kernel is built, and against the test server until then
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
@@ -639,7 +639,7 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
         if *is_e2e && let Some(server) = &server {
             // The home is this run's alone, so a prune takes nothing anyone keeps.
             command
-                .env("VIRTX_E2E_SERVER", &server.exe)
+                .env("VIRTX_E2E_SERVER", &server.dir)
                 .env("VIRTX_HOME", &server.home)
                 .env("VIRTX_E2E_ALLOW_PRUNE", "1");
         }
@@ -657,8 +657,8 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The stdio server `virtx-core`'s e2e scenarios run against, built and signed, with a home of
-/// its own. None when the environment names a server, which they run against instead, or when
+/// The servers `virtx-core`'s e2e scenarios run against, built and signed, with a home of
+/// their own. None when the environment names a server, which they run against instead, or when
 /// the servers cannot be built here yet, and they run against the test server.
 fn e2e_server() -> anyhow::Result<Option<E2eServer>> {
     if env::var_os("VIRTX_E2E_SERVER").is_some() || env::var_os("VIRTX_E2E_URL").is_some() {
@@ -678,39 +678,31 @@ fn e2e_server() -> anyhow::Result<Option<E2eServer>> {
     }
 
     let options = Options {
-        components: vec![Component::ServerStdio],
+        components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
         prefix: None,
         debug: false,
         target: None,
         locked: false,
     };
     build_servers(&options)?;
-    let exe = options
-        .out()
-        .join(format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX));
-    // The scenarios split `VIRTX_E2E_SERVER` on whitespace, into a program and its arguments.
-    ensure!(
-        !exe.to_string_lossy().contains(char::is_whitespace),
-        "the e2e scenarios cannot spawn {}: its path has a space in it",
-        exe.display()
-    );
+    let dir = options.out();
     let home = target_path().join(format!("e2e-home-{}", std::process::id()));
     if home.exists() {
         fs::remove_dir_all(&home).with_context(|| format!("emptying {}", home.display()))?;
     }
     fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
     eprintln!(
-        "xtask: the e2e scenarios against {}, in {}",
-        exe.display(),
+        "xtask: the e2e scenarios against the servers in {}, over stdio and HTTP, in {}",
+        dir.display(),
         home.display()
     );
-    Ok(Some(E2eServer { exe, home }))
+    Ok(Some(E2eServer { dir, home }))
 }
 
-/// The server the e2e scenarios run against, and the home it keeps what they make in, removed
-/// once they have run.
+/// The directory of the servers the e2e scenarios run against, and the home they keep what
+/// the scenarios make in, removed once they have run.
 struct E2eServer {
-    exe: PathBuf,
+    dir: PathBuf,
     home: PathBuf,
 }
 

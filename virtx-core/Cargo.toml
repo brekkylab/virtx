@@ -139,7 +139,7 @@ harness = false
 required-features = ["testing"]
 
 # Scenarios across a real transport, against the test server as a child process of itself or a
-# server the environment names: `cargo xtask test` names the stdio server, built and signed.
+# server the environment names: `cargo xtask test` names the servers it built and signed.
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"

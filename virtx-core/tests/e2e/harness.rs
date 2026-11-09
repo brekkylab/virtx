@@ -26,13 +26,18 @@ pub(crate) const SERVE: &str = "VIRTX_E2E_SERVE";
 /// The image every scenario that boots a sandbox pulls first.
 pub(crate) const ALPINE: &str = "alpine:3.20";
 
-/// The bearer token the test server over TCP takes, made up here and no one's.
+/// The bearer token a server over TCP here takes, made up here and no one's: the test server's,
+/// and the one user's of the config `virtx-server-tcp` is served with.
 const TOKEN: &str = "e2e-token";
 
-/// The header the test server over TCP takes a request's project from, as a server for many
-/// would, and the one project it lets a request reach.
-pub(crate) const PROJECT_HEADER: &str = "e2e-project";
+/// The header a server over TCP here takes a request's project from, as `virtx-server-tcp`
+/// does, and the one project it lets a request reach.
+pub(crate) const PROJECT_HEADER: &str = "virtx-project";
 const PROJECT: &str = "e2e";
+
+/// The servers a directory of built ones is taken to hold, as `cargo xtask build` names them.
+const STDIO_SERVER: &str = "virtx-stdio";
+const TCP_SERVER: &str = "virtx-server-tcp";
 
 /// A server clients reach over TCP: its base URL, and the credentials and headers it wants.
 #[derive(Clone)]
@@ -63,8 +68,13 @@ pub(crate) enum Server {
     TestTcp,
     /// A server spawned from this argv.
     Spawn(Vec<String>),
+    /// The servers built into this directory, which the run takes as [`STDIO_SERVER`],
+    /// spawned, and [`TCP_SERVER`], [`Served`](Server::Served).
+    Built(PathBuf),
     /// A server at a URL.
     Url(Reach),
+    /// [`TCP_SERVER`], served on the loopback for the run, with [`TOKEN`] and [`PROJECT`].
+    Served(Reach),
 }
 
 impl Server {
@@ -72,8 +82,11 @@ impl Server {
     /// takes over TCP as well.
     pub(crate) fn from_env() -> Server {
         let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
-        if let Some(command) = var("VIRTX_E2E_SERVER") {
-            return Server::Spawn(command.split_whitespace().map(Into::into).collect());
+        if let Some(server) = var("VIRTX_E2E_SERVER") {
+            if std::path::Path::new(&server).is_dir() {
+                return Server::Built(server.into());
+            }
+            return Server::Spawn(server.split_whitespace().map(Into::into).collect());
         }
         if let Some(url) = var("VIRTX_E2E_URL") {
             let (auth, headers) = (Auth::None, HeaderMap::new());
@@ -95,14 +108,14 @@ impl Server {
     /// Whether several clients can reach one server: over TCP or at a URL. Over stdio a server
     /// carries its one client.
     pub(crate) fn is_shared(&self) -> bool {
-        matches!(self, Server::TestTcp | Server::Url(_))
+        matches!(self, Server::TestTcp | Server::Url(_) | Server::Served(_))
     }
 
-    /// Whether it refuses a request without valid credentials: the test server over TCP does,
-    /// with ones the harness makes up. A server at a URL is reached with none, and over stdio
-    /// a server takes none.
+    /// Whether it refuses a request without valid credentials: a server over TCP served here
+    /// does, with ones the harness makes up. A server at a URL is reached with none, and over
+    /// stdio a server takes none.
     pub(crate) fn wants_credentials(&self) -> bool {
-        matches!(self, Server::TestTcp)
+        matches!(self, Server::TestTcp | Server::Served(_))
     }
 
     /// Whether a scenario that `needs` it runs against this server, a prune `prune` lets it.
@@ -131,18 +144,136 @@ impl Server {
                 command.args(&argv[1..]);
                 Client::spawn(command).unwrap()
             }
-            Server::Url(reach) => reach.client(),
+            Server::Url(reach) | Server::Served(reach) => reach.client(),
+            Server::Built(_) => panic!("a directory's servers are each taken apart"),
         }
     }
 
-    /// One server several clients reach: the one at the URL, or a test server served on the
-    /// loopback over TCP.
+    /// One server several clients reach: the one at the URL or served for the run, or a test
+    /// server served on the loopback over TCP.
     async fn reach(&self) -> Reach {
         match self {
             Server::Test | Server::TestTcp => serve().await,
-            Server::Url(reach) => reach.clone(),
-            Server::Spawn(_) => panic!("a spawned server answers its own client alone"),
+            Server::Url(reach) | Server::Served(reach) => reach.clone(),
+            Server::Spawn(_) | Server::Built(_) => {
+                panic!("a spawned server answers its own client alone")
+            }
         }
+    }
+
+    /// What the run takes this server over, each with what it adds to a scenario's name: the
+    /// test server over stdio and over TCP, the servers built into a directory likewise, and
+    /// any other over its own. What is served for the run is kept by the [`Serving`] handed
+    /// back, until it is stopped.
+    pub(crate) async fn transports(self) -> (Vec<(Option<&'static str>, Server)>, Option<Serving>) {
+        match self {
+            Server::Test | Server::TestTcp => (
+                vec![
+                    (Some("stdio"), Server::Test),
+                    (Some("tcp"), Server::TestTcp),
+                ],
+                None,
+            ),
+            Server::Built(dir) => {
+                let built =
+                    |name: &str| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                let stdio = built(STDIO_SERVER).to_string_lossy().into_owned();
+                let serving = Serving::start(&built(TCP_SERVER)).await;
+                let tcp = Server::Served(serving.reach.clone());
+                (
+                    vec![
+                        (Some("stdio"), Server::Spawn(vec![stdio])),
+                        (Some("tcp"), tcp),
+                    ],
+                    Some(serving),
+                )
+            }
+            server => (vec![(None, server)], None),
+        }
+    }
+}
+
+/// [`TCP_SERVER`], served for the run over a config made up here: one user, whose token is
+/// [`TOKEN`], in one project, [`PROJECT`], kept under `VIRTX_HOME` as the stdio server's are, or
+/// else under a home of the run's own, removed once it is stopped.
+pub(crate) struct Serving {
+    process: tokio::process::Child,
+    reach: Reach,
+    config: PathBuf,
+    home: Option<PathBuf>,
+}
+
+impl Serving {
+    async fn start(program: &std::path::Path) -> Serving {
+        let scratch = std::env::temp_dir().join(format!("virtx-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let (home, own) = match std::env::var_os("VIRTX_HOME").filter(|h| !h.is_empty()) {
+            Some(home) => (PathBuf::from(home), None),
+            None => (scratch.join("home"), Some(scratch.clone())),
+        };
+        let token_sha256 = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(TOKEN));
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "home": home,
+            "users": { "e2e": { "token_sha256": token_sha256 } },
+            "projects": { PROJECT: { "members": ["e2e"] } },
+        });
+        let path = scratch.join("config.json");
+        std::fs::write(&path, config.to_string()).unwrap();
+
+        let mut process = tokio::process::Command::new(program)
+            .arg("serve")
+            .arg("--config")
+            .arg(&path)
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawning {}: {e}", program.display()));
+        // Where it listens is the port it was given, which it says first; the rest of what it
+        // says, its machines' consoles among it, is read only so that it never blocks.
+        let mut said = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(
+            process.stderr.take().unwrap(),
+        ));
+        let line = said
+            .next_line()
+            .await
+            .unwrap()
+            .expect("it says where it serves");
+        let url = line
+            .strip_prefix("serving at ")
+            .unwrap_or_else(|| panic!("{} said {line}", program.display()))
+            .to_owned();
+        tokio::spawn(async move { while let Ok(Some(_)) = said.next_line().await {} });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(PROJECT_HEADER, PROJECT.parse().unwrap());
+        let auth = Auth::Bearer {
+            token: TOKEN.into(),
+        };
+        let reach = Reach { url, auth, headers };
+        Serving {
+            process,
+            reach,
+            config: scratch,
+            home: own,
+        }
+    }
+
+    /// Stop it as `ctrl-c` would, so that it ends its sandboxes' machines, and kill it if it has
+    /// not ended a while later; then remove what was made for it.
+    pub(crate) async fn stop(mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.process.id() {
+            // SAFETY: a signal to a child process this owns and has not reaped.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
+        }
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(30), self.process.wait());
+        if waited.await.is_err() {
+            let _ = self.process.kill().await;
+        }
+        let _ = std::fs::remove_dir_all(self.home.as_ref().unwrap_or(&self.config));
+        let _ = std::fs::remove_dir_all(&self.config);
     }
 }
 

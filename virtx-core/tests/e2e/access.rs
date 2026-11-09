@@ -2,8 +2,9 @@
 //!
 //! That a client sends them with every kind of request needs no scenario of its own: the test
 //! server over TCP refuses any request without its made-up token and project, so every
-//! scenario against it fails where one is left off. It runs against the test server alone, the
-//! one server here given credentials.
+//! scenario against it fails where one is left off. It runs against the servers over TCP here
+//! given credentials the harness makes up: the test server's, and `virtx-server-tcp` served
+//! over a config of its own.
 
 use futures_util::StreamExt;
 use http::HeaderMap;
@@ -51,7 +52,8 @@ async fn a_request_of_each_kind_without_valid_credentials_is_refused(run: Run) {
         let refused = refusals(other, &id, &job.id, &volume).await;
         assert_eq!(refused, [401; 4], "{who}");
     }
-    // The test server's token, reaching a project not its own.
+    // The test server's token, reaching a project not its own. `virtx-server-tcp` answers its
+    // images to any user it knows, whichever project a request names.
     if run.is_test() {
         let mut elsewhere = HeaderMap::new();
         elsewhere.insert(PROJECT_HEADER, "elsewhere".parse().unwrap());

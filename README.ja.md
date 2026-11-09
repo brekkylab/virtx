@@ -34,7 +34,7 @@ VMの中でインストールしたものや変更した内容はVMを削除す�
 ## クイックスタート
 
 > [!TIP]
-> コーディングエージェントを使っているなら、[virtxスキル](skills/virtx/SKILL.md)をインストールすれば、以下のコードはエージェントが書いてくれます。
+> コーディングエージェントを使っているなら、次のコマンドで[virtxスキル](skills/virtx/SKILL.md)をインストールすれば、この後のサンプルコードはエージェントが書いてくれます。
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab

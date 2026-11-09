@@ -67,3 +67,34 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// The HTTP status the server refused the request with, if it did.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Error::Status(status, _) | Error::Refusal { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_gives_its_status() {
+        assert_eq!(Error::Status(404, "not found".into()).status(), Some(404));
+        assert_eq!(
+            Error::Refusal {
+                status: 503,
+                description: "not a virtx answer".into(),
+                body: None,
+            }
+            .status(),
+            Some(503)
+        );
+        assert_eq!(Error::Transport("connection reset".into()).status(), None);
+        assert_eq!(Error::Json("bad json".into()).status(), None);
+    }
+}

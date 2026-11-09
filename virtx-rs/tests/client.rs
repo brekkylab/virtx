@@ -173,6 +173,26 @@ fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
     assert!(refused.to_string().contains("423"), "{refused}");
 }
 
+fn a_sandbox_s_files_are_its_own_and_go_with_it() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .wait()
+        .unwrap();
+    let root = FileRoot::Sandbox(sandbox.id.clone());
+    client.create_dir_all(&root, "work/dir").unwrap_wait();
+    client
+        .write_file(&root, "work/dir/a.txt", "hello", None)
+        .unwrap_wait();
+    assert_eq!(
+        client.read_text(&root, "work/dir/a.txt").wait().unwrap(),
+        "hello"
+    );
+    client.remove_sandbox(&sandbox.id).unwrap_wait();
+    let gone = client.read_dir(&root, "").wait().unwrap_err();
+    assert!(gone.to_string().contains("404"), "{gone}");
+}
+
 fn a_snapshot_is_created_got_and_removed() {
     let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
     let created = client.create_snapshot(Some("t"), None).wait().unwrap();
@@ -569,6 +589,7 @@ fn main() -> ExitCode {
         a_forwarder_is_on_the_loopback_until_it_is_dropped,
         the_files_of_a_volume_are_written_listed_moved_and_read_back,
         a_snapshot_is_created_got_and_removed,
+        a_sandbox_s_files_are_its_own_and_go_with_it,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,

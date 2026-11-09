@@ -1,0 +1,42 @@
+[package]
+name = "virtx-server-tcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# The stdio server's: this binary links libkrun and becomes a machine just the same.
+build = "../virtx-server-stdio/build.rs"
+
+# The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names.
+[features]
+gpu = ["virtx-uvm/gpu"]
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
+clap = { version = "4", features = ["derive"] }
+http = "1"
+serde = { workspace = true }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
+# A token's randomness.
+uuid = { version = "1", features = ["v4"] }
+# What the endpoints take and answer.
+virtx-core = { workspace = true }
+# What the endpoints answer from, and the machines they start.
+virtx-uvm = { workspace = true }
+# A job's log, as an event stream.
+futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+# The wire, spoken by hand, and by virtx-core's client with the token and the project given
+# at connect.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+virtx-core = { workspace = true, features = ["client"] }
+tokio = { workspace = true, features = ["io-util", "process"] }
+# A port's WebSocket, as a client would open it.
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

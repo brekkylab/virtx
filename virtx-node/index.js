@@ -62,6 +62,7 @@ const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
 // A request with a body of bytes beside its args.
 const WITH_DATA = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']]
 const SIGNATURES = {
+  virtx_ensure_virtx: ['int', [Out]],
   virtx_client_spawn: [
     'int',
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
@@ -361,6 +362,28 @@ const holds = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_client_release.async(raw, () => {})
 })
 
+// Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is not
+// there, and give its path: what `Client.spawn()` without a program starts. The fetch runs on a
+// worker thread, off the event loop.
+//
+// The server is kept one directory per version, so a library that is upgraded fetches its own.
+// `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
+// `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
+function ensureVirtx() {
+  const lib = library()
+  const out = {}
+  return new Promise((resolve, reject) => {
+    lib.virtx_ensure_virtx.async(out, (error, status) => {
+      if (error) return reject(error)
+      try {
+        resolve(lib.take(status, out))
+      } catch (e) {
+        reject(e)
+      }
+    })
+  })
+}
+
 // `auth` as `virtx_client_connect` takes it: JSON, or nothing for none.
 function authBytes(auth) {
   return auth ? Buffer.from(JSON.stringify(auth)) : Buffer.alloc(0)
@@ -387,7 +410,10 @@ class Client {
   }
 
   // Start `program` with `args` as the server, and talk to it over its stdin and stdout.
-  static spawn(program, args = []) {
+  // Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
+  // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+  // event loop.
+  static spawn(program = null, args = []) {
     const lib = library()
     const raw = [0]
     const error = {}
@@ -616,7 +642,7 @@ class Client {
     await this._call('virtx_client_remove_volume_mount', { volume, path: at })
   }
 
-  // What is at `path` in `root`, `{ volume }` or `{ snapshot }`, the path relative to its root
+  // What is at `path` in `root`, `{ volume }`, `{ snapshot }` or `{ sandbox }`, the path relative to its root
   // as `dir/file.txt`.
   statFile(root, at) {
     return this._call('virtx_client_stat_file', { ...root, path: at })
@@ -806,6 +832,7 @@ module.exports = {
   Recipe,
   StartedJob,
   VirtxError,
+  ensureVirtx,
   imageName,
   libraryPath,
   load,

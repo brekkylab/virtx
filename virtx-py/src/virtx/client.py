@@ -94,6 +94,25 @@ def _close_all() -> None:
         client.close()
 
 
+async def ensure_virtx() -> str:
+    """Fetch ``virtx-stdio``, the server of the library's version, into this host's cache if it
+    is not there, and give its path: what ``Client.spawn()`` without a program starts. The
+    fetch runs in a thread, off the event loop.
+
+    The server is kept one directory per version, so a library that is upgraded fetches its
+    own. ``$VIRTX_STDIO`` names a server to use as it is; ``$VIRTX_STDIO_VERSION`` another
+    version; ``$VIRTX_DIST_URL`` where releases are fetched from; ``$VIRTX_HOME`` the cache.
+    """
+    lib = library()
+
+    def fetch() -> str:
+        out = _Bytes()
+        status = lib.virtx_ensure_virtx(ctypes.byref(out))
+        return lib.take(status, out)
+
+    return await asyncio.to_thread(fetch)
+
+
 class Client:
     """A client of one server, over stdio or HTTP, made by ``libvirtx_core``.
 
@@ -110,16 +129,22 @@ class Client:
         _open.add(self)
 
     @classmethod
-    def spawn(cls, program: str, args: Iterable[str] = ()) -> Client:
+    def spawn(cls, program: str | None = None, args: Iterable[str] = ()) -> Client:
         """Start ``program`` with ``args`` as the server, and talk to it over its stdin and
-        stdout. Blocks until it has started."""
+        stdout. Blocks until it has started. Without ``program``, the server is ``virtx-stdio``
+        of this library's version, fetched first if this host has none -- blocking for the
+        fetch; ``ensure_virtx`` does that fetch alone, and off the event loop."""
         lib = library()
         argv = [arg.encode() for arg in args]
         array = (ctypes.c_char_p * len(argv))(*argv)
         raw = ctypes.c_void_p()
         error = _Bytes()
         status = lib.virtx_client_spawn(
-            program.encode(), array, len(argv), ctypes.byref(raw), ctypes.byref(error)
+            None if program is None else program.encode(),
+            array,
+            len(argv),
+            ctypes.byref(raw),
+            ctypes.byref(error),
         )
         return cls._opened(lib, status, raw, error)
 

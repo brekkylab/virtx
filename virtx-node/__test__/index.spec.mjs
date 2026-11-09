@@ -129,6 +129,25 @@ test('the files of a volume are written, listed, moved and read back', async () 
   }
 })
 
+test("a sandbox's files are its own and go with it", async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const { id } = await client.createSandbox('alpine:3.20')
+    const root = { sandbox: id }
+    await client.createDirAll(root, 'work/dir')
+    await client.writeFile(root, 'work/dir/a.txt', 'hello')
+    assert.equal(await client.readText(root, 'work/dir/a.txt'), 'hello')
+    assert.deepEqual(
+      (await client.readDir(root, 'work/dir')).map((entry) => entry.name),
+      ['a.txt'],
+    )
+    await client.removeSandbox(id)
+    await assert.rejects(client.readDir(root, ''), /404/)
+  } finally {
+    await client.close()
+  }
+})
+
 // Each entry of `log`, until and with its end.
 async function entries(log) {
   const read = []

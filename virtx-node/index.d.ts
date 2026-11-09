@@ -12,6 +12,17 @@ export function load(file: string): void
 /** The path the open library was opened by; `null` before the first client or `load`. */
 export function libraryPath(): string | null
 
+/**
+ * Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is not
+ * there, and give its path: what `Client.spawn()` without a program starts. The fetch runs on
+ * a worker thread, off the event loop.
+ *
+ * The server is kept one directory per version, so a library that is upgraded fetches its
+ * own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
+ * `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
+ */
+export function ensureVirtx(): Promise<string>
+
 /** An image by a tag on it, as `name:tag`. */
 export interface ImageTag {
   type: 'tag'
@@ -161,8 +172,8 @@ export interface VolumeMountListOutputItem {
   mountType: MountType
 }
 
-/** Whose files a request names: a volume's, or a snapshot's. A snapshot in use, held by a sandbox, refuses every request. */
-export type FileRoot = { volume: string } | { snapshot: string }
+/** Whose files a request names: a volume's, a snapshot's, or a sandbox's as its processes see them. A snapshot in use, held by a sandbox, refuses every request. */
+export type FileRoot = { volume: string } | { snapshot: string } | { sandbox: string }
 
 /** What a file or directory is. */
 export interface Metadata {
@@ -254,8 +265,13 @@ export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
  * the last.
  */
 export class Client {
-  /** Start `program` with `args` as the server, and talk to it over its stdin and stdout. */
-  static spawn(program: string, args?: string[]): Client
+  /**
+   * Start `program` with `args` as the server, and talk to it over its stdin and stdout.
+   * Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
+   * this host has none, blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+   * event loop.
+   */
+  static spawn(program?: string | null, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL, sending
    * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with

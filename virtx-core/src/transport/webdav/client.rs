@@ -26,6 +26,7 @@ fn uri(root: &FileRoot, path: &str) -> String {
     let (kind, name) = match root {
         FileRoot::Volume(name) => ("volumes", name),
         FileRoot::Snapshot(name) => ("snapshots", name),
+        FileRoot::Sandbox(id) => ("sandboxes", id),
     };
     format!("/{kind}/{}/files/{}", segment(name), segments(path))
 }
@@ -488,6 +489,8 @@ mod tests {
         );
         let snapshot = FileRoot::Snapshot("s".into());
         assert_eq!(uri(&snapshot, "a"), "/snapshots/s/files/a");
+        let sandbox = FileRoot::Sandbox("sb1".into());
+        assert_eq!(uri(&sandbox, "etc/hosts"), "/sandboxes/sb1/files/etc/hosts");
     }
 
     #[test]

@@ -89,6 +89,7 @@ macro_rules! api {
 }
 
 api! {
+    virtx_ensure_virtx: unsafe extern "C" fn(out: *mut VirtxBytes) -> c_int,
     virtx_client_spawn: unsafe extern "C" fn(
         program: *const c_char,
         args: *const *const c_char,

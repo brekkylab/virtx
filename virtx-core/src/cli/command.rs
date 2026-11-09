@@ -158,7 +158,7 @@ pub(crate) async fn run(argv: impl IntoIterator<Item = impl Into<OsString> + Clo
 }
 
 async fn execute(cli: Cli) -> anyhow::Result<()> {
-    let client = server::connect(&cli.server)?;
+    let client = server::connect(&cli.server).await?;
     let done = dispatch(&client, cli.command.into_image()).await;
     client.close().await;
     done

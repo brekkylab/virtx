@@ -3,10 +3,11 @@
 //! spawn.
 //!
 //! It starts with the image `alpine:3.20`, the volume `v`, the snapshot `s`, and the snapshot
-//! `locked`, held by the sandbox `holder`, so its files answer `423` to everything. Each volume
-//! and snapshot is a filesystem of its own, whose requests are answered one at a time, each once
-//! its body has all arrived, so a write lands whole. An image is a config and a layer of a few
-//! bytes, not one anything boots: its digest is of those bytes.
+//! `locked`, held by the sandbox `holder`, so its files answer `423` to everything. Each volume,
+//! snapshot and sandbox is a filesystem of its own, a sandbox's empty as it is made, whose
+//! requests are answered one at a time, each once its body has all arrived, so a write lands
+//! whole. An image is a config and a layer of a few bytes, not one anything boots: its digest is
+//! of those bytes.
 //!
 //! Its jobs pretend, and keep a log of at most [`LOG_LIMIT`] entries before their end:
 //!
@@ -208,6 +209,7 @@ struct SandboxState {
     /// The volumes it mounts, by name.
     volumes: Vec<String>,
     jobs: BTreeMap<String, Arc<SandboxJobState>>,
+    files: DavHandler,
 }
 
 #[derive(Default)]
@@ -218,7 +220,7 @@ struct Data {
     volumes: BTreeMap<String, (DavHandler, BTreeMap<String, VolumeMountListOutputItem>)>,
     sandboxes: BTreeMap<String, SandboxState>,
     image_jobs: BTreeMap<String, Arc<ImageJobState>>,
-    /// Held while a request to any volume's or snapshot's files is answered.
+    /// Held while a request to any volume's, snapshot's or sandbox's files is answered.
     files: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -277,6 +279,7 @@ pub fn router() -> Router {
             },
             volumes: Vec::new(),
             jobs: BTreeMap::new(),
+            files: dav("/sandboxes/holder/files"),
         },
     );
     let shared: Shared = Arc::new(Mutex::new(data));
@@ -308,6 +311,9 @@ pub fn router() -> Router {
         .route("/snapshots/{name}/files", any(snapshot_files))
         .route("/snapshots/{name}/files/", any(snapshot_files))
         .route("/snapshots/{name}/files/{*path}", any(snapshot_files))
+        .route("/sandboxes/{id}/files", any(sandbox_files))
+        .route("/sandboxes/{id}/files/", any(sandbox_files))
+        .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(list_sandboxes).post(create_sandbox))
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
@@ -780,6 +786,20 @@ async fn snapshot_files(State(shared): State<Shared>, request: axum::extract::Re
     }
 }
 
+/// Answers a request under `/sandboxes/{id}/files/` from that sandbox's filesystem.
+async fn sandbox_files(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
+    let id = root_name(&request);
+    let (dav, files) = {
+        let data = shared.lock().unwrap();
+        let dav = data.sandboxes.get(&id).map(|state| state.files.clone());
+        (dav, Arc::clone(&data.files))
+    };
+    match dav {
+        Some(dav) => answer_files(dav, files, request).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn list_sandboxes(State(shared): State<Shared>) -> Response {
     let sandboxes: Vec<_> = shared
         .lock()
@@ -839,6 +859,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
             sandbox: sandbox.clone(),
             volumes: args.volumes.iter().map(|v| v.volume.clone()).collect(),
             jobs: BTreeMap::new(),
+            files: dav(&format!("/sandboxes/{id}/files")),
         },
     );
     let ports = args

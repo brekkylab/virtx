@@ -1,0 +1,27 @@
+[package]
+name = "virtx-uvm-guest"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# The agent inside each of virtx-uvm's machines. Its own workspace root: it is cross-compiled to
+# `*-unknown-linux-musl` by virtx-uvm's build script, which embeds it, and a member would be
+# built for the host by a bare `cargo build`.
+[workspace]
+
+[[bin]]
+name = "virtx-uvm-guest"
+path = "src/main.rs"
+
+[dependencies]
+# Process groups, and the signals sent to them.
+libc = "0.2"
+# The channel's frames; the channel itself is `virtx-uvm/src/machine/wire.rs`, included by
+# path.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

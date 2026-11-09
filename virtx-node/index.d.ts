@@ -10,6 +10,8 @@ export class VirtxError extends Error {
    * exist, `409` for what is in use or has ended, and the like.
    */
   status: number | null
+  /** The server's response body, where it was not a JSON error. */
+  body: string | null
 }
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */

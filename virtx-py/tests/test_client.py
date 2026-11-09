@@ -76,3 +76,61 @@ def test_a_forwarder_is_on_the_loopback_until_it_is_closed() -> None:
             assert connection.recv(1) == b""
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection((forwarder.host, forwarder.port))
+
+
+def test_virtx_error_keeps_body() -> None:
+    err = VirtxError("something failed")
+    assert str(err) == "something failed"
+    assert err.status is None
+    assert err.body is None
+
+    err_with_status_and_body = VirtxError(
+        "service unavailable", status=503, body="<html>error</html>"
+    )
+    assert str(err_with_status_and_body) == "service unavailable"
+    assert err_with_status_and_body.status == 503
+    assert err_with_status_and_body.body == "<html>error</html>"
+
+
+async def test_a_non_json_refusal_raises_without_quoting_html() -> None:
+    import http.server
+    import threading
+
+    class _503Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = (
+                b"<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            self.send_response(503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _503Handler)
+    host, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with Client.connect(f"http://{host}:{port}/") as client:
+            with pytest.raises(VirtxError) as exc_info:
+                await client.list_sandbox()
+            err = exc_info.value
+            assert err.status == 503
+            assert (
+                err.body
+                == "<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
+            )
+            err_msg = str(err)
+            assert (
+                "the server answered 503 Service Unavailable; not a virtx answer (text/html,"
+                in err_msg
+            )
+            assert "the service is unreachable or restarting" in err_msg
+            assert "<html>" not in err_msg
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -47,9 +47,18 @@ class VirtxError(Exception):
     """The HTTP status the server refused the request with, if it did: ``404`` for what does
     not exist, ``409`` for what is in use or has ended, and the like."""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    body: str | None
+    """The server's response body, where it was not a JSON error."""
+
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        body: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.body = body
 
 
 class _Bytes(ctypes.Structure):
@@ -223,7 +232,7 @@ class Library:
             if not data:
                 raise VirtxError("the call failed")
             failure = json.loads(data)
-            raise VirtxError(failure["message"], failure.get("status"))
+            raise VirtxError(failure["message"], failure.get("status"), failure.get("body"))
         raise VirtxError(f"unknown status {status}")
 
     def _poll(

@@ -949,7 +949,7 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 the programs in [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
 
 **No machine is given it at present.** `cargo xtask build abin` builds it, `cargo xtask install`
-installs it beside the servers, and the dist workflow puts it in a release, but neither server
+installs it beside the servers, and the `build` workflow puts it in a release, but neither server
 shares it into a machine: that went with the move to a machine per sandbox, and is not back.
 
 ```sh

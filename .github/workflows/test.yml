@@ -1,0 +1,152 @@
+# What `build` left, tested the way a user meets it; `ci` and `release` call it after `build`.
+#
+# - `check`: `cargo xtask check --client`, and the Python and Node packages' own tests.
+# - `packages`: on each platform, the npm packages installed from a registry on localhost and
+#   the wheel pip picks, each opening the library it carries; then the server that library
+#   fetches, from a release layout served on localhost, started and asked to answer.
+#
+# Linux runs on ubuntu-22.04, below the build runners' glibc, so a build that needs more than
+# its floor fails to open here.
+name: test
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version `build` built
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check
+
+      - run: cargo xtask check --client
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Python
+        working-directory: virtx-py
+        run: uv run pytest
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Node
+        working-directory: virtx-node
+        run: npm ci && npm test
+
+  packages:
+    name: packages (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: linux-x64-gnu
+            runner: ubuntu-22.04
+          - platform: linux-arm64-gnu
+            runner: ubuntu-22.04-arm
+          - platform: win32-x64-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/packages
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: dist/release
+          key: bundle-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      # Published with an explicit --registry and a config of its own: the packages'
+      # publishConfig names npmjs, and nothing here may reach it. Verdaccio is installed on its
+      # own first: on Windows the install alone can outlast the wait for it to answer.
+      - name: Install from a local registry
+        run: |
+          npm install --global --silent verdaccio@6
+          cd scripts/packages
+          verdaccio --config ./verdaccio.yaml --listen 4873 > "$RUNNER_TEMP/verdaccio.log" 2>&1 &
+          for _ in $(seq 120); do curl -sf http://localhost:4873/-/ping >/dev/null && break; sleep 1; done
+          curl -sf http://localhost:4873/-/ping >/dev/null || { echo "::error::the local registry did not start"; exit 1; }
+          token=$(curl -sf -X PUT -H 'content-type: application/json' \
+            -d '{"name":"ci","password":"ci-local-only"}' \
+            http://localhost:4873/-/user/org.couchdb.user:ci | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
+          npmrc="$RUNNER_TEMP/npmrc"
+          printf 'registry=http://localhost:4873/\n//localhost:4873/:_authToken=%s\n' "$token" > "$npmrc"
+          for tgz in "$GITHUB_WORKSPACE"/dist/release/*.tgz; do
+            npm publish "$tgz" --userconfig "$npmrc" --registry http://localhost:4873/
+          done
+          mkdir -p "$RUNNER_TEMP/project" && cd "$RUNNER_TEMP/project"
+          echo '{"name":"project","private":true,"type":"module"}' > package.json
+          npm install @brekkylab/virtx --userconfig "$npmrc" --registry http://localhost:4873/
+          ls node_modules/@brekkylab
+
+      - name: Install the wheel pip picks
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/bin/python"; [ -x "$py" ] || py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --no-index --find-links dist/release virtx
+          "$py" -m pip show virtx
+          echo "SMOKE_PYTHON=$py" >> "$GITHUB_ENV"
+
+      - name: Smoke, Node
+        run: cd "$RUNNER_TEMP/project" && node "$GITHUB_WORKSPACE/scripts/packages/smoke/node.mjs"
+
+      - name: Smoke, Python
+        run: '"$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/python.py"'
+
+      # The layout a client fetches from, `<base>/v<version>/`, as a release would hang it.
+      - name: Smoke, server
+        run: |
+          releases="$RUNNER_TEMP/releases"
+          mkdir -p "$releases/v$VERSION"
+          cp dist/release/virtx-stdio-*.tar.gz dist/release/SHA256SUMS "$releases/v$VERSION/"
+          "$SMOKE_PYTHON" -m http.server 8765 --bind 127.0.0.1 --directory "$releases" > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 30); do curl -sf "http://127.0.0.1:8765/v$VERSION/SHA256SUMS" >/dev/null && break; sleep 1; done
+          VIRTX_DIST_URL=http://127.0.0.1:8765 VIRTX_HOME="$RUNNER_TEMP/virtx-home" \
+            "$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/server.py"
+
+      - name: Logs
+        if: failure()
+        run: cat "$RUNNER_TEMP/verdaccio.log" "$RUNNER_TEMP/http.log" 2>/dev/null || true

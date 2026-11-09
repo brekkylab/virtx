@@ -4,8 +4,8 @@
 //
 //   node scripts/packages/pack-npm.mjs <lib-dir> <out-dir> [--allow-missing]
 //
-// `<lib-dir>/<platform>/` holds each platform's library, as the release workflow's `build`
-// uploads it. `--allow-missing` packs only the platforms that have one, and still names every
+// `<lib-dir>/<platform>/` holds each platform's library, as the `build` workflow's `client`
+// jobs lay it out. `--allow-missing` packs only the platforms that have one, and still names every
 // one in the root -- for a local run on one machine. A release packs all.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'

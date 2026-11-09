@@ -20,3 +20,8 @@ libc = "0.2"
 png = "0.18"
 # Input from the viewer goes into the X server through XTEST; the cursor comes out of XFixes.
 x11rb = { version = "0.13", default-features = false, features = ["xfixes", "xtest"] }
+
+# `build.rs` builds the X server in a virtx machine.
+[build-dependencies]
+anyhow = "1"
+virtx = { path = "../../virtx-rs" }

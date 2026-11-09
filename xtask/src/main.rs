@@ -8,8 +8,6 @@ use std::{
 
 use anyhow::{Context, bail, ensure};
 
-mod xserver;
-
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
@@ -36,8 +34,6 @@ components:
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables every VM gets at /abin
-  xserver       the X server /abin's `display` runs, built in an Alpine VM: on the server
-                built into the same profile if there is one, else on a downloaded one
 
   --force         (init) resets every submodule to its pinned commit first, discarding
                   any local changes in it
@@ -83,7 +79,6 @@ enum Component {
     ServerTcp,
     Kernel,
     Abin,
-    Xserver,
 }
 
 struct Options {
@@ -202,7 +197,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
             Some("server-tcp") => Component::ServerTcp,
             Some("kernel") => Component::Kernel,
             Some("abin") => Component::Abin,
-            Some("xserver") => Component::Xserver,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
@@ -254,11 +248,14 @@ fn cargo() -> Command {
     Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
+/// Cargo for `crate_dir`, a workspace of its own, built into `target/abin/` rather than beside
+/// the main workspace: a build-dependency on `virtx` builds `libvirtx_core` without its C ABI,
+/// and in a shared directory that file would replace the client library of the same name.
 fn cross_cargo(crate_dir: &Path) -> Command {
     let mut cargo = cargo();
     cargo
         .current_dir(crate_dir)
-        .env("CARGO_TARGET_DIR", target_path())
+        .env("CARGO_TARGET_DIR", target_path().join("abin"))
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_BUILD_TARGET")
@@ -433,10 +430,6 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.servers().next().is_some() {
         build_servers(options)?;
     }
-    // Before `abin`, which takes the X server in.
-    if options.has(Component::Xserver) {
-        build_xserver(options)?;
-    }
     if options.has(Component::Abin) {
         build_abin(options.debug, &options.out().join("abin"))?;
     }
@@ -535,8 +528,9 @@ fn ready(exe: &Path) -> anyhow::Result<()> {
     if !beside.is_file() {
         place(&kernel, &beside)?;
     }
-    build_abin(true, &dir.join("abin"))?;
-    sign(exe)
+    // Signed first: building `abin/` may boot a machine on it.
+    sign(exe)?;
+    build_abin(true, &dir.join("abin"))
 }
 
 fn sign(exe: &Path) -> anyhow::Result<()> {
@@ -656,34 +650,12 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build `display`'s X server, on this host's client library -- built first -- and the server
-/// in the same profile when there is one.
-fn build_xserver(options: &Options) -> anyhow::Result<()> {
-    ensure!(
-        options.target.is_none(),
-        "xserver is built for this host's guest; --target names another"
-    );
-    let mut cargo = cargo();
-    cargo
-        .current_dir(root_path())
-        .args(["build", "-p", CLIENT_PACKAGE, "--lib"]);
-    if !options.debug {
-        cargo.arg("--release");
-    }
-    run(cargo, "the client")?;
-
-    let out = options.out();
-    let server = out.join(format!("virtx-stdio{}", env::consts::EXE_SUFFIX));
-    let arch = guest_target()?.split('-').next().unwrap_or_default();
-    xserver::build(
-        &out.join(client_library()),
-        server.is_file().then_some(server.as_path()),
-        &root_path().join(format!("build/display-xserver/{arch}")),
-    )
-}
-
-/// Build the `/abin` programs for the guest, in the debug or release profile, and place them
-/// and their `SKILLS.md` in `out`.
+/// Build the `/abin` programs for the guest, in the debug or release profile, and place them,
+/// their `SKILLS.md` and what their builds put in `libexec/<program>/` in `out`.
+///
+/// A program's build may run a virtx machine, as `display`'s does for its X server: the client
+/// library of the same profile is built first, and it and the server, when there is one, are
+/// handed in as `$VIRTX_CORE_LIB` and `$VIRTX_STDIO`.
 fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
@@ -698,9 +670,26 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
         ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
     }
 
+    let profile = if debug { "debug" } else { "release" };
+    let mut cargo = cargo();
+    cargo
+        .current_dir(&root)
+        .args(["build", "-p", CLIENT_PACKAGE, "--lib"]);
+    if !debug {
+        cargo.arg("--release");
+    }
+    run(cargo, "the client")?;
+
     let crate_dir = root.join("virtx-abins");
+    let host = target_path().join(profile);
     let mut cargo = cross_cargo(&crate_dir);
-    cargo.args(["build", "--target", target]);
+    cargo
+        .args(["build", "--target", target])
+        .env("VIRTX_CORE_LIB", host.join(client_library()));
+    let server = host.join(format!("virtx-stdio{}", env::consts::EXE_SUFFIX));
+    if server.is_file() {
+        cargo.env("VIRTX_STDIO", server);
+    }
     if !debug {
         cargo.arg("--release");
     }
@@ -709,13 +698,19 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     }
     run(cargo, &format!("abin for {target}"))?;
 
-    let profile = if debug { "debug" } else { "release" };
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let built = target_path().join(format!("abin/{target}/{profile}"));
     for (_, program) in ABINS {
-        place(
-            &target_path().join(format!("{target}/{profile}/{program}")),
-            &out.join(program),
-        )?;
+        place(&built.join(program), &out.join(program))?;
+
+        let libexec = built.join("libexec").join(program);
+        let at = out.join("libexec").join(program);
+        if at.exists() {
+            fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
+        }
+        if libexec.is_dir() {
+            place_dir(&libexec, &at)?;
+        }
 
         let skill = crate_dir.join(program).join("SKILLS.md");
         let at = out.join("skills").join(program);
@@ -728,17 +723,6 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
         }
     }
 
-    // `display`'s X server, which `build xserver` puts in `build/display-xserver/<arch>/`.
-    // Without it `display run` says it has no X server.
-    let xserver = root.join(format!("build/display-xserver/{arch}"));
-    if xserver.join("Xvfb").is_file() {
-        place_dir(&xserver, &out.join("libexec/display"))?;
-    } else {
-        eprintln!(
-            "xtask: no X server at {}; `display run` will have none until `cargo xtask build xserver`",
-            xserver.display()
-        );
-    }
     Ok(())
 }
 

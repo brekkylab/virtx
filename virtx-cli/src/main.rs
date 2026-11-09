@@ -114,7 +114,9 @@ struct Cloud {
 const CLOUD: [&str; 4] = ["login", "token", "whoami", "logout"];
 
 fn main() -> std::process::ExitCode {
-    let cloud = std::env::args().nth(1).is_some_and(|first| CLOUD.contains(&first.as_str()));
+    let cloud = std::env::args()
+        .nth(1)
+        .is_some_and(|first| CLOUD.contains(&first.as_str()));
     if !cloud {
         return std::process::ExitCode::from(virtx_core::cli::main(std::env::args_os()));
     }

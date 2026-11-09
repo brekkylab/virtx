@@ -502,8 +502,15 @@ pub(crate) async fn image_digest(client: &Client, id: &str) -> String {
         .unwrap_or_else(|| panic!("{id} failed: {:?}", end.error))
 }
 
-/// [`ALPINE`] pulled, and its digest.
+/// [`ALPINE`] on the server, pulled unless it is there already, and its digest.
+///
+/// A real server keeps its images from one scenario to the next, and Docker Hub limits the
+/// pulls an address makes without credentials, so a scenario that only needs the image takes
+/// the one there. Those that are of a pull pull it themselves.
 pub(crate) async fn alpine(client: &Client) -> String {
+    if let Some(digest) = tags(client).await.remove(ALPINE) {
+        return digest;
+    }
     let job = client.pull_image(ALPINE, None).await.unwrap();
     image_digest(client, &job.id).await
 }

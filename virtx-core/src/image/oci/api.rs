@@ -44,15 +44,12 @@ impl<'a> Registry<'a> {
         }
         let request = request
             .body(body)
-            .map_err(|e| Error::Registry(format!("{method} {path}: {e}")))?;
+            .map_err(|e| Error::Client(format!("{method} {path}: {e}")))?;
         let response = self.client.send(request).await?;
         if response.status().is_success() {
             return Ok(response);
         }
-        Err(Error::Registry(format!(
-            "{method} {path}: {}",
-            failure(response).await
-        )))
+        Err(refused(&format!("{method} {path}"), response).await)
     }
 
     /// Every repository, in the order the registry lists them.
@@ -100,7 +97,7 @@ impl<'a> Registry<'a> {
                 .await?;
             let more = response.headers().contains_key(header::LINK);
             let page = read(&collect(response).await?)
-                .map_err(|e| Error::Registry(format!("GET {path}: {e}")))?;
+                .map_err(|e| Error::Client(format!("GET {path}: {e}")))?;
             let ended = page.is_empty();
             all.extend(page);
             if !more || ended {
@@ -173,10 +170,7 @@ impl<'a> Registry<'a> {
         match response.status() {
             status if status.is_success() => Ok(true),
             StatusCode::NOT_FOUND => Ok(false),
-            _ => Err(Error::Registry(format!(
-                "HEAD {name}/blobs/{digest}: {}",
-                failure(response).await
-            ))),
+            _ => Err(refused(&format!("HEAD {name}/blobs/{digest}"), response).await),
         }
     }
 
@@ -244,14 +238,14 @@ impl Upload {
     /// The upload `response` says it started in `name`, at its `Location`.
     fn from(response: &Response<Body>, name: &str) -> Result<Upload, Error> {
         let location = header_value(response, header::LOCATION.as_str()).ok_or_else(|| {
-            Error::Registry(format!("an upload to {name} was started with no Location"))
+            Error::Client(format!("an upload to {name} was started with no Location"))
         })?;
         // A `Location` is a URL, an absolute path or a relative one: what follows `/v2/` is
         // the same in each.
         let path = location
             .split_once("/v2/")
             .map(|(_, path)| path)
-            .ok_or_else(|| Error::Registry(format!("an upload at {location:?}, not in /v2/")))?;
+            .ok_or_else(|| Error::Client(format!("an upload at {location:?}, not in /v2/")))?;
         Ok(Upload {
             path: path.to_owned(),
         })
@@ -275,8 +269,9 @@ async fn collect(response: Response<Body>) -> Result<Bytes, Error> {
         .map_err(|e| Error::Transport(format!("reading the response: {e}")))
 }
 
-/// Why `response` failed: its status, and the codes and messages of its `{"errors": [...]}`.
-async fn failure(response: Response<Body>) -> String {
+/// `response` to `request`, a refusal, as the [`Error::Status`] it is: why, the request and the
+/// codes and messages of its `{"errors": [...]}`.
+async fn refused(request: &str, response: Response<Body>) -> Error {
     #[derive(Deserialize)]
     struct Errors {
         errors: Vec<ErrorItem>,
@@ -287,18 +282,19 @@ async fn failure(response: Response<Body>) -> String {
         #[serde(default)]
         message: String,
     }
-    let status = response.status();
+    let status = response.status().as_u16();
     let body = collect(response).await.unwrap_or_default();
-    match serde_json::from_slice::<Errors>(&body) {
+    let why = match serde_json::from_slice::<Errors>(&body) {
         Ok(Errors { errors }) if !errors.is_empty() => {
             let errors: Vec<_> = errors
                 .iter()
                 .map(|e| format!("{} {}", e.code, e.message).trim().to_owned())
                 .collect();
-            format!("{status}: {}", errors.join("; "))
+            format!("{request}: {}", errors.join("; "))
         }
-        _ => format!("{status}"),
-    }
+        _ => request.to_owned(),
+    };
+    Error::Status(status, why)
 }
 
 #[cfg(test)]
@@ -335,27 +331,33 @@ mod tests {
         let elsewhere = response(StatusCode::ACCEPTED, &[("location", "/elsewhere/u1")], "");
         assert!(matches!(
             Upload::from(&elsewhere, "app"),
-            Err(Error::Registry(_))
+            Err(Error::Client(_))
         ));
         let none = response(StatusCode::ACCEPTED, &[], "");
-        assert!(matches!(
-            Upload::from(&none, "app"),
-            Err(Error::Registry(_))
-        ));
+        assert!(matches!(Upload::from(&none, "app"), Err(Error::Client(_))));
     }
 
     #[tokio::test]
-    async fn a_failure_is_its_status_and_each_error_the_registry_names() {
+    async fn a_refusal_is_its_status_and_each_error_the_registry_names() {
         let errors = r#"{"errors": [{"code": "BLOB_UNKNOWN", "message": "no such blob"}, {"code": "DENIED"}]}"#;
-        assert_eq!(
-            failure(response(StatusCode::NOT_FOUND, &[], errors)).await,
-            "404 Not Found: BLOB_UNKNOWN no such blob; DENIED"
+        let refusal = refused(
+            "GET app/blobs/x",
+            response(StatusCode::NOT_FOUND, &[], errors),
+        )
+        .await;
+        assert!(
+            matches!(&refusal, Error::Status(404, why) if why == "GET app/blobs/x: BLOB_UNKNOWN no such blob; DENIED"),
+            "{refusal:?}"
         );
         for body in [r#"{"errors": []}"#, "not json", ""] {
-            assert_eq!(
-                failure(response(StatusCode::BAD_GATEWAY, &[], body)).await,
-                "502 Bad Gateway",
-                "{body:?}"
+            let refusal = refused(
+                "GET app/blobs/x",
+                response(StatusCode::BAD_GATEWAY, &[], body),
+            )
+            .await;
+            assert!(
+                matches!(&refusal, Error::Status(502, why) if why == "GET app/blobs/x"),
+                "{body:?}: {refusal:?}"
             );
         }
     }

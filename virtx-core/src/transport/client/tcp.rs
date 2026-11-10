@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use reqwest::{RequestBuilder, Url};
 
 use super::Body;
-use crate::Auth;
+use crate::{Auth, Error};
 
 /// What is sent with every request, read as each is sent, so that a change reaches the next
 /// one: a forwarder opened before keeps a hold on it too.
@@ -34,12 +34,11 @@ pub(super) struct Tcp {
 impl Tcp {
     /// The server whose base URL is `url`, an `http` or `https` URL, with `auth` and `headers`
     /// sent on every request to it. Nothing is sent until the first request.
-    pub(super) fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Tcp> {
-        let mut base = Url::parse(url)?;
-        anyhow::ensure!(
-            matches!(base.scheme(), "http" | "https"),
-            "not an http or https URL: {base}"
-        );
+    pub(super) fn connect(url: &str, auth: Auth, headers: HeaderMap) -> Result<Tcp, Error> {
+        let mut base = Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(Error::Client(format!("not an http or https URL: {base}")));
+        }
         not_in_the_clear(&base, &auth)?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -53,7 +52,7 @@ impl Tcp {
     }
 
     /// Send `auth` with every request from now on, in place of what was sent until now.
-    pub(super) fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+    pub(super) fn set_auth(&self, auth: Auth) -> Result<(), Error> {
         not_in_the_clear(&self.base, &auth)?;
         *self.auth.write().unwrap_or_else(PoisonError::into_inner) = auth;
         Ok(())
@@ -68,12 +67,12 @@ impl Tcp {
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,
-    ) -> Result<http::Response<Body>, String> {
+    ) -> Result<http::Response<Body>, Error> {
         let (parts, body) = request.into_parts();
         let url = self
             .base
             .join(parts.uri.to_string().trim_start_matches('/'))
-            .map_err(|e| format!("{e:#}"))?;
+            .map_err(|e| Error::Client(format!("{}: {e}", parts.uri)))?;
         // The request's own headers win over the ones sent with every request.
         let mut headers = current(&self.headers);
         headers.extend(parts.headers);
@@ -84,7 +83,7 @@ impl Tcp {
         let response = authorized(request, headers, &current(&self.auth))
             .send()
             .await
-            .map_err(|e| format!("{e:#}"))?;
+            .map_err(|e| Error::Transport(format!("{e:#}")))?;
         let response: http::Response<reqwest::Body> = response.into();
         Ok(response.map(|body| body.map_err(std::io::Error::other).boxed()))
     }
@@ -107,7 +106,7 @@ pub(super) fn authorized(
 
 /// Refuses `auth` to `base` when its token would go in the clear: over `http` to any host but
 /// this machine's loopback, where a local server is (`PROTOCOL.md`) and no wire.
-fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
+fn not_in_the_clear(base: &Url, auth: &Auth) -> Result<(), Error> {
     if matches!(auth, Auth::None) || base.scheme() == "https" {
         return Ok(());
     }
@@ -118,10 +117,11 @@ fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
                 .parse::<IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     });
-    anyhow::ensure!(
-        loopback,
-        "a token would go in the clear to {base}: reach the server over https"
-    );
+    if !loopback {
+        return Err(Error::Client(format!(
+            "a token would go in the clear to {base}: reach the server over https"
+        )));
+    }
     Ok(())
 }
 

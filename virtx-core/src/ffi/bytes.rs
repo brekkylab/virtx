@@ -5,34 +5,20 @@ use std::{ffi::c_int, ptr, slice};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{VIRTX_ERROR, VIRTX_OK};
-use crate::Error;
+use crate::{Error, Source};
 
-/// Why a call failed, as C reads it: `{"message": "..."}`, with `"status": 404` beside it when
+/// Why a call failed, as C reads it: `{"message": "...", "source": "server"}`, `source` where
+/// it failed (`server`, `job`, `transport` or `client`), with `"status": 404` beside it when
 /// the server refused the request with that HTTP status, and `"body"` where the refusal had a
 /// body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
+    source: Source,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-}
-
-impl From<String> for Failure {
-    fn from(message: String) -> Failure {
-        Failure {
-            message,
-            status: None,
-            body: None,
-        }
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(message: &str) -> Failure {
-        message.to_owned().into()
-    }
 }
 
 impl From<Error> for Failure {
@@ -44,6 +30,7 @@ impl From<Error> for Failure {
         };
         Failure {
             message: error.to_string(),
+            source: error.source_kind(),
             status,
             body,
         }
@@ -70,28 +57,27 @@ pub unsafe extern "C" fn virtx_bytes_free(bytes: VirtxBytes) {
 }
 
 /// The `len` bytes of JSON at `ptr`, read as a `T`.
-pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Result<T, String> {
+pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Result<T, Error> {
     if ptr.is_null() {
-        return Err("a JSON argument is null".to_string());
+        return Err(Error::Client("a JSON argument is null".into()));
     }
     let bytes = unsafe { slice::from_raw_parts(ptr, len) };
-    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+    serde_json::from_slice(bytes).map_err(|e| Error::Client(e.to_string()))
 }
 
 /// `output` as a status, and its JSON or its error's.
-pub(crate) fn encode<T: Serialize>(output: Result<T, impl Into<Failure>>) -> (c_int, Vec<u8>) {
-    match output.map_err(Into::into) {
-        Ok(output) => match serde_json::to_vec(&output) {
-            Ok(bytes) => (VIRTX_OK, bytes),
-            Err(e) => failure(e.to_string()),
-        },
-        Err(failed) => failure(failed),
+pub(crate) fn encode<T: Serialize>(output: Result<T, Error>) -> (c_int, Vec<u8>) {
+    match output
+        .and_then(|output| serde_json::to_vec(&output).map_err(|e| Error::Client(e.to_string())))
+    {
+        Ok(bytes) => (VIRTX_OK, bytes),
+        Err(error) => failure(error),
     }
 }
 
-/// `VIRTX_ERROR`, and `failed` as a [`Failure`]'s JSON.
-pub(crate) fn failure(failed: impl Into<Failure>) -> (c_int, Vec<u8>) {
-    let bytes = serde_json::to_vec(&failed.into()).expect("a failure encodes");
+/// `VIRTX_ERROR`, and `error` as a [`Failure`]'s JSON.
+pub(crate) fn failure(error: Error) -> (c_int, Vec<u8>) {
+    let bytes = serde_json::to_vec(&Failure::from(error)).expect("a failure encodes");
     (VIRTX_ERROR, bytes)
 }
 
@@ -114,8 +100,8 @@ mod tests {
 
     use super::*;
 
-    fn written(failed: impl Into<Failure>) -> Value {
-        let (status, bytes) = failure(failed);
+    fn written(error: Error) -> Value {
+        let (status, bytes) = failure(error);
         assert_eq!(status, VIRTX_ERROR);
         serde_json::from_slice(&bytes).unwrap()
     }
@@ -126,6 +112,7 @@ mod tests {
             written(Error::Status(404, "not_found: no such file".into())),
             json!({
                 "message": "the server answered 404 Not Found: not_found: no such file",
+                "source": "server",
                 "status": 404,
             })
         );
@@ -137,13 +124,22 @@ mod tests {
             }),
             json!({
                 "message": "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes)",
+                "source": "server",
                 "status": 503,
                 "body": "<html>503</html>",
             })
         );
         assert_eq!(
             written(Error::Transport("the session ended".into())),
-            json!({"message": "the session ended"})
+            json!({"message": "the session ended", "source": "transport"})
+        );
+        assert_eq!(
+            written(Error::Job("step 1 exited 3".into())),
+            json!({"message": "step 1 exited 3", "source": "job"})
+        );
+        assert_eq!(
+            written(Error::Client("not JSON".into())),
+            json!({"message": "not JSON", "source": "client"})
         );
     }
 }

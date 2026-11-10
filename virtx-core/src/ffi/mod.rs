@@ -8,7 +8,8 @@
 //! the error. A request takes JSON and returns at once, running on the client's own
 //! runtime: a [`VirtxFuture`] if it answers once, a [`VirtxStream`] if it answers item by item.
 //! What the library writes is JSON in a [`VirtxBytes`]: an output, or an error as
-//! `{"message": "...", "status": 404}`, `status` only for a request the server refused with it.
+//! `{"message": "...", "source": "server", "status": 404}`: `source` where it failed (`server`,
+//! `job`, `transport` or `client`), `status` only for a request the server refused with it.
 //! C drives futures and streams as Rust does: [`virtx_future_poll`] and
 //! [`virtx_stream_poll_next`] answer [`VIRTX_PENDING`] and keep the [`VirtxWaker`](waker::VirtxWaker) they were
 //! given, which is woken once there is something to take, and the next poll takes it. So the
@@ -30,7 +31,7 @@ use std::ffi::c_int;
 pub use bytes::VirtxBytes;
 #[cfg(test)]
 pub(crate) use bytes::virtx_bytes_free;
-pub(crate) use bytes::{Failure, encode, failure, json, write};
+pub(crate) use bytes::{encode, failure, json, write};
 pub use future::*;
 pub(crate) use runtime::{Runtime, release, retain, share};
 pub use stream::*;
@@ -38,8 +39,8 @@ pub use stream::*;
 /// Succeeded: the output, as JSON, is written.
 pub const VIRTX_OK: c_int = 0;
 
-/// Failed: the error is written, as `{"message": "...", "status": 404}`, `status` only for a
-/// request the server refused with that HTTP status.
+/// Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
+/// `source` where it failed, `status` only for a request the server refused with it.
 pub const VIRTX_ERROR: c_int = -1;
 
 /// Not answered yet: the waker given is kept, and woken once it is.

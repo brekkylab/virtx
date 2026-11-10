@@ -18,10 +18,7 @@ use std::{
     thread::{self, Thread},
 };
 
-use virtx::{
-    Auth, Client, Event, Events, ImageJobEnd, ImageJobEntry, Sandbox, SandboxExecArgs,
-    SandboxJobEntry,
-};
+use virtx::{Auth, Client, Event, Events, Sandbox, SandboxExecArgs, SandboxJobEntry};
 
 /// The image every test that boots a sandbox pulls first.
 pub const ALPINE: &str = "alpine:3.20";
@@ -149,18 +146,11 @@ pub fn alpine(client: &Client) -> String {
     if let Some(digest) = tagged(client, ALPINE) {
         return digest;
     }
-    let mut log = client.pull_image(ALPINE, None).log();
-    let mut last = None;
-    while let Some(entry) = log.wait_next() {
-        last = Some(entry.unwrap().entry);
-    }
-    match last {
-        Some(ImageJobEntry::End(ImageJobEnd {
-            digest: Some(digest),
-            ..
-        })) => digest,
-        other => panic!("pulling {ALPINE} ended with {other:?}"),
-    }
+    client
+        .pull_image(ALPINE, None)
+        .complete(false)
+        .wait()
+        .unwrap_or_else(|error| panic!("pulling {ALPINE} failed: {error}"))
 }
 
 /// Each entry of `log`, to its end.
@@ -172,6 +162,23 @@ pub fn entries<E: serde::de::DeserializeOwned>(
         entries.push(entry.unwrap());
     }
     entries
+}
+
+/// Each entry of a failed job's `log` before the error it ends with, and that error.
+pub fn failure<E: serde::de::DeserializeOwned + std::fmt::Debug>(
+    mut log: Events<virtx::LogEntry<E>>,
+) -> (Vec<virtx::LogEntry<E>>, virtx::Error) {
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                assert!(log.wait_next().is_none(), "an entry after the error");
+                return (entries, error);
+            }
+        }
+    }
+    panic!("a failed job's log ends with its error: {entries:?}")
 }
 
 /// What a stream of the client's own, such as a download, gave last.

@@ -6,6 +6,11 @@ export const LIBRARY_ENV: 'VIRTX_CORE_LIB'
 /** A request failed: the server's error, the transport's, or the library's. */
 export class VirtxError extends Error {
   /**
+   * Where it failed: the server answered with an error, the job it started failed, the
+   * connection failed, or this side did. Tell errors apart by it and `status`, not the message.
+   */
+  source: 'server' | 'job' | 'transport' | 'client'
+  /**
    * The HTTP status the server refused the request with, if it did: `404` for what does not
    * exist, `409` for what is in use or has ended, and the like.
    */
@@ -106,14 +111,19 @@ export class ImageJob implements ImageJobInfo {
   error?: string
   /** It as the server has it now. */
   get(): Promise<ImageJob>
-  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  /**
+   * Its log, from its start or after the entry numbered `after`, ending after its `end` entry,
+   * or throwing the `VirtxError` it failed with in that entry's place.
+   */
   log(after?: number): AsyncGenerator<ImageJobEntry>
+  /** Follow it to its end, each line of its log printed if `print`: the digest it ended with. Rejects with why it failed. */
+  complete(options?: CompleteOptions): Promise<string>
   /** Cancel it if it runs, and forget it. */
   remove(): Promise<void>
 }
 
-/** How an image job ended. */
-export type ImageJobEnd = { digest: string } | { error: string }
+/** How an image job that succeeded ended. One that failed throws its error in this entry's place. */
+export type ImageJobEnd = { digest: string }
 
 /** An entry of an image job's log, numbered by `id`; `end` is the last. */
 export type ImageJobEntry = { id: number } & (
@@ -386,6 +396,11 @@ export class SandboxJob implements SandboxJobInfo {
   writeStdin(data?: string, eof?: boolean): Promise<void>
   /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
   log(after?: number): AsyncGenerator<SandboxJobEntry>
+  /**
+   * Follow it to its end, what its process writes to stdout and stderr printed there if
+   * `print`: its exit code, `128 + signal` for one a signal ended.
+   */
+  complete(options?: CompleteOptions): Promise<number>
   /** Cancel it if it runs, killing its process, and forget it. */
   remove(): Promise<void>
 }
@@ -398,13 +413,22 @@ export type SandboxJobEntry = { id: number } & (
   | { end: { code: number } }
 )
 
+/** How a job's `complete` follows it. */
+export interface CompleteOptions {
+  /** Print its log as it is read, to stdout, and a process's stderr to stderr. */
+  print?: boolean
+}
+
 /**
- * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
- * read until its `end` entry. The job starts at the call, as a promise's work does, and once
- * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
- * leaving one leaves the job running, which the job's `remove` cancels.
+ * A job as it starts: a promise of the job `J`, an async iterable of its log's entries `E`,
+ * read until its `end` entry, and `complete`, the job's own once started. The job starts at the
+ * call, as a promise's work does, and once however the value is used: awaited, iterated,
+ * completed, or each. Each loop reads the log from its start; leaving one leaves the job
+ * running, which the job's `remove` cancels.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
+  /** Start the job and follow it to its end, as its `complete` does. */
+  complete<T>(this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>, options?: CompleteOptions): Promise<T>
   [Symbol.asyncIterator](): AsyncGenerator<E>
 }
 

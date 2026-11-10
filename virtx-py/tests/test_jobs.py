@@ -36,7 +36,7 @@ async def test_a_snapshot_is_created_got_listed_and_removed(client: Client) -> N
     await created.remove()
     with pytest.raises(VirtxError) as refused:
         await client.get_snapshot(name)
-    assert refused.value.status == 404
+    assert (refused.value.source, refused.value.status) == ("server", 404)
 
 
 async def test_a_volume_is_created_and_got(client: Client) -> None:
@@ -83,6 +83,8 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     failed = await sandbox.exec(["sh", "-c", "echo failed >&2; exit 1"])
     log = [entry.entry async for entry in failed.log()]
     assert log == [Stderr("failed"), SandboxJobEnd(1)]
+    assert await job.complete() == 0
+    assert await failed.complete() == 1
 
     await job.remove()
     with pytest.raises(VirtxError) as refused:
@@ -127,6 +129,19 @@ async def test_stdin_written_comes_back_until_it_is_closed(client: Client) -> No
     await sandbox.remove()
 
 
+async def test_an_exec_completed_prints_its_output_and_answers_its_code(
+    client: Client, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    cmd = ["sh", "-c", "echo out; echo err >&2; exit 3"]
+    assert await sandbox.exec(cmd).complete() == 3
+    assert capsys.readouterr() == ("", "")
+    assert await sandbox.exec(cmd).complete(print=True) == 3
+    assert capsys.readouterr() == ("out\n", "err\n")
+    await sandbox.remove()
+
+
 async def test_a_signal_ends_a_process(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)
@@ -135,6 +150,7 @@ async def test_a_signal_ends_a_process(client: Client) -> None:
     await sleep.signal("SIGTERM")
     log = [entry.entry async for entry in sleep.log()]
     assert log[-1] == SandboxJobEnd(128 + 15)
+    assert await sleep.complete() == 128 + 15
     got = await client.get_sandbox(sandbox.id)
     assert not (await got.job(sleep.id)).running
     await sandbox.remove()
@@ -151,6 +167,7 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Cl
     assert log[-1].entry == ImageJobEnd(digest=digest)
     assert [entry async for entry in job.log(after=log[0].id)] == log[1:]
     assert (await job.get()).digest == digest
+    assert await job.complete() == digest
     assert (await client.get_image_job(job.id)).digest == digest
     assert job.id in [item.id for item in await client.list_image_job()]
     await job.remove()
@@ -166,6 +183,18 @@ async def test_a_build_iterated_yields_its_log_to_its_end(client: Client) -> Non
     log = [entry async for entry in client.build_image(Recipe(ALPINE).run(f"echo {reference} > /built"), reference)]
     built = (await tags(client))[reference]
     assert log[-1].entry == ImageJobEnd(built)
+    await client.remove_image(reference)
+
+
+async def test_a_build_completed_prints_its_log_and_answers_its_digest(
+    client: Client, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await alpine(client)
+    reference = f"{unique('completed')}:latest"
+    recipe = Recipe(ALPINE).run(f"echo {reference}-step | tee /built")
+    digest = await client.build_image(recipe, reference).complete(print=True)
+    assert (await tags(client))[reference] == digest
+    assert f"{reference}-step" in capsys.readouterr().out
     await client.remove_image(reference)
 
 
@@ -214,13 +243,23 @@ async def test_an_image_is_tagged_downloaded_removed_and_uploaded_back(
     assert reference not in await tags(client)
 
 
-async def test_a_push_is_a_job_that_ends_with_its_end(client: Client) -> None:
+async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
+    client: Client,
+) -> None:
     await alpine(client)
     # A registry that does not resolve, so the push fails before it reaches anyone.
     reference = f"registry.invalid/{unique('pushed')}:latest"
     await client.tag_image(ALPINE, reference)
     job = await client.push_image(reference, BearerAuth("test-secret"))
     assert job.kind == ImageJobKind.PUSH
-    end = [entry.entry async for entry in job.log()][-1]
-    assert isinstance(end, ImageJobEnd) and end.error
+    log = []
+    with pytest.raises(VirtxError) as failed:
+        async for entry in job.log():
+            log.append(entry.entry)
+    assert not any(isinstance(entry, ImageJobEnd) for entry in log)
+    assert (failed.value.source, failed.value.status) == ("job", None)
+    assert (await job.get()).error == str(failed.value)
+    with pytest.raises(VirtxError) as completed:
+        await job.complete()
+    assert str(completed.value) == str(failed.value)
     await client.remove_image(reference)

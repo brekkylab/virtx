@@ -24,8 +24,7 @@ This writes an input file into the sandbox, runs a command on it, and reads what
 await sandbox.create_dir_all("work")
 await sandbox.write_file("work/input.txt", "one two three\n")
 
-async for _ in sandbox.exec(["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"]):
-    pass
+await sandbox.exec(["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"]).complete()
 
 print(await sandbox.read_text("work/count.txt"))
 ```
@@ -37,7 +36,7 @@ print(await sandbox.read_text("work/count.txt"))
 await sandbox.createDirAll('work')
 await sandbox.writeFile('work/input.txt', 'one two three\n')
 
-for await (const _ of sandbox.exec(['sh', '-c', 'wc -w < /work/input.txt > /work/count.txt'])) {}
+await sandbox.exec(['sh', '-c', 'wc -w < /work/input.txt > /work/count.txt']).complete()
 
 console.log(await sandbox.readText('work/count.txt'))
 ```
@@ -52,10 +51,7 @@ sandbox.create_dir_all("work").await?;
 sandbox.write_file("work/input.txt", "one two three\n", None).await?;
 
 let cmd = ["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"];
-let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-while let Some(entry) = log.next().await {
-    entry?;
-}
+sandbox.exec(&SandboxExecArgs::new(cmd)).complete(false).await?;
 
 println!("{}", sandbox.read_text("work/count.txt").await?);
 ```

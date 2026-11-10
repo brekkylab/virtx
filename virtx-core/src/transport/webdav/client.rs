@@ -42,7 +42,7 @@ pub(crate) async fn stat(
         .into_iter()
         .next()
         .map(|(_, metadata)| metadata)
-        .ok_or_else(|| Error::Transport("a PROPFIND answered no response".into()))
+        .ok_or_else(|| Error::Client("a PROPFIND answered no response".into()))
 }
 
 /// What is at `path` in `root`, if anything: `None` for a `404`.
@@ -145,7 +145,7 @@ pub(crate) async fn read(
     Ok(body)
 }
 
-/// The whole file at `path` in `root`, as text: refused as an [`Error::File`] unless it is
+/// The whole file at `path` in `root`, as text: refused as an [`Error::Client`] unless it is
 /// UTF-8.
 pub(crate) async fn read_text(
     client: &TransportClient,
@@ -154,7 +154,7 @@ pub(crate) async fn read_text(
 ) -> Result<String, Error> {
     let bytes = read(client, root, path, 0, None).await?;
     String::from_utf8(bytes.into())
-        .map_err(|e| Error::File(format!("{path} is not UTF-8 text: {e}")))
+        .map_err(|e| Error::Client(format!("{path} is not UTF-8 text: {e}")))
 }
 
 /// Write `content` as the whole file at `path` in `root`, creating it if it does not exist.
@@ -301,7 +301,7 @@ async fn send(
     client: &TransportClient,
     request: http::Result<http::Request<Body>>,
 ) -> Result<(StatusCode, Bytes), Error> {
-    let request = request.map_err(|e| Error::Transport(format!("not a request: {e}")))?;
+    let request = request.map_err(|e| Error::Client(format!("not a request: {e}")))?;
     // What a `207` means depends on the request: a `PROPFIND` succeeds with one, and these
     // report what failed in a directory, per path.
     let per_path = matches!(request.method().as_str(), "DELETE" | "COPY" | "MOVE");
@@ -337,7 +337,7 @@ async fn send(
     if status == StatusCode::MULTI_STATUS && per_path {
         // A `207` whose paths all succeeded is a success.
         let xml = std::str::from_utf8(&body)
-            .map_err(|e| Error::Transport(format!("a 207 answered no XML: {e}")))?;
+            .map_err(|e| Error::Client(format!("a 207 answered no XML: {e}")))?;
         if let Some((status, path)) = failure_in(xml) {
             return Err(Error::Status(status, path));
         }
@@ -359,8 +359,8 @@ async fn propfind(
         .body(full(PROPFIND));
     let (_, body) = send(client, request).await?;
     let body = std::str::from_utf8(&body)
-        .map_err(|e| Error::Transport(format!("a PROPFIND answered no XML: {e}")))?;
-    multistatus(body).map_err(|e| Error::Transport(format!("a PROPFIND answered: {e}")))
+        .map_err(|e| Error::Client(format!("a PROPFIND answered no XML: {e}")))?;
+    multistatus(body).map_err(|e| Error::Client(format!("a PROPFIND answered: {e}")))
 }
 
 /// The path of `href`, an absolute path or a full URL, percent-decoded.

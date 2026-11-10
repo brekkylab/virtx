@@ -8,13 +8,16 @@
 
 from __future__ import annotations
 
+import builtins
 import re
+import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ._library import args
+from ._library import VirtxError, args
 from .job import LogEntry, Truncated
 
 if TYPE_CHECKING:
@@ -168,12 +171,30 @@ class ImageJob:
         return ImageJob.from_dict(self.client, output)
 
     async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[ImageJobEntry]]:
-        """Its log, from its start or after its ``after``th entry, until its ``ImageJobEnd``.
-        Closing it leaves the job as it is."""
+        """Its log, from its start or after its ``after``th entry, until its ``ImageJobEnd``,
+        or the ``VirtxError`` in its place if the job failed. Closing it leaves the job as it
+        is."""
         async for item in self.client._items(
             "virtx_client_image_job_log", args(id=self.id, after=after)
         ):
             yield image_job_entry(item)
+
+    async def complete(self, print: bool = False) -> str:
+        """Follow it to its end, printing each line of its log if ``print``: the digest it ended
+        with. Raises ``VirtxError`` with why it failed."""
+        async with aclosing(self.log()) as log:
+            async for item in log:
+                match item.entry:
+                    case Log(line) if print:
+                        builtins.print(line)
+                    case Truncated() if print:
+                        builtins.print(
+                            "(the log reached the server's limit; the rest is not kept)",
+                            file=sys.stderr,
+                        )
+                    case ImageJobEnd(digest):
+                        return digest
+        raise VirtxError("the job was removed before it ended", source="job")
 
     async def remove(self) -> None:
         """Cancel it if it runs, and forget it."""
@@ -189,11 +210,12 @@ class Log:
 
 @dataclass(frozen=True)
 class ImageJobEnd:
-    """How an image job ended, last in its log: with ``digest`` if it succeeded, ``error`` if
-    not."""
+    """How an image job that succeeded ended, last in its log. One that failed ends its log
+    with the ``VirtxError`` it failed with instead."""
 
-    digest: str | None = None
-    error: str | None = None
+    digest: str
+    """The digest of the image a pull or build left here, or of the manifest a push put on
+    the registry, as ``algorithm:hex``."""
 
 
 ImageJobEntry = Log | Truncated | ImageJobEnd
@@ -208,8 +230,7 @@ def image_job_entry(item: Mapping[str, Any]) -> LogEntry[ImageJobEntry]:
     elif "truncated" in item:
         entry = Truncated()
     else:
-        end = item["end"]
-        entry = ImageJobEnd(end.get("digest"), end.get("error"))
+        entry = ImageJobEnd(item["end"]["digest"])
     return LogEntry(item["id"], entry)
 
 

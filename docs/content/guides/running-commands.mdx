@@ -7,56 +7,47 @@ import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Run a command
 
-`exec` takes an argv and starts a job. Iterate the job to read its output, a line per entry, then how it ended. A sandbox runs any number of jobs at once, and leaving the loop leaves the command running.
+`exec` takes an argv and starts a job, and `complete` follows it to its end and answers its exit code.
+With `print`, it prints what the command writes as it writes it, stdout to stdout and stderr to stderr.
+A nonzero exit code is the answer, not an error.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-async for entry in sandbox.exec(["uname", "-a"]):
-    match entry.entry:
-        case Stdout(line) | Stderr(line):
-            print(line)
-        case SandboxJobEnd(code):
-            print("exited", code)
+code = await sandbox.exec(["uname", "-a"]).complete(print=True)
+print("exited", code)
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```js
-for await (const entry of sandbox.exec(['uname', '-a'])) {
-  if ('stdout' in entry) console.log(entry.stdout)
-  else if ('stderr' in entry) console.error(entry.stderr)
-  else if ('end' in entry) console.log('exited', entry.end.code)
-}
+const code = await sandbox.exec(['uname', '-a']).complete({ print: true })
+console.log('exited', code)
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let mut log = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).log();
-while let Some(entry) = log.next().await {
-    match entry?.entry {
-        SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
-        SandboxJobEntry::End(end) => println!("exited {}", end.code),
-        _ => {}
-    }
-}
+let code = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).complete(true).await?;
+println!("exited {code}");
 ```
 
 </TabItem>
 </Tabs>
 
 A command that cannot start, such as one not found, is refused at `exec` and starts no job.
-A line longer than 64 KiB arrives as several entries.
 
 ## Follow a job
 
 Each command runs as a **job**. The server runs it apart from the request that started it, so a job keeps going when a loop is left or a connection drops, and its output is kept in a log you can read again.
 
-The value `exec` returns is two things at once. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+The value `exec` returns is three things at once.
+Completed, it answers how the job ended; iterated, it is the job's log.
+Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`.
+`get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -123,8 +114,72 @@ False 0
 A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes last.
 
 <Aside type="tip">
-Building, pulling, and pushing an image are jobs too, read the same way: iterate `build_image`, `pull_image`, or `push_image` for the log, or await it for the job. See [Working with images](/docs/guides/images/).
+Building, pulling, and pushing an image are jobs too, used the same way: complete `build_image`, `pull_image`, or `push_image` for its digest, iterate it for the log, or await it for the job. See [Working with images](/docs/guides/images/).
 </Aside>
+
+## Stream output
+
+To handle each line as it comes, iterate the job instead of completing it.
+It yields the command's output, a line per entry, then how it ended.
+Here a command reports its progress a step a second, and a warning on stderr, and the loop tells the two apart:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+cmd = ["sh", "-c", "for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2"]
+async for entry in sandbox.exec(cmd):
+    match entry.entry:
+        case Stdout(line):
+            print("stdout:", line)
+        case Stderr(line):
+            print("stderr:", line)
+        case SandboxJobEnd(code):
+            print("exited", code)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const cmd = ['sh', '-c', 'for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2']
+for await (const entry of sandbox.exec(cmd)) {
+  if ('stdout' in entry) console.log('stdout:', entry.stdout)
+  else if ('stderr' in entry) console.log('stderr:', entry.stderr)
+  else if ('end' in entry) console.log('exited', entry.end.code)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let cmd = ["sh", "-c", "for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2"];
+let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
+while let Some(entry) = log.next().await {
+    match entry?.entry {
+        SandboxJobEntry::Stdout(line) => println!("stdout: {line}"),
+        SandboxJobEntry::Stderr(line) => println!("stderr: {line}"),
+        SandboxJobEntry::End(end) => println!("exited {}", end.code),
+        _ => {}
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Each step prints as the command writes it, a second apart, not all at once when it ends:
+
+```text frame="terminal" title="Output"
+stdout: step 1/3
+stdout: step 2/3
+stdout: step 3/3
+stderr: cache miss
+exited 0
+```
+
+A line longer than 64 KiB arrives as several entries, and leaving the loop leaves the command running.
 
 ## Run several commands at once
 
@@ -189,23 +244,20 @@ A job left in the background runs until it ends or is removed; removing the sand
 
 ## Set a timeout
 
-`timeout_ms` kills the process when the time runs out:
+`timeout_ms` kills the process when the time runs out, which ends it with `137`, as `SIGKILL` does:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-async for entry in sandbox.exec(["sleep", "60"], timeout_ms=10_000):
-    ...
+code = await sandbox.exec(["sleep", "60"], timeout_ms=10_000).complete()  # 137
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```js
-for await (const entry of sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 })) {
-  // ...
-}
+const code = await sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 }).complete() // 137
 ```
 
 </TabItem>
@@ -214,7 +266,7 @@ for await (const entry of sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 })) 
 ```rust
 let mut args = SandboxExecArgs::new(["sleep", "60"]);
 args.timeout_ms = Some(10_000);
-let mut log = sandbox.exec(&args).log();
+let code = sandbox.exec(&args).complete(false).await?; // 137
 ```
 
 </TabItem>

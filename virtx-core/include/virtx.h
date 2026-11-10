@@ -27,8 +27,8 @@
 // Succeeded: the output, as JSON, is written.
 #define VIRTX_OK 0
 
-// Failed: the error is written, as `{"message": "...", "status": 404}`, `status` only for a
-// request the server refused with that HTTP status.
+// Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
+// `source` where it failed, `status` only for a request the server refused with it.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.
@@ -245,8 +245,8 @@ struct VirtxFuture *virtx_client_remove_image_job(struct VirtxClient *client,
 // The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
 // its start, or after its `after`th entry. Its items are the entries, each with its number
 // beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
-// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
-// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` last, or, if the
+// job failed, its error in that entry's place. Freeing it leaves the job as it is.
 //
 // # Safety
 //

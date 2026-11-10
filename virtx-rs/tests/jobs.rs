@@ -5,7 +5,7 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Source, Step,
 };
 
 mod common;
@@ -46,6 +46,14 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     let whole = common::entries(job.log(None));
     assert_eq!(common::entries(job.log(Some(whole[0].id))), whole[1..]);
     assert_eq!(job.get().wait().unwrap().info().code, Some(0));
+    assert_eq!(job.complete(false).wait().unwrap(), 0);
+    assert_eq!(common::block_on(job.complete(true)).unwrap(), 0);
+    let exit = SandboxExecArgs::new(["sh", "-c", "exit 3"]);
+    assert_eq!(sandbox.exec(&exit).complete(false).wait().unwrap(), 3);
+    assert_eq!(
+        common::block_on(sandbox.exec(&exit).complete(false)).unwrap(),
+        3
+    );
     let held = sandbox.job_from(job.info().clone());
     assert_eq!(held.sandbox_id(), sandbox.id());
     assert_eq!(held.get().wait().unwrap().info().code, Some(0));
@@ -62,6 +70,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         .wait()
         .unwrap();
     sleep.signal("SIGTERM").wait().unwrap();
+    assert_eq!(sleep.complete(false).wait().unwrap(), 128 + 15);
     let ended = common::entries(sleep.log(None)).pop().unwrap().entry;
     assert_eq!(
         ended,
@@ -72,6 +81,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     again.remove().wait().unwrap();
     let gone = sleep.get().wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
+    assert_eq!(gone.source_kind(), Source::Server);
 
     sandbox.remove().wait().unwrap();
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
@@ -129,6 +139,8 @@ fn an_image_build_is_a_job_with_a_log() {
         })
     );
     assert_eq!(common::entries(job.log(Some(log[0].id))), log[1..]);
+    assert_eq!(job.complete(false).wait().unwrap(), built);
+    assert_eq!(common::block_on(job.complete(true)).unwrap(), built);
     let done = job.get().wait().unwrap();
     assert_eq!(done.info().digest.as_ref(), Some(&built), "{done:?}");
     let got = client.get_image_job(job.id()).wait().unwrap();
@@ -249,7 +261,7 @@ fn an_image_is_tagged_downloaded_removed_and_uploaded_back() {
 }
 
 #[test]
-fn a_push_that_fails_ends_with_its_error_and_shows_no_credentials() {
+fn a_push_that_fails_ends_its_log_and_complete_with_its_error_and_shows_no_credentials() {
     let client = common::client();
     common::alpine(&client);
     // A registry that does not resolve, so the push fails before it reaches anyone.
@@ -260,23 +272,23 @@ fn a_push_that_fails_ends_with_its_error_and_shows_no_credentials() {
     };
     let job = client.push_image(&reference, Some(auth)).wait().unwrap();
     assert_eq!(job.info().kind, ImageJobKind::Push);
-    let log = common::entries(job.log(None));
-    let Some(ImageJobEntry::End(end)) = log.last().map(|entry| &entry.entry) else {
-        panic!("a log with no end: {log:?}")
-    };
-    assert!(end.digest.is_none() && end.error.is_some(), "{end:?}");
+    let (log, failed) = common::failure(job.log(None));
+    assert_eq!(failed.source_kind(), Source::Job);
+    assert_eq!(failed.status(), None);
     let got = job.get().wait().unwrap();
+    assert!(got.info().digest.is_none(), "{got:?}");
+    assert_eq!(got.info().error, Some(failed.to_string()));
+    let completed = job.complete(false).wait().unwrap_err();
+    assert_eq!(completed.to_string(), failed.to_string());
     let shown = serde_json::to_string(&(got.info(), &log)).unwrap();
+    let shown = format!("{shown} {failed}");
     assert!(!shown.contains("test-secret"), "{shown}");
     client.remove_image(&reference).wait().unwrap();
 
     let missing = format!("{}:latest", common::unique("unpushed"));
     let job = client.push_image(&missing, None).wait().unwrap();
-    let end = common::entries(job.log(None)).pop().unwrap().entry;
-    assert!(
-        matches!(&end, ImageJobEntry::End(end) if end.error.is_some()),
-        "{end:?}"
-    );
+    common::failure(job.log(None));
+    assert!(job.complete(false).wait().is_err());
 }
 
 #[test]
@@ -339,11 +351,8 @@ fn a_built_image_runs_with_what_its_steps_made() {
     let failed = format!("{}:latest", common::unique("failed"));
     let recipe = Recipe::new(reference.as_str()).step(Step::run("exit 3"));
     let job = client.build_image(recipe, &failed).wait().unwrap();
-    let end = common::entries(job.log(None)).pop().unwrap().entry;
-    assert!(
-        matches!(&end, ImageJobEntry::End(end) if end.error.is_some()),
-        "{end:?}"
-    );
+    common::failure(job.log(None));
+    assert!(job.complete(false).wait().is_err());
     let refused = client
         .create_sandbox(&SandboxCreateArgs::new(failed.as_str()))
         .wait()
@@ -353,7 +362,7 @@ fn a_built_image_runs_with_what_its_steps_made() {
 }
 
 #[test]
-fn a_pull_or_a_build_of_what_no_registry_has_ends_with_its_error_and_tags_nothing() {
+fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
     let client = common::client();
     // A registry that does not resolve, so each fails before it reaches anyone.
     let missing = "registry.invalid/missing:latest";
@@ -365,12 +374,12 @@ fn a_pull_or_a_build_of_what_no_registry_has_ends_with_its_error_and_tags_nothin
         .wait()
         .unwrap();
     for job in [pull, build] {
-        let end = common::entries(job.log(None)).pop().unwrap().entry;
-        let ImageJobEntry::End(end) = end else {
-            panic!("a log that ends with {end:?}")
-        };
-        assert!(end.digest.is_none() && end.error.is_some(), "{end:?}");
-        assert_eq!(job.get().wait().unwrap().info().error, end.error);
+        let (_, failed) = common::failure(job.log(None));
+        let got = job.get().wait().unwrap();
+        assert!(got.info().digest.is_none(), "{got:?}");
+        assert_eq!(got.info().error, Some(failed.to_string()));
+        let completed = common::block_on(job.complete(false)).unwrap_err();
+        assert_eq!(completed.to_string(), failed.to_string());
     }
     assert_eq!(common::tagged(&client, &built), None);
 }

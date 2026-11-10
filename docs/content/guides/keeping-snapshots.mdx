@@ -92,8 +92,7 @@ The sandbox finds the user's files at `/attachments`, and what it writes, here a
 ```python
 sandbox = await client.create_sandbox("alpine:latest", snapshot=snapshot)
 cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"]
-async for _ in sandbox.exec(cmd):
-    pass
+await sandbox.exec(cmd).complete()
 await sandbox.remove()
 ```
 
@@ -103,7 +102,7 @@ await sandbox.remove()
 ```js
 const sandbox = await client.createSandbox('alpine:latest', { snapshot })
 const cmd = ['sh', '-c', 'mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt']
-for await (const _ of sandbox.exec(cmd)) {}
+await sandbox.exec(cmd).complete()
 await sandbox.remove()
 ```
 
@@ -114,10 +113,7 @@ await sandbox.remove()
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
 let sandbox = client.create_sandbox(&args).await?;
 let cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"];
-let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-while let Some(entry) = log.next().await {
-    entry?;
-}
+sandbox.exec(&SandboxExecArgs::new(cmd)).complete(false).await?;
 sandbox.remove().await?;
 ```
 
@@ -179,8 +175,7 @@ The user can add a file to `attachments` in between, and the agent carries on wi
 await snapshot.write_file("attachments/todo.txt", "write the changelog\n")
 
 sandbox = await client.create_sandbox("alpine:latest", snapshot=snapshot)
-async for entry in sandbox.exec(["ls", "/attachments", "/artifacts"]):
-    print(entry.entry)
+await sandbox.exec(["ls", "/attachments", "/artifacts"]).complete(print=True)
 ```
 
 </TabItem>
@@ -190,7 +185,7 @@ async for entry in sandbox.exec(["ls", "/attachments", "/artifacts"]):
 await snapshot.writeFile('attachments/todo.txt', 'write the changelog\n')
 
 const sandbox = await client.createSandbox('alpine:latest', { snapshot })
-for await (const entry of sandbox.exec(['ls', '/attachments', '/artifacts'])) console.log(entry)
+await sandbox.exec(['ls', '/attachments', '/artifacts']).complete({ print: true })
 ```
 
 </TabItem>
@@ -203,10 +198,7 @@ snapshot
 
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
 let sandbox = client.create_sandbox(&args).await?;
-let mut log = sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).complete(true).await?;
 ```
 
 </TabItem>

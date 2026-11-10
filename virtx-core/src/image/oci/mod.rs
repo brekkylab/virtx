@@ -11,8 +11,6 @@ mod archive;
 mod images;
 mod manifest;
 mod reference;
-#[cfg(all(test, feature = "server"))]
-mod tests;
 
 pub(crate) use self::{
     archive::{download, upload},

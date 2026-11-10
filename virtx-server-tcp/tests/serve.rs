@@ -1,6 +1,7 @@
 //! The built binary, served over a config of its own and called over HTTP as a client would:
-//! each request to an endpoint with a token and a project -- by hand, and through
-//! `virtx-core`'s client given both at connect.
+//! what its sandboxes' machines do, and what it keeps across a restart -- each test booting
+//! them, and so ignored but where `--include-ignored` asks. What is answered without a machine
+//! is the app's own tests, in `src/main.rs`.
 
 use std::path::PathBuf;
 
@@ -13,10 +14,10 @@ use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
 use virtx_core::{
-    Auth, Client, DirEntry, FileRoot, PortProtocol, Recipe, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJobEntry, SandboxPortOpenArgs, SandboxState, Step,
+    Auth, Client, PortProtocol, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
+    SandboxPortOpenArgs, SandboxState, Step,
 };
-use virtx_uvm::{FsTree, ImageStore, RegistryClient};
+use virtx_uvm::{ImageStore, RegistryClient};
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -112,30 +113,6 @@ impl Served {
         Served::start(home).await
     }
 
-    /// `method` sent to `path` as `token` in `project`: the HTTP status, and the body.
-    async fn send(
-        &self,
-        method: &str,
-        path: &str,
-        token: Option<&str>,
-        project: Option<&str>,
-        body: &'static str,
-    ) -> (StatusCode, String) {
-        let method = Method::from_bytes(method.as_bytes()).unwrap();
-        let mut request = reqwest::Client::new()
-            .request(method, format!("{}{path}", self.url))
-            .body(body);
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-        if let Some(project) = project {
-            request = request.header("virtx-project", project);
-        }
-        let response = request.send().await.unwrap();
-        let status = response.status();
-        (status, response.text().await.unwrap())
-    }
-
     /// A client of `token`'s, in `demo`.
     fn connect(&self, token: &str) -> Client {
         let mut headers = http::HeaderMap::new();
@@ -144,18 +121,6 @@ impl Served {
             token: token.into(),
         };
         Client::connect(&self.url, auth, headers).unwrap()
-    }
-
-    /// File an empty image under `tag` in the store the server reads.
-    fn file_image(&self, tag: &str) {
-        let store = ImageStore::new(self.home.join("images")).unwrap();
-        let layer = store.insert_layer(&FsTree::new()).unwrap();
-        let config = serde_json::from_str(
-            r#"{"architecture": "arm64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}"#,
-        )
-        .unwrap();
-        let image = store.insert_image(&config, &[layer]).unwrap();
-        store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
     }
 
     /// Pull `reference` from its registry into the store the server reads.
@@ -220,312 +185,6 @@ fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
         }
         other => panic!("expected a status, got {other:?}"),
     }
-}
-
-fn names(entries: Vec<DirEntry>) -> Vec<String> {
-    entries.into_iter().map(|entry| entry.name).collect()
-}
-
-#[tokio::test]
-async fn a_request_reaches_only_a_member_s_project() {
-    let served = Served::spawn("access").await;
-    let list = async |token, project| served.send("GET", "volumes/", token, project, "").await;
-
-    let (status, body) = list(Some("a-token"), Some("demo")).await;
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
-
-    let (status, body) = list(None, Some("demo")).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let refusal: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(refusal["error"]["code"], "unauthorized");
-    assert_eq!(
-        list(Some("x"), Some("demo")).await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(list(Some("a-token"), None).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        list(Some("b-token"), Some("demo")).await.0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        list(Some("a-token"), Some("other")).await.0,
-        StatusCode::FORBIDDEN
-    );
-
-    let from = async |origin| {
-        reqwest::Client::new()
-            .get(format!("{}volumes/", served.url))
-            .bearer_auth("a-token")
-            .header("virtx-project", "demo")
-            .header("origin", origin)
-            .send()
-            .await
-            .unwrap()
-            .status()
-    };
-    assert_eq!(from("https://allowed.example").await, StatusCode::OK);
-    assert_eq!(from("https://evil.example").await, StatusCode::FORBIDDEN);
-
-    // A browser's preflight, sent without the token, is answered for the WebDAV methods from
-    // an origin let in, and left without its answer from any other.
-    let files = format!("{}volumes/data/files/", served.url);
-    let preflight = async |origin| {
-        reqwest::Client::new()
-            .request(Method::OPTIONS, &files)
-            .header("origin", origin)
-            .header("access-control-request-method", "PROPFIND")
-            .header(
-                "access-control-request-headers",
-                "authorization, virtx-project, depth",
-            )
-            .send()
-            .await
-            .unwrap()
-    };
-    let cleared = preflight("https://allowed.example").await;
-    assert!(cleared.status().is_success(), "{}", cleared.status());
-    let header = |name| {
-        cleared
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().unwrap().to_owned())
-    };
-    assert_eq!(
-        header("access-control-allow-origin").as_deref(),
-        Some("https://allowed.example")
-    );
-    let methods = header("access-control-allow-methods").unwrap();
-    assert!(
-        methods.contains("PROPFIND") && methods.contains("MKCOL"),
-        "{methods}"
-    );
-    let headers = header("access-control-allow-headers")
-        .unwrap()
-        .to_lowercase();
-    assert!(
-        headers.contains("depth") && headers.contains("virtx-project"),
-        "{headers}"
-    );
-    let refused = preflight("https://evil.example").await;
-    assert!(
-        refused
-            .headers()
-            .get("access-control-allow-origin")
-            .is_none()
-    );
-
-    // The request it clears carries the origin's answer too.
-    served
-        .connect("a-token")
-        .create_volume(Some("data"))
-        .await
-        .unwrap();
-    let listed = reqwest::Client::new()
-        .request(Method::from_bytes(b"PROPFIND").unwrap(), &files)
-        .bearer_auth("a-token")
-        .header("virtx-project", "demo")
-        .header("origin", "https://allowed.example")
-        .header("depth", "1")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(listed.status(), StatusCode::MULTI_STATUS);
-    assert_eq!(
-        listed.headers().get("access-control-allow-origin").unwrap(),
-        "https://allowed.example"
-    );
-}
-
-/// The images are an OCI registry at `/images/oci/v2/`, to any user, naming no project.
-#[tokio::test]
-async fn the_images_are_a_registry_to_any_user() {
-    let served = Served::spawn("registry").await;
-    served.file_image("alpine:3.21");
-    let base = format!("{}images/oci/v2", served.url);
-    let client = reqwest::Client::new();
-
-    let anonymous = client.get(format!("{base}/")).send().await.unwrap();
-    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
-    let root = client
-        .get(format!("{base}/"))
-        .bearer_auth("b-token")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(root.status(), StatusCode::OK);
-
-    let manifest = client
-        .get(format!("{base}/alpine/manifests/3.21"))
-        .bearer_auth("b-token")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(manifest.status(), StatusCode::OK);
-    let manifest: Value = manifest.json().await.unwrap();
-    let layer = &manifest["layers"][0];
-    assert_eq!(layer["mediaType"], "application/vnd.erofs.layer.v1");
-    let blob = client
-        .get(format!(
-            "{base}/alpine/blobs/{}",
-            layer["digest"].as_str().unwrap()
-        ))
-        .bearer_auth("b-token")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(blob.status(), StatusCode::OK);
-    assert_eq!(
-        format!("sha256:{:x}", Sha256::digest(blob.bytes().await.unwrap())),
-        layer["digest"]
-    );
-}
-
-#[tokio::test]
-async fn the_files_endpoints_take_the_same_token_and_project() {
-    let served = Served::spawn("files").await;
-    served
-        .connect("a-token")
-        .create_volume(Some("data"))
-        .await
-        .unwrap();
-    let send = async |method, path, token, body| {
-        served.send(method, path, token, Some("demo"), body).await
-    };
-
-    let put = "volumes/data/files/a.txt";
-    assert_eq!(
-        send("PUT", put, None, "hello").await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        send("PUT", put, Some("b-token"), "hello").await.0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        send("PUT", put, Some("a-token"), "hello").await.0,
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        std::fs::read(served.home.join("project/demo/volume/data/files/a.txt")).unwrap(),
-        b"hello"
-    );
-    let (status, body) = send("GET", put, Some("a-token"), "").await;
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "hello"));
-    let (status, body) = send("PROPFIND", "volumes/data/files/", Some("a-token"), "").await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert!(body.contains("a.txt"), "{body}");
-    assert_eq!(
-        send("GET", "volumes/nobody/files/a.txt", Some("a-token"), "")
-            .await
-            .0,
-        StatusCode::NOT_FOUND
-    );
-}
-
-/// The files of a volume through `virtx-core`'s client, given the token and the project at
-/// connect, as a program over the bindings reaches them.
-#[tokio::test]
-async fn the_client_reaches_a_project_with_the_headers_given_at_connect() {
-    let served = Served::spawn("client").await;
-    let client = served.connect("a-token");
-    client.create_volume(Some("data")).await.unwrap();
-    let volume = FileRoot::Volume("data".into());
-    let home = served.home.join("project/demo");
-
-    // A volume's files, on the host's disk.
-    client.create_dir(&volume, "dir").await.unwrap();
-    client
-        .write_file(&volume, "dir/a.txt", "hello world", None)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read(home.join("volume/data/files/dir/a.txt")).unwrap(),
-        b"hello world"
-    );
-    let metadata = client.stat_file(&volume, "dir/a.txt").await.unwrap();
-    assert!(!metadata.is_dir && metadata.size == 11, "{metadata:?}");
-    assert_eq!(
-        names(client.read_dir(&volume, "dir").await.unwrap()),
-        ["a.txt"]
-    );
-    assert_eq!(names(client.read_dir(&volume, "").await.unwrap()), ["dir"]);
-    let read = client
-        .read_file(&volume, "dir/a.txt", 6, Some(3))
-        .await
-        .unwrap();
-    assert_eq!(&read[..], b"wor");
-    client
-        .rename_file(&volume, "dir/a.txt", "b.txt", false)
-        .await
-        .unwrap();
-    client
-        .copy_file(&volume, "b.txt", "c.txt", false)
-        .await
-        .unwrap();
-    assert_eq!(
-        status(client.copy_file(&volume, "b.txt", "c.txt", false).await),
-        412
-    );
-    client
-        .copy_file(&volume, "dir", "copied", false)
-        .await
-        .unwrap();
-    client.remove_file(&volume, "dir", false).await.unwrap();
-    assert_eq!(status(client.stat_file(&volume, "dir").await), 404);
-    assert!(client.stat_file(&volume, "copied").await.unwrap().is_dir);
-    let read = client.read_file(&volume, "c.txt", 0, None).await.unwrap();
-    assert_eq!(&read[..], b"hello world");
-    assert_eq!(
-        status(client.write_file(&volume, "no/file", "x", None).await),
-        409
-    );
-    let nobody = FileRoot::Volume("nobody".into());
-    assert_eq!(status(client.stat_file(&nobody, "").await), 404);
-
-    // Not a member of the project: every request is refused, the resources and the files alike.
-    let bob = served.connect("b-token");
-    assert_eq!(status(bob.create_volume(None::<String>).await), 403);
-    assert_eq!(status(bob.stat_file(&volume, "c.txt").await), 403);
-}
-
-#[tokio::test]
-async fn a_project_keeps_its_volumes() {
-    let served = Served::spawn("project").await;
-    let client = served.connect("a-token");
-    client.create_volume(Some("data")).await.unwrap();
-    assert!(served.home.join("project/demo/volume/data/files").is_dir());
-    assert_eq!(status(client.create_volume(Some("data")).await), 409);
-
-    // A port that is none, and a sandbox of an image nobody filed, are refused before it
-    // boots.
-    let mut args = SandboxCreateArgs::new("a:b");
-    args.ports = vec![0.into()];
-    assert_eq!(status(client.create_sandbox(&args).await), 400);
-    let args = SandboxCreateArgs::new("a:b");
-    assert_eq!(status(client.create_sandbox(&args).await), 404);
-}
-
-/// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
-#[tokio::test]
-async fn a_port_is_a_websocket_behind_its_capability() {
-    let served = Served::spawn("ports").await;
-    let guessed = served.port_url(&format!("ports/{}", "0".repeat(64)));
-    let mut plain = guessed.clone();
-    plain.set_scheme("http").unwrap();
-    let elsewhere = reqwest::Client::new()
-        .get(plain.clone())
-        .header("origin", "https://elsewhere.example")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(elsewhere.status(), StatusCode::FORBIDDEN);
-    let plain = reqwest::get(plain).await.unwrap();
-    assert_eq!(plain.status(), StatusCode::UPGRADE_REQUIRED);
-    assert_eq!(Served::open(&guessed, None).await.err(), Some(400));
-    assert_eq!(
-        Served::open(&guessed, Some("virtx.tcp")).await.err(),
-        Some(404)
-    );
 }
 
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the

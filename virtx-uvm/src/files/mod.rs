@@ -38,7 +38,9 @@ pub type Held<'a> = &'a (dyn Fn(&str) -> bool + Sync);
 pub struct Files {
     snapshots: SnapshotStore,
     volumes: VolumeStore,
-    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole.
+    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
+    /// and each volume's that write over an etag, by `volume:` and its name, so the etag each
+    /// checks is the one the file has when it writes.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -123,6 +125,16 @@ impl Files {
                 let handler = handler
                     .filesystem(Box::new(volume::Fs(volume)))
                     .build_handler();
+                let conditional = request.headers().contains_key(http::header::IF_MATCH);
+                let _serial = match conditional {
+                    true => {
+                        let key = format!("volume:{name}");
+                        let serial =
+                            Arc::clone(self.serial.lock().unwrap().entry(key).or_default());
+                        Some(serial.lock_owned().await)
+                    }
+                    false => None,
+                };
                 handler.handle(request).await.map(Body::new)
             }
             Root::Snapshot(name) => {
@@ -225,7 +237,7 @@ fn status(e: &VolumeError) -> StatusCode {
     match e {
         VolumeError::InvalidName(_) | VolumeError::InvalidPath(_) => StatusCode::BAD_REQUEST,
         VolumeError::Unknown(_) | VolumeError::NoMount { .. } => StatusCode::NOT_FOUND,
-        VolumeError::AlreadyExists(_) => StatusCode::CONFLICT,
+        VolumeError::AlreadyExists(_) | VolumeError::MountExists(_) => StatusCode::CONFLICT,
         VolumeError::InUse(_) => StatusCode::LOCKED,
         VolumeError::Refused(_) => StatusCode::FORBIDDEN,
         VolumeError::Io { source, .. } => match source.kind() {

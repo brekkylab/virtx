@@ -128,3 +128,37 @@ fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sent(headers: &[(&str, &str)], token: Option<&str>) -> HeaderMap {
+        let mut given = HeaderMap::new();
+        for (name, value) in headers {
+            let name = header::HeaderName::from_bytes(name.as_bytes()).unwrap();
+            given.append(name, value.parse().unwrap());
+        }
+        let request = reqwest::Client::new().get("http://127.0.0.1:9/");
+        authorized(request, given, token)
+            .build()
+            .unwrap()
+            .headers()
+            .clone()
+    }
+
+    #[test]
+    fn a_token_takes_the_place_of_an_authorization_header_and_leaves_the_rest() {
+        let given = [("authorization", "Bearer mine"), ("virtx-project", "p")];
+        let headers = sent(&given, Some("t"));
+        let authorization: Vec<_> = headers.get_all(header::AUTHORIZATION).iter().collect();
+        assert_eq!(authorization, ["Bearer t"]);
+        assert_eq!(headers["virtx-project"], "p");
+    }
+
+    #[test]
+    fn without_a_token_the_headers_go_as_given() {
+        let headers = sent(&[("authorization", "Bearer mine")], None);
+        assert_eq!(headers[header::AUTHORIZATION], "Bearer mine");
+    }
+}

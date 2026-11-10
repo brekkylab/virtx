@@ -25,8 +25,6 @@ mod error;
 mod ffi;
 mod image;
 mod sandbox;
-#[cfg(feature = "testing")]
-pub mod testing;
 mod transport;
 mod volume;
 

@@ -36,6 +36,44 @@ impl<'a> Registry<'a> {
         headers: &[(header::HeaderName, String)],
         body: Body,
     ) -> Result<Response<Body>, Error> {
+        let response = self.request(method.clone(), path, headers, body).await?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        Err(Error::Registry(format!(
+            "{method} {path}: {}",
+            failure(response).await
+        )))
+    }
+
+    /// As [`send`](Self::send), but `None` for a `404`: what was named is not there, or no
+    /// longer.
+    async fn send_found(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(header::HeaderName, String)],
+        body: Body,
+    ) -> Result<Option<Response<Body>>, Error> {
+        let response = self.request(method.clone(), path, headers, body).await?;
+        match response.status() {
+            status if status.is_success() => Ok(Some(response)),
+            StatusCode::NOT_FOUND => Ok(None),
+            _ => Err(Error::Registry(format!(
+                "{method} {path}: {}",
+                failure(response).await
+            ))),
+        }
+    }
+
+    /// `method` sent to `path`, under `images/oci/v2/`, and the response, whatever its status.
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(header::HeaderName, String)],
+        body: Body,
+    ) -> Result<Response<Body>, Error> {
         let mut request = http::Request::builder()
             .method(method.clone())
             .uri(format!("/images/oci/v2/{path}"));
@@ -45,14 +83,7 @@ impl<'a> Registry<'a> {
         let request = request
             .body(body)
             .map_err(|e| Error::Registry(format!("{method} {path}: {e}")))?;
-        let response = self.client.send(request).await?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        Err(Error::Registry(format!(
-            "{method} {path}: {}",
-            failure(response).await
-        )))
+        self.client.send(request).await
     }
 
     /// Every repository, in the order the registry lists them.
@@ -69,7 +100,7 @@ impl<'a> Registry<'a> {
         .await
     }
 
-    /// Every tag in `name`.
+    /// Every tag in `name`: none once it is gone, as a repository goes with its last tag.
     pub(crate) async fn tags(&self, name: &str) -> Result<Vec<String>, Error> {
         #[derive(Deserialize)]
         struct Tags {
@@ -95,9 +126,12 @@ impl<'a> Registry<'a> {
             if let Some(last) = all.last() {
                 query.push_str(&format!("&last={last}"));
             }
-            let response = self
-                .send(Method::GET, &query, &[], full(Bytes::new()))
-                .await?;
+            let Some(response) = self
+                .send_found(Method::GET, &query, &[], full(Bytes::new()))
+                .await?
+            else {
+                return Ok(all);
+            };
             let more = response.headers().contains_key(header::LINK);
             let page = read(&collect(response).await?)
                 .map_err(|e| Error::Registry(format!("GET {path}: {e}")))?;
@@ -119,6 +153,26 @@ impl<'a> Registry<'a> {
         match header_value(&response, CONTENT_DIGEST) {
             Some(digest) => Ok(digest),
             None => Ok(self.manifest(name, target).await?.digest),
+        }
+    }
+
+    /// As [`manifest_digest`](Self::manifest_digest), but `None` once `target` is gone.
+    pub(crate) async fn manifest_digest_found(
+        &self,
+        name: &str,
+        target: &str,
+    ) -> Result<Option<String>, Error> {
+        let path = format!("{name}/manifests/{target}");
+        let accept = [(header::ACCEPT, MANIFEST_TYPES.to_owned())];
+        let Some(response) = self
+            .send_found(Method::HEAD, &path, &accept, full(Bytes::new()))
+            .await?
+        else {
+            return Ok(None);
+        };
+        match header_value(&response, CONTENT_DIGEST) {
+            Some(digest) => Ok(Some(digest)),
+            None => Ok(Some(self.manifest(name, target).await?.digest)),
         }
     }
 
@@ -298,5 +352,78 @@ async fn failure(response: Response<Body>) -> String {
             format!("{status}: {}", errors.join("; "))
         }
         _ => format!("{status}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(
+        status: StatusCode,
+        headers: &[(&str, &str)],
+        body: &'static str,
+    ) -> Response<Body> {
+        let mut response = Response::builder().status(status);
+        for (name, value) in headers {
+            response = response.header(*name, *value);
+        }
+        response.body(full(body)).unwrap()
+    }
+
+    #[test]
+    fn an_upload_is_where_its_location_says_under_v2() {
+        let path = "app/blobs/uploads/u1?state=s";
+        for location in [
+            "http://127.0.0.1:8470/images/oci/v2/app/blobs/uploads/u1?state=s",
+            "/images/oci/v2/app/blobs/uploads/u1?state=s",
+            "/v2/app/blobs/uploads/u1?state=s",
+        ] {
+            let started = response(StatusCode::ACCEPTED, &[("location", location)], "");
+            assert_eq!(
+                Upload::from(&started, "app").unwrap().path,
+                path,
+                "{location}"
+            );
+        }
+        let elsewhere = response(StatusCode::ACCEPTED, &[("location", "/elsewhere/u1")], "");
+        assert!(matches!(
+            Upload::from(&elsewhere, "app"),
+            Err(Error::Registry(_))
+        ));
+        let none = response(StatusCode::ACCEPTED, &[], "");
+        assert!(matches!(
+            Upload::from(&none, "app"),
+            Err(Error::Registry(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failure_is_its_status_and_each_error_the_registry_names() {
+        let errors = r#"{"errors": [{"code": "BLOB_UNKNOWN", "message": "no such blob"}, {"code": "DENIED"}]}"#;
+        assert_eq!(
+            failure(response(StatusCode::NOT_FOUND, &[], errors)).await,
+            "404 Not Found: BLOB_UNKNOWN no such blob; DENIED"
+        );
+        for body in [r#"{"errors": []}"#, "not json", ""] {
+            assert_eq!(
+                failure(response(StatusCode::BAD_GATEWAY, &[], body)).await,
+                "502 Bad Gateway",
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_that_is_not_text_is_not_read() {
+        let mut response = response(StatusCode::OK, &[(CONTENT_DIGEST, "sha256:0")], "");
+        assert_eq!(
+            header_value(&response, CONTENT_DIGEST).as_deref(),
+            Some("sha256:0")
+        );
+        let opaque = header::HeaderValue::from_bytes(&[0xff]).unwrap();
+        response.headers_mut().insert(CONTENT_DIGEST, opaque);
+        assert_eq!(header_value(&response, CONTENT_DIGEST), None);
+        assert_eq!(header_value(&response, "location"), None);
     }
 }

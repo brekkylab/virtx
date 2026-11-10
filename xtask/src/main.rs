@@ -15,7 +15,9 @@ usage: cargo xtask init     [--force]
        cargo xtask check    [--client]
        cargo xtask archive  [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
-       cargo xtask test     [<cargo test args>...] [-- <test harness args>...]
+       cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
+       cargo xtask fixture  -- <command>...
+       cargo xtask fixture  --serve
 
   init      checks out the submodules that are not, and adds the guest's musl target --
             ready to build the servers
@@ -26,7 +28,16 @@ usage: cargo xtask init     [--force]
   archive   archives the stdio server and the guest kernel, for this platform, as a release
             carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
-  test      cargo test, the same way
+  test      every test: the crates' own, then the packages' against the fixture, each
+            suite summed up at the end. With arguments, cargo test, the way run is, against
+            the fixture where they name virtx
+  fixture   runs any <command> against the servers, built and signed, over a home of its own:
+            VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
+            VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
+            loopback; both and the home are gone once it ends, and its exit is this one's.
+            Where the environment names them already, <command> runs as it is. With --serve,
+            it writes each of those as NAME=value on stdout, then `ready`, and serves until
+            its stdin closes, for a test runner to start it the way pytest's conftest does
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
@@ -168,8 +179,29 @@ fn main() -> anyhow::Result<()> {
             );
             archive(abin)
         }
-        Some("run") => run_target(args.collect(), false),
-        Some("test") => run_target(args.collect(), true),
+        Some("run") => run_target(args.collect(), false, &[]),
+        Some("test") => {
+            let args: Vec<OsString> = args.collect();
+            match args.as_slice() {
+                [] => test_all(),
+                // virtx-rs's tests are against the fixture too.
+                _ if args.iter().any(|arg| arg == "virtx") => {
+                    let fixture = Fixture::start()?;
+                    run_target(args, true, &fixture.vars())
+                }
+                _ => run_target(args, true, &[]),
+            }
+        }
+        Some("fixture") => {
+            let rest: Vec<OsString> = args.collect();
+            match rest.split_first() {
+                Some((dashes, command)) if dashes == "--" && !command.is_empty() => {
+                    fixture(command)
+                }
+                Some((serve, [])) if serve == "--serve" => serve_fixture(),
+                _ => bail!("fixture takes -- and the command to run, or --serve\n\n{USAGE}"),
+            }
+        }
         Some("-h" | "--help") | None => {
             println!("{USAGE}");
             Ok(())
@@ -392,11 +424,7 @@ fn check(client_only: bool) -> anyhow::Result<()> {
     clippy.extend(&client);
     clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
     cargo_in_root(&clippy, "clippy of the client")?;
-    cargo_in_root(
-        &["test", "-p", CLIENT_PACKAGE, "--features", "testing"],
-        "the tests of virtx-core",
-    )?;
-    cargo_in_root(&["test", "-p", "virtx"], "the tests of virtx")?;
+    cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
 
     if client_only {
         eprintln!("xtask: the servers left out (--client)");
@@ -411,7 +439,10 @@ fn check(client_only: bool) -> anyhow::Result<()> {
     clippy.extend(&servers);
     clippy.extend(["--all-targets", "--", "-D", "warnings"]);
     cargo_in_root(&clippy, "clippy of the servers")?;
-    cargo_in_root(&["test", "-p", "virtx-uvm"], "the tests of virtx-uvm")?;
+    cargo_in_root(
+        &["test", "-p", "virtx-uvm", "--lib"],
+        "the unit tests of virtx-uvm",
+    )?;
     eprintln!("xtask: checked");
     Ok(())
 }
@@ -542,7 +573,9 @@ fn sign(exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
+/// Build with cargo what `args` names, and run it, or each of its tests if `test`, with `vars`
+/// added to its environment.
+fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> anyhow::Result<()> {
     let split = args.iter().position(|a| a == "--");
     let (cargo_args, program_args) = match split {
         Some(at) => (&args[..at], &args[at + 1..]),
@@ -616,9 +649,15 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
 
     let mut failed = 0;
     for (exe, manifest_dir) in &targets {
-        sign(exe)?;
+        // A test may boot machines of itself, as `virtx-uvm`'s do: it needs the kernel beside
+        // it, wherever there is one to put there.
+        if test && kernel_library().is_ok() {
+            ready(exe)?;
+        } else {
+            sign(exe)?;
+        }
         let mut command = Command::new(exe);
-        command.args(program_args);
+        command.args(program_args).envs(vars.iter().cloned());
         if test {
             eprintln!("     Running {}", exe.display());
             command
@@ -923,4 +962,257 @@ fn cache_root() -> std::path::PathBuf {
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache")
         })
         .join("virtx");
+}
+
+/// The token the fixture's server over HTTP lets a request through with, made up and no one's,
+/// and its SHA-256, which its config holds.
+const FIXTURE_TOKEN: &str = "test-token";
+const FIXTURE_TOKEN_SHA256: &str =
+    "4c5dc9b7708905f77f5e5d16316b5dfb425e68cb326dcd55a860e90a7707031e";
+/// The one project the fixture's server over HTTP lets a request reach.
+const FIXTURE_PROJECT: &str = "test";
+
+/// Run `command` against the fixture, and exit as it does.
+fn fixture(command: &[OsString]) -> anyhow::Result<()> {
+    // Under a fixture already, as `cargo xtask test` runs `npm test`, the command runs in it.
+    let fixture = match env::var_os("VIRTX_TEST_URL") {
+        Some(_) => None,
+        None => Some(Fixture::start()?),
+    };
+    let mut run = Command::new(&command[0]);
+    run.args(&command[1..]);
+    if let Some(fixture) = &fixture {
+        run.envs(fixture.vars());
+    }
+    let status = run
+        .status()
+        .with_context(|| format!("running {}", command[0].to_string_lossy()))?;
+    drop(fixture);
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Serve the fixture until stdin closes, having written what it names in the environment on
+/// stdout as `NAME=value` lines, then `ready`.
+fn serve_fixture() -> anyhow::Result<()> {
+    use std::io::{Read as _, Write as _};
+    let fixture = Fixture::start()?;
+    let mut stdout = std::io::stdout().lock();
+    for (name, value) in fixture.vars() {
+        writeln!(stdout, "{name}={}", value.to_string_lossy())?;
+    }
+    writeln!(stdout, "ready")?;
+    stdout.flush()?;
+    drop(stdout);
+    let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    Ok(())
+}
+
+/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
+/// cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
+const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
+    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
+    ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
+    (
+        "virtx-node",
+        "virtx-node",
+        &[&["npm", "install"], &["npm", "test"]],
+    ),
+];
+
+/// How a suite of `test_all` ended.
+enum Outcome {
+    Passed,
+    Failed(String),
+    Skipped(String),
+}
+
+/// Every suite: the crates' own tests, then the packages' against one fixture, each run whatever
+/// came before, and how each ended. The servers' suites and the packages' are skipped until the
+/// servers can be built here.
+fn test_all() -> anyhow::Result<()> {
+    let mut outcomes: Vec<(&str, Outcome)> = Vec::new();
+
+    let unready = match servers_unready()? {
+        Some(why) => Some(format!("{why} -- `cargo xtask init` readies them")),
+        None if kernel_library().is_err() => {
+            Some("no guest kernel -- `cargo xtask build kernel` builds it".to_owned())
+        }
+        None => None,
+    };
+    let crates = [
+        "virtx-core",
+        "virtx-uvm",
+        "virtx-server-stdio",
+        "virtx-server-tcp",
+    ];
+    for name in crates {
+        let outcome = match &unready {
+            Some(why) if name != CLIENT_PACKAGE => Outcome::Skipped(why.clone()),
+            _ => match run_target(vec!["-p".into(), name.into()], true, &[]) {
+                Ok(()) => Outcome::Passed,
+                Err(e) => Outcome::Failed(format!("{e:#}")),
+            },
+        };
+        outcomes.push((name, outcome));
+    }
+
+    let fixture = match &unready {
+        Some(why) => Err(Outcome::Skipped(why.clone())),
+        None => Fixture::start().map_err(|e| Outcome::Failed(format!("the fixture: {e:#}"))),
+    };
+    for (name, dir, commands) in PACKAGES {
+        let outcome = match &fixture {
+            Err(Outcome::Skipped(why)) => Outcome::Skipped(why.clone()),
+            Err(Outcome::Failed(why)) => Outcome::Failed(why.clone()),
+            Err(Outcome::Passed) => unreachable!("the fixture started"),
+            Ok(fixture) => {
+                let mut outcome = Outcome::Passed;
+                for argv in *commands {
+                    let ran = Command::new(argv[0])
+                        .args(&argv[1..])
+                        .envs(fixture.vars())
+                        .current_dir(root_path().join(dir))
+                        .status();
+                    let why = match ran {
+                        Ok(status) if status.success() => continue,
+                        Ok(status) => format!("`{}` {status}", argv.join(" ")),
+                        Err(e) => format!("`{}` did not run: {e}", argv.join(" ")),
+                    };
+                    outcome = Outcome::Failed(why);
+                    break;
+                }
+                outcome
+            }
+        };
+        outcomes.push((name, outcome));
+    }
+    drop(fixture);
+
+    eprintln!();
+    for (name, outcome) in &outcomes {
+        match outcome {
+            Outcome::Passed => eprintln!("xtask: {name:<20} ok"),
+            Outcome::Failed(why) => eprintln!("xtask: {name:<20} FAILED: {why}"),
+            Outcome::Skipped(why) => eprintln!("xtask: {name:<20} skipped: {why}"),
+        }
+    }
+    let failures = outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, Outcome::Failed(_)))
+        .count();
+    ensure!(failures == 0, "{failures} suites failed");
+    Ok(())
+}
+
+/// The servers, built and signed, for tests to run against: `virtx-stdio` for each to spawn,
+/// and `virtx-server-tcp` served on the loopback, over a config and a home made for it under a
+/// directory of their own. The server is stopped, and the directory removed, when this drops.
+struct Fixture {
+    process: std::process::Child,
+    stdio: PathBuf,
+    url: String,
+    scratch: PathBuf,
+}
+
+impl Fixture {
+    fn start() -> anyhow::Result<Fixture> {
+        if let Some(why) = servers_unready()? {
+            bail!("{why} -- `cargo xtask init` readies the servers");
+        }
+        kernel_library().context("no guest kernel -- `cargo xtask build kernel` builds it")?;
+        let options = Options {
+            components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
+            prefix: None,
+            debug: false,
+            target: None,
+            locked: false,
+        };
+        build_servers(&options)?;
+        let built = |name: &str| {
+            options
+                .out()
+                .join(format!("{name}{}", env::consts::EXE_SUFFIX))
+        };
+
+        let scratch = env::temp_dir().join(format!("virtx-fixture-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch)
+                .with_context(|| format!("emptying {}", scratch.display()))?;
+        }
+        let home = scratch.join("home");
+        fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+        let config = serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "users": { "test": { "token_sha256": FIXTURE_TOKEN_SHA256 } },
+            "projects": { FIXTURE_PROJECT: { "members": ["test"] } },
+        });
+        let config_path = scratch.join("config.json");
+        fs::write(&config_path, config.to_string())
+            .with_context(|| format!("writing {}", config_path.display()))?;
+
+        let tcp = built("virtx-server-tcp");
+        let mut process = Command::new(&tcp)
+            .arg("serve")
+            .arg("--config")
+            .arg(&config_path)
+            .env("VIRTX_HOME", &home)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("starting {}", tcp.display()))?;
+        // It says where it listens first; the rest, its machines' consoles among it, is read
+        // only so that it never blocks.
+        let stderr = process.stderr.take().expect("piped");
+        let mut lines = std::io::BufRead::lines(std::io::BufReader::new(stderr));
+        let mut fixture = Fixture {
+            process,
+            stdio: built("virtx-stdio"),
+            url: String::new(),
+            scratch,
+        };
+        let line = lines
+            .next()
+            .context("virtx-server-tcp ended before it served")?
+            .context("reading what virtx-server-tcp said")?;
+        fixture.url = line
+            .strip_prefix("serving at ")
+            .with_context(|| format!("virtx-server-tcp said {line:?}, not where it serves"))?
+            .to_owned();
+        std::thread::spawn(move || lines.for_each(drop));
+        eprintln!(
+            "xtask: the fixture is served at {}, over {}",
+            fixture.url,
+            home.display()
+        );
+        Ok(fixture)
+    }
+
+    /// What it names to a command in its environment: the home both servers keep, where
+    /// `virtx-stdio` is, and how to reach `virtx-server-tcp`.
+    fn vars(&self) -> Vec<(&'static str, OsString)> {
+        vec![
+            ("VIRTX_HOME", self.scratch.join("home").into()),
+            ("VIRTX_TEST_STDIO", self.stdio.clone().into()),
+            ("VIRTX_TEST_URL", self.url.clone().into()),
+            ("VIRTX_TEST_TOKEN", FIXTURE_TOKEN.into()),
+            ("VIRTX_TEST_PROJECT", FIXTURE_PROJECT.into()),
+        ]
+    }
+}
+
+impl Drop for Fixture {
+    /// Stop it as `ctrl-c` would, so that it ends its sandboxes' machines, and kill it if it
+    /// has not ended a while later.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-INT", &self.process.id().to_string()])
+            .status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while matches!(self.process.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        let _ = fs::remove_dir_all(&self.scratch);
+    }
 }

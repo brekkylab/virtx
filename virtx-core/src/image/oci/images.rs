@@ -8,13 +8,17 @@ use super::{
 };
 use crate::{Error, image::ImageListOutputItem, transport::TransportClient};
 
-/// Every tag in every repository, with the digest it points at, sorted by reference.
+/// Every tag in every repository, with the digest it points at, sorted by reference. A
+/// repository or a tag gone between the catalog and reading it, as another client removes it,
+/// is passed over.
 pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
     let registry = Registry::new(client);
     let mut images = Vec::new();
     for name in registry.repositories().await? {
         for tag in registry.tags(&name).await? {
-            let digest = registry.manifest_digest(&name, &tag).await?;
+            let Some(digest) = registry.manifest_digest_found(&name, &tag).await? else {
+                continue;
+            };
             images.push(ImageListOutputItem {
                 reference: format!("{name}:{tag}"),
                 digest,
@@ -85,4 +89,66 @@ pub(crate) async fn remove(client: &TransportClient, reference: &str) -> Result<
         Target::Tag(tag) => registry.manifest_digest(&reference.name, tag).await?,
     };
     registry.delete_manifest(&reference.name, &digest).await
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use axum::{Router, routing::get};
+    use http::{HeaderMap, StatusCode};
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
+
+    use super::*;
+    use crate::transport::serve_stdio;
+
+    #[tokio::test]
+    async fn a_listing_passes_over_what_goes_while_it_is_read() {
+        // `gone` lost its last tag, and `kept:2` its tag, after the catalog named them.
+        let digest = "sha256:".to_owned() + &"ab".repeat(32);
+        let router = Router::new()
+            .route(
+                "/images/oci/v2/_catalog",
+                get(|| async { r#"{"repositories": ["gone", "kept"]}"# }),
+            )
+            .route(
+                "/images/oci/v2/gone/tags/list",
+                get(|| async { StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/images/oci/v2/kept/tags/list",
+                get(|| async { r#"{"tags": ["1", "2"]}"# }),
+            )
+            .route(
+                "/images/oci/v2/kept/manifests/1",
+                get({
+                    let digest = digest.clone();
+                    || async move {
+                        let mut headers = HeaderMap::new();
+                        headers.insert("docker-content-digest", digest.parse().unwrap());
+                        (headers, "")
+                    }
+                }),
+            )
+            .route(
+                "/images/oci/v2/kept/manifests/2",
+                get(|| async { StatusCode::NOT_FOUND }),
+            );
+        let (pipe, server) = tokio::io::duplex(64 * 1024);
+        let (input, output) = tokio::io::split(server);
+        let service = TowerToHyperService::new(router);
+        let handle = move |request| {
+            let service = service.clone();
+            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
+        };
+        tokio::spawn(serve_stdio(handle, input, output));
+        let client = TransportClient::over(pipe);
+
+        assert_eq!(
+            list(&client).await.unwrap(),
+            [ImageListOutputItem {
+                reference: "kept:1".into(),
+                digest,
+            }]
+        );
+    }
 }

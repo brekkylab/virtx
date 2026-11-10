@@ -26,6 +26,8 @@ use crate::{
 /// A machine's size where a sandbox leaves it to the server.
 pub const DEFAULT_VCPUS: u8 = 4;
 pub const DEFAULT_MEMORY_MIB: u32 = 4096;
+/// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
+const MIN_MEMORY_MIB: u32 = 64;
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
@@ -1128,9 +1130,26 @@ fn kill(run: &Run, job: &Job) {
 
 /// What `args` boots: its machine's size and network, refused for what no machine is.
 pub(super) fn spec_of(args: &SandboxCreateArgs) -> Result<MachineSpec, Error> {
+    let mut at = std::collections::HashSet::new();
+    for volume in &args.volumes {
+        // Asked of the text rather than of `Path`, which answers by this host's rules.
+        let path = volume.path.trim_end_matches('/');
+        let why = if !volume.path.starts_with('/') {
+            "a path in the guest is absolute"
+        } else if path.is_empty() {
+            "/ is the guest's root"
+        } else if !at.insert(path) {
+            "another volume is there"
+        } else {
+            continue;
+        };
+        return Err(Error::Invalid(format!(
+            "volumes: {} at {}: {why}",
+            volume.volume, volume.path
+        )));
+    }
     for (what, given) in [
         ("vcpus", args.vcpus.map(u32::from)),
-        ("memory_mib", args.memory_mib),
         ("gpu_memory_mib", args.gpu_memory_mib),
     ] {
         if given == Some(0) {
@@ -1138,6 +1157,11 @@ pub(super) fn spec_of(args: &SandboxCreateArgs) -> Result<MachineSpec, Error> {
                 "{what}: 0 is a machine nothing runs on"
             )));
         }
+    }
+    if let Some(mib) = args.memory_mib.filter(|mib| *mib < MIN_MEMORY_MIB) {
+        return Err(Error::Invalid(format!(
+            "memory_mib: {mib} is under the {MIN_MEMORY_MIB} a machine boots in"
+        )));
     }
     let gpu = args.gpu.unwrap_or(false);
     if gpu && !cfg!(feature = "gpu") {

@@ -305,6 +305,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
  "sha1",
@@ -844,8 +845,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "libc",
  "log",
  "mime_guess",
  "percent-encoding",
@@ -4005,7 +4004,6 @@ dependencies = [
  "bytes",
  "cbindgen",
  "clap",
- "dav-server",
  "flate2",
  "futures-util",
  "http",
@@ -4026,6 +4024,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+ "virtx-core",
 ]
 
 [[package]]

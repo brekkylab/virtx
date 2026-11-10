@@ -1,6 +1,6 @@
 ---
 title: "Using GPUs"
-description: "Give a sandbox the host's GPU through Vulkan, and build an image that can use it."
+description: "Give a sandbox the host's GPU through Vulkan."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -13,24 +13,16 @@ The guest's half of Vulkan, the loader and the venus driver that reaches the hos
 
 Set `gpu=True` when creating a sandbox.
 `gpu_memory_mib` sets how much memory the GPU may hold, apart from the sandbox's own memory, 8 GiB when left out.
-This builds an image with `vulkaninfo`, then checks the GPU with it:
+This installs `vulkaninfo` in a GPU sandbox and checks the GPU with it:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-recipe = Recipe("alpine:latest").run(
-    # vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
-    "apk add --no-cache vulkan-tools"
-)
-async for entry in client.build_image(recipe, "vulkan:latest"):
-    match entry.entry:
-        case Log(line):
-            print(line)
-        case ImageJobEnd(error=str(error)):
-            raise RuntimeError(error)
-sandbox = await client.create_sandbox("vulkan:latest", gpu=True, gpu_memory_mib=8192)
-async for entry in sandbox.exec(["vulkaninfo", "--summary"]):
+sandbox = await client.create_sandbox("alpine:latest", gpu=True)
+async for entry in sandbox.exec(
+    ["sh", "-c", "apk add --no-cache vulkan-tools && vulkaninfo --summary"]
+):
     print(entry.entry)
 ```
 
@@ -38,40 +30,26 @@ async for entry in sandbox.exec(["vulkaninfo", "--summary"]):
 <TabItem label="Node.js">
 
 ```js
-const recipe = new Recipe('alpine:latest').run(
-  // vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
-  'apk add --no-cache vulkan-tools'
-)
-for await (const entry of client.buildImage(recipe, 'vulkan:latest')) {
-  if ('log' in entry) console.log(entry.log)
-  else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
-}
-const options = { gpu: true, gpuMemoryMib: 8192 }
-const sandbox = await client.createSandbox('vulkan:latest', options)
-for await (const entry of sandbox.exec(['vulkaninfo', '--summary'])) console.log(entry)
+const sandbox = await client.createSandbox('alpine:latest', { gpu: true })
+for await (const entry of sandbox.exec([
+  'sh', '-c', 'apk add --no-cache vulkan-tools && vulkaninfo --summary',
+])) console.log(entry)
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let recipe = Recipe::new("alpine:latest").step(
-    // vulkaninfo, to check the GPU with. Vulkan itself comes with the sandbox.
-    "apk add --no-cache vulkan-tools",
-);
-let mut log = client.build_image(recipe, "vulkan:latest").log();
-while let Some(entry) = log.next().await {
-    match entry?.entry {
-        ImageJobEntry::Log(line) => println!("{line}"),
-        ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
-        _ => {}
-    }
-}
-let args = SandboxCreateArgs::new("vulkan:latest")
-    .gpu(true)
-    .gpu_memory_mib(8192);
-let sandbox = client.create_sandbox(&args).await?;
-let mut log = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).log();
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").gpu(true))
+    .await?;
+let mut log = sandbox
+    .exec(&SandboxExecArgs::new([
+        "sh",
+        "-c",
+        "apk add --no-cache vulkan-tools && vulkaninfo --summary",
+    ]))
+    .log();
 while let Some(entry) = log.next().await {
     println!("{:?}", entry?.entry);
 }

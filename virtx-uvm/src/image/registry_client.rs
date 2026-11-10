@@ -34,7 +34,7 @@ pub use oci_spec::distribution::Reference;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The registry would not let these credentials, or no credentials, at `reference`.
+    /// The registry would not let these credentials at `reference`.
     /// Apart from [`Registry`](Error::Registry) because it is the caller's to fix, not the
     /// registry's or the network's.
     #[error("{reference}: not authorized: {source}")]
@@ -44,7 +44,7 @@ pub enum Error {
         source: Box<OciDistributionError>,
     },
 
-    /// A pull without credentials the registry turned away. A registry answers so for a
+    /// A read without credentials the registry answered 401. A registry answers so for a
     /// repository that does not exist as for one that is private, so it is said as either.
     #[error(
         "{reference}: not found, or private and pulled without credentials (the registry answers both with 401)"
@@ -156,12 +156,16 @@ impl RegistryClient {
         }
     }
 
-    /// `source`, as an error at `reference` in a pull: a refusal without credentials is
+    /// `source`, as an error at `reference` in a read: a 401 without credentials is
     /// [`NotFoundOrPrivate`](Error::NotFoundOrPrivate), with them [`Unauthorized`](Error::Unauthorized).
     fn pull_error(&self, reference: &Reference, source: OciDistributionError) -> Error {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
         match Error::registry(reference, source) {
+            // Only `UnauthorizedError` is a 401: `AuthenticationFailure` is any token answer
+            // but 200.
             Error::Unauthorized { reference, source }
-                if matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous) =>
+                if anonymous
+                    && matches!(*source, OciDistributionError::UnauthorizedError { .. }) =>
             {
                 Error::NotFoundOrPrivate { reference, source }
             }
@@ -655,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_refused_without_credentials_is_not_found_or_private() {
+    fn a_read_answered_401_without_credentials_is_not_found_or_private() {
         let scratch = Scratch::new("refused");
         let reference: Reference = "nosuchrepo/none:1".parse().unwrap();
         let refusals = || {
@@ -668,12 +672,14 @@ mod tests {
         };
 
         let anonymous = RegistryClient::new(scratch.0.clone(), None);
-        for refusal in refusals() {
-            assert_eq!(
-                anonymous.pull_error(&reference, refusal).to_string(),
-                "docker.io/nosuchrepo/none:1: not found, or private and pulled without credentials (the registry answers both with 401)"
-            );
-        }
+        let [unauthorized, token_refused] = refusals();
+        assert_eq!(
+            anonymous.pull_error(&reference, unauthorized).to_string(),
+            "docker.io/nosuchrepo/none:1: not found, or private and pulled without credentials (the registry answers both with 401)"
+        );
+        // A token refused carries no status, so it is not said to be a 401.
+        let error = anonymous.pull_error(&reference, token_refused);
+        assert!(matches!(error, Error::Unauthorized { .. }), "{error}");
 
         let credentialed = RegistryClient::new(
             scratch.0.clone(),
@@ -739,11 +745,22 @@ mod tests {
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.
     #[tokio::test]
     #[ignore]
-    async fn pulling_a_missing_repository_anonymously_is_not_found_or_private() {
+    async fn reading_a_missing_repository_anonymously_is_not_found_or_private() {
         let scratch = Scratch::new("missing");
         let registry = RegistryClient::new(scratch.0.clone(), None);
         let reference: Reference = "nosuchrepo-qa-xyz/none:1".parse().unwrap();
         let error = registry.pull_manifest(&reference).await.unwrap_err();
+        assert!(matches!(error, Error::NotFoundOrPrivate { .. }), "{error}");
+
+        let error = registry.list_tags(&reference).await.unwrap_err();
+        assert!(matches!(error, Error::NotFoundOrPrivate { .. }), "{error}");
+
+        let digest: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let blob = Descriptor::new(MediaType::ImageLayerGzip, 1, digest);
+        let error = registry
+            .pull_blob(&reference, &blob, &mut Vec::new())
+            .await
+            .unwrap_err();
         assert!(matches!(error, Error::NotFoundOrPrivate { .. }), "{error}");
     }
 

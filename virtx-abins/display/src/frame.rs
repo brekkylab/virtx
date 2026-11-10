@@ -18,6 +18,9 @@ pub struct Framebuffer {
     stride: usize,
     big_endian: bool,
     shifts: [u32; 3],
+    /// The screen's bytes as the file has them, kept between reads rather than allocated for
+    /// each: a viewer's screen is read every few tens of milliseconds.
+    raw: Vec<u8>,
 }
 
 impl Framebuffer {
@@ -51,18 +54,18 @@ impl Framebuffer {
             stride: bytes_per_line as usize,
             big_endian: byte_order == MSB_FIRST,
             shifts: masks.map(u32::trailing_zeros),
+            raw: vec![0; bytes_per_line as usize * height as usize],
         })
     }
 
     /// Read the whole screen into `pixels`, as `0x00RRGGBB` a pixel, row after row.
     pub fn read(&mut self, pixels: &mut Vec<u32>) -> io::Result<()> {
-        let mut raw = vec![0u8; self.stride * usize::from(self.height)];
-        self.file.read_exact_at(&mut raw, self.offset)?;
+        self.file.read_exact_at(&mut self.raw, self.offset)?;
         let (w, h) = (usize::from(self.width), usize::from(self.height));
         pixels.clear();
         pixels.reserve(w * h);
         let [rs, gs, bs] = self.shifts;
-        for row in raw.chunks_exact(self.stride) {
+        for row in self.raw.chunks_exact(self.stride) {
             for &px in row[..w * 4].as_chunks::<4>().0 {
                 let v = if self.big_endian {
                     u32::from_be_bytes(px)

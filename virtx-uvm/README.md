@@ -956,7 +956,7 @@ A sandbox gets the programs it is made with, by its `abins`, from the `abin/` di
 The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under the snapshots' `sandbox/`, deleted with the sandbox or by the next server's sweep.
 That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
 A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
-On Windows each file in them is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report.
+On Windows each file directly in them, the programs run by path, is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report; what is in their directories is read, not run, and left as it is.
 `cargo xtask build abin` builds `abin/` beside the server binary, as the fixture `cargo xtask test` serves does, and `alib/` is placed there when `build alib` has run.
 
 ```sh

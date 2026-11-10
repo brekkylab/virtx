@@ -551,7 +551,7 @@ fn utf8(path: &Path) -> Result<&str> {
 }
 
 /// The directory `name` beside this executable, such as `alib/`, if there is one, with its
-/// files made executable in the guest.
+/// programs made executable in the guest.
 fn beside(name: &str) -> Option<std::path::PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.join(name);
     if !dir.is_dir() {
@@ -562,7 +562,10 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// Mark each file under `dir` executable for the guest, those in its directories too.
+/// Mark each file directly in `dir` executable for the guest: the programs `/abin` and `/alib`
+/// run by path. What is in their directories is read, not run -- a library is mapped by the
+/// guest's loader whatever its mode, and `xkb/` is data -- so it is left as it is, and a boot
+/// writes a stream for a handful of files rather than for every keymap.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
@@ -578,8 +581,7 @@ fn executable(dir: &Path) {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
-        if path.is_dir() {
-            executable(&path);
+        if !path.is_file() {
             continue;
         }
         let mut stream = path.clone().into_os_string();

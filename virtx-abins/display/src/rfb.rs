@@ -356,7 +356,9 @@ fn read_messages(
                     return Err(io::Error::other("a viewer asked for colour-map pixels"));
                 }
                 if format.shift.iter().any(|&s| s >= format.bits_per_pixel) {
-                    return Err(io::Error::other("a viewer asked for a colour outside its pixel"));
+                    return Err(io::Error::other(
+                        "a viewer asked for a colour outside its pixel",
+                    ));
                 }
                 let mut state = state.lock().unwrap();
                 state.format = format;

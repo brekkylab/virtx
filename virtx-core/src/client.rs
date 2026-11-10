@@ -900,16 +900,24 @@ mod tests {
                 .unwrap();
             assert_eq!(build.kind, ImageJobKind::Build);
             assert_eq!(build.reference, "jq:latest");
+            let built = build.digest.clone().unwrap();
             assert_eq!(
                 image_log(&client, &build.id).await,
                 [
                     ImageJobEntry::Log("pulling alpine:3.20".into()),
-                    digest("sha256:0")
+                    digest(&built)
                 ]
             );
             let read = client.get_image_job(&build.id).await.unwrap();
             assert!(!read.running);
-            assert_eq!(read.digest.as_deref(), Some("sha256:0"));
+            assert_eq!(read.digest.as_ref(), Some(&built));
+            let listed = client.list_image().await.unwrap();
+            assert!(
+                listed
+                    .iter()
+                    .any(|image| image.reference == "jq:latest" && image.digest == built),
+                "{listed:?}"
+            );
 
             let pull = client.pull_image("missing", None).await.unwrap();
             assert_eq!(pull.kind, ImageJobKind::Pull);
@@ -923,22 +931,24 @@ mod tests {
             let auth = RegistryAuth::Bearer {
                 token: "token".into(),
             };
-            let push = client
-                .push_image("ghcr.io/owner/jq:latest", Some(auth))
-                .await
-                .unwrap();
+            let push = client.push_image("jq:latest", Some(auth)).await.unwrap();
             assert_eq!(
                 image_log(&client, &push.id).await,
                 [
-                    ImageJobEntry::Log("pushing ghcr.io/owner/jq:latest as bearer".into()),
-                    digest("sha256:0")
+                    ImageJobEntry::Log("pushing jq:latest as bearer".into()),
+                    digest(&built)
                 ]
             );
-            assert_eq!(client.list_image_job().await.unwrap().len(), 3);
+            let push = client.push_image("nothing:here", None).await.unwrap();
+            assert_eq!(push.error.as_deref(), Some("no image nothing:here"));
+            assert_eq!(client.list_image_job().await.unwrap().len(), 4);
 
+            // Tagged, it stays; untagged, it goes, and what only it held with it.
+            assert!(client.prune_image().await.unwrap().images.is_empty());
+            client.untag_image("jq:latest").await.unwrap();
             let pruned = client.prune_image().await.unwrap();
-            assert_eq!(pruned.images, ["sha256:0"]);
-            assert_eq!(pruned.reclaimed, 1024);
+            assert_eq!(pruned.images, [built]);
+            assert!(pruned.reclaimed > 0);
             client.close().await;
         }
     }

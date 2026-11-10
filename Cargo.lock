@@ -3417,6 +3417,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+ "virtx-core",
 ]
 
 [[package]]

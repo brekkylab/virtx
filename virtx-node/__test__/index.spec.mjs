@@ -4,7 +4,9 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import net from 'node:net'
+import os from 'node:os'
 import path from 'node:path'
 import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -310,14 +312,15 @@ test('an image build is a job whose log ends with its digest', async () => {
     assert.equal(job.reference, 'built:latest')
     assert.ok(job instanceof virtx.ImageJob)
     assert.equal(job.client, client)
+    assert.ok(job.digest)
     const log = await entries(job.log())
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
-      [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+      [{ log: 'pulling alpine:3.20' }, { end: { digest: job.digest } }],
     )
     assert.deepEqual(await entries(job.log(1)), log.slice(1))
-    assert.equal((await job.get()).digest, 'sha256:0')
-    assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
+    assert.equal((await job.get()).digest, job.digest)
+    assert.equal((await client.getImageJob(job.id)).digest, job.digest)
     assert.ok((await client.listImageJob()).some((j) => j.id === job.id))
 
     const missing = await client.buildImage(new virtx.Recipe('missing'), 'no:latest')
@@ -335,9 +338,11 @@ test('a started build is iterated to its end', async () => {
   const client = Client.spawn(testServer)
   try {
     const log = await entries(client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'iterated:latest'))
+    const built = (await client.listImage()).find((image) => image.reference === 'iterated:latest')
+    assert.ok(built)
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
-      [{ log: 'pulling alpine:3.20' }, { end: { digest: 'sha256:0' } }],
+      [{ log: 'pulling alpine:3.20' }, { end: { digest: built.digest } }],
     )
   } finally {
     await client.close()
@@ -365,11 +370,70 @@ test('a started job awaited and iterated is one job', async () => {
     const build = client.buildImage(new virtx.Recipe('alpine:3.20').run('true'), 'once:latest')
     const job = await build
     assert.equal(job.kind, 'build')
+    assert.ok(job.digest)
     const log = await entries(build)
-    assert.deepEqual(log.at(-1).end, { digest: 'sha256:0' })
+    assert.deepEqual(log.at(-1).end, { digest: job.digest })
     const jobs = await client.listImageJob()
     assert.equal(jobs.length, before + 1)
-    assert.equal((await client.getImageJob(job.id)).digest, 'sha256:0')
+    assert.equal((await client.getImageJob(job.id)).digest, job.digest)
+  } finally {
+    await client.close()
+  }
+})
+
+// Every tag on the server's images, with the digest it points at.
+async function tags(client) {
+  return Object.fromEntries((await client.listImage()).map((image) => [image.reference, image.digest]))
+}
+
+test('an image is tagged, downloaded, removed and uploaded back', async () => {
+  const client = Client.spawn(testServer)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'virtx-node-'))
+  try {
+    const digest = (await tags(client))['alpine:3.20']
+    await client.tagImage('alpine:3.20', 'copy:1')
+    assert.equal((await tags(client))['copy:1'], digest)
+
+    const archive = path.join(dir, 'copy.tar')
+    assert.deepEqual((await entries(client.downloadImage('copy:1', archive))).at(-1), { output: { digest } })
+    await client.removeImage('copy:1')
+    assert.ok(!('copy:1' in (await tags(client))))
+    assert.deepEqual((await entries(client.uploadImage(archive, 'copy:1'))).at(-1), { output: { digest } })
+    assert.equal((await tags(client))['copy:1'], digest)
+
+    await client.untagImage('copy:1')
+    assert.ok(!('copy:1' in (await tags(client))))
+  } finally {
+    await client.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a push ends with the digest its reference points at', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const digest = (await tags(client))['alpine:3.20']
+    const log = await entries(client.pushImage('alpine:3.20', { type: 'bearer', token: 'secret' }))
+    assert.deepEqual(
+      log.map(({ id, ...entry }) => entry),
+      [{ log: 'pushing alpine:3.20 as bearer' }, { end: { digest } }],
+    )
+    const missing = await client.pushImage('nothing:here')
+    assert.equal(missing.error, 'no image nothing:here')
+  } finally {
+    await client.close()
+  }
+})
+
+test('a mount at a path taken is refused', async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const volume = await client.getVolume('v')
+    const source = { type: 'notion', apiKey: 'secret' }
+    await volume.mount('notion', source)
+    await assert.rejects(volume.mount('notion', source), /409/)
+    await volume.unmount('notion')
+    assert.deepEqual(await volume.mounts(), [])
   } finally {
     await client.close()
   }
@@ -395,9 +459,12 @@ function virtxCommand(...args) {
   })
 }
 
-test('the command runs against a server', () => {
+test('the command runs against a server', async () => {
+  const client = Client.spawn(testServer)
+  const alpine = (await client.listImage()).find((image) => image.reference === 'alpine:3.20')
+  await client.close()
   const pulled = virtxCommand('--server', testServer, 'pull', '-q', 'alpine:3.20')
-  assert.deepEqual([pulled.status, pulled.stdout], [0, 'alpine:3.20 sha256:0\n'], pulled.stderr)
+  assert.deepEqual([pulled.status, pulled.stdout], [0, `alpine:3.20 ${alpine.digest}\n`], pulled.stderr)
 })
 
 test('a bad argument exits as clap does', () => {

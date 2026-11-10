@@ -78,6 +78,15 @@ pub(crate) mod tests {
         Client::connect(&serve().await, Auth::None, http::HeaderMap::new()).unwrap()
     }
 
+    /// Every tag on the server's images, with the digest it points at.
+    pub(crate) async fn tags(client: &Client) -> std::collections::BTreeMap<String, String> {
+        let listed = client.list_image().await.unwrap();
+        listed
+            .into_iter()
+            .map(|image| (image.reference, image.digest))
+            .collect()
+    }
+
     #[tokio::test]
     async fn a_job_answers_the_digest_it_ended_with() {
         let client = client().await;
@@ -85,7 +94,14 @@ pub(crate) mod tests {
             .build_image(Recipe::new("alpine:3.20"), "jq:latest")
             .await
             .unwrap();
-        assert_eq!(follow(&client, &job, true).await.unwrap(), "sha256:0");
+        let digest = follow(&client, &job, true).await.unwrap();
+        let listed = client.list_image().await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|image| image.reference == "jq:latest" && image.digest == digest),
+            "{listed:?}"
+        );
     }
 
     #[tokio::test]

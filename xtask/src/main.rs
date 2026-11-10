@@ -26,7 +26,9 @@ usage: cargo xtask init     [--force]
   archive   archives the stdio server and the guest kernel, for this platform, as a release
             carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
-  test      cargo test, the same way
+  test      cargo test, the same way; virtx-core's e2e scenarios, among the tests, run against
+            the servers over stdio and HTTP, built and signed, once `init` has run and the
+            kernel is built, and against the test server until then
 
 components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
@@ -567,7 +569,9 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
         if test { "test" } else { "build" }
     );
 
-    let mut targets: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Each target to run, the directory of its package, and whether it is `virtx-core`'s e2e
+    // scenarios.
+    let mut targets: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -602,7 +606,10 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
                 .and_then(|m| Path::new(m).parent())
                 .map(Path::to_path_buf)
                 .unwrap_or_else(root_path);
-            targets.push((exe.into(), manifest_dir));
+            let is_e2e = is_test
+                && message["target"]["name"] == "e2e"
+                && manifest_dir.ends_with(CLIENT_PACKAGE);
+            targets.push((exe.into(), manifest_dir, is_e2e));
         }
     }
 
@@ -614,8 +621,12 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
         );
     }
 
+    let server = match targets.iter().any(|(_, _, is_e2e)| *is_e2e) {
+        true => e2e_server()?,
+        false => None,
+    };
     let mut failed = 0;
-    for (exe, manifest_dir) in &targets {
+    for (exe, manifest_dir, is_e2e) in &targets {
         sign(exe)?;
         let mut command = Command::new(exe);
         command.args(program_args);
@@ -624,6 +635,13 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
             command
                 .current_dir(manifest_dir)
                 .env("CARGO_MANIFEST_DIR", manifest_dir);
+        }
+        if *is_e2e && let Some(server) = &server {
+            // The home is this run's alone, so a prune takes nothing anyone keeps.
+            command
+                .env("VIRTX_E2E_SERVER", &server.dir)
+                .env("VIRTX_HOME", &server.home)
+                .env("VIRTX_E2E_ALLOW_PRUNE", "1");
         }
         let status = command
             .status()
@@ -637,6 +655,61 @@ fn run_target(args: Vec<OsString>, test: bool) -> anyhow::Result<()> {
     }
     ensure!(failed == 0, "{failed} test binaries failed");
     Ok(())
+}
+
+/// The servers `virtx-core`'s e2e scenarios run against, built and signed, with a home of
+/// their own. None when the environment names a server, which they run against instead, or when
+/// the servers cannot be built here yet, and they run against the test server.
+fn e2e_server() -> anyhow::Result<Option<E2eServer>> {
+    if env::var_os("VIRTX_E2E_SERVER").is_some() || env::var_os("VIRTX_E2E_URL").is_some() {
+        eprintln!("xtask: the e2e scenarios against the server the environment names");
+        return Ok(None);
+    }
+    let unready = match servers_unready()? {
+        Some(why) => Some(format!("{why} -- `cargo xtask init` readies them")),
+        None if kernel_library().is_err() => {
+            Some("no guest kernel -- `cargo xtask build kernel` builds it".to_string())
+        }
+        None => None,
+    };
+    if let Some(why) = unready {
+        eprintln!("xtask: the e2e scenarios against the test server: {why}");
+        return Ok(None);
+    }
+
+    let options = Options {
+        components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
+        prefix: None,
+        debug: false,
+        target: None,
+        locked: false,
+    };
+    build_servers(&options)?;
+    let dir = options.out();
+    let home = target_path().join(format!("e2e-home-{}", std::process::id()));
+    if home.exists() {
+        fs::remove_dir_all(&home).with_context(|| format!("emptying {}", home.display()))?;
+    }
+    fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    eprintln!(
+        "xtask: the e2e scenarios against the servers in {}, over stdio and HTTP, in {}",
+        dir.display(),
+        home.display()
+    );
+    Ok(Some(E2eServer { dir, home }))
+}
+
+/// The directory of the servers the e2e scenarios run against, and the home they keep what
+/// the scenarios make in, removed once they have run.
+struct E2eServer {
+    dir: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for E2eServer {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.home);
+    }
 }
 
 fn build_abin(options: &Options) -> anyhow::Result<()> {

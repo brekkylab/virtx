@@ -60,6 +60,7 @@ Then, in your own project, install the package for your language from the clone:
 
 ```bash
 cargo xtask check                                 # the gate: format, clippy and tests, of the client always and of the servers once `init` has run
+cargo xtask test                                  # the client's tests, the e2e scenarios against the servers once `init` has run
 cargo xtask test -p virtx-server-stdio            # the servers' own tests, which boot VMs
 (cd virtx-py && uv run pytest)                    # Python
 (cd virtx-node && npm install && npm test)        # Node

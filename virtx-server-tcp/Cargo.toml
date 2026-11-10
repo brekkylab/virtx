@@ -16,9 +16,12 @@ anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
 http = "1"
+# An OpenID Connect provider's tokens, checked against its keys.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+# The provider's discovery document and keys. Its TLS is the one `virtx-uvm` picks for the host.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { workspace = true }
 serde_json = "1"
-sha2 = "0.10"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
@@ -30,6 +33,10 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
+# A blob's digest, as a registry's client computes it.
+sha2 = "0.10"
+# Signing a provider's tokens, as it would, from a key in PEM.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 # The wire, spoken by hand, and by virtx-core's client with the token and the project given
 # at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

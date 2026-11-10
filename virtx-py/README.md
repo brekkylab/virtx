@@ -89,4 +89,5 @@ The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the
 uv run pytest
 ```
 
-The tests build `libvirtx_core`, and `virtx-core`'s `test_server` example they spawn, with cargo first.
+The tests build `libvirtx_core` with cargo first, and run against the real servers, which `cargo xtask fixture` builds and serves over a home of the run's own for them.
+They boot machines, so they need `cargo xtask init` and `cargo xtask build kernel` first.

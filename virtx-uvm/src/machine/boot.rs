@@ -207,9 +207,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
     let mut holds = Vec::with_capacity(machine.volumes.len());
     for (i, asked) in machine.volumes.iter().enumerate() {
+        let volume = crate::Volume::open(&asked.path)?;
         let refused = |why| {
             Err(Error::MountPoint {
-                path: asked.path.clone(),
+                volume: volume.name().to_owned(),
                 at: asked.at.clone(),
                 why,
             })
@@ -230,7 +231,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             return refused("another volume is mounted there");
         }
 
-        let volume = crate::Volume::open(&asked.path)?;
         holds.push(volume.hold()?);
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();

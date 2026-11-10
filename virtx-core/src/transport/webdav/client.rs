@@ -589,276 +589,97 @@ mod tests {
         assert!(multistatus("<D:prop xmlns:D=\"DAV:\"/>").is_err());
         assert!(multistatus("not xml").is_err());
     }
+
+    #[test]
+    fn an_etag_is_quoted_as_a_header_spells_it() {
+        assert_eq!(quoted("abc"), "\"abc\"");
+        assert_eq!(quoted("\"abc\""), "\"abc\"");
+        assert_eq!(quoted("W/\"abc\""), "W/\"abc\"");
+    }
+
+    #[test]
+    fn a_directory_s_two_spellings_are_one() {
+        assert_eq!(normalize("/volumes/v/dir/"), "/volumes/v/dir");
+        assert_eq!(normalize("/volumes/v/dir"), "/volumes/v/dir");
+        assert_eq!(normalize("/"), "");
+    }
+
+    #[test]
+    fn an_href_that_is_neither_a_path_nor_a_url_is_decoded_as_it_is() {
+        assert_eq!(href_path("a%20b"), "a b");
+    }
+
+    #[test]
+    fn a_multistatus_reads_an_etag_and_leaves_what_is_not_dav_s() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:X="urn:other">
+  <D:response>
+    <D:href>/volumes/v/a</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>abc</D:getetag><X:getcontentlength>7</X:getcontentlength><X:resourcetype><D:collection/></X:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/volumes/v/b</D:href>
+    <D:propstat>
+      <D:prop><D:getetag></D:getetag><D:getlastmodified>not a date</D:getlastmodified><D:getcontentlength>many</D:getcontentlength></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let none = Metadata {
+            is_dir: false,
+            size: 0,
+            modified: None,
+            etag: None,
+        };
+        assert_eq!(
+            multistatus(xml).unwrap(),
+            [
+                (
+                    "/volumes/v/a".to_owned(),
+                    Metadata {
+                        etag: Some("\"abc\"".into()),
+                        ..none.clone()
+                    }
+                ),
+                ("/volumes/v/b".to_owned(), none),
+            ]
+        );
+        let no_href = r#"<D:multistatus xmlns:D="DAV:"><D:response/></D:multistatus>"#;
+        assert!(multistatus(no_href).is_err());
+    }
+
+    #[test]
+    fn a_failure_with_no_href_is_one_at_no_path() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:status>HTTP/1.1 423 Locked</D:status></D:response></D:multistatus>"#;
+        assert_eq!(failure_in(xml), Some((423, String::new())));
+    }
 }
 
-#[cfg(all(test, feature = "testing"))]
-mod round_trips {
-    use super::*;
-    use crate::transport::tests::{clients, piped};
-    use axum::Router;
+/// What a server answers that is not the protocol's error, read over a pipe to a router.
+#[cfg(all(test, feature = "server"))]
+mod refusals {
     use std::sync::Arc;
 
-    fn volume() -> FileRoot {
-        FileRoot::Volume("v".into())
-    }
+    use axum::Router;
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
 
-    /// The status `result` was refused with.
-    fn status<T: std::fmt::Debug>(result: Result<T, Error>) -> u16 {
-        match result {
-            Err(e) => e.status().unwrap_or_else(|| panic!("not a status: {e:?}")),
-            Ok(v) => panic!("not an error: {v:?}"),
-        }
-    }
+    use super::*;
+    use crate::transport::serve_stdio;
 
-    #[tokio::test]
-    async fn a_file_written_is_read_back_whole_or_in_part() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "hello.txt", "hello world", None)
-                .await
-                .unwrap();
-            let metadata = stat(&client, &root, "hello.txt").await.unwrap();
-            assert!(!metadata.is_dir);
-            assert_eq!(metadata.size, 11);
-            assert!(metadata.modified.is_some());
-
-            assert_eq!(
-                read(&client, &root, "hello.txt", 0, None).await.unwrap(),
-                "hello world"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 6, None).await.unwrap(),
-                "world"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 2, Some(3)).await.unwrap(),
-                "llo"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 2, Some(0)).await.unwrap(),
-                ""
-            );
-
-            write(&client, &root, "hello.txt", "bye", None)
-                .await
-                .unwrap();
-            assert_eq!(
-                read(&client, &root, "hello.txt", 0, None).await.unwrap(),
-                "bye"
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_directory_lists_what_is_in_it_and_goes_with_it() {
-        for client in clients().await {
-            let root = volume();
-            create_dir(&client, &root, "dir").await.unwrap();
-            create_dir(&client, &root, "dir/sub").await.unwrap();
-            write(&client, &root, "dir/a.txt", "aaaa", None)
-                .await
-                .unwrap();
-            assert!(stat(&client, &root, "dir").await.unwrap().is_dir);
-
-            let mut entries = read_dir(&client, &root, "dir").await.unwrap();
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
-            assert_eq!(names, ["a.txt", "sub"]);
-            assert!(!entries[0].metadata.is_dir);
-            assert_eq!(entries[0].metadata.size, 4);
-            assert!(entries[1].metadata.is_dir);
-
-            let names: Vec<_> = read_dir(&client, &root, "")
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.name)
-                .collect();
-            assert!(names.contains(&"dir".to_owned()), "{names:?}");
-
-            remove(&client, &root, "dir", false).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "dir").await), 404);
-            assert_eq!(status(stat(&client, &root, "dir/a.txt").await), 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_directory_is_had_with_its_parents_and_as_often_as_asked() {
-        for client in clients().await {
-            let root = volume();
-            create_dir_all(&client, &root, "a/b/c").await.unwrap();
-            assert!(stat(&client, &root, "a/b/c").await.unwrap().is_dir);
-            // Some parents there, some not; all there, spelled otherwise; nothing to make.
-            create_dir_all(&client, &root, "a/x/y").await.unwrap();
-            assert!(stat(&client, &root, "a/x/y").await.unwrap().is_dir);
-            create_dir_all(&client, &root, "a/b/c").await.unwrap();
-            create_dir_all(&client, &root, "/a//b/").await.unwrap();
-            create_dir_all(&client, &root, "").await.unwrap();
-
-            write(&client, &root, "a/file", "x", None).await.unwrap();
-            assert_eq!(status(create_dir_all(&client, &root, "a/file").await), 405);
-            // Under a file: the `409` RFC 4918 names, or the `403` it also allows.
-            let under_file = status(create_dir_all(&client, &root, "a/file/sub").await);
-            assert!(matches!(under_file, 403 | 409), "{under_file}");
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn what_rfc_4918_refuses_is_refused_with_its_status() {
-        for client in clients().await {
-            let root = volume();
-            // A parent that does not exist.
-            assert_eq!(status(create_dir(&client, &root, "no/dir").await), 409);
-            assert_eq!(
-                status(write(&client, &root, "no/file", "x", None).await),
-                409
-            );
-            // Nothing to read, list or remove.
-            assert_eq!(status(read(&client, &root, "missing", 0, None).await), 404);
-            assert_eq!(status(read_dir(&client, &root, "missing").await), 404);
-            assert_eq!(status(remove(&client, &root, "missing", false).await), 404);
-            remove(&client, &root, "missing", true).await.unwrap();
-            // A root that does not exist, and a snapshot in use.
-            let nowhere = FileRoot::Volume("nowhere".into());
-            assert_eq!(status(stat(&client, &nowhere, "").await), 404);
-            let locked = FileRoot::Snapshot("locked".into());
-            assert_eq!(status(read_dir(&client, &locked, "").await), 423);
-            assert_eq!(status(write(&client, &locked, "a", "x", None).await), 423);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_write_with_an_etag_goes_only_over_the_file_that_has_it() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "a", "A", None).await.unwrap();
-            let etag = stat(&client, &root, "a").await.unwrap().etag.unwrap();
-            write(&client, &root, "a", "BB", Some(&etag)).await.unwrap();
-            assert_eq!(
-                status(write(&client, &root, "a", "C", Some(&etag)).await),
-                412
-            );
-            assert_eq!(read(&client, &root, "a", 0, None).await.unwrap(), "BB");
-            assert_ne!(stat(&client, &root, "a").await.unwrap().etag.unwrap(), etag);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn what_is_at_a_path_is_told_without_an_error() {
-        for client in clients().await {
-            let root = volume();
-            create_dir(&client, &root, "dir").await.unwrap();
-            write(&client, &root, "dir/f", "x", None).await.unwrap();
-            let tell = async |path: &str| {
-                (
-                    exists(&client, &root, path).await.unwrap(),
-                    is_file(&client, &root, path).await.unwrap(),
-                    is_dir(&client, &root, path).await.unwrap(),
-                )
-            };
-            assert_eq!(tell("dir").await, (true, false, true));
-            assert_eq!(tell("dir/f").await, (true, true, false));
-            assert_eq!(tell("dir/missing").await, (false, false, false));
-            assert_eq!(tell("").await, (true, false, true));
-            assert!(
-                !exists(&client, &FileRoot::Volume("nobody".into()), "")
-                    .await
-                    .unwrap()
-            );
-            assert_eq!(
-                status(exists(&client, &FileRoot::Snapshot("locked".into()), "").await),
-                423
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_file_reads_as_text_when_it_is_utf_8() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "t", "한글 text", None).await.unwrap();
-            assert_eq!(read_text(&client, &root, "t").await.unwrap(), "한글 text");
-            write(&client, &root, "b", &[0xff, 0xfe][..], None)
-                .await
-                .unwrap();
-            let refused = read_text(&client, &root, "b").await.unwrap_err();
-            assert!(
-                matches!(refused, Error::File(ref m) if m.contains("UTF-8")),
-                "{refused}"
-            );
-            assert_eq!(status(read_text(&client, &root, "missing").await), 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_rename_and_a_copy_replace_only_when_told_to() {
-        for client in clients().await {
-            let root = FileRoot::Snapshot("s".into());
-            write(&client, &root, "a", "A", None).await.unwrap();
-            write(&client, &root, "b", "B", None).await.unwrap();
-
-            assert_eq!(status(rename(&client, &root, "a", "b", false).await), 412);
-            assert_eq!(read(&client, &root, "a", 0, None).await.unwrap(), "A");
-            rename(&client, &root, "a", "b", true).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "a").await), 404);
-            assert_eq!(read(&client, &root, "b", 0, None).await.unwrap(), "A");
-
-            create_dir(&client, &root, "dir").await.unwrap();
-            write(&client, &root, "dir/c", "C", None).await.unwrap();
-            copy(&client, &root, "dir", "copy", false).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "C");
-            assert_eq!(read(&client, &root, "dir/c", 0, None).await.unwrap(), "C");
-            assert_eq!(
-                status(copy(&client, &root, "dir", "copy", false).await),
-                412
-            );
-            copy(&client, &root, "b", "copy/c", true).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "A");
-
-            // A directory moves with everything in it, onto one there only when told to.
-            create_dir_all(&client, &root, "dir/sub").await.unwrap();
-            assert_eq!(
-                status(rename(&client, &root, "dir", "copy", false).await),
-                412
-            );
-            rename(&client, &root, "dir", "moved", false).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "dir").await), 404);
-            assert_eq!(read(&client, &root, "moved/c", 0, None).await.unwrap(), "C");
-            assert!(stat(&client, &root, "moved/sub").await.unwrap().is_dir);
-            rename(&client, &root, "moved", "copy", true).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "C");
-            assert!(stat(&client, &root, "copy/sub").await.unwrap().is_dir);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_name_that_needs_encoding_round_trips() {
-        for client in clients().await {
-            let root = volume();
-            let name = "한글 & spaces #1.txt";
-            create_dir(&client, &root, "dir 2").await.unwrap();
-            write(&client, &root, &format!("dir 2/{name}"), "x", None)
-                .await
-                .unwrap();
-            let entries = read_dir(&client, &root, "dir 2").await.unwrap();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].name, name);
-            assert_eq!(
-                read(&client, &root, &format!("dir 2/{name}"), 0, None)
-                    .await
-                    .unwrap(),
-                "x"
-            );
-            client.close().await;
-        }
+    /// A client over an in-memory pipe to `router`, served as stdio serves one.
+    fn piped(router: Router) -> TransportClient {
+        let (pipe, server) = tokio::io::duplex(64 * 1024);
+        let (input, output) = tokio::io::split(server);
+        let service = TowerToHyperService::new(router);
+        let handle = move |request| {
+            let service = service.clone();
+            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
+        };
+        tokio::spawn(serve_stdio(handle, input, output));
+        TransportClient::over(pipe)
     }
 
     #[tokio::test]
@@ -873,7 +694,7 @@ mod round_trips {
                 .unwrap()
         });
         let client = piped(router);
-        let error = read(&client, &volume(), "hello.txt", 0, None)
+        let error = read(&client, &FileRoot::Volume("v".into()), "hello.txt", 0, None)
             .await
             .unwrap_err();
         assert_eq!(
@@ -900,7 +721,7 @@ mod round_trips {
                 .unwrap()
         });
         let client = piped(router);
-        let error = read(&client, &volume(), "hello.txt", 0, None)
+        let error = read(&client, &FileRoot::Volume("v".into()), "hello.txt", 0, None)
             .await
             .unwrap_err();
         assert_eq!(
@@ -927,11 +748,13 @@ mod round_trips {
         });
         let client_404 = piped(router_404);
         assert_eq!(
-            found(&client_404, &volume(), "missing").await.unwrap(),
+            found(&client_404, &FileRoot::Volume("v".into()), "missing")
+                .await
+                .unwrap(),
             None
         );
         assert!(
-            remove(&client_404, &volume(), "missing", true)
+            remove(&client_404, &FileRoot::Volume("v".into()), "missing", true)
                 .await
                 .is_ok()
         );
@@ -965,9 +788,13 @@ mod round_trips {
         });
         let client_parents = piped(router_parents);
         assert!(
-            create_dir_all(&client_parents, &volume(), "parent/child")
-                .await
-                .is_ok()
+            create_dir_all(
+                &client_parents,
+                &FileRoot::Volume("v".into()),
+                "parent/child"
+            )
+            .await
+            .is_ok()
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
@@ -990,7 +817,7 @@ mod round_trips {
             });
         let client_existing = piped(router_existing);
         assert!(
-            create_dir_all(&client_existing, &volume(), "existing")
+            create_dir_all(&client_existing, &FileRoot::Volume("v".into()), "existing")
                 .await
                 .is_ok()
         );

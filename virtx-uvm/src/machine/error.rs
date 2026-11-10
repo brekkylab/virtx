@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::{fstree, snapshot, volume};
 
 #[derive(Debug, thiserror::Error)]
@@ -18,10 +16,10 @@ pub enum Error {
     Volume(#[from] volume::Error),
 
     /// A volume the guest could not be shown where it was asked: somewhere not absolute, the
-    /// root, or where another volume already is.
-    #[error("volume {} at {at}: {why}", path.display())]
+    /// root, or where another volume already is. Named, not by its path on this host.
+    #[error("volume {volume} at {at}: {why}")]
     MountPoint {
-        path: PathBuf,
+        volume: String,
         at: String,
         why: &'static str,
     },

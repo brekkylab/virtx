@@ -1,0 +1,298 @@
+---
+title: "Working with images"
+description: "Build images from recipes, pull and push them, and manage the server's registry."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Every sandbox in virtx boots from an image, the read-only base its root filesystem starts from.
+This page covers how to get images onto a server and manage them there: building them, tagging them, pulling and pushing them, copying them between servers, and pruning the ones left behind.
+
+## Building images
+
+An image can be built from a recipe in code, or from a Dockerfile.
+
+### From a recipe
+
+A recipe is a base image plus the steps to run on it: `.run(command)`, `.env(key, value)`, and `.workdir(directory)`, chained in the order they run.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+recipe = (
+    Recipe("alpine:latest")
+    .run("apk add --no-cache jq")
+    .env("LANG", "C.UTF-8")
+    .workdir("/work")
+)
+async for entry in client.build_image(recipe, "jq:latest"):
+    # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
+    print(entry.entry)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const recipe = new Recipe('alpine:latest')
+  .run('apk add --no-cache jq')
+  .env('LANG', 'C.UTF-8')
+  .workdir('/work')
+for await (const entry of client.buildImage(recipe, 'jq:latest')) {
+  // { id, log } ..., then { id, end } with a digest or an error
+  console.log(entry)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let recipe = Recipe::new("alpine:latest")
+    .step(Step::run("apk add --no-cache jq"))
+    .step(Step::env("LANG", "C.UTF-8"))
+    .step(Step::workdir("/work"));
+let mut log = client.build_image(recipe, "jq:latest").log();
+while let Some(entry) = log.next().await {
+    // Log(line) ..., then End(ImageJobEnd { digest, error })
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+### From a Dockerfile
+
+A Dockerfile is read as a recipe: one stage, with only `FROM`, `RUN`, `ENV`, and `WORKDIR`. Any other instruction is refused at its line.
+
+```dockerfile
+FROM alpine:latest
+RUN apk add --no-cache jq
+ENV LANG=C.UTF-8
+WORKDIR /work
+```
+
+The `virtx` command, which the Python and Node.js packages install, builds the Dockerfile in a directory, or the one `-f` names; see [CLI](/docs/reference/cli/):
+
+```sh
+virtx build -t jq:latest .
+```
+
+In Rust, `Recipe::from_dockerfile` reads a Dockerfile's text into a recipe for `build_image`:
+
+```rust
+let recipe = Recipe::from_dockerfile(std::fs::read_to_string("Dockerfile")?)?;
+let mut log = client.build_image(recipe, "jq:latest").log();
+```
+
+### After a build
+
+A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
+
+A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
+
+A build, like a pull or a push, is a job. Read its log through `end` and check its `error` before booting from the tag. Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+
+## Tagging
+
+A tag is a `name:tag` that points at an image. `tag_image` points a new tag at an image, named by a tag or by `name@algorithm:hex`, moving the tag if it already points elsewhere. `untag_image` removes a tag and leaves the image. `list_image` lists every tag and the digest it points at. `remove_image` removes the image a reference names and every tag on it in that name, and is refused while a sandbox uses it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await client.tag_image("jq:latest", "jq:1.7")
+for item in await client.list_image():
+    print(item.reference, item.digest)
+await client.untag_image("jq:1.7")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await client.tagImage('jq:latest', 'jq:1.7')
+for (const item of await client.listImage()) console.log(item.reference, item.digest)
+await client.untagImage('jq:1.7')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+client.tag_image("jq:latest", "jq:1.7").await?;
+for item in client.list_image().await? {
+    println!("{} {}", item.reference, item.digest);
+}
+client.untag_image("jq:1.7").await?;
+```
+
+</TabItem>
+</Tabs>
+
+An untagged image stays on the server until it is [pruned](#prune-the-registry).
+
+## Pull and push
+
+You don't need to build an image to start. `pull_image` copies any image from a registry such as Docker Hub or `ghcr.io` to the server, ready to boot as it is. `push_image` copies one back to the registry its name points at, so tag it with the registry's name first.
+
+When the registry wants credentials, pass them as `auth`: a username with a password or an access token, or a bearer token. Without `auth`, both are anonymous. These credentials are for the registry, not for the virtx server.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+import os
+
+from virtx import BasicAuth
+
+async for entry in client.pull_image("python:3.12-slim"):
+    print(entry.entry)
+sandbox = await client.create_sandbox("python:3.12-slim")
+
+await client.tag_image("jq:latest", "ghcr.io/me/jq:1")
+auth = BasicAuth("me", os.environ["GHCR_TOKEN"])
+async for entry in client.push_image("ghcr.io/me/jq:1", auth):
+    print(entry.entry)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for await (const entry of client.pullImage('python:3.12-slim')) console.log(entry)
+const sandbox = await client.createSandbox('python:3.12-slim')
+
+await client.tagImage('jq:latest', 'ghcr.io/me/jq:1')
+const auth = { type: 'basic', username: 'me', password: process.env.GHCR_TOKEN }
+for await (const entry of client.pushImage('ghcr.io/me/jq:1', auth)) console.log(entry)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut log = client.pull_image("python:3.12-slim", None).log();
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry);
+}
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("python:3.12-slim"))
+    .await?;
+
+client.tag_image("jq:latest", "ghcr.io/me/jq:1").await?;
+let auth = RegistryAuth::Basic {
+    username: "me".into(),
+    password: std::env::var("GHCR_TOKEN")?,
+};
+let mut log = client.push_image("ghcr.io/me/jq:1", Some(auth)).log();
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Copy a local image to a remote server
+
+An image built on your machine can go to a server without a registry in between. `download_image` writes it from the local server to an OCI archive, and `upload_image` sends the archive to the remote server and tags it there, uploading only what that server lacks.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import BearerAuth, Client
+
+with Client.spawn() as local:
+    async for _ in local.download_image("jq:latest", "jq.tar"):
+        pass
+
+with Client.connect(
+    "https://virtx.example.com", BearerAuth("<token>"), {"virtx-project": "demo"}
+) as remote:
+    async for _ in remote.upload_image("jq.tar", "jq:latest"):
+        pass
+    sandbox = await remote.create_sandbox("jq:latest")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const local = Client.spawn()
+for await (const _ of local.downloadImage('jq:latest', 'jq.tar')) {}
+await local.close()
+
+const remote = Client.connect(
+  'https://virtx.example.com',
+  { type: 'bearer', token: '<token>' },
+  { 'virtx-project': 'demo' }
+)
+for await (const _ of remote.uploadImage('jq.tar', 'jq:latest')) {}
+const sandbox = await remote.createSandbox('jq:latest')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let local = Client::spawn_virtx([] as [&str; 0])?;
+let mut events = local.download_image("jq:latest", "jq.tar");
+while let Some(event) = events.next().await {
+    event?;
+}
+
+let remote = Client::connect(
+    "https://virtx.example.com",
+    Auth::Bearer { token: "<token>".into() },
+    [("virtx-project", "demo")],
+)?;
+let mut events = remote.upload_image("jq.tar", "jq:latest");
+while let Some(event) = events.next().await {
+    event?;
+}
+let sandbox = remote
+    .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+The archive is a standard OCI image layout, so it can also come from or go to other tools that read one.
+
+## Prune the registry
+
+Rebuilding a tag, like untagging it, leaves the old image on the server. `prune_image` deletes every image no tag points at and no sandbox uses, and the layers only those images held, and answers what it deleted and how many bytes it freed. An image younger than an hour is kept, so one a build or an upload has just written is not deleted before it is tagged.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+pruned = await client.prune_image()
+print(len(pruned.images), "images,", pruned.reclaimed, "bytes")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const pruned = await client.pruneImage()
+console.log(pruned.images.length, 'images,', pruned.reclaimed, 'bytes')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let pruned = client.prune_image().await?;
+println!("{} images, {} bytes", pruned.images.len(), pruned.reclaimed);
+```
+
+</TabItem>
+</Tabs>
+
+From a shell, `virtx image prune` does the same. `virtx-server-tcp` also prunes on its own once an hour; the stdio server prunes only when asked.

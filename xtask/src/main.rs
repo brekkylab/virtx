@@ -51,7 +51,7 @@ components:
                   the archive has no abin, and sessions from the release no /abin";
 
 /// The client's packages, which `check` checks before `init` has run.
-const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs", "virtx-cli"];
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
 /// The package the client library is built from.
 const CLIENT_PACKAGE: &str = "virtx-core";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
@@ -398,7 +398,7 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         &["test", "-p", CLIENT_PACKAGE, "--features", "testing"],
         "the tests of virtx-core",
     )?;
-    cargo_in_root(&["test", "-p", "virtx-rs"], "the tests of virtx-rs")?;
+    cargo_in_root(&["test", "-p", "virtx"], "the tests of virtx")?;
 
     if client_only {
         eprintln!("xtask: the servers left out (--client)");

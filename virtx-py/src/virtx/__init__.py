@@ -121,6 +121,7 @@ __all__ = [
     "VirtxError",
     "Volume",
     "VolumeMountListOutputItem",
+    "ensure_virtx",
     "image_name",
     "library_path",
     "load",

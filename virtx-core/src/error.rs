@@ -13,6 +13,13 @@ pub enum Error {
     /// `401` or a `403` from any endpoint says the headers are not what it wants: a client may
     /// set new ones and send the request again.
     Status(u16, String),
+    /// An HTTP response that is not the protocol's error: its status, what it was rather than
+    /// its body for a person, and its raw body if it had one.
+    Refusal {
+        status: u16,
+        description: String,
+        body: Option<String>,
+    },
     /// The body did not encode, or the answer did not read as the type asked for.
     Json(String),
     /// The server's image registry answered with an error, or with what is not an image.
@@ -40,8 +47,54 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Error::Refusal {
+                status,
+                description,
+                ..
+            } => {
+                let reason = http::StatusCode::from_u16(*status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or("");
+                write!(f, "the server answered {status} {reason}")?;
+                if !description.is_empty() {
+                    write!(f, "; {description}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// The HTTP status the server refused the request with, if it did.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Error::Status(status, _) | Error::Refusal { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_gives_its_status() {
+        assert_eq!(Error::Status(404, "not found".into()).status(), Some(404));
+        assert_eq!(
+            Error::Refusal {
+                status: 503,
+                description: "not a virtx answer".into(),
+                body: None,
+            }
+            .status(),
+            Some(503)
+        );
+        assert_eq!(Error::Transport("connection reset".into()).status(), None);
+        assert_eq!(Error::Json("bad json".into()).status(), None);
+    }
+}

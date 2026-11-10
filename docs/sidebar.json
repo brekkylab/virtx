@@ -1,0 +1,27 @@
+[
+  {
+    "label": "Getting started",
+    "items": [
+      { "label": "Overview", "link": "/" },
+      { "slug": "hello-world" }
+    ]
+  },
+  {
+    "label": "Guides",
+    "items": [
+      { "slug": "guides/images" },
+      { "slug": "guides/setting-sandboxes" },
+      { "slug": "guides/running-commands" },
+      { "slug": "guides/reading-writing-files" },
+      { "slug": "guides/networks-ports" },
+      { "slug": "guides/keeping-snapshots" },
+      { "slug": "guides/mounting-volumes" },
+      { "slug": "guides/using-gpus" },
+      { "slug": "guides/coding-agents" }
+    ]
+  },
+  {
+    "label": "Reference",
+    "items": [{ "slug": "reference/api" }, { "slug": "reference/cli" }]
+  }
+]

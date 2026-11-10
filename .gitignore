@@ -23,9 +23,6 @@ rustc-ice-*.txt
 .omc
 .remember
 
-# Generated docs write-ups (not versioned)
-docs/
-
 # Provider keys for tests and binaries that call a model; credentials never go in the tree.
 .env
 

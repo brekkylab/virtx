@@ -20,7 +20,8 @@ pub enum Source {
     Client,
 }
 
-/// Why a call failed.
+/// Why a call failed. Each variant is one [`Source`]: what made the error says where it
+/// failed by the variant it picks.
 #[cfg(feature = "client")]
 #[derive(Debug)]
 pub enum Error {
@@ -28,9 +29,10 @@ pub enum Error {
     /// connection failed or the session ended.
     Transport(String),
     /// The server refused the request with an HTTP status: the status, and why, for a person,
-    /// as `code: message` where the server answered its error as `PROTOCOL.md`'s Resources do. A
-    /// `401` or a `403` from any endpoint says the headers are not what it wants: a client may
-    /// set new ones and send the request again.
+    /// as `code: message` where the server answered its error as `PROTOCOL.md`'s Resources do,
+    /// and as the codes and messages of its `errors` where its registry refused. A `401` or a
+    /// `403` from any endpoint says the headers are not what it wants: a client may set new ones
+    /// and send the request again.
     Status(u16, String),
     /// An HTTP response that is not the protocol's error: its status, what it was rather than
     /// its body for a person, and its raw body if it had one.
@@ -39,27 +41,21 @@ pub enum Error {
         description: String,
         body: Option<String>,
     },
-    /// The body did not encode, or the answer did not read as the type asked for.
-    Json(String),
-    /// The server's image registry answered with an error, or with what is not an image.
-    Registry(String),
-    /// A file on this machine could not be read or written, or a file is not what it should
-    /// be: one read as text that is not UTF-8.
-    File(String),
     /// A job ended without doing what it was started for: why, for a person, as the job's
     /// `error` says.
     Job(String),
+    /// This side failed: an argument that is not what the call takes, a file on this machine
+    /// that could not be read or written, or an answer it could not read.
+    Client(String),
 }
 
 #[cfg(feature = "client")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Transport(reason) => f.write_str(reason),
-            Error::Json(reason) => f.write_str(reason),
-            Error::Registry(reason) => f.write_str(reason),
-            Error::File(reason) => f.write_str(reason),
-            Error::Job(reason) => f.write_str(reason),
+            Error::Transport(reason) | Error::Job(reason) | Error::Client(reason) => {
+                f.write_str(reason)
+            }
             Error::Status(status, body) => {
                 let reason = http::StatusCode::from_u16(*status)
                     .ok()
@@ -98,10 +94,10 @@ impl Error {
     /// Where it failed.
     pub fn source_kind(&self) -> Source {
         match self {
-            Error::Status(..) | Error::Refusal { .. } | Error::Registry(_) => Source::Server,
+            Error::Status(..) | Error::Refusal { .. } => Source::Server,
             Error::Job(_) => Source::Job,
             Error::Transport(_) => Source::Transport,
-            Error::Json(_) | Error::File(_) => Source::Client,
+            Error::Client(_) => Source::Client,
         }
     }
 
@@ -150,20 +146,19 @@ mod tests {
             Some(503)
         );
         assert_eq!(Error::Transport("connection reset".into()).status(), None);
-        assert_eq!(Error::Json("bad json".into()).status(), None);
+        assert_eq!(Error::Client("bad json".into()).status(), None);
     }
 
     #[test]
     fn an_error_names_where_it_failed() {
         let cases = [
             (Error::Status(409, "in_use: held".into()), Source::Server),
-            (Error::Registry("no such manifest".into()), Source::Server),
             (Error::Job("step 1 exited 3".into()), Source::Job),
             (
                 Error::Transport("connection reset".into()),
                 Source::Transport,
             ),
-            (Error::File("not UTF-8".into()), Source::Client),
+            (Error::Client("not UTF-8".into()), Source::Client),
         ];
         for (error, source) in cases {
             assert_eq!(error.source_kind(), source, "{error:?}");

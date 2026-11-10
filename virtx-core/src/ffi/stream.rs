@@ -16,9 +16,10 @@ use tokio::{
 
 use super::{
     VIRTX_END, VIRTX_ERROR, VIRTX_PENDING,
-    bytes::{Failure, VirtxBytes, encode, failure, write},
+    bytes::{VirtxBytes, encode, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
+use crate::Error;
 
 /// A request that answers item by item: polled for each until it ends, then freed.
 pub struct VirtxStream {
@@ -65,16 +66,21 @@ impl Items {
 
 impl Drop for Items {
     fn drop(&mut self) {
-        self.push(Some(failure("the call ended before it finished")), true);
+        self.push(
+            Some(failure(Error::Transport(
+                "the call ended before it finished".into(),
+            ))),
+            true,
+        );
     }
 }
 
 /// Run `stream` on `runtime`, tracked in `tasks`, and hand C the stream. Its first error is
 /// its last item.
-pub(super) fn start<T: Serialize, E: Into<Failure>>(
+pub(super) fn start<T: Serialize>(
     runtime: &Handle,
     tasks: &Mutex<JoinSet<()>>,
-    stream: impl Stream<Item = Result<T, E>> + Send + 'static,
+    stream: impl Stream<Item = Result<T, Error>> + Send + 'static,
 ) -> *mut VirtxStream {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let items = Items(Arc::clone(&shared));
@@ -200,7 +206,7 @@ mod tests {
     fn pending(
         runtime: &Runtime,
         tasks: &Mutex<JoinSet<()>>,
-    ) -> (*mut VirtxStream, mpsc::UnboundedSender<Result<u32, String>>) {
+    ) -> (*mut VirtxStream, mpsc::UnboundedSender<Result<u32, Error>>) {
         let (send, mut receive) = mpsc::unbounded_channel();
         let items = async_stream::stream! {
             while let Some(item) = receive.recv().await {
@@ -240,7 +246,7 @@ mod tests {
         let tasks = Mutex::new(JoinSet::new());
         let (stream, send) = pending(&runtime, &tasks);
 
-        send.send(Err("no".to_string())).unwrap();
+        send.send(Err(Error::Client("no".into()))).unwrap();
         assert_eq!(
             wait(stream),
             (

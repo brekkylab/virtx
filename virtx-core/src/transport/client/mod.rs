@@ -33,7 +33,7 @@ enum Connection {
 impl Connection {
     /// Send `request`, whose URI is a path under the server's base, such as `/snapshots/`. An
     /// `Err` says why no response came.
-    async fn send(&self, request: http::Request<Body>) -> Result<http::Response<Body>, String> {
+    async fn send(&self, request: http::Request<Body>) -> Result<http::Response<Body>, Error> {
         match self {
             Connection::Tcp(tcp) => tcp.send(request).await,
             Connection::Stdio(stdio) => stdio.send(request).await,
@@ -66,7 +66,7 @@ impl TransportClient {
     /// request. `Authorization` is `auth`'s, over one given as a header. Nothing is sent until
     /// the first request. Refused when a token would go in the clear: over `http` to any host
     /// but this machine.
-    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Self> {
+    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> Result<Self, Error> {
         Tcp::connect(url, auth, headers).map(|tcp| Self::new(Connection::Tcp(tcp)))
     }
 
@@ -74,7 +74,7 @@ impl TransportClient {
     /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
     /// already open sends it with its next connection. Over stdio, where none is sent, nothing
     /// changes. Refused as at `connect`, the auth unchanged.
-    pub fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+    pub fn set_auth(&self, auth: Auth) -> Result<(), Error> {
         match &self.connection {
             Connection::Tcp(tcp) => tcp.set_auth(auth),
             Connection::Stdio(_) => Ok(()),
@@ -106,11 +106,7 @@ impl TransportClient {
         &self,
         request: http::Request<Body>,
     ) -> Result<http::Response<Body>, Error> {
-        let response = self
-            .connection
-            .send(request)
-            .await
-            .map_err(Error::Transport)?;
+        let response = self.connection.send(request).await?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(refused(response).await);

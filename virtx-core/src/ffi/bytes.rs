@@ -21,23 +21,6 @@ pub(crate) struct Failure {
     body: Option<String>,
 }
 
-impl From<String> for Failure {
-    fn from(message: String) -> Failure {
-        Failure {
-            message,
-            source: Source::Client,
-            status: None,
-            body: None,
-        }
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(message: &str) -> Failure {
-        message.to_owned().into()
-    }
-}
-
 impl From<Error> for Failure {
     fn from(error: Error) -> Failure {
         let status = error.status();
@@ -74,28 +57,27 @@ pub unsafe extern "C" fn virtx_bytes_free(bytes: VirtxBytes) {
 }
 
 /// The `len` bytes of JSON at `ptr`, read as a `T`.
-pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Result<T, String> {
+pub(crate) unsafe fn json<T: DeserializeOwned>(ptr: *const u8, len: usize) -> Result<T, Error> {
     if ptr.is_null() {
-        return Err("a JSON argument is null".to_string());
+        return Err(Error::Client("a JSON argument is null".into()));
     }
     let bytes = unsafe { slice::from_raw_parts(ptr, len) };
-    serde_json::from_slice(bytes).map_err(|e| e.to_string())
+    serde_json::from_slice(bytes).map_err(|e| Error::Client(e.to_string()))
 }
 
 /// `output` as a status, and its JSON or its error's.
-pub(crate) fn encode<T: Serialize>(output: Result<T, impl Into<Failure>>) -> (c_int, Vec<u8>) {
-    match output.map_err(Into::into) {
-        Ok(output) => match serde_json::to_vec(&output) {
-            Ok(bytes) => (VIRTX_OK, bytes),
-            Err(e) => failure(e.to_string()),
-        },
-        Err(failed) => failure(failed),
+pub(crate) fn encode<T: Serialize>(output: Result<T, Error>) -> (c_int, Vec<u8>) {
+    match output
+        .and_then(|output| serde_json::to_vec(&output).map_err(|e| Error::Client(e.to_string())))
+    {
+        Ok(bytes) => (VIRTX_OK, bytes),
+        Err(error) => failure(error),
     }
 }
 
-/// `VIRTX_ERROR`, and `failed` as a [`Failure`]'s JSON.
-pub(crate) fn failure(failed: impl Into<Failure>) -> (c_int, Vec<u8>) {
-    let bytes = serde_json::to_vec(&failed.into()).expect("a failure encodes");
+/// `VIRTX_ERROR`, and `error` as a [`Failure`]'s JSON.
+pub(crate) fn failure(error: Error) -> (c_int, Vec<u8>) {
+    let bytes = serde_json::to_vec(&Failure::from(error)).expect("a failure encodes");
     (VIRTX_ERROR, bytes)
 }
 
@@ -118,8 +100,8 @@ mod tests {
 
     use super::*;
 
-    fn written(failed: impl Into<Failure>) -> Value {
-        let (status, bytes) = failure(failed);
+    fn written(error: Error) -> Value {
+        let (status, bytes) = failure(error);
         assert_eq!(status, VIRTX_ERROR);
         serde_json::from_slice(&bytes).unwrap()
     }
@@ -156,7 +138,7 @@ mod tests {
             json!({"message": "step 1 exited 3", "source": "job"})
         );
         assert_eq!(
-            written("not JSON"),
+            written(Error::Client("not JSON".into())),
             json!({"message": "not JSON", "source": "client"})
         );
     }

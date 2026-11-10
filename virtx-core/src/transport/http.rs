@@ -97,14 +97,14 @@ async fn send(
     let body = match body {
         Some(body) => {
             request = request.header(header::CONTENT_TYPE, "application/json");
-            serde_json::to_vec(body).map_err(|e| Error::Json(e.to_string()))?
+            serde_json::to_vec(body).map_err(|e| Error::Client(e.to_string()))?
         }
         None => Vec::new(),
     };
     let request = request
         .header(header::ACCEPT, "application/json")
         .body(full(body))
-        .map_err(|e| Error::Transport(format!("not a request: {e}")))?;
+        .map_err(|e| Error::Client(format!("not a request: {e}")))?;
     let response = client.send(request).await?;
     if !response.status().is_success() {
         return Err(refused(response).await);
@@ -119,7 +119,7 @@ async fn send(
 
 /// `bytes` read as a `T`.
 fn read<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    serde_json::from_slice(bytes).map_err(|e| Error::Json(e.to_string()))
+    serde_json::from_slice(bytes).map_err(|e| Error::Client(e.to_string()))
 }
 
 /// What `GET path` answers.

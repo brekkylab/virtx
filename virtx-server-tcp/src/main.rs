@@ -1,6 +1,7 @@
-//! `virtx-server-tcp` -- a virtx server over HTTP, to the users and projects its config names
-//! (see [`config`]): each request carries a user's token and names a project, and the endpoints
-//! `virtx-core`'s `PROTOCOL.md` names answer it from that project's home.
+//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the
+//! users its OpenID Connect provider does (see [`config`]): each request carries a user's
+//! token and names a project, and the endpoints `virtx-core`'s `PROTOCOL.md` names answer it
+//! from that project's home.
 //!
 //! The images every project shares are at `/images/oci/v2/`, as an OCI registry (see
 //! [`virtx_uvm::RegistryServer`]), to any user.
@@ -9,13 +10,13 @@
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
 //! making the sandbox answers, is all a connection needs, and gives no more than the one port.
 //!
-//! `virtx-server-tcp token` makes a token, and says what the config keeps of it.
 //! `virtx-server-tcp vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod access;
 mod config;
 mod endpoints;
+mod oidc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,9 +58,10 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Make a token for a user, and its `token_sha256` for the config.
-    Token,
 }
+
+/// Where a client asks how to sign in (`PROTOCOL.md`, Authentication).
+const AUTH_PATH: &str = "/.well-known/virtx-auth";
 
 fn main() -> anyhow::Result<()> {
     // Before any runtime: this process is about to become a machine and never come back.
@@ -74,16 +76,6 @@ fn main() -> anyhow::Result<()> {
     }
     match Command::parse() {
         Command::Serve { config } => serve(Config::read(&config)?),
-        Command::Token => {
-            let token = format!(
-                "{}{}",
-                uuid::Uuid::new_v4().simple(),
-                uuid::Uuid::new_v4().simple()
-            );
-            println!("token:        {token}");
-            println!("token_sha256: {}", config::hashed(&token));
-            Ok(())
-        }
     }
 }
 
@@ -110,6 +102,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening at {}", config.listen))?;
     eprintln!("serving at http://{}/", listener.local_addr()?);
+    if config.open {
+        eprintln!("without authentication: every request reaches every project");
+    }
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -133,7 +128,7 @@ fn app(config: &Config, access: Arc<Access>) -> anyhow::Result<axum::Router> {
     let images = move |request: axum::extract::Request| {
         let (registry, access) = (Arc::clone(&registry), Arc::clone(&reading));
         async move {
-            match access.user(request.headers()) {
+            match access.user(request.headers()).await {
                 Ok(_) => registry
                     .handle(request)
                     .await
@@ -145,12 +140,24 @@ fn app(config: &Config, access: Arc<Access>) -> anyhow::Result<axum::Router> {
     };
     let checked = Arc::clone(&access);
     let reaching = Arc::clone(&access);
+    // Where a client signs in for this server's tokens, answered without any: the provider
+    // and the client to sign in as, or nothing where no one signs in.
+    let advertised = match &config.oidc {
+        Some(oidc) => serde_json::json!({
+            "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
+        }),
+        None => serde_json::json!({}),
+    };
+    let advertised = (
+        [(header::CONTENT_TYPE, "application/json")],
+        advertised.to_string(),
+    );
     let router = endpoints::router()
         .layer(axum::middleware::from_fn(
             move |mut request: axum::extract::Request, next: Next| {
-                let home = checked.home(request.headers());
+                let checked = Arc::clone(&checked);
                 async move {
-                    match home {
+                    match checked.home(request.headers()).await {
                         Ok((_, home)) => {
                             request.extensions_mut().insert(home);
                             next.run(request).await
@@ -160,6 +167,7 @@ fn app(config: &Config, access: Arc<Access>) -> anyhow::Result<axum::Router> {
                 }
             },
         ))
+        .route(AUTH_PATH, axum::routing::get(move || async move { advertised }))
         .route("/images/oci/v2", any(images.clone()))
         .route("/images/oci/v2/", any(images.clone()))
         .route("/images/oci/v2/{*rest}", any(images))
@@ -326,6 +334,7 @@ mod tests {
 
     use crate::access::Access;
     use crate::config::Config;
+    use crate::oidc::tests::Provider;
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -337,24 +346,41 @@ mod tests {
         /// Its base URL, ending in `/`.
         url: String,
         home: PathBuf,
+        /// Who signs its users in, kept serving its keys, and a token of alice's, a member of
+        /// `demo`, and of bob's, a member of nothing: empty where no one is signed in.
+        _provider: Option<Provider>,
+        alice: String,
+        bob: String,
     }
 
     impl Served {
         async fn spawn(name: &str) -> Served {
+            let provider = Provider::spawn().await;
+            let who = json!({
+                "oidc": { "issuer": provider.issuer, "client_id": "virtx" },
+                "projects": { "demo": { "members": ["alice@example.com"] } },
+            });
+            let mut served = Served::spawn_with(name, who).await;
+            served.alice = provider.token(json!({ "email": "alice@example.com" }));
+            served.bob = provider.token(json!({ "email": "bob@example.com" }));
+            served._provider = Some(provider);
+            served
+        }
+
+        /// As [`spawn`](Self::spawn), with `who`'s members in the config for who is let in.
+        async fn spawn_with(name: &str, who: Value) -> Served {
             let home =
                 std::env::temp_dir().join(format!("virtx-tcp-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
-            let config = json!({
+            let mut config = json!({
                 "listen": "127.0.0.1:0",
                 "home": home,
                 "origins": ["https://allowed.example"],
-                "users": {
-                    "alice": { "token_sha256": crate::config::hashed("a-token") },
-                    "bob": { "token_sha256": crate::config::hashed("b-token") },
-                },
-                "projects": { "demo": { "members": ["alice"] } },
             });
+            for (name, value) in who.as_object().unwrap() {
+                config[name] = value.clone();
+            }
             let path = home.join("config.json");
             std::fs::write(&path, config.to_string()).unwrap();
             let config = Config::read(&path).unwrap();
@@ -364,7 +390,14 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener, router).await });
-            Served { task, url, home }
+            Served {
+                task,
+                url,
+                home,
+                _provider: None,
+                alice: String::new(),
+                bob: String::new(),
+            }
         }
 
         /// `method` sent to `path` as `token` in `project`: the HTTP status, and the body.
@@ -457,12 +490,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_says_where_to_sign_in_and_without_authentication_takes_any_request() {
+        let asked = async |served: &Served| {
+            let (status, body) = served
+                .send("GET", ".well-known/virtx-auth", None, None, "")
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            serde_json::from_str::<Value>(&body).unwrap()
+        };
+
+        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
+        let signed_in = Served::spawn_with("advertised", json!({ "oidc": oidc })).await;
+        assert_eq!(asked(&signed_in).await, json!({ "oidc": oidc }));
+        let list = signed_in.send("GET", "volumes/", None, None, "").await;
+        assert_eq!(list.0, StatusCode::UNAUTHORIZED);
+
+        let open = Served::spawn_with("open", json!({})).await;
+        assert_eq!(asked(&open).await, json!({}));
+        let list = open.send("GET", "volumes/", None, None, "").await;
+        assert_eq!((list.0, list.1.as_str()), (StatusCode::OK, "[]"));
+    }
+
+    #[tokio::test]
     async fn a_request_reaches_only_a_member_s_project() {
         let served = Served::spawn("access").await;
         let list =
             async |token, project| served.send("GET", "snapshots/", token, project, "").await;
 
-        let (status, body) = list(Some("a-token"), Some("demo")).await;
+        let (status, body) = list(Some(served.alice.as_str()), Some("demo")).await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
 
         let (status, body) = list(None, Some("demo")).await;
@@ -473,20 +528,23 @@ mod tests {
             list(Some("x"), Some("demo")).await.0,
             StatusCode::UNAUTHORIZED
         );
-        assert_eq!(list(Some("a-token"), None).await.0, StatusCode::BAD_REQUEST);
         assert_eq!(
-            list(Some("b-token"), Some("demo")).await.0,
+            list(Some(served.alice.as_str()), None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            list(Some(served.bob.as_str()), Some("demo")).await.0,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            list(Some("a-token"), Some("other")).await.0,
+            list(Some(served.alice.as_str()), Some("other")).await.0,
             StatusCode::FORBIDDEN
         );
 
         let from = async |origin| {
             reqwest::Client::new()
                 .get(format!("{}snapshots/", served.url))
-                .bearer_auth("a-token")
+                .bearer_auth(&served.alice)
                 .header("virtx-project", "demo")
                 .header("origin", origin)
                 .send()
@@ -547,13 +605,13 @@ mod tests {
 
         // The request it clears carries the origin's answer too.
         served
-            .connect("a-token")
+            .connect(&served.alice)
             .create_volume(Some("data"))
             .await
             .unwrap();
         let listed = reqwest::Client::new()
             .request(Method::from_bytes(b"PROPFIND").unwrap(), &files)
-            .bearer_auth("a-token")
+            .bearer_auth(&served.alice)
             .header("virtx-project", "demo")
             .header("origin", "https://allowed.example")
             .header("depth", "1")
@@ -579,7 +637,7 @@ mod tests {
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
         let root = client
             .get(format!("{base}/"))
-            .bearer_auth("b-token")
+            .bearer_auth(&served.bob)
             .send()
             .await
             .unwrap();
@@ -587,7 +645,7 @@ mod tests {
 
         let manifest = client
             .get(format!("{base}/alpine/manifests/3.21"))
-            .bearer_auth("b-token")
+            .bearer_auth(&served.bob)
             .send()
             .await
             .unwrap();
@@ -600,7 +658,7 @@ mod tests {
                 "{base}/alpine/blobs/{}",
                 layer["digest"].as_str().unwrap()
             ))
-            .bearer_auth("b-token")
+            .bearer_auth(&served.bob)
             .send()
             .await
             .unwrap();
@@ -615,7 +673,7 @@ mod tests {
     async fn the_files_endpoints_take_the_same_token_and_project() {
         let served = Served::spawn("files").await;
         served
-            .connect("a-token")
+            .connect(&served.alice)
             .create_volume(Some("data"))
             .await
             .unwrap();
@@ -629,26 +687,39 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            send("PUT", put, Some("b-token"), "hello").await.0,
+            send("PUT", put, Some(served.bob.as_str()), "hello").await.0,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            send("PUT", put, Some("a-token"), "hello").await.0,
+            send("PUT", put, Some(served.alice.as_str()), "hello")
+                .await
+                .0,
             StatusCode::CREATED
         );
         assert_eq!(
             std::fs::read(served.home.join("project/demo/volume/data/files/a.txt")).unwrap(),
             b"hello"
         );
-        let (status, body) = send("GET", put, Some("a-token"), "").await;
+        let (status, body) = send("GET", put, Some(served.alice.as_str()), "").await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "hello"));
-        let (status, body) = send("PROPFIND", "volumes/data/files/", Some("a-token"), "").await;
+        let (status, body) = send(
+            "PROPFIND",
+            "volumes/data/files/",
+            Some(served.alice.as_str()),
+            "",
+        )
+        .await;
         assert_eq!(status, StatusCode::MULTI_STATUS);
         assert!(body.contains("a.txt"), "{body}");
         assert_eq!(
-            send("GET", "volumes/nobody/files/a.txt", Some("a-token"), "")
-                .await
-                .0,
+            send(
+                "GET",
+                "volumes/nobody/files/a.txt",
+                Some(served.alice.as_str()),
+                ""
+            )
+            .await
+            .0,
             StatusCode::NOT_FOUND
         );
     }
@@ -658,7 +729,7 @@ mod tests {
     #[tokio::test]
     async fn the_client_reaches_a_project_with_the_headers_given_at_connect() {
         let served = Served::spawn("client").await;
-        let client = served.connect("a-token");
+        let client = served.connect(&served.alice);
         client.create_volume(Some("data")).await.unwrap();
         client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         let volume = FileRoot::Volume("data".into());
@@ -783,7 +854,7 @@ mod tests {
         assert_eq!(status(client.read_dir(&nobody, "").await), 404);
 
         // Not a member of the project: every request is refused, the resources and the files alike.
-        let bob = served.connect("b-token");
+        let bob = served.connect(&served.bob);
         assert_eq!(status(bob.create_volume(None::<String>).await), 403);
         assert_eq!(status(bob.stat_file(&volume, "c.txt").await), 403);
     }
@@ -791,7 +862,7 @@ mod tests {
     #[tokio::test]
     async fn a_project_keeps_its_snapshots_and_volumes() {
         let served = Served::spawn("project").await;
-        let client = served.connect("a-token");
+        let client = served.connect(&served.alice);
         let created = client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         assert_eq!(created.name, "work");
         assert!(
@@ -843,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn of_two_writes_over_one_etag_one_lands() {
         let served = Served::spawn("etag").await;
-        let (a, b) = (served.connect("a-token"), served.connect("a-token"));
+        let (a, b) = (served.connect(&served.alice), served.connect(&served.alice));
         a.create_volume(Some("data")).await.unwrap();
         let root = FileRoot::Volume("data".into());
         let (from_a, from_b) = (vec![b'a'; 1 << 20], vec![b'b'; 1 << 20]);

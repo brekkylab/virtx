@@ -128,7 +128,9 @@ export type RegistryAuth =
   | { type: 'bearer'; token: string }
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
-export type Auth = { type: 'bearer'; token: string }
+export type Auth =
+  | { type: 'bearer'; token: string }
+  | { type: 'command'; program: string; args?: string[] }
 
 export interface ImageListOutputItem {
   /** The tag, as `name:tag`. */

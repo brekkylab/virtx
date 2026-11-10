@@ -161,21 +161,12 @@ Your machine must meet the [requirements](https://github.com/brekkylab/virtx#req
 Run `virtx-server-tcp` on the machine that should run the VMs.
 It keeps running, serves many users, and can sit on another machine.
 
-On the machine that should run the VMs, make a token.
-This prints the token and its `token_sha256`:
-
-```sh
-virtx-server-tcp token
-```
-
-Write a `server.json` that lets that token's user into a project:
+On the machine that should run the VMs, write a `server.json`:
 
 ```json
 {
   "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "home": "/var/lib/virtx"
 }
 ```
 
@@ -185,16 +176,72 @@ Start the server:
 virtx-server-tcp serve --config server.json
 ```
 
-In the program, connect with the token and the project in place of `Client.spawn()`:
+In the program, connect to it in place of `Client.spawn()`:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-from virtx import BearerAuth
+with Client.connect("http://127.0.0.1:8470") as client:
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.connect('http://127.0.0.1:8470')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::Auth;
+
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::None,
+    [("virtx-project", "default")],
+)?;
+```
+
+</TabItem>
+</Tabs>
+
+A server listening on the loopback takes no credentials, and every request reaches its one project, `default`.
+
+#### For other machines
+
+To serve other machines, name your OpenID Connect provider and who may reach each project:
+
+```json
+{
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+  "projects": { "demo": { "members": ["alice@example.com"] } }
+}
+```
+
+A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
+Sign in once with `virtx`, built from `virtx-cli/`:
+
+```sh
+virtx login https://virtx.example
+```
+
+Then connect with the token it prints and the project:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import CommandAuth
 
 with Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
+    {"virtx-project": "demo"},
 ) as client:
 ```
 
@@ -203,8 +250,8 @@ with Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] },
   { 'virtx-project': 'demo' }
 )
 ```
@@ -216,8 +263,8 @@ const client = Client.connect(
 use virtx::Auth;
 
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
     [("virtx-project", "demo")],
 )?;
 ```

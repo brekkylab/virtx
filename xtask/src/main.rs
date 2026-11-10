@@ -964,11 +964,66 @@ fn cache_root() -> std::path::PathBuf {
         .join("virtx");
 }
 
-/// The token the fixture's server over HTTP lets a request through with, made up and no one's,
-/// and its SHA-256, which its config holds.
-const FIXTURE_TOKEN: &str = "test-token";
-const FIXTURE_TOKEN_SHA256: &str =
-    "4c5dc9b7708905f77f5e5d16316b5dfb425e68cb326dcd55a860e90a7707031e";
+/// The user the fixture's server over HTTP lets through, and the client its token is for.
+const FIXTURE_USER: &str = "test";
+const FIXTURE_CLIENT: &str = "virtx-test";
+/// The key the fixture's provider signs with, made up and no one's.
+const FIXTURE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2VGrzT1wOXvQVtaT\nL+shE0n9BR9/rn3Qn7RrXiJOcHKhRANCAAQCHMHdyNbFbHDPyRIdE7zhyTcL7XuZ\nlymVLSds5EVclDhHznH6nXaR6DUzWH+gad5rKfYNLAnnobLUNbrydOJS\n-----END PRIVATE KEY-----";
+
+/// An OpenID Connect provider for the fixture's server, on the loopback until this process
+/// ends: its issuer, and an ID token of [`FIXTURE_USER`]'s it signed, good for a day. It
+/// serves its discovery document and its key, which is all a server asks of one.
+fn fixture_provider() -> anyhow::Result<(String, String)> {
+    use jsonwebtoken::jwk::{Jwk, JwkSet};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header};
+    use std::io::{BufRead as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("serving a provider")?;
+    let issuer = format!("http://{}", listener.local_addr()?);
+    let key = EncodingKey::from_ec_pem(FIXTURE_KEY.as_bytes())?;
+    let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256)?;
+    jwk.common.key_id = Some("fixture".into());
+    let keys = serde_json::to_string(&JwkSet { keys: vec![jwk] })?;
+    let discovery =
+        serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/keys") }).to_string();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let claims = serde_json::json!({
+        "iss": issuer,
+        "aud": FIXTURE_CLIENT,
+        "sub": FIXTURE_USER,
+        "iat": now,
+        "exp": now + 24 * 60 * 60,
+    });
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some("fixture".into());
+    let token = jsonwebtoken::encode(&header, &claims, &key)?;
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut lines = std::io::BufReader::new(&stream).lines();
+            let asked = lines.next().and_then(Result::ok).unwrap_or_default();
+            // The rest of the request, read so that closing does not reset the connection.
+            lines
+                .map_while(Result::ok)
+                .take_while(|line| !line.is_empty())
+                .for_each(drop);
+            let body = match asked.split(' ').nth(1) {
+                Some("/keys") => &keys,
+                _ => &discovery,
+            };
+            let _ = write!(
+                &stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    Ok((issuer, token))
+}
 /// The one project the fixture's server over HTTP lets a request reach.
 const FIXTURE_PROJECT: &str = "test";
 
@@ -1111,6 +1166,8 @@ struct Fixture {
     process: std::process::Child,
     stdio: PathBuf,
     url: String,
+    /// An ID token its provider signed, which the server over HTTP lets through.
+    token: String,
     scratch: PathBuf,
 }
 
@@ -1141,10 +1198,11 @@ impl Fixture {
         }
         let home = scratch.join("home");
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+        let (issuer, token) = fixture_provider()?;
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
-            "users": { "test": { "token_sha256": FIXTURE_TOKEN_SHA256 } },
-            "projects": { FIXTURE_PROJECT: { "members": ["test"] } },
+            "oidc": { "issuer": issuer, "client_id": FIXTURE_CLIENT, "username_claim": "sub" },
+            "projects": { FIXTURE_PROJECT: { "members": [FIXTURE_USER] } },
         });
         let config_path = scratch.join("config.json");
         fs::write(&config_path, config.to_string())
@@ -1167,6 +1225,7 @@ impl Fixture {
             process,
             stdio: built("virtx-stdio"),
             url: String::new(),
+            token,
             scratch,
         };
         let line = lines
@@ -1193,7 +1252,7 @@ impl Fixture {
             ("VIRTX_HOME", self.scratch.join("home").into()),
             ("VIRTX_TEST_STDIO", self.stdio.clone().into()),
             ("VIRTX_TEST_URL", self.url.clone().into()),
-            ("VIRTX_TEST_TOKEN", FIXTURE_TOKEN.into()),
+            ("VIRTX_TEST_TOKEN", self.token.clone().into()),
             ("VIRTX_TEST_PROJECT", FIXTURE_PROJECT.into()),
         ]
     }

@@ -1,10 +1,12 @@
-# A pull request is built as a release would be, and tested; nothing is published.
+# A pull request is built as a release would be, and tested; nothing is published. The docs
+# are `docs`'s.
 name: ci
 
 on:
   pull_request:
     paths-ignore:
       - "**/*.md"
+      - docs/**
   workflow_dispatch:
 
 # A newer push to the pull request makes an older run moot.

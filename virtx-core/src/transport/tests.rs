@@ -347,3 +347,57 @@ async fn a_job_s_log_whose_connection_breaks_is_read_on_after_its_last_entry() {
         [Some("exec".to_owned()), Some("1".to_owned())]
     );
 }
+
+/// A `429` for a quota the caller is past -- sandboxes open -- is answered at once, as waiting
+/// frees none of it; the rate of requests, which frees up by itself, is waited out and asked
+/// again.
+#[tokio::test]
+async fn a_quota_past_is_answered_at_once_and_the_rate_of_requests_waited_out() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+    let asked = Arc::new(AtomicU32::new(0));
+    let router = Router::new()
+        .route(
+            "/quota",
+            axum::routing::get(async || {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(::http::header::RETRY_AFTER, "30")],
+                    r#"{"error":{"code":"quota","message":"the organization has 3 sandboxes open","reason":"sandboxes"}}"#,
+                )
+            }),
+        )
+        .route(
+            "/rate",
+            axum::routing::get(async |State(asked): State<Arc<AtomicU32>>| {
+                if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(::http::header::RETRY_AFTER, "1")],
+                        r#"{"error":{"code":"quota","message":"past the rate","reason":"requests"}}"#,
+                    )
+                        .into_response();
+                }
+                "\"answered\"".into_response()
+            }),
+        )
+        .with_state(asked.clone());
+    let url = serve(router).await;
+    let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+
+    let error = http::get::<String>(&client, "/quota").await.unwrap_err();
+    assert_eq!(error.code(), Some("quota"), "{error:?}");
+    assert!(matches!(error, Error::Status(429, _)), "{error:?}");
+
+    assert_eq!(
+        http::get::<String>(&client, "/rate").await.unwrap(),
+        "answered"
+    );
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        2,
+        "asked again once the rate allowed"
+    );
+}

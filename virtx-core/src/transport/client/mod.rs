@@ -40,6 +40,24 @@ fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
     ))
 }
 
+/// `response`, a `429`, and whether it is a quota's past which the caller is, as virtx cloud
+/// answers one: `{"error": {"code": "quota", "reason"}}`, its reason other than the rate of
+/// requests. Its body read, and given back whole.
+async fn past_a_quota(response: http::Response<Body>) -> (http::Response<Body>, bool) {
+    if response.status() != StatusCode::TOO_MANY_REQUESTS {
+        return (response, false);
+    }
+    let (parts, body) = response.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|b| b.to_bytes())
+        .unwrap_or_default();
+    let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let quota = said["error"]["code"] == "quota" && said["error"]["reason"] != "requests";
+    (http::Response::from_parts(parts, full(bytes)), quota)
+}
+
 /// How a client reaches the server's endpoints.
 enum Connection {
     Tcp(Tcp),
@@ -159,6 +177,13 @@ impl TransportClient {
             let status = response.status();
             if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE
             {
+                return Ok(response);
+            }
+            // A quota past which the caller is -- sandboxes open, storage -- frees up only as it
+            // closes or deletes something, which waiting here does not do: answered at once. The
+            // rate of requests, which frees up by itself, is waited out.
+            let (response, quota) = past_a_quota(response).await;
+            if quota {
                 return Ok(response);
             }
             let wait = retry_after(&response).unwrap_or(backoff).min(PATIENCE);

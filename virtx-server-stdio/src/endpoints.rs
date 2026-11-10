@@ -917,7 +917,9 @@ impl From<VolumeError> for Refused {
             | VolumeError::Refused(_)
             | VolumeError::Source(_) => invalid(e),
             VolumeError::Unknown(_) | VolumeError::NoMount { .. } => not_found(e),
-            VolumeError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            VolumeError::AlreadyExists(_) | VolumeError::MountExists(_) => {
+                refused(StatusCode::CONFLICT, "exists", e)
+            }
             VolumeError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
             VolumeError::Io { source, .. } => io_refused(source, &e),
             VolumeError::Origins(..) => internal(e),

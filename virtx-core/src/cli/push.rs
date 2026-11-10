@@ -27,15 +27,3 @@ pub(crate) async fn push(client: &Client, args: PushArgs) -> anyhow::Result<()> 
     println!("{reference} {digest}");
     Ok(())
 }
-
-#[cfg(all(test, feature = "testing"))]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_push_ends_with_the_digest_it_pushed() {
-        let client = job::tests::client().await;
-        let job = client.push_image("jq:latest", None).await.unwrap();
-        assert_eq!(job::follow(&client, &job, true).await.unwrap(), "sha256:0");
-    }
-}

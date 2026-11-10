@@ -34,10 +34,11 @@ serde_json = "1"
 futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
-# The client end, to call the built binary as a client would.
-virtx-core = { workspace = true, features = ["client", "server"] }
+# The client end, to call the app as a client would, over an in-memory pipe, and the built
+# binary, spawned.
+virtx-core = { workspace = true, features = ["client", "server", "test-util"] }
 # An image's config, filed by hand.
 serde_json = "1"
-# A job's log, read entry by entry.
+# Writes to one file at once, and a job's log read entry by entry.
 futures-util = { version = "0.3", default-features = false }
 tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread"] }

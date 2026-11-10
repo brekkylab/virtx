@@ -11,7 +11,7 @@ use percent_encoding::percent_decode_str;
 use super::{DirEntry, FileRoot, Metadata};
 use crate::{
     Error,
-    transport::{Body, TransportClient, full, segment, segments},
+    transport::{Body, TransportClient, full, http::refused, segment, segments},
 };
 
 /// What a `PROPFIND` asks for: the properties `PROTOCOL.md` says every server answers.
@@ -52,7 +52,7 @@ async fn found(
 ) -> Result<Option<Metadata>, Error> {
     match stat(client, root, path).await {
         Ok(metadata) => Ok(Some(metadata)),
-        Err(Error::Status(404, _)) => Ok(None),
+        Err(e) if e.status() == Some(404) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -199,14 +199,15 @@ pub(crate) async fn create_dir_all(
         return Ok(());
     }
     match create_dir(client, root, path).await {
-        Err(Error::Status(409, _)) => {}
+        Err(e) if e.status() == Some(409) => {}
         other => return created_or_there(client, root, path, other).await,
     }
     // A parent is missing: from the top down, whichever are not there yet. A parent that is a
     // file is not checked: the `MKCOL` under it is refused anyway.
     for end in 1..segments.len() {
         match create_dir(client, root, &segments[..end].join("/")).await {
-            Ok(()) | Err(Error::Status(405, _)) => {}
+            Ok(()) => {}
+            Err(e) if e.status() == Some(405) => {}
             Err(error) => return Err(error),
         }
     }
@@ -222,9 +223,12 @@ async fn created_or_there(
     path: &str,
     created: Result<(), Error>,
 ) -> Result<(), Error> {
-    let Err(Error::Status(405, _)) = &created else {
+    let Err(e) = &created else {
         return created;
     };
+    if e.status() != Some(405) {
+        return created;
+    }
     if stat(client, root, path).await?.is_dir {
         Ok(())
     } else {
@@ -242,7 +246,7 @@ pub(crate) async fn remove(
 ) -> Result<(), Error> {
     let request = http::Request::delete(uri(root, path)).body(full(Bytes::new()));
     match send(client, request).await {
-        Err(Error::Status(404, _)) if missing_ok => Ok(()),
+        Err(e) if missing_ok && e.status() == Some(404) => Ok(()),
         other => other.map(drop),
     }
 }
@@ -290,7 +294,8 @@ async fn relocate(
     send(client, request).await.map(drop)
 }
 
-/// Send `request`, and read its body. A status outside `2xx` is an [`Error::Status`].
+/// Send `request`, and read its body. A status outside `2xx` is an [`Error::Status`] or
+/// [`Error::Refusal`].
 async fn send(
     client: &TransportClient,
     request: http::Result<http::Request<Body>>,
@@ -300,6 +305,27 @@ async fn send(
     // report what failed in a directory, per path.
     let per_path = matches!(request.method().as_str(), "DELETE" | "COPY" | "MOVE");
     let response = client.send(request).await?;
+    if !response.status().is_success() {
+        let is_plain_text = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(|media_type| media_type.trim().eq_ignore_ascii_case("text/plain"))
+            .unwrap_or(false);
+        if is_plain_text {
+            let status = response.status().as_u16();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| Error::Transport(format!("reading the response: {e}")))?
+                .to_bytes();
+            let message = String::from_utf8_lossy(&body).trim().to_owned();
+            return Err(Error::Status(status, message));
+        }
+        return Err(refused(response).await);
+    }
     let status = response.status();
     let body = response
         .into_body()
@@ -307,24 +333,6 @@ async fn send(
         .await
         .map_err(|e| Error::Transport(format!("reading the response: {e}")))?
         .to_bytes();
-    if !status.is_success() {
-        // The protocol's error where the server answered one (`409 stopped` for a stopped
-        // sandbox's files), as every other endpoint's is read: `code: message`.
-        #[derive(serde::Deserialize)]
-        struct Refused {
-            error: Said,
-        }
-        #[derive(serde::Deserialize)]
-        struct Said {
-            code: String,
-            message: String,
-        }
-        let said = match serde_json::from_slice::<Refused>(&body) {
-            Ok(Refused { error }) => format!("{}: {}", error.code, error.message),
-            Err(_) => String::from_utf8_lossy(&body).trim().to_owned(),
-        };
-        return Err(Error::Status(status.as_u16(), said));
-    }
     if status == StatusCode::MULTI_STATUS && per_path {
         // A `207` whose paths all succeeded is a success.
         let xml = std::str::from_utf8(&body)
@@ -578,266 +586,259 @@ mod tests {
         assert!(multistatus("<D:prop xmlns:D=\"DAV:\"/>").is_err());
         assert!(multistatus("not xml").is_err());
     }
+
+    #[test]
+    fn an_etag_is_quoted_as_a_header_spells_it() {
+        assert_eq!(quoted("abc"), "\"abc\"");
+        assert_eq!(quoted("\"abc\""), "\"abc\"");
+        assert_eq!(quoted("W/\"abc\""), "W/\"abc\"");
+    }
+
+    #[test]
+    fn a_directory_s_two_spellings_are_one() {
+        assert_eq!(normalize("/volumes/v/dir/"), "/volumes/v/dir");
+        assert_eq!(normalize("/volumes/v/dir"), "/volumes/v/dir");
+        assert_eq!(normalize("/"), "");
+    }
+
+    #[test]
+    fn an_href_that_is_neither_a_path_nor_a_url_is_decoded_as_it_is() {
+        assert_eq!(href_path("a%20b"), "a b");
+    }
+
+    #[test]
+    fn a_multistatus_reads_an_etag_and_leaves_what_is_not_dav_s() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:X="urn:other">
+  <D:response>
+    <D:href>/volumes/v/a</D:href>
+    <D:propstat>
+      <D:prop><D:getetag>abc</D:getetag><X:getcontentlength>7</X:getcontentlength><X:resourcetype><D:collection/></X:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/volumes/v/b</D:href>
+    <D:propstat>
+      <D:prop><D:getetag></D:getetag><D:getlastmodified>not a date</D:getlastmodified><D:getcontentlength>many</D:getcontentlength></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let none = Metadata {
+            is_dir: false,
+            size: 0,
+            modified: None,
+            etag: None,
+        };
+        assert_eq!(
+            multistatus(xml).unwrap(),
+            [
+                (
+                    "/volumes/v/a".to_owned(),
+                    Metadata {
+                        etag: Some("\"abc\"".into()),
+                        ..none.clone()
+                    }
+                ),
+                ("/volumes/v/b".to_owned(), none),
+            ]
+        );
+        let no_href = r#"<D:multistatus xmlns:D="DAV:"><D:response/></D:multistatus>"#;
+        assert!(multistatus(no_href).is_err());
+    }
+
+    #[test]
+    fn a_failure_with_no_href_is_one_at_no_path() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:status>HTTP/1.1 423 Locked</D:status></D:response></D:multistatus>"#;
+        assert_eq!(failure_in(xml), Some((423, String::new())));
+    }
 }
 
-#[cfg(all(test, feature = "testing"))]
-mod round_trips {
+/// What a server answers that is not the protocol's error, read over a pipe to a router.
+#[cfg(all(test, feature = "server"))]
+mod refusals {
+    use std::sync::Arc;
+
+    use axum::Router;
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
+
     use super::*;
-    use crate::transport::tests::clients;
+    use crate::transport::serve_stdio;
 
-    fn volume() -> FileRoot {
-        FileRoot::Volume("v".into())
-    }
-
-    /// The status `result` was refused with.
-    fn status<T: std::fmt::Debug>(result: Result<T, Error>) -> u16 {
-        match result {
-            Err(Error::Status(status, _)) => status,
-            other => panic!("not a status: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_file_written_is_read_back_whole_or_in_part() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "hello.txt", "hello world", None)
-                .await
-                .unwrap();
-            let metadata = stat(&client, &root, "hello.txt").await.unwrap();
-            assert!(!metadata.is_dir);
-            assert_eq!(metadata.size, 11);
-            assert!(metadata.modified.is_some());
-
-            assert_eq!(
-                read(&client, &root, "hello.txt", 0, None).await.unwrap(),
-                "hello world"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 6, None).await.unwrap(),
-                "world"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 2, Some(3)).await.unwrap(),
-                "llo"
-            );
-            assert_eq!(
-                read(&client, &root, "hello.txt", 2, Some(0)).await.unwrap(),
-                ""
-            );
-
-            write(&client, &root, "hello.txt", "bye", None)
-                .await
-                .unwrap();
-            assert_eq!(
-                read(&client, &root, "hello.txt", 0, None).await.unwrap(),
-                "bye"
-            );
-            client.close().await;
-        }
+    /// A client over an in-memory pipe to `router`, served as stdio serves one.
+    fn piped(router: Router) -> TransportClient {
+        let (pipe, server) = tokio::io::duplex(64 * 1024);
+        let (input, output) = tokio::io::split(server);
+        let service = TowerToHyperService::new(router);
+        let handle = move |request| {
+            let service = service.clone();
+            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
+        };
+        tokio::spawn(serve_stdio(handle, input, output));
+        TransportClient::over(pipe)
     }
 
     #[tokio::test]
-    async fn a_directory_lists_what_is_in_it_and_goes_with_it() {
-        for client in clients().await {
-            let root = volume();
-            create_dir(&client, &root, "dir").await.unwrap();
-            create_dir(&client, &root, "dir/sub").await.unwrap();
-            write(&client, &root, "dir/a.txt", "aaaa", None)
-                .await
-                .unwrap();
-            assert!(stat(&client, &root, "dir").await.unwrap().is_dir);
-
-            let mut entries = read_dir(&client, &root, "dir").await.unwrap();
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
-            assert_eq!(names, ["a.txt", "sub"]);
-            assert!(!entries[0].metadata.is_dir);
-            assert_eq!(entries[0].metadata.size, 4);
-            assert!(entries[1].metadata.is_dir);
-
-            let names: Vec<_> = read_dir(&client, &root, "")
-                .await
+    async fn a_non_json_refusal_says_what_it_was_without_quoting_it() {
+        let router = Router::new().fallback(|| async {
+            http::Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(full(Bytes::from(
+                    "<html><title>503 Service Unavailable</title></html>",
+                )))
                 .unwrap()
-                .into_iter()
-                .map(|entry| entry.name)
-                .collect();
-            assert!(names.contains(&"dir".to_owned()), "{names:?}");
-
-            remove(&client, &root, "dir", false).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "dir").await), 404);
-            assert_eq!(status(stat(&client, &root, "dir/a.txt").await), 404);
-            client.close().await;
-        }
+        });
+        let client = piped(router);
+        let error = read(&client, &FileRoot::Volume("v".into()), "hello.txt", 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes): the service is unreachable or restarting"
+        );
+        let Error::Refusal { status, body, .. } = &error else {
+            panic!("expected Error::Refusal, got {error:?}");
+        };
+        assert_eq!(*status, 503);
+        assert_eq!(
+            body.as_deref(),
+            Some("<html><title>503 Service Unavailable</title></html>")
+        );
     }
 
     #[tokio::test]
-    async fn a_directory_is_had_with_its_parents_and_as_often_as_asked() {
-        for client in clients().await {
-            let root = volume();
-            create_dir_all(&client, &root, "a/b/c").await.unwrap();
-            assert!(stat(&client, &root, "a/b/c").await.unwrap().is_dir);
-            // Some parents there, some not; all there, spelled otherwise; nothing to make.
-            create_dir_all(&client, &root, "a/x/y").await.unwrap();
-            assert!(stat(&client, &root, "a/x/y").await.unwrap().is_dir);
-            create_dir_all(&client, &root, "a/b/c").await.unwrap();
-            create_dir_all(&client, &root, "/a//b/").await.unwrap();
-            create_dir_all(&client, &root, "").await.unwrap();
-
-            write(&client, &root, "a/file", "x", None).await.unwrap();
-            assert_eq!(status(create_dir_all(&client, &root, "a/file").await), 405);
-            // Under a file: the `409` RFC 4918 names, or the `403` it also allows.
-            let under_file = status(create_dir_all(&client, &root, "a/file/sub").await);
-            assert!(matches!(under_file, 403 | 409), "{under_file}");
-            client.close().await;
-        }
+    async fn a_refusal_in_the_protocol_s_shape_says_its_code() {
+        let router = Router::new().fallback(|| async {
+            http::Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(full(Bytes::from(
+                    r#"{"error": {"code": "stopped", "message": "the sandbox is stopped"}}"#,
+                )))
+                .unwrap()
+        });
+        let client = piped(router);
+        let error = read(&client, &FileRoot::Sandbox("s1".into()), "a.txt", 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some("stopped"));
+        assert_eq!(
+            error.to_string(),
+            "the server answered 409 Conflict: stopped: the sandbox is stopped"
+        );
     }
 
     #[tokio::test]
-    async fn what_rfc_4918_refuses_is_refused_with_its_status() {
-        for client in clients().await {
-            let root = volume();
-            // A parent that does not exist.
-            assert_eq!(status(create_dir(&client, &root, "no/dir").await), 409);
-            assert_eq!(
-                status(write(&client, &root, "no/file", "x", None).await),
-                409
-            );
-            // Nothing to read, list or remove.
-            assert_eq!(status(read(&client, &root, "missing", 0, None).await), 404);
-            assert_eq!(status(read_dir(&client, &root, "missing").await), 404);
-            assert_eq!(status(remove(&client, &root, "missing", false).await), 404);
-            remove(&client, &root, "missing", true).await.unwrap();
-            // A root that does not exist.
-            let nowhere = FileRoot::Volume("nowhere".into());
-            assert_eq!(status(stat(&client, &nowhere, "").await), 404);
-            client.close().await;
-        }
+    async fn a_text_plain_refusal_keeps_its_body() {
+        let router = Router::new().fallback(|| async {
+            http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full(Bytes::from("no volume here is named v")))
+                .unwrap()
+        });
+        let client = piped(router);
+        let error = read(&client, &FileRoot::Volume("v".into()), "hello.txt", 0, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the server answered 404 Not Found: no volume here is named v"
+        );
+        let Error::Status(status, body) = &error else {
+            panic!("expected Error::Status, got {error:?}");
+        };
+        assert_eq!(*status, 404);
+        assert_eq!(body, "no volume here is named v");
     }
 
     #[tokio::test]
-    async fn a_write_with_an_etag_goes_only_over_the_file_that_has_it() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "a", "A", None).await.unwrap();
-            let etag = stat(&client, &root, "a").await.unwrap().etag.unwrap();
-            write(&client, &root, "a", "BB", Some(&etag)).await.unwrap();
-            assert_eq!(
-                status(write(&client, &root, "a", "C", Some(&etag)).await),
-                412
-            );
-            assert_eq!(read(&client, &root, "a", 0, None).await.unwrap(), "BB");
-            assert_ne!(stat(&client, &root, "a").await.unwrap().etag.unwrap(), etag);
-            client.close().await;
-        }
-    }
+    async fn a_non_json_refusal_preserves_status_matching() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[tokio::test]
-    async fn what_is_at_a_path_is_told_without_an_error() {
-        for client in clients().await {
-            let root = volume();
-            create_dir(&client, &root, "dir").await.unwrap();
-            write(&client, &root, "dir/f", "x", None).await.unwrap();
-            let tell = async |path: &str| {
-                (
-                    exists(&client, &root, path).await.unwrap(),
-                    is_file(&client, &root, path).await.unwrap(),
-                    is_dir(&client, &root, path).await.unwrap(),
-                )
-            };
-            assert_eq!(tell("dir").await, (true, false, true));
-            assert_eq!(tell("dir/f").await, (true, true, false));
-            assert_eq!(tell("dir/missing").await, (false, false, false));
-            assert_eq!(tell("").await, (true, false, true));
-            assert!(
-                !exists(&client, &FileRoot::Volume("nobody".into()), "")
-                    .await
-                    .unwrap()
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_file_reads_as_text_when_it_is_utf_8() {
-        for client in clients().await {
-            let root = volume();
-            write(&client, &root, "t", "한글 text", None).await.unwrap();
-            assert_eq!(read_text(&client, &root, "t").await.unwrap(), "한글 text");
-            write(&client, &root, "b", &[0xff, 0xfe][..], None)
+        let router_404 = Router::new().fallback(|| async {
+            http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/html")
+                .body(full(Bytes::from("<html>404 Not Found</html>")))
+                .unwrap()
+        });
+        let client_404 = piped(router_404);
+        assert_eq!(
+            found(&client_404, &FileRoot::Volume("v".into()), "missing")
                 .await
-                .unwrap();
-            let refused = read_text(&client, &root, "b").await.unwrap_err();
-            assert!(
-                matches!(refused, Error::File(ref m) if m.contains("UTF-8")),
-                "{refused}"
-            );
-            assert_eq!(status(read_text(&client, &root, "missing").await), 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_rename_and_a_copy_replace_only_when_told_to() {
-        for client in clients().await {
-            let root = FileRoot::Volume("s".into());
-            write(&client, &root, "a", "A", None).await.unwrap();
-            write(&client, &root, "b", "B", None).await.unwrap();
-
-            assert_eq!(status(rename(&client, &root, "a", "b", false).await), 412);
-            assert_eq!(read(&client, &root, "a", 0, None).await.unwrap(), "A");
-            rename(&client, &root, "a", "b", true).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "a").await), 404);
-            assert_eq!(read(&client, &root, "b", 0, None).await.unwrap(), "A");
-
-            create_dir(&client, &root, "dir").await.unwrap();
-            write(&client, &root, "dir/c", "C", None).await.unwrap();
-            copy(&client, &root, "dir", "copy", false).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "C");
-            assert_eq!(read(&client, &root, "dir/c", 0, None).await.unwrap(), "C");
-            assert_eq!(
-                status(copy(&client, &root, "dir", "copy", false).await),
-                412
-            );
-            copy(&client, &root, "b", "copy/c", true).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "A");
-
-            // A directory moves with everything in it, onto one there only when told to.
-            create_dir_all(&client, &root, "dir/sub").await.unwrap();
-            assert_eq!(
-                status(rename(&client, &root, "dir", "copy", false).await),
-                412
-            );
-            rename(&client, &root, "dir", "moved", false).await.unwrap();
-            assert_eq!(status(stat(&client, &root, "dir").await), 404);
-            assert_eq!(read(&client, &root, "moved/c", 0, None).await.unwrap(), "C");
-            assert!(stat(&client, &root, "moved/sub").await.unwrap().is_dir);
-            rename(&client, &root, "moved", "copy", true).await.unwrap();
-            assert_eq!(read(&client, &root, "copy/c", 0, None).await.unwrap(), "C");
-            assert!(stat(&client, &root, "copy/sub").await.unwrap().is_dir);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_name_that_needs_encoding_round_trips() {
-        for client in clients().await {
-            let root = volume();
-            let name = "한글 & spaces #1.txt";
-            create_dir(&client, &root, "dir 2").await.unwrap();
-            write(&client, &root, &format!("dir 2/{name}"), "x", None)
+                .unwrap(),
+            None
+        );
+        assert!(
+            remove(&client_404, &FileRoot::Volume("v".into()), "missing", true)
                 .await
-                .unwrap();
-            let entries = read_dir(&client, &root, "dir 2").await.unwrap();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].name, name);
-            assert_eq!(
-                read(&client, &root, &format!("dir 2/{name}"), 0, None)
-                    .await
-                    .unwrap(),
-                "x"
-            );
-            client.close().await;
-        }
+                .is_ok()
+        );
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let router_parents = Router::new().fallback(move |req: axum::extract::Request| {
+            let attempts = attempts_clone.clone();
+            async move {
+                let count = attempts.fetch_add(1, Ordering::SeqCst);
+                let path = req.uri().path();
+                if path.ends_with("/parent/child") && count == 0 {
+                    http::Response::builder()
+                        .status(StatusCode::CONFLICT)
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(full(Bytes::from("<html>409 Conflict</html>")))
+                        .unwrap()
+                } else if path.ends_with("/parent") {
+                    http::Response::builder()
+                        .status(StatusCode::METHOD_NOT_ALLOWED)
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(full(Bytes::from("<html>405 Method Not Allowed</html>")))
+                        .unwrap()
+                } else {
+                    http::Response::builder()
+                        .status(StatusCode::CREATED)
+                        .body(full(Bytes::new()))
+                        .unwrap()
+                }
+            }
+        });
+        let client_parents = piped(router_parents);
+        assert!(
+            create_dir_all(
+                &client_parents,
+                &FileRoot::Volume("v".into()),
+                "parent/child"
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        let router_existing =
+            Router::new().fallback(move |req: axum::extract::Request| async move {
+                if req.method() == "MKCOL" {
+                    http::Response::builder()
+                        .status(StatusCode::METHOD_NOT_ALLOWED)
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(full(Bytes::from("<html>405 Method Not Allowed</html>")))
+                        .unwrap()
+                } else {
+                    let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/volumes/v/files/existing</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"#;
+                    http::Response::builder()
+                        .status(StatusCode::MULTI_STATUS)
+                        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+                        .body(full(Bytes::from(xml)))
+                        .unwrap()
+                }
+            });
+        let client_existing = piped(router_existing);
+        assert!(
+            create_dir_all(&client_existing, &FileRoot::Volume("v".into()), "existing")
+                .await
+                .is_ok()
+        );
     }
 }

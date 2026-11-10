@@ -1,14 +1,8 @@
-import socket
-
 import pytest
+from conftest import fixture, unique
 
 import virtx
-from virtx import Client, PortForwarder, VirtxError
-
-
-def test_spawning_nothing_raises_a_message() -> None:
-    with pytest.raises(VirtxError, match="starting the server"):
-        Client.spawn("/nonexistent/virtx-server")
+from virtx import Client, VirtxError
 
 
 def test_a_second_library_is_refused() -> None:
@@ -44,20 +38,6 @@ def test_a_streamed_event_reads_back() -> None:
     assert _event({"output": {"code": 0}}, dict) == virtx.Output({"code": 0})
 
 
-def test_a_header_that_cannot_be_sent_is_refused_at_connect() -> None:
-    with pytest.raises(VirtxError, match="not a name"):
-        Client.connect("http://127.0.0.1:9/", headers={"not a name": "x"})
-
-
-def test_a_token_does_not_go_in_the_clear_to_another_machine() -> None:
-    token = virtx.BearerAuth("t")
-    with pytest.raises(VirtxError, match="in the clear"):
-        Client.connect("http://example.com/", token)
-    with Client.connect("http://127.0.0.1:9/", token) as client:
-        client.set_auth(None)
-        client.set_auth(token)
-
-
 async def test_a_command_is_run_for_the_token_before_a_request_is_sent() -> None:
     failing = virtx.CommandAuth("sh", ("-c", "echo 'not signed in' >&2; exit 1"))
     with pytest.raises(VirtxError, match="in the clear"):
@@ -69,24 +49,15 @@ async def test_a_command_is_run_for_the_token_before_a_request_is_sent() -> None
         await client.list_sandbox()
 
 
-def test_a_header_that_cannot_be_sent_is_refused_when_set() -> None:
-    with Client.connect("http://127.0.0.1:9/") as client:
-        client.set_headers({"authorization": "Bearer x"})
-        with pytest.raises(VirtxError, match="not a name"):
-            client.set_headers({"not a name": "x"})
-
-
-def test_a_forwarder_is_on_the_loopback_until_it_is_closed() -> None:
-    # Nothing listens there: each connection to the forwarder is closed.
-    with (
-        Client.connect("http://127.0.0.1:9/") as client,
-        PortForwarder.open(client, "ports/abc") as forwarder,
-    ):
-        assert forwarder.host == "127.0.0.1"
-        with socket.create_connection((forwarder.host, forwarder.port)) as connection:
-            assert connection.recv(1) == b""
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection((forwarder.host, forwarder.port))
+async def test_a_client_over_http_sends_its_token_and_project(tcp_client: Client) -> None:
+    volume = await tcp_client.create_volume(unique("over-http"))
+    assert volume in await tcp_client.list_volume()
+    await volume.remove()
+    project = {"virtx-project": fixture("VIRTX_TEST_PROJECT")}
+    with Client.connect(fixture("VIRTX_TEST_URL"), None, project) as anonymous:
+        with pytest.raises(VirtxError) as refused:
+            await anonymous.list_volume()
+        assert refused.value.status == 401
 
 
 def test_virtx_error_keeps_body() -> None:

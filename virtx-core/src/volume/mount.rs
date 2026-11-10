@@ -66,3 +66,55 @@ pub enum MountType {
     Gdrive,
     Onedrive,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_source_reads_as_its_type_and_its_credentials_stay_out_of_debug() {
+        let sources = [
+            (
+                r#"{"type": "notion", "api_key": "secret"}"#,
+                MountType::Notion,
+            ),
+            (
+                r#"{"type": "gdrive", "client_id": "i", "client_secret": "secret", "refresh_token": "secret"}"#,
+                MountType::Gdrive,
+            ),
+            (
+                r#"{"type": "onedrive", "client_id": "i", "refresh_token": "secret"}"#,
+                MountType::Onedrive,
+            ),
+        ];
+        for (json, mount_type) in sources {
+            let source: MountSource = serde_json::from_str(json).unwrap();
+            assert_eq!(source.mount_type(), mount_type);
+            assert!(!format!("{source:?}").contains("secret"), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_onedrive_source_without_a_secret_is_written_without_one() {
+        let source = MountSource::Onedrive {
+            client_id: "i".into(),
+            client_secret: None,
+            refresh_token: "r".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&source).unwrap(),
+            serde_json::json!({"type": "onedrive", "client_id": "i", "refresh_token": "r"})
+        );
+    }
+
+    #[test]
+    fn a_source_with_what_its_type_does_not_take_is_refused() {
+        for json in [
+            r#"{"type": "notion", "api_key": "k", "client_id": "i"}"#,
+            r#"{"type": "dropbox", "token": "t"}"#,
+            r#"{"type": "gdrive", "client_id": "i"}"#,
+        ] {
+            assert!(serde_json::from_str::<MountSource>(json).is_err(), "{json}");
+        }
+    }
+}

@@ -14,10 +14,10 @@
     "cli.js"
   ],
   "engines": {
-    "node": ">= 18"
+    "node": ">= 22"
   },
   "scripts": {
-    "test": "node --test '__test__/**/*.spec.mjs'",
+    "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

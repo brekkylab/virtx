@@ -42,6 +42,20 @@ impl Client {
         Ok(Client { inner })
     }
 
+    /// Talk to the server at the other end of `io`, one HTTP/2 connection as over a server's
+    /// stdio. Under the `test-util` feature, for tests alone: a server served in the test's own
+    /// process with [`serve_stdio`](crate::serve_stdio), over an in-memory pipe. Must be called
+    /// inside a tokio runtime.
+    #[cfg(feature = "test-util")]
+    pub fn over_stream<T>(io: T) -> Client
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        Client {
+            inner: TransportClient::over(io),
+        }
+    }
+
     /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
     /// credentials it wants, and `headers`, whatever else it asks of each request, with every
     /// request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
@@ -546,639 +560,6 @@ impl Client {
     /// End the session; see [`TransportClient::close`].
     pub async fn close(self) {
         self.inner.close().await;
-    }
-}
-
-#[cfg(all(test, feature = "testing"))]
-mod tests {
-    //! The typed client against the [`testing`](crate::testing) server, over each transport.
-
-    use futures_util::{StreamExt, TryStreamExt};
-
-    use super::*;
-    use crate::{
-        image::{ImageJobEnd, ImageJobKind},
-        sandbox::{SandboxJobEnd, SandboxState},
-        transport::tests::clients,
-        volume::MountType,
-    };
-
-    /// A client of a test server of its own over each transport.
-    async fn each() -> [Client; 2] {
-        clients().await.map(|inner| Client { inner })
-    }
-
-    /// The status `result` was refused with, and its message.
-    fn refusal<T: std::fmt::Debug>(result: Result<T, Error>) -> (u16, String) {
-        match result {
-            Err(Error::Status(status, message)) => (status, message),
-            other => panic!("not a refusal: {other:?}"),
-        }
-    }
-
-    /// The entries of the job `job`'s log in `sandbox`, after its `after`th.
-    async fn sandbox_log(
-        client: &Client,
-        sandbox: &str,
-        job: &str,
-        after: Option<u64>,
-    ) -> Vec<LogEntry<SandboxJobEntry>> {
-        client
-            .sandbox_job_log(sandbox, job, after)
-            .try_collect()
-            .await
-            .unwrap()
-    }
-
-    fn entry(id: u64, entry: SandboxJobEntry) -> LogEntry<SandboxJobEntry> {
-        LogEntry { id, entry }
-    }
-
-    fn end(code: i32) -> SandboxJobEntry {
-        SandboxJobEntry::End(SandboxJobEnd { code })
-    }
-
-    #[tokio::test]
-    async fn a_name_that_needs_encoding_names_its_resource() {
-        for client in each().await {
-            let name = "한글 & spaces #1";
-            client.create_volume(Some(name)).await.unwrap();
-            assert_eq!(client.get_volume(name).await.unwrap().name, name);
-            let root = FileRoot::Volume(name.into());
-            client.write_file(&root, "a", "x", None).await.unwrap();
-            assert_eq!(client.read_text(&root, "a").await.unwrap(), "x");
-            client.remove_volume(name).await.unwrap();
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_volume_and_its_mounts_are_made_read_and_removed() {
-        for client in each().await {
-            let volume = client.create_volume(Some("data")).await.unwrap();
-            assert_eq!(volume.name, "data");
-            assert!(client.list_volume().await.unwrap().contains(&volume));
-
-            let source = MountSource::Notion {
-                api_key: "key".into(),
-            };
-            let mount = client
-                .create_volume_mount("data", "docs/notion", source.clone())
-                .await
-                .unwrap();
-            assert_eq!(
-                mount,
-                VolumeMountListOutputItem {
-                    path: "docs/notion".into(),
-                    mount_type: MountType::Notion,
-                }
-            );
-            assert_eq!(client.list_volume_mount("data").await.unwrap(), [mount]);
-            let again = client.create_volume_mount("data", "docs/notion", source);
-            assert_eq!(refusal(again.await).0, 409);
-            client
-                .remove_volume_mount("data", "docs/notion")
-                .await
-                .unwrap();
-            assert!(client.list_volume_mount("data").await.unwrap().is_empty());
-
-            client.remove_volume("data").await.unwrap();
-            assert_eq!(refusal(client.get_volume("data").await).0, 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_sandbox_stops_starts_again_and_is_found_by_its_name() {
-        for client in each().await {
-            let mut args = SandboxCreateArgs::new("alpine:3.20");
-            args.name = Some("work".into());
-            args.ports = vec![3000.into()];
-            let sandbox = client.create_sandbox(&args).await.unwrap();
-            assert_eq!(sandbox.name.as_deref(), Some("work"));
-            assert_eq!(sandbox.state, SandboxState::Running);
-            assert!(!sandbox.ephemeral);
-            assert_eq!(sandbox.ports.len(), 1);
-            assert_eq!(sandbox.ports[0].port, 3000);
-
-            // Ports are answered at making and starting only.
-            let read = client.get_sandbox(&sandbox.id).await.unwrap();
-            assert!(read.ports.is_empty());
-            assert!(client.list_sandbox().await.unwrap().contains(&read));
-            assert_eq!(client.find_sandbox("work").await.unwrap(), Some(read));
-            assert_eq!(client.find_sandbox("nobody").await.unwrap(), None);
-            assert_eq!(refusal(client.create_sandbox(&args).await).0, 409);
-
-            let stopped = client.stop_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(stopped.state, SandboxState::Stopped);
-            let started = client.start_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(started.state, SandboxState::Running);
-            assert_eq!(started.ports, sandbox.ports);
-
-            // A port opened after is kept as those it was made with are.
-            let opened = client.open_sandbox_port(&sandbox.id, 8080).await.unwrap();
-            assert_eq!(opened.port, 8080);
-            let again = client.open_sandbox_port(&sandbox.id, 8080).await.unwrap();
-            assert_eq!(again, opened);
-            let started = client.start_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(started.ports[1], opened);
-            // One for a browser, named for what it is.
-            let web = client
-                .open_sandbox_port_with(
-                    &sandbox.id,
-                    5173,
-                    &SandboxPortOpenArgs {
-                        label: Some("dev server".into()),
-                        protocol: Some(crate::PortProtocol::Http),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                (web.label.as_deref(), web.protocol),
-                (Some("dev server"), crate::PortProtocol::Http)
-            );
-            // Closed: gone from what starting it answers; closed again, not found.
-            client.close_sandbox_port(&sandbox.id, 5173).await.unwrap();
-            let started = client.start_sandbox(&sandbox.id).await.unwrap();
-            assert!(
-                started.ports.iter().all(|p| p.port != 5173),
-                "{:?}",
-                started.ports
-            );
-            assert_eq!(
-                refusal(client.close_sandbox_port(&sandbox.id, 5173).await).0,
-                404
-            );
-            let missing = client.open_sandbox_port("nobody", 8080).await;
-            assert_eq!(refusal(missing).0, 404);
-
-            // A job started in a stopped one starts it.
-            client.stop_sandbox(&sandbox.id).await.unwrap();
-            client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi"]))
-                .await
-                .unwrap();
-            let read = client.get_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(read.state, SandboxState::Running);
-
-            client.remove_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_ports_inbound_rules_are_set_as_it_opens_and_after() {
-        for client in each().await {
-            let office = InboundRule::new("203.0.113.7").description("office");
-            let mut ssh = crate::PortSpec::new(22);
-            ssh.inbound = Some(vec![office]);
-            let args = SandboxCreateArgs::new("alpine:3.20")
-                .port(ssh)
-                .port(8080)
-                .port(5900);
-            let sandbox = client.create_sandbox(&args).await.unwrap();
-
-            // Made with them: each source a CIDR.
-            let read = client
-                .get_sandbox_port_inbound(&sandbox.id, 22)
-                .await
-                .unwrap();
-            let office = InboundRule::new("203.0.113.7/32").description("office");
-            assert_eq!(read.rules, std::slice::from_ref(&office));
-            assert_eq!((read.port, read.address), (22, None));
-            // Made without: none.
-            let read = client
-                .get_sandbox_port_inbound(&sandbox.id, 8080)
-                .await
-                .unwrap();
-            assert!(read.rules.is_empty());
-
-            // Set: all of them replaced.
-            let lan = [InboundRule::new("10.0.0.0/8")];
-            let set = client
-                .set_sandbox_port_inbound(&sandbox.id, 22, &lan)
-                .await
-                .unwrap();
-            assert_eq!(set.rules, lan);
-            let read = client.get_sandbox_port_inbound(&sandbox.id, 22).await;
-            assert_eq!(read.unwrap(), set);
-
-            // An HTTP port opened with them keeps them.
-            let web = SandboxPortOpenArgs {
-                protocol: Some(crate::PortProtocol::Http),
-                inbound: Some(vec![office.clone()]),
-                ..Default::default()
-            };
-            client
-                .open_sandbox_port_with(&sandbox.id, 5173, &web)
-                .await
-                .unwrap();
-            let read = client.get_sandbox_port_inbound(&sandbox.id, 5173).await;
-            assert_eq!(read.unwrap().rules, [office]);
-
-            // Refused: the desktop's, a port not open, and a source not a CIDR.
-            let desktop = client.set_sandbox_port_inbound(&sandbox.id, 5900, &lan);
-            let refused = desktop.await.unwrap_err();
-            assert_eq!(refused.code(), Some("not_public"));
-            let closed = client.get_sandbox_port_inbound(&sandbox.id, 9000).await;
-            assert_eq!(closed.unwrap_err().code(), Some("not_found"));
-            let nowhere = [InboundRule::new("nowhere")];
-            let invalid = client.set_sandbox_port_inbound(&sandbox.id, 22, &nowhere);
-            assert_eq!(invalid.await.unwrap_err().code(), Some("invalid"));
-
-            client.remove_sandbox(&sandbox.id).await.unwrap();
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn an_ephemeral_sandbox_goes_when_it_stops() {
-        for client in each().await {
-            let mut args = SandboxCreateArgs::new("alpine:3.20");
-            args.ephemeral = true;
-            args.auto_delete_days = Some(None);
-            let sandbox = client.create_sandbox(&args).await.unwrap();
-            assert!(sandbox.ephemeral);
-            assert_eq!(sandbox.auto_delete_days, None);
-            client.stop_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_sandbox_is_committed_to_an_image() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let job = client.commit_image(&sandbox.id, "mine:v1").await.unwrap();
-            assert_eq!(job.kind, ImageJobKind::Commit);
-            assert_eq!(job.reference, "mine:v1");
-            let ended = client.get_image_job(&job.id).await.unwrap();
-            assert_eq!(ended.digest.as_deref(), Some("sha256:0"));
-            let refused = client.commit_image("nobody", "mine:v2").await.unwrap();
-            let ended = client.get_image_job(&refused.id).await.unwrap();
-            assert!(ended.error.is_some());
-            client.remove_sandbox(&sandbox.id).await.unwrap();
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn an_exec_read_with_its_log_is_its_job_then_its_entries() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let args = SandboxExecArgs::new(["echo", "hi", "there"]);
-            let items: Vec<_> = client
-                .exec_sandbox_with_log(&sandbox.id, &args)
-                .try_collect()
-                .await
-                .unwrap();
-            let [SandboxExecItem::Job(job), rest @ ..] = &items[..] else {
-                panic!("not its job first: {items:?}");
-            };
-            assert_eq!(job.cmd, ["echo", "hi", "there"]);
-            assert_eq!(
-                rest,
-                [
-                    SandboxExecItem::Log(entry(1, SandboxJobEntry::Stdout("hi there".into()))),
-                    SandboxExecItem::Log(entry(2, end(0))),
-                ]
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_sandbox_s_files_are_its_own_and_go_with_it() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let root = FileRoot::Sandbox(sandbox.id.clone());
-            client.create_dir_all(&root, "work/dir").await.unwrap();
-            client
-                .write_file(&root, "work/dir/a.txt", "hello", None)
-                .await
-                .unwrap();
-            assert_eq!(
-                client.read_text(&root, "work/dir/a.txt").await.unwrap(),
-                "hello"
-            );
-            let entries = client.read_dir(&root, "work/dir").await.unwrap();
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].name, "a.txt");
-
-            client.remove_sandbox(&sandbox.id).await.unwrap();
-            assert_eq!(refusal(client.read_dir(&root, "").await).0, 404);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_process_s_log_is_its_output_then_how_it_ended() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let job = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo", "hi", "there"]))
-                .await
-                .unwrap();
-            assert_eq!(job.kind, sandbox::SandboxJobKind::Exec);
-            assert_eq!(job.cmd, ["echo", "hi", "there"]);
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &job.id, None).await,
-                [
-                    entry(1, SandboxJobEntry::Stdout("hi there".into())),
-                    entry(2, end(0)),
-                ]
-            );
-            let ended = client.get_sandbox_job(&sandbox.id, &job.id).await.unwrap();
-            assert!(!ended.running);
-            assert_eq!(ended.code, Some(0));
-
-            let failed = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["fail"]))
-                .await
-                .unwrap();
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &failed.id, None).await,
-                [
-                    entry(1, SandboxJobEntry::Stderr("failed".into())),
-                    entry(2, end(1)),
-                ]
-            );
-            let jobs = client.list_sandbox_job(&sandbox.id).await.unwrap();
-            assert_eq!(jobs.len(), 2);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_log_is_read_again_from_after_any_entry() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let job = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["lines", "3"]))
-                .await
-                .unwrap();
-            let whole = sandbox_log(&client, &sandbox.id, &job.id, None).await;
-            assert_eq!(whole.len(), 4);
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &job.id, None).await,
-                whole
-            );
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &job.id, Some(2)).await,
-                whole[2..]
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_log_past_the_limit_is_truncated_but_keeps_its_end() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let job = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["lines", "100"]))
-                .await
-                .unwrap();
-            let log = sandbox_log(&client, &sandbox.id, &job.id, None).await;
-            let limit = crate::testing::LOG_LIMIT;
-            assert_eq!(log.len(), limit + 2);
-            assert_eq!(log[limit].entry, SandboxJobEntry::Truncated {});
-            assert_eq!(log[limit + 1].entry, end(0));
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn stdin_written_in_order_comes_back_and_its_end_ends_the_process() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let mut args = SandboxExecArgs::new(["cat"]);
-            args.stdin = true;
-            let job = client.exec_sandbox(&sandbox.id, &args).await.unwrap();
-            // A reader from the start sees what is written after it started reading.
-            let mut log = client.sandbox_job_log(&sandbox.id, &job.id, None);
-            client
-                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("a\nb\n"), false)
-                .await
-                .unwrap();
-            assert_eq!(
-                log.next().await.unwrap().unwrap(),
-                entry(1, SandboxJobEntry::Stdout("a".into()))
-            );
-            client
-                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("c"), true)
-                .await
-                .unwrap();
-            let rest: Vec<_> = log.try_collect().await.unwrap();
-            assert_eq!(
-                rest,
-                [
-                    entry(2, SandboxJobEntry::Stdout("b".into())),
-                    entry(3, SandboxJobEntry::Stdout("c".into())),
-                    entry(4, end(0)),
-                ]
-            );
-            let closed = client
-                .write_sandbox_job_stdin(&sandbox.id, &job.id, Some("d"), false)
-                .await;
-            assert_eq!(refusal(closed).0, 409);
-
-            let quiet = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["echo"]))
-                .await
-                .unwrap();
-            let unasked = client
-                .write_sandbox_job_stdin(&sandbox.id, &quiet.id, Some("x"), false)
-                .await;
-            assert_eq!(refusal(unasked).0, 409);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_signal_or_a_cancellation_ends_a_process() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let sleep = SandboxExecArgs::new(["sleep"]);
-            let job = client.exec_sandbox(&sandbox.id, &sleep).await.unwrap();
-            assert!(job.running);
-            client
-                .signal_sandbox_job(&sandbox.id, &job.id, "SIGTERM")
-                .await
-                .unwrap();
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &job.id, None).await,
-                [entry(1, end(143))]
-            );
-            let again = client.signal_sandbox_job(&sandbox.id, &job.id, "SIGTERM");
-            assert_eq!(refusal(again.await).0, 409);
-
-            // Removed while read, its log ends where it is.
-            let job = client.exec_sandbox(&sandbox.id, &sleep).await.unwrap();
-            let log = client.sandbox_job_log(&sandbox.id, &job.id, None);
-            let remove = async {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                client.remove_sandbox_job(&sandbox.id, &job.id).await
-            };
-            let (read, removed) = tokio::join!(log.try_collect::<Vec<_>>(), remove);
-            removed.unwrap();
-            assert!(read.unwrap().len() <= 1);
-            assert_eq!(
-                refusal(client.get_sandbox_job(&sandbox.id, &job.id).await).0,
-                404
-            );
-
-            let mut timed = sleep.clone();
-            timed.timeout_ms = Some(10);
-            let job = client.exec_sandbox(&sandbox.id, &timed).await.unwrap();
-            assert_eq!(
-                sandbox_log(&client, &sandbox.id, &job.id, None).await,
-                [entry(1, end(137))]
-            );
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn a_command_that_cannot_start_makes_no_job() {
-        for client in each().await {
-            let sandbox = client
-                .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-                .await
-                .unwrap();
-            let refused = client
-                .exec_sandbox(&sandbox.id, &SandboxExecArgs::new(["nonexistent"]))
-                .await;
-            let (status, message) = refusal(refused);
-            assert_eq!(status, 422);
-            assert!(message.starts_with("not_started: "), "{message}");
-            assert!(
-                client
-                    .list_sandbox_job(&sandbox.id)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-            client.close().await;
-        }
-    }
-
-    /// The entries of the image job `id`'s log.
-    async fn image_log(client: &Client, id: &str) -> Vec<ImageJobEntry> {
-        client
-            .image_job_log(id, None)
-            .map_ok(|entry| entry.entry)
-            .try_collect()
-            .await
-            .unwrap()
-    }
-
-    fn digest(digest: &str) -> ImageJobEntry {
-        ImageJobEntry::End(ImageJobEnd {
-            digest: Some(digest.into()),
-            error: None,
-        })
-    }
-
-    #[tokio::test]
-    async fn an_image_job_logs_then_ends_with_what_it_did() {
-        for client in each().await {
-            let build = client
-                .build_image(Recipe::new("alpine:3.20"), "jq:latest")
-                .await
-                .unwrap();
-            assert_eq!(build.kind, ImageJobKind::Build);
-            assert_eq!(build.reference, "jq:latest");
-            assert_eq!(
-                image_log(&client, &build.id).await,
-                [
-                    ImageJobEntry::Log("pulling alpine:3.20".into()),
-                    digest("sha256:0")
-                ]
-            );
-            let read = client.get_image_job(&build.id).await.unwrap();
-            assert!(!read.running);
-            assert_eq!(read.digest.as_deref(), Some("sha256:0"));
-
-            let pull = client.pull_image("missing", None).await.unwrap();
-            assert_eq!(pull.kind, ImageJobKind::Pull);
-            assert_eq!(pull.error.as_deref(), Some("no image missing"));
-            let log = image_log(&client, &pull.id).await;
-            assert!(matches!(
-                log.last(),
-                Some(ImageJobEntry::End(ImageJobEnd { error: Some(_), .. }))
-            ));
-
-            let auth = RegistryAuth::Bearer {
-                token: "token".into(),
-            };
-            let push = client
-                .push_image("ghcr.io/owner/jq:latest", Some(auth))
-                .await
-                .unwrap();
-            assert_eq!(
-                image_log(&client, &push.id).await,
-                [
-                    ImageJobEntry::Log("pushing ghcr.io/owner/jq:latest as bearer".into()),
-                    digest("sha256:0")
-                ]
-            );
-            assert_eq!(client.list_image_job().await.unwrap().len(), 3);
-
-            let pruned = client.prune_image().await.unwrap();
-            assert_eq!(pruned.images, ["sha256:0"]);
-            assert_eq!(pruned.reclaimed, 1024);
-            client.close().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn an_image_job_cancelled_is_gone() {
-        for client in each().await {
-            let job = client.pull_image("hang", None).await.unwrap();
-            assert!(job.running);
-            let mut log = client.image_job_log(&job.id, None);
-            assert_eq!(
-                log.next().await.unwrap().unwrap().entry,
-                ImageJobEntry::Log("pulling hang".into())
-            );
-            client.remove_image_job(&job.id).await.unwrap();
-            // What was there when it went, and no more.
-            while let Some(entry) = log.next().await {
-                entry.unwrap();
-            }
-            drop(log);
-            assert_eq!(refusal(client.get_image_job(&job.id).await).0, 404);
-            client.close().await;
-        }
     }
 }
 
@@ -2403,10 +1784,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Name>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .find_sandbox(args?.name)
-                .await
-                .map_err(|e| e.to_string())
+            client.find_sandbox(args?.name).await.map_err(Failure::from)
         })
     }
 
@@ -2424,10 +1802,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .start_sandbox(args?.id)
-                .await
-                .map_err(|e| e.to_string())
+            client.start_sandbox(args?.id).await.map_err(Failure::from)
         })
     }
 
@@ -2446,10 +1821,7 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .stop_sandbox(args?.id)
-                .await
-                .map_err(|e| e.to_string())
+            client.stop_sandbox(args?.id).await.map_err(Failure::from)
         })
     }
 
@@ -2490,7 +1862,7 @@ pub(crate) mod ffi {
             client
                 .open_sandbox_port_with(args.id, args.port, &open)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2512,7 +1884,7 @@ pub(crate) mod ffi {
             client
                 .close_sandbox_port(args.id, args.port)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(Failure::from)
         })
     }
 
@@ -2922,6 +2294,40 @@ pub(crate) mod ffi {
             let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
             assert!(String::from_utf8_lossy(message).contains("in the clear"));
             unsafe { virtx_bytes_free(error) };
+        }
+
+        #[test]
+        fn a_request_s_arguments_read_with_their_defaults() {
+            let mount: Mount = serde_json::from_str(r#"{"volume": "v"}"#).unwrap();
+            assert_eq!((mount.volume.as_str(), mount.path.as_str()), ("v", ""));
+            assert!(mount.source.is_none());
+
+            let exec: Exec = serde_json::from_str(r#"{"sandbox": "s", "cmd": ["true"]}"#).unwrap();
+            assert_eq!(
+                (exec.sandbox.as_str(), exec.cmd.as_slice()),
+                ("s", &["true".to_owned()][..])
+            );
+            assert!(!exec.stdin && exec.timeout_ms.is_none());
+
+            let job: Job = serde_json::from_str(r#"{"sandbox": "s", "job": "j"}"#).unwrap();
+            assert_eq!(job.job.as_deref(), Some("j"));
+            assert!(!job.eof && job.signal.is_none() && job.data.is_none() && job.after.is_none());
+
+            let log: ImageJobLogArgs = serde_json::from_str(r#"{"id": "j", "after": 3}"#).unwrap();
+            assert_eq!((log.id.as_str(), log.after), ("j", Some(3)));
+        }
+
+        #[test]
+        fn a_request_s_arguments_with_a_member_misspelled_or_missing_are_refused() {
+            assert!(serde_json::from_str::<Name>(r#"{"nmae": "v"}"#).is_err());
+            assert!(serde_json::from_str::<Name>(r#"{"name": "v", "extra": 1}"#).is_err());
+            assert!(serde_json::from_str::<Id>("{}").is_err());
+            assert!(serde_json::from_str::<Exec>(r#"{"sandbox": "s"}"#).is_err());
+            assert!(
+                serde_json::from_str::<Exec>(r#"{"sandbox": "s", "cmd": [], "timeout": 1}"#)
+                    .is_err()
+            );
+            assert!(serde_json::from_str::<Job>(r#"{"sandbox": "s", "signal": 9}"#).is_err());
         }
     }
 }

@@ -23,16 +23,17 @@ struct Server {
     owns: bool,
 }
 
-/// Where a test pulls `reference` from: Docker Hub's official images from AWS's mirror of them,
-/// as Docker Hub refuses anonymous pulls past a few an hour -- a test failing on that says
-/// nothing of what it tries. Anything else from where it names.
+/// Where a test pulls `reference` from: Docker Hub's official images from Google's mirror of
+/// them, as Docker Hub refuses anonymous pulls past a few an hour, and AWS's mirror past one a
+/// second -- a test failing on that says nothing of what it tries. Anything else from where it
+/// names.
 fn mirrored(reference: &str) -> String {
     let name = reference.strip_prefix("docker.io/").unwrap_or(reference);
     let name = name.strip_prefix("library/").unwrap_or(name);
     if name.contains('/') {
         return reference.to_owned();
     }
-    format!("public.ecr.aws/docker/library/{name}")
+    format!("mirror.gcr.io/library/{name}")
 }
 
 impl Server {

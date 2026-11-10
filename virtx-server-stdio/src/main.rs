@@ -135,8 +135,9 @@ mod tests {
     }
 
     fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
+        // Either kind: a Files refusal is plain HTTP, not the protocol's error body.
         match answered {
-            Err(Error::Status(status, _)) => status,
+            Err(ref e) if e.status().is_some() => e.status().expect("checked"),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }

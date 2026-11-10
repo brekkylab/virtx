@@ -433,14 +433,17 @@ async def test_an_exec_failing_to_start_when_iterated_leaves_no_unretrieved_futu
     loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
     try:
         with Client.spawn(test_server) as client:
-            exec_job = client.exec_sandbox("nonexistent", ["echo", "hi"])
+            sandbox = await client.create_sandbox("alpine:3.20")
+            exec_job = sandbox.exec(["no-such-command"])
             with pytest.raises(VirtxError) as refused:
                 async for _ in exec_job:
                     pass
-            assert refused.value.status == 404
+            assert (refused.value.status, refused.value.code) == (422, "not_started")
 
-            del exec_job
+            # Its traceback holds the job: let go, for it to be collected.
+            del exec_job, refused
             gc.collect()
+            await asyncio.sleep(0)
             assert not any("Future exception was never retrieved" in w for w in warnings)
     finally:
         loop.set_exception_handler(old_handler)
@@ -450,12 +453,13 @@ async def test_an_exec_failing_to_start_when_iterated_still_raises_when_awaited(
     test_server: str,
 ) -> None:
     with Client.spawn(test_server) as client:
-        exec_job = client.exec_sandbox("nonexistent", ["echo", "hi"])
+        sandbox = await client.create_sandbox("alpine:3.20")
+        exec_job = sandbox.exec(["no-such-command"])
         with pytest.raises(VirtxError) as refused:
             async for _ in exec_job:
                 pass
-        assert refused.value.status == 404
+        assert (refused.value.status, refused.value.code) == (422, "not_started")
 
         with pytest.raises(VirtxError) as awaited_refused:
             await exec_job
-        assert awaited_refused.value.status == 404
+        assert (awaited_refused.value.status, awaited_refused.value.code) == (422, "not_started")

@@ -1,6 +1,8 @@
 """Volumes, sandboxes and the jobs of images and sandboxes, against ``virtx-core``'s
 ``test_server`` example over stdio."""
 
+import asyncio
+
 import pytest
 
 from virtx import (
@@ -311,3 +313,25 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: s
         assert log[-1] == ImageJobEnd(digest="sha256:0")
         assert (await client.get_image_job(job.id)).digest == "sha256:0"
         assert len(await client.list_image_job()) == before + 1
+
+
+async def test_an_exec_iterated_at_once_whose_start_fails_raises_in_the_loop_alone(
+    test_server: str,
+) -> None:
+    unheard: list[object] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: unheard.append(context))
+    with Client.spawn(test_server) as client:
+        sandbox = await client.create_sandbox("alpine:3.20")
+        with pytest.raises(VirtxError) as refused:
+            async for _ in sandbox.exec(["no-such-command"]):
+                pass
+        assert (refused.value.status, refused.value.code) == (422, "not_started")
+        # Its traceback holds the job: let go, for it to be collected.
+        del refused
+    # What was left unheard is told as it is collected.
+    import gc
+
+    gc.collect()
+    await asyncio.sleep(0)
+    assert unheard == []

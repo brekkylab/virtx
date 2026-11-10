@@ -81,6 +81,8 @@ A port can say what it is for, and be HTTP, reached at its `url` by a browser ra
 
 A TCP port may also have an `address`, `host:port`, from a server reachable from other machines: any TCP client reaches it there directly, without a `PortForwarder`. Unlike the `url` it is not secret, so what is served there must authenticate whoever connects itself. It is `None` when the server gives none.
 
+On virtx cloud, a port has inbound rules: the addresses a TCP port lets in at its `address`, and an HTTP one at its `url`. `PortSpec(22, inbound=[InboundRule("203.0.113.7", "office")])` or `open_port(22, inbound=[...])` sets them as it opens, `await sandbox.set_inbound(22, rules)` replaces them all (`[]` lets in no one), and `await sandbox.inbound(22)` reads them, as a `PortInbound`. A self-hosted server keeps none, and refuses `inbound`.
+
 A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python

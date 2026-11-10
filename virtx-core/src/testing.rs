@@ -19,6 +19,10 @@
 //!   stderr and ends with 1, `lines n` writes `line 1` up to `line n`, `cat` writes each line of
 //!   its stdin back until it is closed, and `sleep` runs until it is signalled, cancelled or timed
 //!   out. Any other command is not started.
+//!
+//! It keeps each open port's inbound rules, as virtx cloud does, set as the port is opened or
+//! after: none until they are, its sources made CIDRs, and a source that is not one refused.
+//! Port 5900, virtx cloud's desktop, refuses them.
 
 use std::{
     collections::BTreeMap,
@@ -43,8 +47,9 @@ use crate::{
         ImageName, ImagePruneOutput, ImagePullArgs, ImagePushArgs, RegistryAuth,
     },
     sandbox::{
-        Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEnd, SandboxJobEntry,
-        SandboxJobKind, SandboxPort, SandboxSignalArgs, SandboxState, SandboxStdinArgs,
+        InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob,
+        SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxSignalArgs,
+        SandboxState, SandboxStdinArgs,
     },
     transport::Log,
     volume::{
@@ -102,6 +107,8 @@ impl SandboxJobState {
 struct Held {
     sandbox: Sandbox,
     ports: Vec<SandboxPort>,
+    /// The inbound rules of each open port that has any set.
+    inbound: BTreeMap<u16, Vec<InboundRule>>,
     jobs: BTreeMap<String, Arc<SandboxJobState>>,
     files: DavHandler,
 }
@@ -181,6 +188,10 @@ pub fn router() -> Router {
         .route(
             "/sandboxes/{id}/ports/{port}",
             axum::routing::put(open_port).delete(close_port),
+        )
+        .route(
+            "/sandboxes/{id}/ports/{port}/inbound",
+            get(port_inbound).put(set_port_inbound),
         )
         .route("/sandboxes/{id}/jobs/", get(list_sandbox_jobs))
         .route("/sandboxes/{id}/jobs/exec/", post(exec))
@@ -573,6 +584,15 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
             format!("a sandbox is named `{name}`"),
         );
     }
+    let mut inbound = BTreeMap::new();
+    for spec in &args.ports {
+        if let Some(rules) = &spec.inbound {
+            match rules_of(spec.port, rules) {
+                Ok(rules) => inbound.insert(spec.port, rules),
+                Err(refused) => return refused,
+            };
+        }
+    }
     let id = data.id("sb");
     let image = match args.image {
         ImageName::Digest { digest } => digest,
@@ -605,6 +625,7 @@ async fn create_sandbox(State(shared): State<Shared>, request: Bytes) -> Respons
         Held {
             sandbox: sandbox.clone(),
             ports: ports.clone(),
+            inbound,
             jobs: BTreeMap::new(),
             files: dav(&format!("/sandboxes/{id}/files")),
         },
@@ -669,6 +690,7 @@ async fn close_port(
     };
     let before = held.ports.len();
     held.ports.retain(|open| open.port != port);
+    held.inbound.remove(&port);
     match held.ports.len() < before {
         true => StatusCode::NO_CONTENT.into_response(),
         false => not_found("such port open"),
@@ -689,10 +711,20 @@ async fn open_port(
         Err(_) if body.is_empty() => Default::default(),
         Err(e) => return refuse(StatusCode::BAD_REQUEST, "invalid", e.to_string()),
     };
+    let inbound = match asked.inbound.as_deref() {
+        Some(rules) => match rules_of(port, rules) {
+            Ok(rules) => Some(rules),
+            Err(refused) => return refused,
+        },
+        None => None,
+    };
     let mut data = shared.lock().unwrap();
     let Some(held) = data.sandboxes.get_mut(&id) else {
         return not_found("such sandbox");
     };
+    if let Some(rules) = inbound {
+        held.inbound.insert(port, rules);
+    }
     if let Some(open) = held.ports.iter_mut().find(|open| open.port == port) {
         if asked.label.is_some() {
             open.label = asked.label;
@@ -708,6 +740,100 @@ async fn open_port(
     };
     held.ports.push(open.clone());
     created(format!("/sandboxes/{id}/ports/{port}"), &open)
+}
+
+/// `rules`, as port `port` is to have them: each source a CIDR, an address alone made one of
+/// itself. Refused for a source that is not one, and for port 5900.
+#[allow(
+    clippy::result_large_err,
+    reason = "the refusal is the response, sent as it is"
+)]
+fn rules_of(port: u16, rules: &[InboundRule]) -> Result<Vec<InboundRule>, Response> {
+    if port == 5900 {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            "not_public",
+            "port 5900 is the desktop's: it takes no inbound rules",
+        ));
+    }
+    rules
+        .iter()
+        .map(|rule| {
+            let source = cidr(rule.source.trim()).ok_or_else(|| {
+                refuse(
+                    StatusCode::BAD_REQUEST,
+                    "invalid",
+                    format!("{:?} is not an IPv4 or IPv6 CIDR", rule.source),
+                )
+            })?;
+            Ok(InboundRule {
+                source,
+                description: rule.description.clone(),
+            })
+        })
+        .collect()
+}
+
+/// `source` as a CIDR, `<address>/<prefix>`, if it is one or an address.
+fn cidr(source: &str) -> Option<String> {
+    let (address, prefix) = match source.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
+        None => (source, None),
+    };
+    let address: std::net::IpAddr = address.parse().ok()?;
+    let most = if address.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix.unwrap_or(most);
+    (prefix <= most).then(|| format!("{address}/{prefix}"))
+}
+
+/// Port `port` of sandbox `id`'s inbound rules, made `rules` if given.
+fn inbound_of(shared: &Shared, id: &str, port: u16, rules: Option<Vec<InboundRule>>) -> Response {
+    let mut data = shared.lock().unwrap();
+    let Some(held) = data.sandboxes.get_mut(id) else {
+        return not_found("such sandbox");
+    };
+    let Some(open) = held.ports.iter().find(|open| open.port == port) else {
+        return not_found("such port open");
+    };
+    let address = open.address.clone();
+    if let Some(rules) = rules {
+        held.inbound.insert(port, rules);
+    }
+    json(&PortInbound {
+        port,
+        rules: held.inbound.get(&port).cloned().unwrap_or_default(),
+        address,
+    })
+}
+
+async fn port_inbound(
+    State(shared): State<Shared>,
+    Path((id, port)): Path<(String, u16)>,
+) -> Response {
+    if let Err(refused) = rules_of(port, &[]) {
+        return refused;
+    }
+    inbound_of(&shared, &id, port, None)
+}
+
+async fn set_port_inbound(
+    State(shared): State<Shared>,
+    Path((id, port)): Path<(String, u16)>,
+    request: Bytes,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rules {
+        rules: Vec<InboundRule>,
+    }
+    let asked = match body::<Rules>(&request) {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
+    };
+    match rules_of(port, &asked.rules) {
+        Ok(rules) => inbound_of(&shared, &id, port, Some(rules)),
+        Err(refused) => refused,
+    }
 }
 
 async fn list_sandbox_jobs(State(shared): State<Shared>, Path(id): Path<String>) -> Response {

@@ -1633,6 +1633,11 @@ async fn sandbox_port_open(
             .map_err(invalid)?
             .unwrap_or_default(),
     };
+    if asked.inbound.is_some() {
+        return Err(invalid(
+            "inbound: a port's inbound rules are virtx cloud's; this server keeps none",
+        ));
+    }
     let sandbox = home.sandbox(&id)?;
     match sandbox.open_port(port, asked.label, asked.protocol).await? {
         (open, true) => Ok(created(format!("/sandboxes/{id}/ports/{port}"), &open)),

@@ -61,24 +61,83 @@ class SandboxPort:
 
 
 @dataclass(frozen=True)
+class InboundRule:
+    """One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they
+    are."""
+
+    source: str
+    """An IPv4 or IPv6 CIDR, as ``203.0.113.0/24``, or one address, as ``203.0.113.7``."""
+
+    description: str | None = None
+    """What it is for: whose they are."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        rule: dict[str, Any] = {"source": self.source}
+        if self.description is not None:
+            rule["description"] = self.description
+        return rule
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InboundRule:
+        return cls(value["source"], value.get("description"))
+
+
+def inbound_rules(rules: Iterable[InboundRule | Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """``rules``, each an ``InboundRule`` or its ``{source, description?}``, as the wire has
+    them."""
+    return [r.to_dict() if isinstance(r, InboundRule) else dict(r) for r in rules]
+
+
+@dataclass(frozen=True)
+class PortInbound:
+    """A port's inbound rules, as virtx cloud answers them: whom a TCP port lets in at its public
+    ``address``, and an HTTP one at its ``url``. A connection from an address no rule's source
+    holds is not let in there, so a port with none is reached there by no one."""
+
+    port: int
+
+    rules: list[InboundRule]
+    """Each source a CIDR, as the server keeps it."""
+
+    address: str | None = None
+    """Its public ``host:port``, once a rule has given it one, as ``SandboxPort.address``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> PortInbound:
+        return cls(
+            value["port"],
+            [InboundRule.from_dict(rule) for rule in value["rules"]],
+            value.get("address"),
+        )
+
+
+@dataclass(frozen=True)
 class PortSpec:
     """A port to open in a sandbox as ``create_sandbox`` makes it: its number, what it is for,
-    and how it is reached. ``ports`` takes a plain ``int`` for TCP named nothing."""
+    how it is reached, and whom it lets in. ``ports`` takes a plain ``int`` for TCP that says
+    nothing more."""
 
     port: int
     label: str | None = None
     protocol: PortProtocol | str = PortProtocol.TCP
 
+    inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None
+    """Its inbound rules, set once it is open (``PortInbound``): virtx cloud's. ``None`` leaves
+    them to the server, and ``[]`` lets in no one."""
+
     def to_dict(self) -> int | dict[str, Any]:
         """As the wire has it: the number alone when it says no more."""
         protocol = PortProtocol(self.protocol)
-        if self.label is None and protocol == PortProtocol.TCP:
+        if self.label is None and protocol == PortProtocol.TCP and self.inbound is None:
             return self.port
         spec: dict[str, Any] = {"port": self.port}
         if self.label is not None:
             spec["label"] = self.label
         if protocol != PortProtocol.TCP:
             spec["protocol"] = protocol.value
+        if self.inbound is not None:
+            spec["inbound"] = inbound_rules(self.inbound)
         return spec
 
 
@@ -184,12 +243,15 @@ class Sandbox(Files):
         *,
         label: str | None = None,
         protocol: PortProtocol | str | None = None,
+        inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None,
     ) -> SandboxPort:
         """Open the port ``port`` in it, as those it was made with are -- TCP unless ``protocol``
-        says HTTP, ``label`` saying what it is for -- and answer where it is reached from, kept
-        in ``ports`` in place of one for the same port. A program in it listening on ``port``
-        already is reached once it listens again."""
-        opened = await self.client.open_sandbox_port(self.id, port, label=label, protocol=protocol)
+        says HTTP, ``label`` saying what it is for, ``inbound`` whom it lets in -- and answer
+        where it is reached from, kept in ``ports`` in place of one for the same port. A program
+        in it listening on ``port`` already is reached once it listens again."""
+        opened = await self.client.open_sandbox_port(
+            self.id, port, label=label, protocol=protocol, inbound=inbound
+        )
         at = next((i for i, known in enumerate(self.ports) if known.port == port), None)
         if at is None:
             self.ports.append(opened)
@@ -202,6 +264,18 @@ class Sandbox(Files):
         ``ports``."""
         await self.client.close_sandbox_port(self.id, port)
         self.ports[:] = [known for known in self.ports if known.port != port]
+
+    async def inbound(self, port: int) -> PortInbound:
+        """The inbound rules of its port ``port``, as ``Client.get_sandbox_port_inbound``
+        answers them: virtx cloud's."""
+        return await self.client.get_sandbox_port_inbound(self.id, port)
+
+    async def set_inbound(
+        self, port: int, rules: Iterable[InboundRule | Mapping[str, Any]]
+    ) -> PortInbound:
+        """Make the inbound rules of its port ``port`` ``rules``, all of them, as
+        ``Client.set_sandbox_port_inbound`` does."""
+        return await self.client.set_sandbox_port_inbound(self.id, port, rules)
 
     def commit(self, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
         """Make an image of it, as ``Client.commit_image`` does, to point ``reference`` at."""

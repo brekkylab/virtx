@@ -6,8 +6,9 @@ use ::http::header;
 use futures_util::StreamExt as _;
 
 use super::{
-    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs,
+    InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJob, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs,
+    SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -87,6 +88,30 @@ pub(crate) async fn open_port(
     args: &SandboxPortOpenArgs,
 ) -> Result<SandboxPort, Error> {
     http::put(client, &format!("{}/ports/{port}", sandbox(id)), args).await
+}
+
+/// The inbound rules of the port `port` in the sandbox `id`: virtx cloud's.
+pub(crate) async fn port_inbound(
+    client: &TransportClient,
+    id: &str,
+    port: u16,
+) -> Result<PortInbound, Error> {
+    http::get(client, &format!("{}/ports/{port}/inbound", sandbox(id))).await
+}
+
+/// The inbound rules of the port `port` in the sandbox `id` made `rules`, all of them.
+pub(crate) async fn set_port_inbound(
+    client: &TransportClient,
+    id: &str,
+    port: u16,
+    rules: &[InboundRule],
+) -> Result<PortInbound, Error> {
+    #[derive(serde::Serialize)]
+    struct Rules<'a> {
+        rules: &'a [InboundRule],
+    }
+    let path = format!("{}/ports/{port}/inbound", sandbox(id));
+    http::put(client, &path, &Rules { rules }).await
 }
 
 /// Every job in the sandbox `id`.

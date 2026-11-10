@@ -13,8 +13,8 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
-    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    ImageUploadOutput, InboundRule, LogEntry, Metadata, MountSource, PortInbound, Recipe,
+    RegistryAuth, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
     SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs,
     VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
@@ -709,8 +709,30 @@ impl Client {
             "port": port,
             "label": args.label,
             "protocol": args.protocol,
+            "inbound": args.inbound,
         });
         self.call(self.api.virtx_client_open_sandbox_port, args)
+    }
+
+    /// The inbound rules of the port `port` in the sandbox `id`, and its public address if it
+    /// has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port
+    /// is refused `409`, `not_public`; one not open, `404`.
+    pub fn get_sandbox_port_inbound(&self, id: impl AsRef<str>, port: u16) -> Call<PortInbound> {
+        let args = json!({ "id": id.as_ref(), "port": port });
+        self.call(self.api.virtx_client_get_sandbox_port_inbound, args)
+    }
+
+    /// Make the inbound rules of the port `port` in the sandbox `id` `rules`, all of them -- none
+    /// lets in no one -- and answer them as the server keeps them. A source that is not an
+    /// address or a CIDR is refused `400`, `invalid`.
+    pub fn set_sandbox_port_inbound(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+        rules: &[InboundRule],
+    ) -> Call<PortInbound> {
+        let args = json!({ "id": id.as_ref(), "port": port, "rules": rules });
+        self.call(self.api.virtx_client_set_sandbox_port_inbound, args)
     }
 
     /// Close the port `port` in the sandbox `id`: its URL reaches it no more, and it is not

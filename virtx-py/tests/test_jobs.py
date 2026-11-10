@@ -10,8 +10,10 @@ from virtx import (
     ImageJob,
     ImageJobEnd,
     ImageJobKind,
+    InboundRule,
     Log,
     LogEntry,
+    PortInbound,
     PortProtocol,
     PortSpec,
     Recipe,
@@ -130,10 +132,45 @@ async def test_a_port_says_what_it_is_for_and_whether_it_is_http(test_server: st
         assert (plain.label, plain.protocol) == (None, PortProtocol.TCP)
 
 
+async def test_a_port_s_inbound_rules_are_set_as_it_opens_and_after(test_server: str) -> None:
+    with Client.spawn(test_server) as client:
+        office = InboundRule("203.0.113.7", "office")
+        sandbox = await client.create_sandbox(
+            "alpine:3.20", ports=[PortSpec(22, inbound=[office]), 5900]
+        )
+        office = InboundRule("203.0.113.7/32", "office")
+        assert await sandbox.inbound(22) == PortInbound(22, [office])
+
+        lan = [InboundRule("10.0.0.0/8")]
+        assert await sandbox.set_inbound(22, lan) == PortInbound(22, lan)
+        assert await client.get_sandbox_port_inbound(sandbox.id, 22) == PortInbound(22, lan)
+        cleared = await client.set_sandbox_port_inbound(sandbox.id, 22, [])
+        assert cleared.rules == []
+
+        # An HTTP port opened with them keeps them.
+        await sandbox.open_port(5173, protocol="http", inbound=[{"source": "10.0.0.0/8"}])
+        assert (await sandbox.inbound(5173)).rules == lan
+
+        with pytest.raises(VirtxError) as refused:
+            await sandbox.set_inbound(5900, lan)
+        assert (refused.value.status, refused.value.code) == (409, "not_public")
+        with pytest.raises(VirtxError) as refused:
+            await sandbox.inbound(9000)
+        assert (refused.value.status, refused.value.code) == (404, "not_found")
+        with pytest.raises(VirtxError) as refused:
+            await sandbox.set_inbound(22, [InboundRule("nowhere")])
+        assert (refused.value.status, refused.value.code) == (400, "invalid")
+
+
 def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:
     assert PortSpec(8080).to_dict() == 8080
     assert PortSpec(22, label="ssh").to_dict() == {"port": 22, "label": "ssh"}
     assert PortSpec(5173, protocol="http").to_dict() == {"port": 5173, "protocol": "http"}
+    assert PortSpec(22, inbound=[InboundRule("10.0.0.0/8", "lan")]).to_dict() == {
+        "port": 22,
+        "inbound": [{"source": "10.0.0.0/8", "description": "lan"}],
+    }
+    assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
     assert SandboxPort.from_dict({"port": 1, "url": "u"}) == SandboxPort(1, "u")
 
 

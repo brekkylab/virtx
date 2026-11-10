@@ -133,6 +133,8 @@ const SIGNATURES = {
   virtx_client_stop_sandbox: WITH_ARGS,
   virtx_client_open_sandbox_port: WITH_ARGS,
   virtx_client_close_sandbox_port: WITH_ARGS,
+  virtx_client_get_sandbox_port_inbound: WITH_ARGS,
+  virtx_client_set_sandbox_port_inbound: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -999,14 +1001,15 @@ class Sandbox extends Files {
   }
 
   // Opens the port `port` in it, as those it was made with are, TCP unless `protocol` says
-  // `'http'`: where it is reached from, kept in `ports` in place of one for the same port.
-  // Opened already, it is answered as it is, `label` renaming it.
-  async openPort(port, { label, protocol } = {}) {
+  // `'http'`, with `inbound` its inbound rules: where it is reached from, kept in `ports` in
+  // place of one for the same port. Opened already, it is answered as it is, `label` renaming it.
+  async openPort(port, { label, protocol, inbound } = {}) {
     const opened = await this.client._call('virtx_client_open_sandbox_port', {
       id: this.id,
       port,
       label,
       protocol,
+      inbound,
     })
     this.ports = (this.ports ?? []).filter((known) => known.port !== port).concat([opened])
     return opened
@@ -1017,6 +1020,21 @@ class Sandbox extends Files {
   async closePort(port) {
     await this.client._call('virtx_client_close_sandbox_port', { id: this.id, port })
     if (this.ports) this.ports = this.ports.filter((known) => known.port !== port)
+  }
+
+  // The inbound rules of its port `port`, and its public address if it has one: virtx cloud's.
+  inbound(port) {
+    return this.client._call('virtx_client_get_sandbox_port_inbound', { id: this.id, port })
+  }
+
+  // Makes the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one --
+  // answered as the server keeps them.
+  setInbound(port, rules) {
+    return this.client._call('virtx_client_set_sandbox_port_inbound', {
+      id: this.id,
+      port,
+      rules,
+    })
   }
 
   // Starts making an image of it, to point `reference` at: the job, and its log as the job's

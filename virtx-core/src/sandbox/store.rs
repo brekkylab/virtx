@@ -316,14 +316,17 @@ impl PortProtocol {
     }
 }
 
-/// A port to open in a sandbox: its number, what it is for, and how it is reached. Written as
-/// the number alone when it is TCP and named nothing, `{port, label?, protocol?}` otherwise; read
-/// as either.
+/// A port to open in a sandbox: its number, what it is for, how it is reached, and whom it lets
+/// in. Written as the number alone when it is TCP and says nothing more,
+/// `{port, label?, protocol?, inbound?}` otherwise; read as either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
     pub port: u16,
     pub label: Option<String>,
     pub protocol: PortProtocol,
+    /// Its inbound rules, set once it is open ([`PortInbound`]): virtx cloud's. `None` leaves
+    /// them to the server.
+    pub inbound: Option<Vec<InboundRule>>,
 }
 
 impl PortSpec {
@@ -332,6 +335,7 @@ impl PortSpec {
             port,
             label: None,
             protocol: PortProtocol::Tcp,
+            inbound: None,
         }
     }
 }
@@ -350,17 +354,20 @@ struct PortSpecObject {
     label: Option<String>,
     #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
     protocol: PortProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inbound: Option<Vec<InboundRule>>,
 }
 
 impl Serialize for PortSpec {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.label.is_none() && self.protocol.is_tcp() {
+        if self.label.is_none() && self.protocol.is_tcp() && self.inbound.is_none() {
             return serializer.serialize_u16(self.port);
         }
         PortSpecObject {
             port: self.port,
             label: self.label.clone(),
             protocol: self.protocol,
+            inbound: self.inbound.clone(),
         }
         .serialize(serializer)
     }
@@ -380,13 +387,14 @@ impl<'de> Deserialize<'de> for PortSpec {
                 port: spec.port,
                 label: spec.label,
                 protocol: spec.protocol,
+                inbound: spec.inbound,
             },
         })
     }
 }
 
 /// What opening a port in a sandbox already made asks for (`PUT /sandboxes/{id}/ports/{port}`):
-/// what it is for, and how it is reached; TCP if not said.
+/// what it is for, how it is reached, TCP if not said, and whom it lets in.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPortOpenArgs {
@@ -394,6 +402,55 @@ pub struct SandboxPortOpenArgs {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<PortProtocol>,
+    /// Its inbound rules, set once it is open, as [`PortSpec::inbound`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<Vec<InboundRule>>,
+}
+
+/// One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they are.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboundRule {
+    /// An IPv4 or IPv6 CIDR, as `203.0.113.0/24`, or one address, as `203.0.113.7`.
+    pub source: String,
+
+    /// What it is for: whose they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl InboundRule {
+    /// A rule letting in `source`, described by nothing.
+    pub fn new(source: impl Into<String>) -> InboundRule {
+        InboundRule {
+            source: source.into(),
+            description: None,
+        }
+    }
+
+    /// Described as `description`.
+    pub fn description(mut self, description: impl Into<String>) -> InboundRule {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+/// A port's inbound rules, as virtx cloud answers them (`/sandboxes/{id}/ports/{port}/inbound`):
+/// whom a TCP port lets in at its public `address`, and an HTTP one at its URL. A connection
+/// from an address no rule's source holds is not let in there, so a port with none is reached
+/// there by no one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortInbound {
+    /// The port in the sandbox.
+    pub port: u16,
+
+    /// Its rules, each source a CIDR as the server keeps it.
+    pub rules: Vec<InboundRule>,
+
+    /// Its public `host:port`, once a rule has given it one, as [`SandboxPort::address`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// A volume mounted into a sandbox.
@@ -514,6 +571,7 @@ mod port_tests {
             port: 5173,
             label: Some("dev server".into()),
             protocol: PortProtocol::Http,
+            inbound: None,
         };
         let written = serde_json::to_value(&web).unwrap();
         assert_eq!(
@@ -539,5 +597,37 @@ mod port_tests {
         let answered: SandboxPort = serde_json::from_value(reached.clone()).unwrap();
         assert_eq!(answered.address.as_deref(), Some("tcp.example:20001"));
         assert_eq!(serde_json::to_value(&answered).unwrap(), reached);
+    }
+
+    #[test]
+    fn a_port_with_inbound_rules_is_written_as_an_object() {
+        let mut ssh = PortSpec::new(22);
+        ssh.inbound = Some(vec![InboundRule::new("203.0.113.7").description("office")]);
+        let written = serde_json::to_value(&ssh).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"port": 22, "inbound": [{"source": "203.0.113.7", "description": "office"}]})
+        );
+        assert_eq!(serde_json::from_value::<PortSpec>(written).unwrap(), ssh);
+        // No rules, which let in no one, are written; `None` is left out.
+        ssh.inbound = Some(Vec::new());
+        assert_eq!(
+            serde_json::to_value(&ssh).unwrap(),
+            serde_json::json!({"port": 22, "inbound": []})
+        );
+
+        let open = SandboxPortOpenArgs {
+            inbound: Some(vec![InboundRule::new("10.0.0.0/8")]),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            serde_json::json!({"inbound": [{"source": "10.0.0.0/8"}]})
+        );
+
+        let answered = serde_json::json!({"port": 22, "rules": [{"source": "10.0.0.0/8"}]});
+        let inbound: PortInbound = serde_json::from_value(answered.clone()).unwrap();
+        assert_eq!((inbound.port, inbound.address), (22, None));
+        assert_eq!(inbound.rules, [InboundRule::new("10.0.0.0/8")]);
     }
 }

@@ -759,6 +759,7 @@ impl Sandbox {
                 port,
                 label,
                 protocol: protocol.unwrap_or_default(),
+                inbound: None,
             };
             let (key, url) = self.shared.hooks.port(&spec, None);
             let made = SandboxPort {

@@ -59,11 +59,21 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
+| `open_port(port, label, protocol, inbound)` | `SandboxPort` | Opens `port` in it, TCP unless `protocol` is `"http"`, kept in `ports`. With `inbound`, a list of `InboundRule`, its inbound rules are set as it opens. In Rust, `open_port(port)`, and the client's `open_sandbox_port_with(id, port, args)` for the rest. |
+| `close_port(port)` | `None` | Closes `port`: its `url` reaches it no more. |
+| `inbound(port)` | `PortInbound` | **virtx cloud.** The port's inbound rules, and its public `address` once it has one. |
+| `set_inbound(port, rules)` | `PortInbound` | **virtx cloud.** Replaces the port's inbound rules with `rules`; `[]` lets in no one. |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, keeping its snapshot and volumes. |
 
 Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `snapshot`, `running` and `ports`.
+
+A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
+An `InboundRule(source, description)` lets in `source`, an IPv4 or IPv6 CIDR or one address, which the server keeps as a CIDR.
+A `PortInbound` has the `port`, its `rules`, and its `address` when it has one.
+Inbound rules are virtx cloud's: a self-hosted server refuses `inbound` with `400`, and the desktop's port 5900 refuses them with `409`, `not_public`.
+In Python and Rust the client has the same two calls as `get_sandbox_port_inbound(id, port)` and `set_sandbox_port_inbound(id, port, rules)`.
 
 ## Jobs
 

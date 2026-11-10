@@ -689,15 +689,20 @@ async fn sandbox_port_open(
     }
 }
 
-/// What a port's opening asks: none, `null` or `{}` for TCP, named nothing.
+/// What a port's opening asks: none, `null` or `{}` for TCP, named nothing. Inbound rules are
+/// refused: virtx cloud's.
 fn port_args(request: &Bytes) -> Result<SandboxPortOpenArgs, Refused> {
-    match request.iter().all(u8::is_ascii_whitespace) {
-        true => Ok(SandboxPortOpenArgs::default()),
-        false => Ok(
-            serde_json::from_slice::<Option<SandboxPortOpenArgs>>(request)
-                .map_err(invalid)?
-                .unwrap_or_default(),
-        ),
+    let asked = match request.iter().all(u8::is_ascii_whitespace) {
+        true => SandboxPortOpenArgs::default(),
+        false => serde_json::from_slice::<Option<SandboxPortOpenArgs>>(request)
+            .map_err(invalid)?
+            .unwrap_or_default(),
+    };
+    match asked.inbound {
+        Some(_) => Err(invalid(
+            "inbound: a port's inbound rules are virtx cloud's; this server keeps none",
+        )),
+        None => Ok(asked),
     }
 }
 

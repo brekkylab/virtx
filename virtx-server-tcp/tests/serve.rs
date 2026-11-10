@@ -697,6 +697,7 @@ async fn a_port_opened_after_the_sandbox_reaches_what_listens_on_it() {
     let web = |label: &str, protocol| SandboxPortOpenArgs {
         label: Some(label.into()),
         protocol,
+        inbound: None,
     };
     let http = client
         .open_sandbox_port_with(

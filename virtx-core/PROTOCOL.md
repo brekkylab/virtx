@@ -251,7 +251,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | `POST /sandboxes/{id}/start` | `{}` | `200`, the sandbox, with `ports` |
 | `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
-| `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?}` | `201`, the port; `200` for one open already |
+| `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?, inbound?}` | `201`, the port; `200` for one open already |
 | `DELETE /sandboxes/{id}/ports/{port}` | | `204` |
 
 A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at}`, and in the answer to its `POST` and to `start`, `ports` too:
@@ -310,15 +310,16 @@ A connection to one of its ports while its VM is stopped is closed, as one to a 
 
 #### Ports
 
-`ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?}` to say what it is for and how it is reached: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
+`ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?, inbound?}` to say what it is for, how it is reached and whom it lets in: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
 
 - `label` is what it is for, free text of up to 128 characters, answered with it.
 - `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP refuses `http` with `400`, `invalid`.
+- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: virtx cloud's, beside the protocol, which answers them at `/sandboxes/{id}/ports/{port}/inbound`. A server that keeps none refuses `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out.
 
 They are reserved when the sandbox is made, and kept through every stop and start until it is deleted. `0` and a port given twice are refused.
 A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
-A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, its body `{label?, protocol?}` as above -- `{}`, or none, for TCP named nothing -- and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed; a `label` given then is its label from then on, and a `protocol` other than the one it was opened with is refused with `409`, `exists`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
+A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, its body `{label?, protocol?, inbound?}` as above -- `{}`, or none, for TCP named nothing -- and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed; a `label` given then is its label from then on, and a `protocol` other than the one it was opened with is refused with `409`, `exists`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
 
 A port is closed with `DELETE /sandboxes/{id}/ports/{port}`: its URL reaches it no more from then on, and it is not opened again as the sandbox starts; one not open is answered `404`, `not_found`. A server MAY refuse to close a port it opens in every sandbox, with `409`, `in_use`. To reach a port another way -- `http` rather than `tcp` -- it is closed and opened again, at another URL.
 

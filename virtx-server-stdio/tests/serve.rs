@@ -9,9 +9,10 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
-    Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, MountSource,
-    MountType, PortProtocol, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs, SandboxState, SandboxVolume, Step,
+    Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, InboundRule,
+    MountSource, MountType, PortProtocol, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs, SandboxState,
+    SandboxVolume, Step,
 };
 use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 
@@ -277,6 +278,18 @@ async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
     let mut args = here();
     args.vcpus = Some(0);
     assert_eq!(refused(args).await, 400);
+    // Inbound rules are virtx cloud's.
+    let mut ssh = PortSpec::new(22);
+    ssh.inbound = Some(vec![InboundRule::new("10.0.0.0/8")]);
+    let mut args = here();
+    args.ports = vec![ssh];
+    assert_eq!(refused(args).await, 400);
+    let open = SandboxPortOpenArgs {
+        inbound: Some(Vec::new()),
+        ..Default::default()
+    };
+    let opened = server.client.open_sandbox_port_with("nobody", 22, &open);
+    assert_eq!(status(opened.await), 400);
     let mut args = here();
     args.gpu_memory_mib = Some(1024);
     assert_eq!(refused(args).await, 400);
@@ -760,6 +773,7 @@ async fn a_port_is_opened_and_closed_as_the_sandbox_runs() {
     let args = SandboxPortOpenArgs {
         label: Some("hello".into()),
         protocol: Some(PortProtocol::Http),
+        inbound: None,
     };
     let open = server
         .client
@@ -773,12 +787,14 @@ async fn a_port_is_opened_and_closed_as_the_sandbox_runs() {
     let tcp = SandboxPortOpenArgs {
         label: None,
         protocol: Some(PortProtocol::Tcp),
+        inbound: None,
     };
     let again = server.client.open_sandbox_port_with(&id, 8000, &tcp).await;
     assert_eq!(status(again), 409);
     let again = SandboxPortOpenArgs {
         label: Some("hi".into()),
         protocol: None,
+        inbound: None,
     };
     let again = server
         .client

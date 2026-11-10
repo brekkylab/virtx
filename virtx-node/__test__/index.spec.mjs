@@ -344,6 +344,33 @@ test('a port says what it is for, and whether it is HTTP', async () => {
   }
 })
 
+test("a port's inbound rules are set as it opens and after", async () => {
+  const client = Client.spawn(testServer)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20', {
+      ports: [{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }, 5900],
+    })
+    const office = { source: '203.0.113.7/32', description: 'office' }
+    assert.deepEqual(await sandbox.inbound(22), { port: 22, rules: [office] })
+
+    const lan = [{ source: '10.0.0.0/8' }]
+    assert.deepEqual(await sandbox.setInbound(22, lan), { port: 22, rules: lan })
+    assert.deepEqual((await sandbox.inbound(22)).rules, lan)
+    assert.deepEqual((await sandbox.setInbound(22, [])).rules, [])
+
+    // An HTTP port opened with them keeps them.
+    await sandbox.openPort(5173, { protocol: 'http', inbound: lan })
+    assert.deepEqual((await sandbox.inbound(5173)).rules, lan)
+
+    await assert.rejects(sandbox.setInbound(5900, lan), { status: 409, code: 'not_public' })
+    await assert.rejects(sandbox.inbound(9000), { status: 404, code: 'not_found' })
+    const nowhere = [{ source: 'nowhere' }]
+    await assert.rejects(sandbox.setInbound(22, nowhere), { status: 400, code: 'invalid' })
+  } finally {
+    await client.close()
+  }
+})
+
 // The test server is on the client's machine and gives no port an address: a server that does
 // is played by one answering a sandbox, and a port opened in it with such an address.
 test('a TCP port answered with an address has it', async () => {

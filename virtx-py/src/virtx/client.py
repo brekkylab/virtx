@@ -28,7 +28,16 @@ from .image import (
     image_name,
 )
 from .job import StartedJob
-from .sandbox import PortProtocol, PortSpec, Sandbox, SandboxPort, SandboxVolume
+from .sandbox import (
+    InboundRule,
+    PortInbound,
+    PortProtocol,
+    PortSpec,
+    Sandbox,
+    SandboxPort,
+    SandboxVolume,
+    inbound_rules,
+)
 from .volume import Volume
 
 if TYPE_CHECKING:
@@ -470,8 +479,9 @@ class Client:
         ``Sandbox.remove``, when it stops if ``ephemeral``, or after ``auto_delete_days`` stopped
         and unused, ``"never"`` keeping it until then. ``name`` finds it again with
         ``find_sandbox``. ``ports`` are ports in it to open -- a number for TCP, or a
-        ``PortSpec`` (or its ``{port, label?, protocol?}``) to say what it is for and whether it
-        is HTTP -- each answered here and by ``Sandbox.start`` with the ``url`` it is reached by.
+        ``PortSpec`` (or its ``{port, label?, protocol?, inbound?}``) to say what it is for,
+        whether it is HTTP and whom it lets in -- each answered here and by ``Sandbox.start``
+        with the ``url`` it is reached by.
         Whatever is left out the server picks."""
         args = json.loads(
             _args(
@@ -523,18 +533,41 @@ class Client:
         *,
         label: str | None = None,
         protocol: PortProtocol | str | None = None,
+        inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None,
     ) -> SandboxPort:
         """Open the port ``port`` in the sandbox ``id``, as those it was made with are, and
         answer where it is reached from: TCP unless ``protocol`` says HTTP, ``label`` saying
-        what it is for. Opened already, it is answered as it is, ``label`` renaming it. A
-        program in it listening on ``port`` already is reached once it listens again."""
+        what it is for, ``inbound`` its inbound rules, virtx cloud's. Opened already, it is
+        answered as it is, ``label`` renaming it. A program in it listening on ``port`` already
+        is reached once it listens again."""
         args = _args(
             id=id,
             port=port,
             label=label,
             protocol=None if protocol is None else PortProtocol(protocol).value,
+            inbound=None if inbound is None else inbound_rules(inbound),
         )
         return SandboxPort.from_dict(await self._call("virtx_client_open_sandbox_port", args))
+
+    async def get_sandbox_port_inbound(self, id: str, port: int) -> PortInbound:
+        """The inbound rules of the port ``port`` in the sandbox ``id``, and its public address
+        if it has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's
+        port is refused ``409``, ``not_public``; one not open, ``404``."""
+        args = _args(id=id, port=port)
+        return PortInbound.from_dict(
+            await self._call("virtx_client_get_sandbox_port_inbound", args)
+        )
+
+    async def set_sandbox_port_inbound(
+        self, id: str, port: int, rules: Iterable[InboundRule | Mapping[str, Any]]
+    ) -> PortInbound:
+        """Make the inbound rules of the port ``port`` in the sandbox ``id`` ``rules``, all of
+        them -- ``[]`` lets in no one -- and answer them as the server keeps them. A source that
+        is not an address or a CIDR is refused ``400``, ``invalid``."""
+        args = _args(id=id, port=port, rules=inbound_rules(rules))
+        return PortInbound.from_dict(
+            await self._call("virtx_client_set_sandbox_port_inbound", args)
+        )
 
     async def close_sandbox_port(self, id: str, port: int) -> None:
         """Close the port ``port`` in the sandbox ``id``: its ``url`` reaches it no more, and it

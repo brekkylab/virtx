@@ -185,6 +185,12 @@ impl Sandboxes {
                 super::LABEL_MOST
             )));
         }
+        if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s inbound rules are virtx cloud's; this server keeps none",
+                spec.port
+            )));
+        }
         spec_of(&args)?;
         if args.disk_gib == Some(0) {
             return Err(Error::Invalid(

@@ -18,8 +18,9 @@ use crate::{
         Recipe, RegistryAuth, oci,
     },
     sandbox::{
-        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
-        SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs,
+        self, InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs,
+        SandboxExecItem, SandboxJob, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs,
+        SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -432,6 +433,30 @@ impl Client {
         sandbox::client::open_port(&self.inner, id.as_ref(), port, args).await
     }
 
+    /// The inbound rules of the port `port` in the sandbox `id`, and its public address if it
+    /// has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port
+    /// is refused `409`, `not_public`; one not open, `404`.
+    pub async fn get_sandbox_port_inbound(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+    ) -> Result<PortInbound, Error> {
+        sandbox::client::port_inbound(&self.inner, id.as_ref(), port).await
+    }
+
+    /// Make the inbound rules of the port `port` in the sandbox `id` `rules`, all of them -- none
+    /// lets in no one -- and answer them as the server keeps them, as
+    /// [`get_sandbox_port_inbound`](Self::get_sandbox_port_inbound) does. A source that is not
+    /// an address or a CIDR is refused `400`, `invalid`.
+    pub async fn set_sandbox_port_inbound(
+        &self,
+        id: impl AsRef<str>,
+        port: u16,
+        rules: &[InboundRule],
+    ) -> Result<PortInbound, Error> {
+        sandbox::client::set_port_inbound(&self.inner, id.as_ref(), port, rules).await
+    }
+
     /// Every job in the sandbox `id`.
     pub async fn list_sandbox_job(&self, id: impl AsRef<str>) -> Result<Vec<SandboxJob>, Error> {
         sandbox::client::list_job(&self.inner, id.as_ref()).await
@@ -665,6 +690,7 @@ mod tests {
                     &SandboxPortOpenArgs {
                         label: Some("dev server".into()),
                         protocol: Some(crate::PortProtocol::Http),
+                        ..Default::default()
                     },
                 )
                 .await
@@ -699,6 +725,71 @@ mod tests {
 
             client.remove_sandbox(&sandbox.id).await.unwrap();
             assert_eq!(refusal(client.get_sandbox(&sandbox.id).await).0, 404);
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ports_inbound_rules_are_set_as_it_opens_and_after() {
+        for client in each().await {
+            let office = InboundRule::new("203.0.113.7").description("office");
+            let mut ssh = crate::PortSpec::new(22);
+            ssh.inbound = Some(vec![office]);
+            let args = SandboxCreateArgs::new("alpine:3.20")
+                .port(ssh)
+                .port(8080)
+                .port(5900);
+            let sandbox = client.create_sandbox(&args).await.unwrap();
+
+            // Made with them: each source a CIDR.
+            let read = client
+                .get_sandbox_port_inbound(&sandbox.id, 22)
+                .await
+                .unwrap();
+            let office = InboundRule::new("203.0.113.7/32").description("office");
+            assert_eq!(read.rules, std::slice::from_ref(&office));
+            assert_eq!((read.port, read.address), (22, None));
+            // Made without: none.
+            let read = client
+                .get_sandbox_port_inbound(&sandbox.id, 8080)
+                .await
+                .unwrap();
+            assert!(read.rules.is_empty());
+
+            // Set: all of them replaced.
+            let lan = [InboundRule::new("10.0.0.0/8")];
+            let set = client
+                .set_sandbox_port_inbound(&sandbox.id, 22, &lan)
+                .await
+                .unwrap();
+            assert_eq!(set.rules, lan);
+            let read = client.get_sandbox_port_inbound(&sandbox.id, 22).await;
+            assert_eq!(read.unwrap(), set);
+
+            // An HTTP port opened with them keeps them.
+            let web = SandboxPortOpenArgs {
+                protocol: Some(crate::PortProtocol::Http),
+                inbound: Some(vec![office.clone()]),
+                ..Default::default()
+            };
+            client
+                .open_sandbox_port_with(&sandbox.id, 5173, &web)
+                .await
+                .unwrap();
+            let read = client.get_sandbox_port_inbound(&sandbox.id, 5173).await;
+            assert_eq!(read.unwrap().rules, [office]);
+
+            // Refused: the desktop's, a port not open, and a source not a CIDR.
+            let desktop = client.set_sandbox_port_inbound(&sandbox.id, 5900, &lan);
+            let refused = desktop.await.unwrap_err();
+            assert_eq!(refused.code(), Some("not_public"));
+            let closed = client.get_sandbox_port_inbound(&sandbox.id, 9000).await;
+            assert_eq!(closed.unwrap_err().code(), Some("not_found"));
+            let nowhere = [InboundRule::new("nowhere")];
+            let invalid = client.set_sandbox_port_inbound(&sandbox.id, 22, &nowhere);
+            assert_eq!(invalid.await.unwrap_err().code(), Some("invalid"));
+
+            client.remove_sandbox(&sandbox.id).await.unwrap();
             client.close().await;
         }
     }
@@ -1118,7 +1209,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs,
             ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        sandbox::{SandboxCreateArgs, SandboxExecArgs},
+        sandbox::{InboundRule, SandboxCreateArgs, SandboxExecArgs},
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
@@ -1165,6 +1256,14 @@ pub(crate) mod ffi {
         #[serde(default)]
         stdin: bool,
         timeout_ms: Option<u64>,
+    }
+
+    /// What names a port in a sandbox: `{"id": "...", "port": n}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct IdPort {
+        id: String,
+        port: u16,
     }
 
     /// What names a sandbox's jobs, or one of them, and what each request to one takes beside:
@@ -2355,8 +2454,9 @@ pub(crate) mod ffi {
     }
 
     /// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
-    /// "protocol"?: "tcp" | "http"}`. Answers with `{"port": n, "url": "...", "label"?,
-    /// "protocol"?, "address"?}`: where it is reached from now.
+    /// "protocol"?: "tcp" | "http", "inbound"?: [{"source": "...", "description"?: "..."}]}`.
+    /// Answers with `{"port": n, "url": "...", "label"?, "protocol"?, "address"?}`: where it is
+    /// reached from now.
     ///
     /// # Safety
     ///
@@ -2376,6 +2476,8 @@ pub(crate) mod ffi {
             label: Option<String>,
             #[serde(default)]
             protocol: Option<crate::PortProtocol>,
+            #[serde(default)]
+            inbound: Option<Vec<InboundRule>>,
         }
         let args = unsafe { json::<IdPort>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
@@ -2383,6 +2485,7 @@ pub(crate) mod ffi {
             let open = crate::SandboxPortOpenArgs {
                 label: args.label,
                 protocol: args.protocol,
+                inbound: args.inbound,
             };
             client
                 .open_sandbox_port_with(args.id, args.port, &open)
@@ -2403,12 +2506,6 @@ pub(crate) mod ffi {
         args: *const u8,
         args_len: usize,
     ) -> *mut VirtxFuture {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct IdPort {
-            id: String,
-            port: u16,
-        }
         let args = unsafe { json::<IdPort>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let args = args?;
@@ -2416,6 +2513,59 @@ pub(crate) mod ffi {
                 .close_sandbox_port(args.id, args.port)
                 .await
                 .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Answers with the inbound rules of the port `port` in the sandbox `id`, given
+    /// `{"id": "...", "port": n}`, as `{"port": n, "rules": [{"source": "...",
+    /// "description"?: "..."}], "address"?: "..."}`: virtx cloud's.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_sandbox_port_inbound(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<IdPort>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let args = args?;
+            client
+                .get_sandbox_port_inbound(args.id, args.port)
+                .await
+                .map_err(Failure::from)
+        })
+    }
+
+    /// Makes the inbound rules of the port `port` in the sandbox `id` `rules`, all of them, given
+    /// `{"id": "...", "port": n, "rules": [{"source": "...", "description"?: "..."}]}`. Answers
+    /// with them as `virtx_client_get_sandbox_port_inbound` does.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_sandbox_port_inbound(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Rules {
+            id: String,
+            port: u16,
+            rules: Vec<InboundRule>,
+        }
+        let args = unsafe { json::<Rules>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let args = args?;
+            client
+                .set_sandbox_port_inbound(args.id, args.port, &args.rules)
+                .await
+                .map_err(Failure::from)
         })
     }
 

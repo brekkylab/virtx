@@ -54,6 +54,8 @@ from .image import (
 from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .sandbox import (
+    InboundRule,
+    PortInbound,
     PortProtocol,
     PortSpec,
     Sandbox,
@@ -100,6 +102,7 @@ __all__ = [
     "ImagePruneOutput",
     "ImageTag",
     "ImageUploadOutput",
+    "InboundRule",
     "Log",
     "LogEntry",
     "Metadata",
@@ -109,6 +112,7 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
+    "PortInbound",
     "PortProtocol",
     "PortSpec",
     "Progress",

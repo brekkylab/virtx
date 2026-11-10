@@ -330,6 +330,10 @@ export class Sandbox extends Files implements SandboxInfo {
   commit(reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Close the port `port` in it: its `url` reaches it no more, and it is not opened again as it starts; dropped from `ports`. One not open is refused `404`. */
   closePort(port: number): Promise<void>
+  /** The inbound rules of its port `port`, and its public address if it has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port is refused `409`, `not_public`; one not open, `404`. */
+  inbound(port: number): Promise<PortInbound>
+  /** Make the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one -- answered as the server keeps them. A source that is not an address or a CIDR is refused `400`, `invalid`. */
+  setInbound(port: number, rules: InboundRule[]): Promise<PortInbound>
   /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
   /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */
@@ -351,14 +355,34 @@ export interface SandboxPort {
   address?: string
 }
 
-/** A port to open as a sandbox is made: a number for TCP named nothing, or one that says more. */
-export type PortSpec = number | { port: number; label?: string; protocol?: PortProtocol }
+/** A port to open as a sandbox is made: a number for TCP that says nothing more, or one that says more. */
+export type PortSpec =
+  number | { port: number; label?: string; protocol?: PortProtocol; inbound?: InboundRule[] }
 
 /** What opening a port in a sandbox already made asks for; TCP if not said. */
 export interface SandboxPortOpenOptions {
   /** What it is for; given for one open already, its label from then on. */
   label?: string
   protocol?: PortProtocol
+  /** Its inbound rules, set once it is open: virtx cloud's. Absent leaves them to the server; `[]` lets in no one. */
+  inbound?: InboundRule[]
+}
+
+/** One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they are. */
+export interface InboundRule {
+  /** An IPv4 or IPv6 CIDR, as `203.0.113.0/24`, or one address, as `203.0.113.7`. */
+  source: string
+  /** What it is for: whose they are. */
+  description?: string
+}
+
+/** A port's inbound rules, as virtx cloud answers them: whom a TCP port lets in at its public `address`, and an HTTP one at its `url`. A connection from an address no rule's source holds is not let in there, so a port with none is reached there by no one. */
+export interface PortInbound {
+  port: number
+  /** Each source a CIDR, as the server keeps it. */
+  rules: InboundRule[]
+  /** Its public `host:port`, once a rule has given it one. */
+  address?: string
 }
 
 /** Whatever is left out the server picks. */

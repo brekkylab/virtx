@@ -18,9 +18,10 @@ use futures_core::Stream;
 use std::{io::Read, net::TcpStream};
 
 use virtx::{
-    Auth, Client, Error, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, LogEntry, MountSource,
-    MountType, PortForwarder, PortProtocol, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs, SandboxState,
+    Auth, Client, Error, Files, ImageJobEnd, ImageJobEntry, ImageJobKind, InboundRule, LogEntry,
+    MountSource, MountType, PortForwarder, PortProtocol, PortSpec, Recipe, SandboxCreateArgs,
+    SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry, SandboxPortOpenArgs,
+    SandboxState,
 };
 
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
@@ -284,6 +285,7 @@ fn a_port_says_what_it_is_for_and_whether_it_is_http() {
             port: 5173,
             label: Some("dev server".into()),
             protocol: PortProtocol::Http,
+            inbound: None,
         },
     ];
     let made = client.create_sandbox(&args).wait().unwrap();
@@ -303,6 +305,7 @@ fn a_port_says_what_it_is_for_and_whether_it_is_http() {
     let open = SandboxPortOpenArgs {
         label: Some("docs".into()),
         protocol: Some(PortProtocol::Http),
+        ..Default::default()
     };
     let web = client
         .open_sandbox_port_with(made.id(), 8080, &open)
@@ -314,6 +317,47 @@ fn a_port_says_what_it_is_for_and_whether_it_is_http() {
     );
     let plain = made.open_port(9000).wait().unwrap();
     assert_eq!((plain.label, plain.protocol), (None, PortProtocol::Tcp));
+}
+
+fn a_port_s_inbound_rules_are_set_as_it_opens_and_after() {
+    let client = Client::spawn(test_server().to_str().unwrap(), [] as [&str; 0]).unwrap();
+    let mut ssh = PortSpec::new(22);
+    ssh.inbound = Some(vec![InboundRule::new("203.0.113.7").description("office")]);
+    let args = SandboxCreateArgs::new("alpine:3.20").port(ssh).port(5900);
+    let made = client.create_sandbox(&args).wait().unwrap();
+
+    let office = InboundRule::new("203.0.113.7/32").description("office");
+    let read = made.inbound(22).wait().unwrap();
+    assert_eq!(
+        (read.port, read.rules, read.address),
+        (22, vec![office], None)
+    );
+
+    let lan = [InboundRule::new("10.0.0.0/8")];
+    let set = made.set_inbound(22, &lan).wait().unwrap();
+    assert_eq!(set.rules, lan);
+    let read = client.get_sandbox_port_inbound(made.id(), 22).wait();
+    assert_eq!(read.unwrap(), set);
+
+    // An HTTP port opened with them keeps them.
+    let web = SandboxPortOpenArgs {
+        protocol: Some(PortProtocol::Http),
+        inbound: Some(lan.to_vec()),
+        ..Default::default()
+    };
+    client
+        .open_sandbox_port_with(made.id(), 5173, &web)
+        .wait()
+        .unwrap();
+    assert_eq!(made.inbound(5173).wait().unwrap().rules, lan);
+
+    let desktop = made.set_inbound(5900, &lan).wait().unwrap_err();
+    assert_eq!(desktop.code(), Some("not_public"), "{desktop}");
+    let closed = made.inbound(9000).wait().unwrap_err();
+    assert_eq!(closed.code(), Some("not_found"), "{closed}");
+    let nowhere = [InboundRule::new("nowhere")];
+    let invalid = made.set_inbound(22, &nowhere).wait().unwrap_err();
+    assert_eq!(invalid.code(), Some("invalid"), "{invalid}");
 }
 
 fn a_process_run_in_a_sandbox_is_read_from_its_log() {
@@ -666,6 +710,7 @@ fn main() -> ExitCode {
         a_sandbox_s_files_are_its_own_and_go_with_it,
         a_sandbox_stops_starts_again_and_is_found_by_its_name,
         a_port_says_what_it_is_for_and_whether_it_is_http,
+        a_port_s_inbound_rules_are_set_as_it_opens_and_after,
         a_process_run_in_a_sandbox_is_read_from_its_log,
         an_image_build_is_a_job_with_a_log,
         a_started_job_is_read_as_its_log,

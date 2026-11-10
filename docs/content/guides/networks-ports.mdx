@@ -125,3 +125,58 @@ Closing a forwarder stops forwarding on this machine; the port in the sandbox st
 
 A server on this machine answers each port with a loopback address already, which a TCP client can also reach as it is.
 A server over HTTP answers a URL that only a `PortForwarder` opens, so use one either way.
+
+## Who a port lets in
+
+On virtx cloud, each open port has inbound rules, as a security group does: the addresses it lets in.
+A TCP port's rules limit who reaches its public `address`, which it is given with its first rule; its `url`, through a `PortForwarder`, is not limited by them.
+An HTTP port's rules limit who reaches its `url`, and it has no `address`.
+A connection from an address no rule holds is not let in, so a port with no rules is reached there by no one.
+
+Each rule is a `source`, an IPv4 or IPv6 CIDR such as `203.0.113.0/24` or one address such as `203.0.113.7`, and an optional `description`.
+Set them as the port opens, with `inbound` in its spec or in `open_port`, or later with `set_inbound`, which replaces them all.
+`inbound` reads them back, each source as a CIDR.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import InboundRule, PortSpec
+
+sandbox = await client.create_sandbox(
+    "alpine:latest",
+    ports=[PortSpec(22, inbound=[InboundRule("203.0.113.7", "office")])],
+)
+await sandbox.set_inbound(22, [InboundRule("10.0.0.0/8")])
+print((await sandbox.inbound(22)).rules)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', {
+  ports: [{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }],
+})
+await sandbox.setInbound(22, [{ source: '10.0.0.0/8' }])
+console.log((await sandbox.inbound(22)).rules)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut ssh = PortSpec::new(22);
+ssh.inbound = Some(vec![InboundRule::new("203.0.113.7").description("office")]);
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(ssh))
+    .await?;
+sandbox.set_inbound(22, &[InboundRule::new("10.0.0.0/8")]).await?;
+println!("{:?}", sandbox.inbound(22).await?.rules);
+```
+
+</TabItem>
+</Tabs>
+
+A source that is not an address or a CIDR is refused with `400`, `invalid`, and the desktop's port 5900 refuses rules with `409`, `not_public`.
+Inbound rules are virtx cloud's alone: a self-hosted server, `virtx-stdio` or `virtx-server-tcp`, keeps none and refuses a port opened with `inbound`.

@@ -630,8 +630,9 @@ struct VirtxFuture *virtx_client_stop_sandbox(struct VirtxClient *client,
                                               size_t args_len);
 
 // Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
-// "protocol"?: "tcp" | "http"}`. Answers with `{"port": n, "url": "...", "label"?,
-// "protocol"?, "address"?}`: where it is reached from now.
+// "protocol"?: "tcp" | "http", "inbound"?: [{"source": "...", "description"?: "..."}]}`.
+// Answers with `{"port": n, "url": "...", "label"?, "protocol"?, "address"?}`: where it is
+// reached from now.
 //
 // # Safety
 //
@@ -649,6 +650,28 @@ struct VirtxFuture *virtx_client_open_sandbox_port(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_close_sandbox_port(struct VirtxClient *client,
                                                     const uint8_t *args,
                                                     size_t args_len);
+
+// Answers with the inbound rules of the port `port` in the sandbox `id`, given
+// `{"id": "...", "port": n}`, as `{"port": n, "rules": [{"source": "...",
+// "description"?: "..."}], "address"?: "..."}`: virtx cloud's.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_sandbox_port_inbound(struct VirtxClient *client,
+                                                          const uint8_t *args,
+                                                          size_t args_len);
+
+// Makes the inbound rules of the port `port` in the sandbox `id` `rules`, all of them, given
+// `{"id": "...", "port": n, "rules": [{"source": "...", "description"?: "..."}]}`. Answers
+// with them as `virtx_client_get_sandbox_port_inbound` does.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_set_sandbox_port_inbound(struct VirtxClient *client,
+                                                          const uint8_t *args,
+                                                          size_t args_len);
 
 // Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
 // removed. Answers with `null`.

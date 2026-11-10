@@ -1,8 +1,8 @@
 //! A sandbox and the jobs in it, each with the client its requests go through.
 
 use virtx_core::{
-    FileRoot, ImageJobEntry, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxExecItem,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort,
+    FileRoot, ImageJobEntry, InboundRule, LogEntry, PortInbound, Sandbox as SandboxInfo,
+    SandboxExecArgs, SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort,
 };
 
 use crate::{Call, Client, Events, ImageJob, StartedJob, files};
@@ -67,6 +67,19 @@ impl Sandbox {
     /// it starts. One not open is refused `404`.
     pub fn close_port(&self, port: u16) -> Call<()> {
         self.client.close_sandbox_port(&self.info.id, port)
+    }
+
+    /// The inbound rules of its port `port`, as [`Client::get_sandbox_port_inbound`] answers
+    /// them: virtx cloud's.
+    pub fn inbound(&self, port: u16) -> Call<PortInbound> {
+        self.client.get_sandbox_port_inbound(&self.info.id, port)
+    }
+
+    /// Make the inbound rules of its port `port` `rules`, all of them, as
+    /// [`Client::set_sandbox_port_inbound`] does.
+    pub fn set_inbound(&self, port: u16, rules: &[InboundRule]) -> Call<PortInbound> {
+        self.client
+            .set_sandbox_port_inbound(&self.info.id, port, rules)
     }
 
     /// Start making an image of it -- its image, with what it has written as one more layer --

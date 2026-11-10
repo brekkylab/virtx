@@ -132,6 +132,7 @@ mod tests {
             json!({
                 "message": "the server answered 404 Not Found: not_found: no such file",
                 "status": 404,
+                "code": "not_found",
             })
         );
         assert_eq!(

@@ -95,3 +95,8 @@ windows-sys = { version = "0.61.2", features = [
 # for the mock servers they answer from.
 tempfile = "3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+
+# The tests that boot machines: its own `main`, which becomes the machine when spawned to be one.
+[[test]]
+name = "machine"
+harness = false

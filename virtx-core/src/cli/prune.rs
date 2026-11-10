@@ -49,7 +49,7 @@ fn size(bytes: u64) -> String {
     }
 }
 
-#[cfg(all(test, feature = "testing"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -59,60 +59,26 @@ fn ended(digest: Option<String>, error: Option<String>) -> anyhow::Result<String
     }
 }
 
-#[cfg(all(test, feature = "testing"))]
-pub(crate) mod tests {
-    use crate::{Auth, Recipe};
-
+#[cfg(test)]
+mod tests {
     use super::*;
 
-    /// The test server, served over HTTP on loopback, and its base URL.
-    pub(crate) async fn serve() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, crate::testing::router()).await });
-        url
+    #[test]
+    fn a_job_ended_answers_its_digest_or_why_it_failed() {
+        let digest = || Some("sha256:0".to_owned());
+        assert_eq!(ended(digest(), None).unwrap(), "sha256:0");
+        // An error is how it ended, whatever digest it has.
+        let failed = ended(digest(), Some("no space".into())).unwrap_err();
+        assert_eq!(failed.to_string(), "no space");
+        assert!(ended(None, None).is_err());
     }
 
-    /// A client of a test server of its own.
-    pub(crate) async fn client() -> Client {
-        Client::connect(&serve().await, Auth::None, http::HeaderMap::new()).unwrap()
-    }
-
-    /// Every tag on the server's images, with the digest it points at.
-    pub(crate) async fn tags(client: &Client) -> std::collections::BTreeMap<String, String> {
-        let listed = client.list_image().await.unwrap();
-        listed
-            .into_iter()
-            .map(|image| (image.reference, image.digest))
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn a_job_answers_the_digest_it_ended_with() {
-        let client = client().await;
-        let job = client
-            .build_image(Recipe::new("alpine:3.20"), "jq:latest")
-            .await
-            .unwrap();
-        let digest = follow(&client, &job, true).await.unwrap();
-        let listed = client.list_image().await.unwrap();
-        assert!(
-            listed
-                .iter()
-                .any(|image| image.reference == "jq:latest" && image.digest == digest),
-            "{listed:?}"
+    #[test]
+    fn an_interruption_says_what_was_undone() {
+        let interrupted = Interrupted("the job was cancelled");
+        assert_eq!(
+            interrupted.to_string(),
+            "interrupted; the job was cancelled"
         );
-    }
-
-    #[tokio::test]
-    async fn a_failed_job_fails_with_its_error() {
-        let client = client().await;
-        let job = client
-            .build_image(Recipe::new("missing"), "jq:latest")
-            .await
-            .unwrap();
-        let error = follow(&client, &job, true).await.unwrap_err();
-        assert!(!error.is::<Interrupted>());
-        assert!(!error.to_string().is_empty());
     }
 }

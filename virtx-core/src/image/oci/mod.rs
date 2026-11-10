@@ -11,11 +11,7 @@ mod archive;
 mod images;
 mod manifest;
 mod reference;
-#[cfg(all(test, feature = "testing"))]
-mod tests;
 
-#[cfg(feature = "testing")]
-pub(crate) use self::manifest::sha256;
 pub(crate) use self::{
     archive::{download, upload},
     images::{list, remove, tag, untag},

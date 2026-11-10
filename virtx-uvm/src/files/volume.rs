@@ -296,7 +296,7 @@ fn described(stat: &Stat) -> Meta {
 fn refused(e: &Error) -> FsError {
     match e {
         Error::Unknown(_) | Error::NoMount { .. } => FsError::NotFound,
-        Error::AlreadyExists(_) => FsError::Exists,
+        Error::AlreadyExists(_) | Error::MountExists(_) => FsError::Exists,
         Error::InvalidName(_) | Error::InvalidPath(_) | Error::Refused(_) | Error::InUse(_) => {
             FsError::Forbidden
         }

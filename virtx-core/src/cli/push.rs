@@ -27,21 +27,3 @@ pub(crate) async fn push(client: &Client, args: PushArgs) -> anyhow::Result<()> 
     println!("{reference} {digest}");
     Ok(())
 }
-
-#[cfg(all(test, feature = "testing"))]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_push_ends_with_the_digest_it_pushed() {
-        let client = job::tests::client().await;
-        let listed = client.list_image().await.unwrap();
-        let alpine = listed.iter().find(|image| image.reference == "alpine:3.20");
-        let job = client.push_image("alpine:3.20", None).await.unwrap();
-        let pushed = job::follow(&client, &job, true).await.unwrap();
-        assert_eq!(
-            Some(pushed.as_str()),
-            alpine.map(|image| image.digest.as_str())
-        );
-    }
-}

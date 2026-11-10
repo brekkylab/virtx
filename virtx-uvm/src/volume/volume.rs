@@ -42,6 +42,9 @@ pub enum Error {
     #[error("a volume named {0} is already here")]
     AlreadyExists(String),
 
+    #[error("a mount is at {0} already")]
+    MountExists(String),
+
     #[error("volume {0} is mounted by a machine or being removed")]
     InUse(String),
 
@@ -286,6 +289,12 @@ impl Volume {
             relative(&mount.path)
                 .is_ok_and(|other| at.starts_with(&other) || other.starts_with(&at))
         });
+        // At the very path, it is the mount there; inside or over it, a path no mount can be at.
+        if let Some(clash) =
+            clash.filter(|clash| relative(&clash.path).is_ok_and(|other| other == at))
+        {
+            return Err(Error::MountExists(clash.path.clone()));
+        }
         if let Some(clash) = clash {
             return Err(Error::Refused(format!(
                 "{path} would be inside or over the mount at {}",
@@ -846,5 +855,19 @@ mod tests {
             matches!(&refused, Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound),
             "{refused:?}"
         );
+    }
+
+    #[test]
+    fn a_mount_at_a_path_a_mount_is_at_is_one_there_and_inside_one_is_refused() {
+        let scratch = Scratch::new("mounts");
+        let mut volume = scratch.0.create("v").unwrap();
+        let notion = || MountSource::Notion {
+            api_key: "k".into(),
+        };
+        volume.mount("notes".into(), notion()).unwrap();
+        let again = volume.mount("notes".into(), notion());
+        assert!(matches!(again, Err(Error::MountExists(_))), "{again:?}");
+        let inside = volume.mount("notes/deeper".into(), notion());
+        assert!(matches!(inside, Err(Error::Refused(_))), "{inside:?}");
     }
 }

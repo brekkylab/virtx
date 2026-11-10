@@ -16,11 +16,12 @@ use std::{
     time::Duration,
 };
 
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
-use virtx_core::{SandboxCreateArgs, SandboxJobEntry};
+use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::{
-    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeStore,
+    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
+    VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -271,6 +272,77 @@ async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed(home: Ho
     close(sandbox).await;
 }
 
+async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
+    let args = SandboxCreateArgs::new(ALPINE);
+    let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
+    // Each writes and reads at once with the others, and finds what it wrote alone.
+    let writes: Vec<_> = (0..made.len())
+        .map(|i| format!("echo {i} > /root/mine"))
+        .collect();
+    let wrote = join_all(
+        made.iter()
+            .zip(&writes)
+            .map(async |(sandbox, write)| run(sandbox, &["sh", "-c", write], None).await),
+    )
+    .await;
+    for wrote in wrote {
+        assert_eq!(wrote.unwrap().1, 0);
+    }
+    let read = join_all(
+        made.iter()
+            .map(|sandbox| run(sandbox, &["cat", "/root/mine"], None)),
+    )
+    .await;
+    for (i, read) in read.into_iter().enumerate() {
+        assert_eq!(read.unwrap(), (vec![i.to_string()], 0));
+    }
+    join_all(made.into_iter().map(close)).await;
+}
+
+async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    let job = sandbox.exec(cmd, None).await.unwrap();
+    tokio::join!(close(Arc::clone(&sandbox)), close(Arc::clone(&sandbox)));
+    assert!(!sandbox.answer(String::new()).running);
+    assert!(!job.get().running);
+    assert!(sandbox.jobs().is_empty());
+    let after = run(&sandbox, &["true"], None).await;
+    assert!(matches!(after, Err(SandboxError::Ended)), "{after:?}");
+    let left = std::fs::read_dir(home.root.join("sandbox"))
+        .unwrap()
+        .count();
+    assert_eq!(left, 0);
+}
+
+async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Home) {
+    home.volumes.create("data").unwrap();
+    let mounting = |readonly| SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "data".into(),
+            path: "/data".into(),
+            readonly,
+        }],
+        ..SandboxCreateArgs::new(ALPINE)
+    };
+    let (writing, reading) = (mounting(false), mounting(true));
+    let (writer, reader) = tokio::join!(home.sandbox(&writing, None), home.sandbox(&reading, None));
+    let write = ["sh", "-c", "echo kept > /data/kept"];
+    assert_eq!(run(&writer, &write, None).await.unwrap().1, 0);
+    let read = run(&reader, &["cat", "/data/kept"], None).await;
+    assert_eq!(read.unwrap(), (vec!["kept".into()], 0));
+    let denied = run(&reader, &["sh", "-c", "echo no > /data/no"], None).await;
+    assert_ne!(denied.unwrap().1, 0);
+
+    let in_use = || matches!(home.volumes.remove("data"), Err(VolumeError::InUse(_)));
+    assert!(in_use());
+    close(writer).await;
+    // The other mounts it still.
+    assert!(in_use());
+    close(reader).await;
+    home.volumes.remove("data").unwrap();
+}
+
 fn main() -> ExitCode {
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
@@ -309,6 +381,9 @@ fn main() -> ExitCode {
         a_parked_sandbox_holds_its_snapshot_against_another,
         a_sandbox_closed_while_its_machine_stops_has_synced,
         a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed,
+        sandboxes_made_at_once_each_run_their_own,
+        a_sandbox_closed_twice_at_once_ends_once,
+        a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
     ];
     let filter = env::args().skip(1).find(|arg| !arg.starts_with('-'));
     let mut failed = 0;

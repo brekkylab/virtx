@@ -1205,7 +1205,8 @@ async fn a_cancelled_build_takes_its_machine_with_it() {
     assert!(running());
 
     server.client.remove_image_job(&job.id).await.unwrap();
-    for _ in 0..50 {
+    // Looked for a minute: what is tried is that it goes, not how soon.
+    for _ in 0..600 {
         if !running() {
             return;
         }

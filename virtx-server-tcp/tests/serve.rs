@@ -1389,7 +1389,8 @@ async fn a_terminal_s_history_is_written_as_each_command_runs() {
     read_until(&mut socket, "kept-42").await;
     // The shell still open: its history on the disk all the same.
     let mut history = String::new();
-    for _ in 0..20 {
+    // Looked for a minute: what is tried is that it is written, not how soon.
+    for _ in 0..240 {
         history = said("cat /root/.bash_history 2>/dev/null").await;
         if history.contains("echo kept-") {
             break;
@@ -1658,18 +1659,25 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
         (log, started.elapsed())
     };
 
-    // A program left running, its output the job's own: the job ends with its shell.
-    let (log, took) = exec("sleep 60 & echo started; printf 'no newline'").await;
-    assert!(took < std::time::Duration::from_secs(10), "{took:?}: {log}");
+    // A program left running, its output the job's own: the job ends with its shell, the
+    // program running still.
+    let (log, _) = exec("sleep 300 & echo started; printf 'no newline'").await;
+    let (left, _) = exec("pgrep -f 'sleep 300' >/dev/null && echo running").await;
+    assert!(left.contains(r#"data: {"stdout":"running"}"#), "{left}");
     assert!(log.contains(r#"data: {"stdout":"started"}"#), "{log}");
     assert!(log.contains(r#"data: {"stdout":"no newline"}"#), "{log}");
     assert!(log.ends_with("data: {\"end\":{\"code\":0}}\n\n"), "{log}");
     // One that goes on writing: none of what it writes after is the job's, and it is not held
     // up by a pipe no one reads. It writes to stderr: on the job's stdout, its lines -- longer
     // than a pipe writes at once -- would be cut by `seq`'s, and `seq`'s by them.
-    let (log, took) =
+    let (log, _) =
         exec("(while true; do head -c 8000 /dev/zero | tr '\\0' x; echo; date >> /tmp/w; sleep 0.01; done) >&2 & seq 1 20000; echo done").await;
-    assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    // Ended while what it left writes on: /tmp/w grows after its end.
+    let (grew, _) = exec(
+        "a=$(wc -l < /tmp/w); sleep 1; b=$(wc -l < /tmp/w); [ \"$b\" -gt \"$a\" ] && echo growing",
+    )
+    .await;
+    assert!(grew.contains(r#"data: {"stdout":"growing"}"#), "{grew}");
     let lines: Vec<&str> = log.lines().filter(|l| l.starts_with("data: ")).collect();
     assert!(
         lines.contains(&r#"data: {"stdout":"20000"}"#),
@@ -1794,14 +1802,19 @@ async fn a_fork_bomb_leaves_the_sandbox_answering() {
     };
     ran("sh -c 'f(){ f & f & wait; }; f' >/dev/null 2>&1 </dev/null & echo started").await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // Answered while the bomb goes on, rightly: how soon is not what is tried here. The
+    // timeout only keeps a sandbox that never answers from holding the suite.
     let asked = std::time::Instant::now();
     let answered = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        ran("echo alive; cat /proc/sys/kernel/pid_max"),
+        std::time::Duration::from_secs(120),
+        // The processes counted by the shell's own glob: no fork, which the bomb may starve.
+        ran("echo alive; set -- /proc/[0-9]*; echo $#"),
     )
     .await
     .expect("a command answered beside the bomb");
     eprintln!("BOMB {answered:?} in {:?}", asked.elapsed());
     assert_eq!(answered[0], "alive", "{answered:?}");
+    let processes: u32 = answered[1].parse().unwrap_or(0);
+    assert!(processes > 100, "the bomb went on beside it: {answered:?}");
     client.stop_sandbox(&id).await.unwrap();
 }

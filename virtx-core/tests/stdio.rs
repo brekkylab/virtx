@@ -4,8 +4,6 @@
 //! Without libtest's harness, which writes its own lines to stdout: over stdio, stdout is the
 //! server's HTTP/2 connection and nothing else.
 
-use std::time::Duration;
-
 use futures_util::TryStreamExt;
 use hyper::service::Service as _;
 use hyper_util::service::TowerToHyperService;
@@ -16,6 +14,8 @@ use virtx_core::{
 
 /// Set in the environment of this binary when it runs as the server.
 const SERVER: &str = "VIRTX_CORE_STDIO_SERVER";
+/// A file the server writes as it exits on its own, its stdin closed: one killed writes none.
+const EXITED: &str = "VIRTX_CORE_STDIO_EXITED";
 
 fn main() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -27,6 +27,9 @@ fn main() {
         };
         let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout());
         runtime.block_on(served).unwrap();
+        if let Some(exited) = std::env::var_os(EXITED) {
+            std::fs::write(exited, "exited").unwrap();
+        }
         return;
     }
     runtime.block_on(a_child_process_answers_requests_and_logs());
@@ -34,8 +37,10 @@ fn main() {
 }
 
 async fn a_child_process_answers_requests_and_logs() {
+    let exited = std::env::temp_dir().join(format!("virtx-stdio-exited-{}", std::process::id()));
+    let _ = std::fs::remove_file(&exited);
     let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-    command.env(SERVER, "1");
+    command.env(SERVER, "1").env(EXITED, &exited);
     let client = Client::spawn(command).unwrap();
 
     let volume = client.create_volume(Some("dev")).await.unwrap();
@@ -68,8 +73,11 @@ async fn a_child_process_answers_requests_and_logs() {
         ]
     );
 
-    let started = std::time::Instant::now();
     client.close().await;
-    // The server exits once its stdin closes, well before it would be killed.
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // The server exits once its stdin closes, on its own: not killed, as one that does not is.
+    assert_eq!(
+        std::fs::read_to_string(&exited).ok().as_deref(),
+        Some("exited")
+    );
+    let _ = std::fs::remove_file(&exited);
 }

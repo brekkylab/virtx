@@ -55,7 +55,7 @@ It forwards the port to an address on your machine, and you connect to that addr
 
 1. Pass `ports` to `create_sandbox` to open those ports in the sandbox.
 2. Each one comes back in `sandbox.ports` with a `url`.
-3. `PortForwarder.open` takes that `url` and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to.
+3. `PortForwarder.open` takes that port, or its `url`, and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to. In Python, `await PortForwarder.aopen(...)` opens it without holding up the event loop.
 
 How the forwarding works depends on where the server runs:
 
@@ -80,7 +80,7 @@ from virtx import PortForwarder
 sandbox = await client.create_sandbox("alpine:latest", ports=[8000])
 await sandbox.exec(["httpd", "-f", "-p", "8000"])  # started, left running
 
-with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
+with await PortForwarder.aopen(client, sandbox.ports[0]) as forwarder:
     print(f"http://{forwarder.address}")
 ```
 
@@ -93,7 +93,7 @@ const { PortForwarder } = require('@brekkylab/virtx')
 const sandbox = await client.createSandbox('alpine:latest', { ports: [8000] })
 await sandbox.exec(['httpd', '-f', '-p', '8000']) // started, left running
 
-const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+const forwarder = PortForwarder.open(client, sandbox.ports[0])
 console.log(`http://${forwarder.address}`)
 forwarder.close()
 ```
@@ -107,7 +107,7 @@ let sandbox = client
     .await?;
 sandbox.exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).await?; // started, left running
 
-let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url)?;
+let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0])?;
 println!("http://{}", forwarder.address());
 drop(forwarder);
 ```
@@ -119,6 +119,9 @@ Each entry of `sandbox.ports` names the guest's `port` beside its `url`, in the 
 A port given twice, or port `0`, is refused.
 
 A connection made while nothing listens on the port in the guest is closed at once, as a closed port's would be: start the service before connecting.
+Through a server over HTTP, the forwarder says why: a connection whose WebSocket is refused, or closed before the port sent a byte, is kept as the forwarder's last error, and logged as a warning that names the port and what the server answered -- never its `url`.
+Read it after a connection dies with `forwarder.last_error` in Python, `forwarder.lastError` in Node.js and `forwarder.last_error()` in Rust: an error whose message names the port, with the `status` and `code` the server refused the WebSocket with, if it did, or none while every connection has reached the port.
+The warning goes to the `virtx` logger in Python, as a `VirtxWarning` through `process.emitWarning` in Node.js, and to the `log` crate under the target `virtx` in Rust.
 
 Ports are opened only when the sandbox is created, and stay open until it is removed.
 Closing a forwarder stops forwarding on this machine; the port in the sandbox stays open, and another forwarder can reach it again.

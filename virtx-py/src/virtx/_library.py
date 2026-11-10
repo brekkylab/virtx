@@ -7,6 +7,9 @@ module that shares one opens the path ``library_path()`` answers.
 A request is polled with a waker the library wakes from its own threads: the wake schedules
 the asyncio future the poll is waiting on, on that future's loop, and the next poll takes what
 woke it.
+
+What the library warns of beside an answer, such as a forwarded connection that reached nothing
+in its sandbox, is logged as a warning by the ``virtx`` logger.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import asyncio
 import ctypes
 import itertools
 import json
+import logging
 import os
 import sys
 import threading
@@ -105,6 +109,17 @@ def _wake(key: int | None) -> None:
 @_CALLBACK
 def _release(key: int | None) -> None:
     _pending.pop(key or 0, None)
+
+
+_WARN = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
+
+#: What logs the library's warnings.
+logger = logging.getLogger("virtx")
+
+
+@_WARN
+def _warn(message: bytes | None) -> None:
+    logger.warning("%s", (message or b"").decode("utf-8", "replace"))
 
 
 _HANDLE = ctypes.c_void_p
@@ -208,7 +223,9 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],
         ctypes.c_int,
     ),
+    "virtx_port_forwarder_last_error": ([_HANDLE, _OUT], ctypes.c_int),
     "virtx_port_forwarder_free": ([_HANDLE], None),
+    "virtx_set_warn": ([_WARN], None),
     "virtx_bytes_free": ([_Bytes], None),
     "virtx_future_poll": ([_HANDLE, _Waker, _OUT], ctypes.c_int),
     "virtx_future_free": ([_HANDLE], None),
@@ -230,6 +247,7 @@ class Library:
             function.argtypes = argtypes
             function.restype = restype
             setattr(self, name, function)
+        self.virtx_set_warn(_warn)
 
     def take(self, status: int, out: _Bytes, raw: bool = False) -> Any:
         """What the library wrote for ``status``, read and freed: the output, as JSON unless

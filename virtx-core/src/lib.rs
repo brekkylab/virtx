@@ -27,6 +27,8 @@ mod image;
 mod sandbox;
 mod transport;
 mod volume;
+#[cfg(feature = "client")]
+mod warning;
 
 pub use auth::Auth;
 #[cfg(feature = "client")]

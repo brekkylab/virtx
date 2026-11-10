@@ -57,13 +57,13 @@ A sandbox is kept, stopped, once unused, until it is deleted. One the client ans
 }
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it, or `openPort` for one opened after: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the port the sandbox answered, or `openPort` for one opened after, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- is closed, and `forwarder.lastError` says why, a `VirtxError` naming the port, also emitted as a process warning of the type `VirtxWarning`.
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
 
 const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000] })
-const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+const forwarder = PortForwarder.open(client, sandbox.ports[0])
 console.log('reach it at', forwarder.address)
 forwarder.close()
 const port = await sandbox.openPort(9000) // kept in sandbox.ports too

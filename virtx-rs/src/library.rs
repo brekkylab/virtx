@@ -3,9 +3,13 @@
 //! One per process: every client is made by the library first opened, which stays open until
 //! the process ends. A client handed between modules is only good in the same library, so a
 //! module that shares one opens the path [`library_path`] answers.
+//!
+//! What the library warns of beside an answer, such as a forwarded connection that reached
+//! nothing in its sandbox, is logged as a warning by the [`log`] crate, under the target
+//! `virtx`.
 
 use std::{
-    ffi::{OsStr, OsString, c_char, c_int, c_void},
+    ffi::{CStr, OsStr, OsString, c_char, c_int, c_void},
     sync::{Mutex, PoisonError},
 };
 
@@ -181,7 +185,10 @@ api! {
         forwarder: *mut *mut Opaque,
         out: *mut VirtxBytes,
     ) -> c_int,
+    virtx_port_forwarder_last_error:
+        unsafe extern "C" fn(forwarder: *mut Opaque, out: *mut VirtxBytes) -> c_int,
     virtx_port_forwarder_free: unsafe extern "C" fn(forwarder: *mut Opaque),
+    virtx_set_warn: unsafe extern "C" fn(warn: Option<unsafe extern "C" fn(message: *const c_char)>),
     virtx_bytes_free: unsafe extern "C" fn(bytes: VirtxBytes),
     virtx_future_poll:
         unsafe extern "C" fn(future: *mut Opaque, waker: VirtxWaker, out: *mut VirtxBytes) -> c_int,
@@ -221,10 +228,22 @@ pub fn load(path: impl AsRef<OsStr>) -> Result<(), Error> {
             path.display()
         ))),
         None => {
-            *api = Some(Box::leak(Box::new(Api::open(path)?)));
+            let opened: &'static Api = Box::leak(Box::new(Api::open(path)?));
+            unsafe { (opened.virtx_set_warn)(Some(warn)) };
+            *api = Some(opened);
             Ok(())
         }
     }
+}
+
+/// A warning of the library's, logged.
+///
+/// # Safety
+///
+/// `message` is a NUL-terminated string, as `virtx_set_warn` calls it with.
+unsafe extern "C" fn warn(message: *const c_char) {
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    log::warn!(target: "virtx", "{message}");
 }
 
 /// The path the open library was opened by, as given; `None` before the first client or

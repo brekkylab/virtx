@@ -3976,6 +3976,7 @@ version = "0.1.2"
 dependencies = [
  "futures-core",
  "libloading",
+ "log",
  "serde",
  "serde_json",
  "virtx-core",

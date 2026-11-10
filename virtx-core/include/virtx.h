@@ -8,7 +8,9 @@
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
  * left, and ends after an error. A port forwarder opens over a client, blocking as opening
- * one does, and forwards until it is freed or the client's last release. Free every VirtxBytes
+ * one does, and forwards until it is freed or the client's last release. What the library warns
+ * of beside an answer, such as a forwarded connection that reached nothing, goes to the
+ * function virtx_set_warn sets, and is dropped until one is. Free every VirtxBytes
  * written with virtx_bytes_free, every future with virtx_future_free, every stream with
  * virtx_stream_free, and every forwarder with virtx_port_forwarder_free.
  */
@@ -834,9 +836,10 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
 
-// Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
-// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
-// `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
+// Forward the port a sandbox answered `url` for, given `{"url": "...", "port"?: n}` as
+// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
+// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
+// the error's message. Blocks until it is open, which takes no request of the server.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.
@@ -852,12 +855,33 @@ int virtx_port_forwarder_open(struct VirtxClient *client,
                               struct VirtxPortForwarder **forwarder,
                               struct VirtxBytes *out);
 
+// Why the last connection to `forwarder` that reached nothing in the sandbox failed: its
+// WebSocket refused, or closed before the port sent a byte, as it is when nothing listens
+// there. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
+// the failure written as a call's error is, its message naming the port: `{"message",
+// "status"?, "code"?}`, `status` and `code` the server's refusal of the WebSocket. Each
+// such failure is also handed to the function `virtx_set_warn` set.
+//
+// # Safety
+//
+// `forwarder` is one `virtx_port_forwarder_open` wrote, not yet freed. `out` is writable.
+int virtx_port_forwarder_last_error(const struct VirtxPortForwarder *forwarder,
+                                    struct VirtxBytes *out);
+
 // Stop `forwarder` and free it. Null does nothing.
 //
 // # Safety
 //
 // `forwarder` is null, or one `virtx_port_forwarder_open` wrote, not used again.
 void virtx_port_forwarder_free(struct VirtxPortForwarder *forwarder);
+
+// Call `warn` with each warning the library has from now on, in place of the function set
+// before: a NUL-terminated UTF-8 message for a person, valid only during the call, from
+// any thread, the library's own included. Null drops them, as the library does until this
+// is called. One for the process, as the library is.
+//
+// `warn` may block, but must not call into this library.
+void virtx_set_warn(void (*warn)(const char *message));
 
 #ifdef __cplusplus
 }  // extern "C"

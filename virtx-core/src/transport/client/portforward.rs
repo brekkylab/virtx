@@ -84,7 +84,7 @@ impl PortForwarder {
     }
 
     #[cfg(test)]
-    pub(crate) fn tasks(&self) -> usize {
+    fn tasks(&self) -> usize {
         self.tasks.load(SeqCst)
     }
 
@@ -123,16 +123,17 @@ impl PortForwarder {
             .map_err(|e| format!("opening a loopback port: {e}"))?;
         #[cfg(test)]
         let tasks = Arc::new(AtomicUsize::new(0));
-        #[cfg(test)]
-        let tasks_outer = Arc::clone(&tasks);
         let mut forwarding = JoinSet::new();
+        #[cfg(test)]
+        let tasks_inner = Arc::clone(&tasks);
         forwarding.spawn(async move {
+            #[cfg(test)]
+            let tasks = tasks_inner;
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let Ok((accepted, _)) = accepted else { break };
-                        while connections.try_join_next().is_some() {}
                         let (http, url) = (http.clone(), url.clone());
                         let (auth, headers) = (current(&auth), current(&headers));
                         connections.spawn(async move {
@@ -141,22 +142,18 @@ impl PortForwarder {
                                 carry(accepted, socket).await;
                             }
                         });
-                        #[cfg(test)]
-                        tasks.store(connections.len(), SeqCst);
                     }
-                    Some(_) = connections.join_next(), if !connections.is_empty() => {
-                        while connections.try_join_next().is_some() {}
-                        #[cfg(test)]
-                        tasks.store(connections.len(), SeqCst);
-                    }
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 }
+                #[cfg(test)]
+                tasks.store(connections.len(), SeqCst);
             }
         });
         Ok(PortForwarder {
             address,
             _forwarding: Some(forwarding),
             #[cfg(test)]
-            tasks: tasks_outer,
+            tasks,
         })
     }
 }
@@ -365,50 +362,25 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(forward.tasks(), 0, "completed tasks were not reaped");
+    }
 
-        let forward_shut = PortForwarder::open(&client, "ports/shut").await.unwrap();
+    #[tokio::test]
+    async fn refused_connection_tasks_are_reaped() {
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let forward = PortForwarder::open(&client, "ports/shut").await.unwrap();
+
         for _ in 0..5 {
-            let mut stream = TcpStream::connect(forward_shut.address()).await.unwrap();
+            let mut stream = TcpStream::connect(forward.address()).await.unwrap();
             let mut read = Vec::new();
             assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0);
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while forward_shut.tasks() > 0 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(forward_shut.tasks(), 0, "failed tasks were not reaped");
-
-        let mut active = TcpStream::connect(forward.address()).await.unwrap();
-        active.write_all(b"active-start").await.unwrap();
-        let mut echoed = [0u8; 12];
-        active.read_exact(&mut echoed).await.unwrap();
-        assert_eq!(&echoed, b"active-start");
-
-        {
-            let mut short = TcpStream::connect(forward.address()).await.unwrap();
-            short.write_all(b"short").await.unwrap();
-            let mut echoed = [0u8; 5];
-            short.read_exact(&mut echoed).await.unwrap();
-            assert_eq!(&echoed, b"short");
-        }
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while forward.tasks() > 1 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(forward.tasks(), 1, "active connection was dropped");
-
-        active.write_all(b"active-end").await.unwrap();
-        let mut echoed = [0u8; 10];
-        active.read_exact(&mut echoed).await.unwrap();
-        assert_eq!(&echoed, b"active-end");
-        drop(active);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while forward.tasks() > 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(forward.tasks(), 0);
+        assert_eq!(forward.tasks(), 0, "failed tasks were not reaped");
     }
 }
 

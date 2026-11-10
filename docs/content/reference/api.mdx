@@ -9,7 +9,8 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is iterated for its log or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+In Rust, `complete` is the job's, after awaiting the call.
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
 
@@ -76,6 +77,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `get()` | `SandboxJob` | The job as the server has it now. |
+| `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
 | `log(after)` | `LogEntry`s | Its output, from its start or after entry `after`, until its end. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
 | `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
@@ -96,10 +98,26 @@ It has its `id`, its `kind`, the `reference` it points or pushes, whether it is 
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `get()` | `ImageJob` | The job as the server has it now. |
-| `log(after)` | `LogEntry`s | Its log, from its start or after entry `after`, until its end. |
+| `complete(print)` | `str` | Follows it to its end, printing its log if `print`, and answers the digest it made. Raises the error it failed with. |
+| `log(after)` | `LogEntry`s | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. |
 | `remove()` | `None` | Cancels it if it runs, and forgets the job. |
 
 In Rust, `ImageJob` answers `id()` and `info()`.
+
+## Errors
+
+A call that fails raises a `VirtxError`, thrown in Node.js and an `Error` in Rust.
+Its `source` says where it failed, and `status` the HTTP status when the server refused the request:
+
+| `source` | `status` | When |
+| --- | --- | --- |
+| `server` | the HTTP status | The server refused the request, such as `404` for what does not exist and `409` for what is in use. |
+| `job` | none | The job the call started failed, such as a build whose step exited nonzero. |
+| `transport` | none | The request or its answer did not get through: the connection failed or the session ended. |
+| `client` | none | This side failed: an argument, a file on this machine, or an answer it could not read. |
+
+Tell errors apart by `source` and `status`, not by the message.
+In Rust, `source_kind()` answers the `Source` and `status()` the status.
 
 ## Snapshots
 

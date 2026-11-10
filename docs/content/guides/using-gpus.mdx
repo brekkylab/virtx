@@ -22,15 +22,9 @@ recipe = Recipe("alpine:latest").run(
     # The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
     "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools"
 )
-async for entry in client.build_image(recipe, "vulkan:latest"):
-    match entry.entry:
-        case Log(line):
-            print(line)
-        case ImageJobEnd(error=str(error)):
-            raise RuntimeError(error)
+await client.build_image(recipe, "vulkan:latest").complete(print=True)
 sandbox = await client.create_sandbox("vulkan:latest", gpu=True, gpu_memory_mib=8192)
-async for entry in sandbox.exec(["vulkaninfo", "--summary"]):
-    print(entry.entry)
+await sandbox.exec(["vulkaninfo", "--summary"]).complete(print=True)
 ```
 
 </TabItem>
@@ -41,13 +35,10 @@ const recipe = new Recipe('alpine:latest').run(
   // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
   'apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools'
 )
-for await (const entry of client.buildImage(recipe, 'vulkan:latest')) {
-  if ('log' in entry) console.log(entry.log)
-  else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
-}
+await client.buildImage(recipe, 'vulkan:latest').complete({ print: true })
 const options = { gpu: true, gpuMemoryMib: 8192 }
 const sandbox = await client.createSandbox('vulkan:latest', options)
-for await (const entry of sandbox.exec(['vulkaninfo', '--summary'])) console.log(entry)
+await sandbox.exec(['vulkaninfo', '--summary']).complete({ print: true })
 ```
 
 </TabItem>
@@ -58,22 +49,13 @@ let recipe = Recipe::new("alpine:latest").step(
     // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
     "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools",
 );
-let mut log = client.build_image(recipe, "vulkan:latest").log();
-while let Some(entry) = log.next().await {
-    match entry?.entry {
-        ImageJobEntry::Log(line) => println!("{line}"),
-        ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
-        _ => {}
-    }
-}
+client.build_image(recipe, "vulkan:latest").await?.complete(true).await?;
 let args = SandboxCreateArgs::new("vulkan:latest")
     .gpu(true)
     .gpu_memory_mib(8192);
 let sandbox = client.create_sandbox(&args).await?;
-let mut log = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+let job = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).await?;
+job.complete(true).await?;
 ```
 
 </TabItem>

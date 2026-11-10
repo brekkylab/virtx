@@ -26,9 +26,7 @@ recipe = (
     .env("LANG", "C.UTF-8")
     .workdir("/work")
 )
-async for entry in client.build_image(recipe, "jq:latest"):
-    # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
-    print(entry.entry)
+digest = await client.build_image(recipe, "jq:latest").complete(print=True)
 ```
 
 </TabItem>
@@ -39,10 +37,7 @@ const recipe = new Recipe('alpine:latest')
   .run('apk add --no-cache jq')
   .env('LANG', 'C.UTF-8')
   .workdir('/work')
-for await (const entry of client.buildImage(recipe, 'jq:latest')) {
-  // { id, log } ..., then { id, end } with a digest or an error
-  console.log(entry)
-}
+const digest = await client.buildImage(recipe, 'jq:latest').complete({ print: true })
 ```
 
 </TabItem>
@@ -53,11 +48,8 @@ let recipe = Recipe::new("alpine:latest")
     .step(Step::run("apk add --no-cache jq"))
     .step(Step::env("LANG", "C.UTF-8"))
     .step(Step::workdir("/work"));
-let mut log = client.build_image(recipe, "jq:latest").log();
-while let Some(entry) = log.next().await {
-    // Log(line) ..., then End(ImageJobEnd { digest, error })
-    println!("{:?}", entry?.entry);
-}
+let build = client.build_image(recipe, "jq:latest").await?;
+let digest = build.complete(true).await?;
 ```
 
 </TabItem>
@@ -84,7 +76,7 @@ In Rust, `Recipe::from_dockerfile` reads a Dockerfile's text into a recipe for `
 
 ```rust
 let recipe = Recipe::from_dockerfile(std::fs::read_to_string("Dockerfile")?)?;
-let mut log = client.build_image(recipe, "jq:latest").log();
+let digest = client.build_image(recipe, "jq:latest").await?.complete(true).await?;
 ```
 
 ### After a build
@@ -93,7 +85,10 @@ A build stores its image under the supplied tag. `create_sandbox` boots it by th
 
 A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
 
-A build, like a pull or a push, is a job. Read its log through `end` and check its `error` before booting from the tag. Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A build, like a pull or a push, is a job.
+`complete` follows it to its end, printing its log with `print`, and answers the digest of what it made; a build that fails raises a `VirtxError` whose `source` is `job`, so complete it before booting from the tag.
+Iterated instead, it yields its log, and raises the same error in place of its `end` entry.
+Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
 
 ## Tagging
 
@@ -148,36 +143,31 @@ import os
 
 from virtx import BasicAuth
 
-async for entry in client.pull_image("python:3.12-slim"):
-    print(entry.entry)
+await client.pull_image("python:3.12-slim").complete(print=True)
 sandbox = await client.create_sandbox("python:3.12-slim")
 
 await client.tag_image("jq:latest", "ghcr.io/me/jq:1")
 auth = BasicAuth("me", os.environ["GHCR_TOKEN"])
-async for entry in client.push_image("ghcr.io/me/jq:1", auth):
-    print(entry.entry)
+await client.push_image("ghcr.io/me/jq:1", auth).complete(print=True)
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```js
-for await (const entry of client.pullImage('python:3.12-slim')) console.log(entry)
+await client.pullImage('python:3.12-slim').complete({ print: true })
 const sandbox = await client.createSandbox('python:3.12-slim')
 
 await client.tagImage('jq:latest', 'ghcr.io/me/jq:1')
 const auth = { type: 'basic', username: 'me', password: process.env.GHCR_TOKEN }
-for await (const entry of client.pushImage('ghcr.io/me/jq:1', auth)) console.log(entry)
+await client.pushImage('ghcr.io/me/jq:1', auth).complete({ print: true })
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let mut log = client.pull_image("python:3.12-slim", None).log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+client.pull_image("python:3.12-slim", None).await?.complete(true).await?;
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("python:3.12-slim"))
     .await?;
@@ -187,10 +177,7 @@ let auth = RegistryAuth::Basic {
     username: "me".into(),
     password: std::env::var("GHCR_TOKEN")?,
 };
-let mut log = client.push_image("ghcr.io/me/jq:1", Some(auth)).log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+client.push_image("ghcr.io/me/jq:1", Some(auth)).await?.complete(true).await?;
 ```
 
 </TabItem>

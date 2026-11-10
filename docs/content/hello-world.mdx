@@ -29,7 +29,7 @@ npm install @brekkylab/virtx
 <TabItem label="Rust">
 
 ```sh
-cargo add virtx futures
+cargo add virtx
 cargo add tokio --features macros,rt-multi-thread
 ```
 
@@ -47,20 +47,15 @@ As written, it starts a server on your machine with `Client.spawn()`; [Run it](#
 ```python
 import asyncio
 
-from virtx import Client, Stdout
+from virtx import Client
 
 
 async def main() -> None:
     with Client.spawn() as client:
-        async for _ in client.pull_image("alpine:latest"):
-            pass
-
+        await client.pull_image("alpine:latest").complete()
         sandbox = await client.create_sandbox("alpine:latest")
         try:
-            async for entry in sandbox.exec(["echo", "Hello, world!"]):
-                match entry.entry:
-                    case Stdout(line):
-                        print(line)
+            await sandbox.exec(["echo", "Hello, world!"]).complete(print=True)
         finally:
             await sandbox.remove()
 
@@ -77,13 +72,10 @@ const { Client } = require('@brekkylab/virtx')
 async function main() {
   const client = Client.spawn()
   try {
-    for await (const _ of client.pullImage('alpine:latest')) {}
-
+    await client.pullImage('alpine:latest').complete()
     const sandbox = await client.createSandbox('alpine:latest')
     try {
-      for await (const entry of sandbox.exec(['echo', 'Hello, world!'])) {
-        if ('stdout' in entry) console.log(entry.stdout)
-      }
+      await sandbox.exec(['echo', 'Hello, world!']).complete({ print: true })
     } finally {
       await sandbox.remove()
     }
@@ -99,27 +91,17 @@ main()
 <TabItem label="Rust">
 
 ```rust
-use futures::StreamExt;
-use virtx::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
+use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
-
-    let mut log = client.pull_image("alpine:latest", None).log();
-    while let Some(entry) = log.next().await {
-        entry?;
-    }
-
+    client.pull_image("alpine:latest", None).await?.complete(false).await?;
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
         .await?;
-    let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).log();
-    while let Some(entry) = log.next().await {
-        if let SandboxJobEntry::Stdout(line) = entry?.entry {
-            println!("{line}");
-        }
-    }
+    let job = sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).await?;
+    job.complete(true).await?;
     sandbox.remove().await?;
     Ok(())
 }

@@ -36,7 +36,7 @@ pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
-pub use portforward::PortForwarder;
+pub use portforward::{ForwardedPort, PortForwarder};
 pub use sandbox::{Sandbox, SandboxJob};
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
 pub use virtx_core::ImageJob as ImageJobInfo;

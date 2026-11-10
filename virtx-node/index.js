@@ -11,6 +11,10 @@
 // call onto the main thread, so a wake only runs once the event loop does: nothing here blocks
 // the main thread on the library's threads, and releasing a client, which waits for them, runs
 // on a worker.
+//
+// What the library warns of beside an answer, such as a forwarded connection that reached nothing
+// in its sandbox, is emitted as a process warning of the type `VirtxWarning`, queued onto the main
+// thread as a wake is.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -63,6 +67,7 @@ const VirtxWaker = koffi.struct('VirtxWaker', {
   release: koffi.pointer(Callback),
 })
 const Out = koffi.out(koffi.pointer(VirtxBytes))
+const Warn = koffi.proto('void VirtxWarn(const char *message)')
 
 const PLAIN = ['uintptr_t', ['uintptr_t']]
 const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
@@ -148,7 +153,9 @@ const SIGNATURES = {
     'int',
     ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
+  virtx_port_forwarder_last_error: ['int', ['uintptr_t', Out]],
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
+  virtx_set_warn: ['void', [koffi.pointer(Warn)]],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_future_free: ['void', ['uintptr_t']],
@@ -177,6 +184,10 @@ function settle(key, release) {
 // Registered once and kept for the process: wakers are only ever these two.
 const wake = koffi.register((key) => settle(key, false), koffi.pointer(Callback))
 const release = koffi.register((key) => settle(key, true), koffi.pointer(Callback))
+const warn = koffi.register(
+  (message) => process.emitWarning(message, 'VirtxWarning'),
+  koffi.pointer(Warn),
+)
 
 class Library {
   constructor(file) {
@@ -186,6 +197,7 @@ class Library {
     for (const [name, [result, args]] of Object.entries(SIGNATURES)) {
       this[name] = lib.func(name, result, args)
     }
+    this.virtx_set_warn(warn)
   }
 
   // What the library wrote for `status`, read and freed: the output, as JSON unless `raw`, or
@@ -737,7 +749,9 @@ const forwarders = new FinalizationRegistry(({ lib, raw }) => {
 //
 // It runs on its client's session, so the client's last close stops it. Over stdio the server is
 // on this machine and its own address is the forwarder's; over HTTP each connection to the
-// forwarder is carried to the port in a WebSocket.
+// forwarder is carried to the port in a WebSocket. A connection that reaches nothing in the
+// sandbox -- its WebSocket refused, or closed before the port sent a byte, as it is when nothing
+// listens there -- is closed, and why is `lastError`, and emitted as a `VirtxWarning`.
 class PortForwarder {
   constructor(raw, lib, address) {
     this._raw = raw
@@ -748,16 +762,35 @@ class PortForwarder {
     forwarders.register(this, { lib, raw }, this._token)
   }
 
-  // Forward the port a sandbox answered `url` for, as `createSandbox` answers one in `ports`,
-  // over `client`'s session. Blocks until it is open.
-  static open(client, url) {
+  // Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it,
+  // over `client`'s session. Given the port, what a connection that fails says names its number.
+  // Returns once its local address is open, which takes no request of the server.
+  static open(client, port) {
     const lib = client._lib
-    const bytes = encode({ url })
+    const bytes = encode(
+      typeof port === 'string' ? { url: port } : { url: port.url, port: port.port },
+    )
     const raw = [0]
     const out = {}
     const status = lib.virtx_port_forwarder_open(client._held(), bytes, bytes.length, raw, out)
     const { address } = lib.take(status, out)
     return new PortForwarder(raw[0], lib, address)
+  }
+
+  // Why the last connection to the forwarder that reached nothing in the sandbox failed, its
+  // message naming the port, as a `VirtxError`; `null` while none has. Its `status` and `code`
+  // are the server's, where it refused the connection's WebSocket.
+  get lastError() {
+    if (this._raw === null) throw new VirtxError('the forwarder is closed')
+    const out = {}
+    const status = this._lib.virtx_port_forwarder_last_error(this._raw, out)
+    try {
+      this._lib.take(status, out)
+    } catch (error) {
+      if (error instanceof VirtxError) return error
+      throw error
+    }
+    return null
   }
 
   // The address's host: a loopback IP.

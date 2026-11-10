@@ -574,13 +574,18 @@ export class Client {
 
 /**
  * A sandbox's port at an address on this machine's loopback, until it is closed. It runs on its
- * client's session, so the client's last close stops it.
+ * client's session, so the client's last close stops it. A connection that reaches nothing in
+ * the sandbox -- its WebSocket refused, or closed before the port sent a byte, as it is when
+ * nothing listens there -- is closed, and why is `lastError`, and emitted as a process warning
+ * of the type `VirtxWarning`.
  */
 export class PortForwarder {
-  /** Forward the port a sandbox answered `url` for, as `SandboxPort.url`, over `client`'s session. Blocks until it is open. */
-  static open(client: Client, url: string): PortForwarder
+  /** Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it, over `client`'s session. Given the port, what a connection that fails says names its number. Returns once its local address is open, which takes no request of the server. */
+  static open(client: Client, port: SandboxPort | string): PortForwarder
   /** Where the port is reached, as `host:port`. */
   readonly address: string
+  /** Why the last connection to the forwarder that reached nothing in the sandbox failed, its message naming the port; `null` while none has. Its `status` and `code` are the server's, where it refused the connection's WebSocket. A server on this machine is reached at its own address, not through the forwarder, so it has none. */
+  readonly lastError: VirtxError | null
   /** The address's host: a loopback IP. */
   readonly host: string
   /** The address's port. */

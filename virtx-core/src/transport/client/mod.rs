@@ -13,7 +13,7 @@ use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
-pub use self::portforward::PortForwarder;
+pub use self::portforward::{ForwardError, PortForwarder};
 use self::{stdio::Stdio, tcp::Tcp};
 use super::http::refused;
 use crate::{Auth, Error};

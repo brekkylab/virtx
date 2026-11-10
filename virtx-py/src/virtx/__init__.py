@@ -24,9 +24,10 @@ them; one known by its id or name is had with ``get_sandbox``, ``find_sandbox``,
 ``get_volume``, ``get_image_job`` or ``Sandbox.job``. The two with files read and write them as
 ``Files``: ``await volume.read_file("a.txt")``.
 
-A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
-``create_sandbox``, ``Sandbox.start`` or ``Sandbox.open_port`` answered for it: an address on
-this machine's loopback.
+A sandbox's port is reached through a ``PortForwarder``, opened over a client with the port
+``create_sandbox``, ``Sandbox.start`` or ``Sandbox.open_port`` answered, or its ``url``: an
+address on this machine's loopback. What the library warns of, such as a forwarded connection
+that reached nothing, the ``virtx`` logger logs.
 """
 
 from ._library import LIBRARY_ENV, VirtxError, library_path, load

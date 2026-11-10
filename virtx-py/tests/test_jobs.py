@@ -1,8 +1,10 @@
 """Images, volumes and their mounts, sandboxes and their ports, and the jobs of images and
-sandboxes, against the fixture's ``virtx-stdio``."""
+sandboxes, against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port is
+forwarded."""
 
 import asyncio
 import gc
+import logging
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from virtx import (
     ImageUploadOutput,
     InboundRule,
     Output,
+    PortForwarder,
     PortInbound,
     PortProtocol,
     PortSpec,
@@ -175,6 +178,38 @@ async def test_inbound_rules_are_refused_by_a_server_that_keeps_none(client: Cli
         await client.create_sandbox(ALPINE, ports=[PortSpec(22, inbound=[office])])
     assert (refused.value.status, refused.value.code) == (400, "invalid")
     assert "virtx cloud's" in str(refused.value)
+
+
+async def test_a_forwarded_port_nothing_listens_on_says_so(
+    tcp_client: Client, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="virtx")
+    await alpine(tcp_client)
+    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
+    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
+        assert forwarder.last_error is None
+        reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
+        assert await reader.read() == b""
+        writer.close()
+
+        # Kept once the connection that failed has closed: looked for a minute.
+        for _ in range(6000):
+            if forwarder.last_error is not None:
+                break
+            await asyncio.sleep(0.01)
+        error = forwarder.last_error
+        assert isinstance(error, VirtxError), "no error was kept"
+        assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
+        assert "nothing listens on the port" in str(error)
+        assert sandbox.ports[0].url not in str(error)
+
+        for _ in range(6000):
+            if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+        warned = [r for r in caplog.records if r.name == "virtx"]
+        assert [(r.levelno, r.getMessage()) for r in warned][-1:] == [(logging.WARNING, str(error))]
+    await sandbox.remove()
 
 
 def test_a_port_s_inbound_rules_read_and_write_as_the_wire_has_them() -> None:
@@ -360,6 +395,7 @@ async def test_a_started_job_failing_when_iterated_leaves_no_unretrieved_future_
     old_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
     try:
+
         async def failing_run():
             raise RuntimeError("exec failed to start")
             yield
@@ -396,6 +432,7 @@ async def test_a_started_job_ending_before_its_job_leaves_no_unretrieved_future_
     old_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
     try:
+
         async def empty_run():
             if False:
                 yield

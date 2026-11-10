@@ -48,7 +48,7 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 | what it installs kept for later | nothing: a sandbox keeps its disk when it stops; `name=` finds it again with `find_sandbox` |
 | what it installs, for other sandboxes to start from | `commit_image(sandbox.id, "name:tag")`, then sandboxes of that image |
 | nothing kept once done | `ephemeral=True`, deleted when it stops |
-| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)`; `await sandbox.open_port(9000)` opens one later, `await sandbox.close_port(9000)` closes it |
+| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0])`; a connection closed at once means nothing listens there yet, which `forwarder.last_error` and a warning of the `virtx` logger say; `await sandbox.open_port(9000)` opens one later, `await sandbox.close_port(9000)` closes it |
 | a web server in it opened in a browser | `ports=[PortSpec(5173, label="dev server", protocol="http")]`, or `open_port(5173, protocol="http")`: its `url` is the browser's |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |

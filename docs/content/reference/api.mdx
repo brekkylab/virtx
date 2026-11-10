@@ -165,8 +165,9 @@ See [Networks and ports](/docs/guides/networks-ports/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `PortForwarder.open(client, url)` | `PortForwarder` | Forwards the sandbox port `url` names to an address on this machine's loopback. |
+| `PortForwarder.open(client, port)` | `PortForwarder` | Forwards a sandbox's port, as `ports` answers it, or the `url` answered for it, to an address on this machine's loopback. Given the port, a failed connection's error names its number. |
 | `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
+| `last_error` | `VirtxError` or `None` | Why the last connection that reached nothing in the sandbox failed -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- naming the port. Each is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
 | `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
 
 ## Errors

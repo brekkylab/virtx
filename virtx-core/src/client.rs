@@ -139,7 +139,8 @@ impl Client {
     }
 
     /// The log of the image job `id`, from its start or after its `after`th entry, until its
-    /// `end` entry. Dropping it leaves the job as it is.
+    /// `end` entry, or [`Error::Job`] in its place if the job failed. Dropping it leaves the
+    /// job as it is.
     pub fn image_job_log(
         &self,
         id: &str,
@@ -965,8 +966,8 @@ pub(crate) mod ffi {
     /// The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
     /// its start, or after its `after`th entry. Its items are the entries, each with its number
     /// beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
-    /// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
-    /// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+    /// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` last, or, if the
+    /// job failed, its error in that entry's place. Freeing it leaves the job as it is.
     ///
     /// # Safety
     ///

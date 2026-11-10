@@ -1,4 +1,5 @@
-//! A job's start, which answers with the job, and the log read from it once it has.
+//! A job's start, which answers with the job, the log read from it once it has, and the job
+//! followed to its end.
 
 use std::{
     future::Future,
@@ -11,7 +12,7 @@ use futures_core::Stream;
 use serde::de::DeserializeOwned;
 use virtx_core::LogEntry;
 
-use crate::{Call, Error, Events};
+use crate::{Call, Error, Events, Source};
 
 /// What opens a job's log, given the job its start answered with.
 type Open<J, E> = Box<dyn Fn(&J) -> Events<LogEntry<E>> + Send + Sync>;
@@ -132,6 +133,65 @@ impl<J, E: DeserializeOwned> Stream for JobLog<J, E> {
         match &mut self.state {
             State::Reading(events) => Pin::new(events).poll_next(cx),
             _ => Poll::Ready(None),
+        }
+    }
+}
+
+/// What reads one entry of a job's log: what the job ended with if it is the `end` entry,
+/// printing it first if asked.
+pub(crate) type End<E, T> = fn(E, bool) -> Option<Result<T, Error>>;
+
+/// A job followed through its log to its end, as its `complete` gives it: awaited as a `Future`,
+/// or waited on with [`wait`](Self::wait), it answers what the job ended with, or the error it
+/// failed with. Each line is printed on the way if it was asked to. Dropping it stops reading
+/// the log and leaves the job running.
+#[must_use = "a job followed is not followed once dropped"]
+pub struct JobEnd<E, T> {
+    log: Events<LogEntry<E>>,
+    print: bool,
+    end: End<E, T>,
+}
+
+impl<E, T> JobEnd<E, T> {
+    pub(crate) fn new(log: Events<LogEntry<E>>, print: bool, end: End<E, T>) -> JobEnd<E, T> {
+        JobEnd { log, print, end }
+    }
+}
+
+/// A log that closed before its `end` entry: the job was removed while it was read.
+fn removed() -> Error {
+    Error::Call(Source::Job, "the job was removed before it ended".into())
+}
+
+impl<E: DeserializeOwned, T> JobEnd<E, T> {
+    /// Block this thread until the job ends, for a caller without an async runtime.
+    pub fn wait(mut self) -> Result<T, Error> {
+        while let Some(entry) = self.log.wait_next() {
+            if let Some(ended) = (self.end)(entry?.entry, self.print) {
+                return ended;
+            }
+        }
+        Err(removed())
+    }
+}
+
+impl<E, T> Unpin for JobEnd<E, T> {}
+
+impl<E: DeserializeOwned, T> Future for JobEnd<E, T> {
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match Pin::new(&mut self.log).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(Err(removed())),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                Poll::Ready(Some(Ok(entry))) => {
+                    if let Some(ended) = (self.end)(entry.entry, self.print) {
+                        return Poll::Ready(ended);
+                    }
+                }
+            }
         }
     }
 }

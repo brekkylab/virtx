@@ -243,7 +243,10 @@ mod tests {
         send.send(Err("no".to_string())).unwrap();
         assert_eq!(
             wait(stream),
-            (VIRTX_ERROR, Some(serde_json::json!({"message": "no"})))
+            (
+                VIRTX_ERROR,
+                Some(serde_json::json!({"message": "no", "source": "client"}))
+            )
         );
         let _ = send.send(Ok(1));
         assert_eq!(wait(stream), (VIRTX_END, None));

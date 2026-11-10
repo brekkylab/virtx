@@ -285,7 +285,8 @@ class Client:
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Build ``recipe``, to point ``reference`` at what it builds: awaited, the job;
-        iterated, its log, as ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        iterated, its log, as ``ImageJob.log``'s; ``complete``, its digest, as
+        ``ImageJob.complete``'s. Sent when first awaited, iterated or completed."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
@@ -296,7 +297,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
         the server pulls anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s; ``complete``, its digest. Sent when first awaited, iterated or waited
+        on."""
         return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -306,7 +308,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Push the image ``reference`` points at to the registry ``reference`` names; without
         ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s; ``complete``, its digest. Sent when first awaited, iterated or waited
+        on."""
         return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )

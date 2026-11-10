@@ -9,7 +9,8 @@
 //! Each request starts when its method is called, on the library's own runtime, and is a
 //! [`Call`] (a `Future`) or [`Events`] (a `Stream`), woken by the library, so any async runtime
 //! awaits them; or a thread without one blocks on [`Call::wait`] and [`Events::wait_next`].
-//! Starting a job is a [`StartedJob`], a call answering with the job, or its [`JobLog`].
+//! Starting a job is a [`StartedJob`], a call answering with the job, or its [`JobLog`]; a
+//! job's `complete` is a [`JobEnd`], what it ended with once it has.
 //!
 //! Making or asking for a sandbox, a volume or a snapshot answers a [`Sandbox`], a [`Volume`]
 //! or a [`Snapshot`], running a process in a sandbox a [`SandboxJob`], and building, pulling or
@@ -36,7 +37,7 @@ pub use client::{Client, ensure_virtx};
 pub use error::Error;
 pub use files::Files;
 pub use image::ImageJob;
-pub use job::{JobLog, StartedJob};
+pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;
 pub use sandbox::{Sandbox, SandboxJob};
@@ -55,7 +56,7 @@ pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
     MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume, Step,
+    SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume, Source, Step,
     VolumeMountListOutputItem,
 };
 pub use volume::Volume;

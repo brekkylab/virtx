@@ -122,8 +122,4 @@ async def alpine(client: Client) -> str:
     digest = (await tags(client)).get(ALPINE)
     if digest is not None:
         return digest
-    job = await client.pull_image(ALPINE)
-    [entry async for entry in job.log()]
-    digest = (await job.get()).digest
-    assert digest is not None, (await job.get()).error
-    return digest
+    return await client.pull_image(ALPINE).complete()

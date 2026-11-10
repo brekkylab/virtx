@@ -26,6 +26,7 @@ mod ffi;
 mod image;
 mod sandbox;
 mod snapshot;
+mod source;
 mod transport;
 mod volume;
 
@@ -39,5 +40,6 @@ pub use error::Error;
 pub use image::*;
 pub use sandbox::*;
 pub use snapshot::*;
+pub use source::Source;
 pub use transport::*;
 pub use volume::*;

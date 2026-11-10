@@ -21,18 +21,17 @@ Work the steps below in order. Step 2 is the one that gets skipped: a command th
 
 A client reaches one server: `Client.spawn()` (`Client::spawn_virtx` in Rust) starts it on this machine as a child process, fetching the server of the client's own version into a cache the first time, and `Client.connect(url, auth)` reaches one over HTTP, with a bearer token if it wants one. `Client.spawn("virtx-stdio")` starts one installed on `PATH` instead; `ensure_virtx()` (`ensureVirtx()`) does the fetch alone, ahead of time. The Python and Node packages carry the library; the Rust crate opens `libvirtx_core` at run time, from `virtx::load(path)` or `$VIRTX_CORE_LIB`.
 
-Every Python request is a coroutine and every log an async iterator. In Node they are promises and async iterables, with names in camelCase. In Rust each is a `Future` or a `Stream`, awaited with `.await` in an async runtime such as Tokio; a started job's log is its `.log()`, read with `StreamExt::next`.
+Every Python request is a coroutine and every log an async iterator. In Node they are promises and async iterables, with names in camelCase. In Rust each is a `Future` or a `Stream`, awaited with `.await` in an async runtime such as Tokio; a started job's log is its `.log()`, read with `StreamExt::next`, and a job's `.complete(print)` is awaited for how it ended.
 
 ## 2. Have the image
 
 ```python
-async for entry in client.build_image(Recipe("alpine:latest").run("apk add --no-cache jq"), "jq:latest"):
-    print(entry.entry)  # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
+digest = await client.build_image(Recipe("alpine:latest").run("apk add --no-cache jq"), "jq:latest").complete(print=True)
 ```
 
 - A `Recipe` is a base image plus steps, as a Dockerfile is. A build stores what it builds under its tag; build once and boot many sandboxes from it, rather than installing in each.
 - `pull_image("python:3.12-slim-trixie")` takes an image from a registry as it is.
-- A build or a pull is a job. Iterating what it answers reads its log; it is done at the `end` entry, whose `error` says it failed. Read it to the end before booting from the tag. Awaiting it instead gives the job, whose log `job.log()` reads later.
+- A build or a pull is a job. `complete` follows it to its end and answers its digest, printing its log with `print=True`; one that fails raises `VirtxError` with why. Let it complete before booting from the tag. Iterating what it answers reads its log instead, which raises the same error in place of its `end` entry; awaiting it gives the job, whose log `job.log()` reads later.
 - Pick the base by what the task needs: `alpine:latest` boots fastest, `python:3.12-slim-trixie` or `debian:trixie-slim` when the task wants glibc or pip wheels.
 
 ## 3. Make the sandbox, with what it may keep
@@ -56,15 +55,10 @@ Give it what the task must read or keep, and nothing more. Put input files in a 
 ## 4. Run commands, and read what came back
 
 ```python
-async for entry in sandbox.exec(["sh", "-c", "jq --version"], timeout_ms=10_000):
-    match entry.entry:
-        case Stdout(line) | Stderr(line):
-            print(line)
-        case SandboxJobEnd(code):
-            print("exited", code)
+code = await sandbox.exec(["sh", "-c", "jq --version"], timeout_ms=10_000).complete(print=True)
 ```
 
-`exec` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. What it answers is a job: iterated, the command's output, a line per entry, then its exit code as the last entry; awaited, a `SandboxJob`, for the requests below. A sandbox runs many commands at once, each its own job, and leaving the loop leaves the command running.
+`exec` takes an argv, not a shell string: wrap in `["sh", "-c", ...]` when the command needs a shell. What it answers is a job: completed, its exit code, its output printed with `print=True`; iterated, the command's output, a line per entry, then its exit code as the last entry; awaited, a `SandboxJob`, for the requests below. A nonzero exit code is the answer, not an error. A sandbox runs many commands at once, each its own job, and leaving the loop leaves the command running.
 
 - A command that cannot start, such as one not found, is refused at `exec`, and makes no job.
 - `stdin=True` keeps its stdin open for the job's `write_stdin`, each write awaited before the next, until one closes it with `eof=True`.

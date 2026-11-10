@@ -174,6 +174,23 @@ pub fn entries<E: serde::de::DeserializeOwned>(
     entries
 }
 
+/// Each entry of a failed job's `log` before the error it ends with, and that error.
+pub fn failure<E: serde::de::DeserializeOwned + std::fmt::Debug>(
+    mut log: Events<virtx::LogEntry<E>>,
+) -> (Vec<virtx::LogEntry<E>>, virtx::Error) {
+    let mut entries = Vec::new();
+    while let Some(entry) = log.wait_next() {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                assert!(log.wait_next().is_none(), "an entry after the error");
+                return (entries, error);
+            }
+        }
+    }
+    panic!("a failed job's log ends with its error: {entries:?}")
+}
+
 /// What a stream of the client's own, such as a download, gave last.
 pub fn output<T: serde::de::DeserializeOwned>(mut events: Events<Event<T, String>>) -> T {
     while let Some(event) = events.wait_next() {

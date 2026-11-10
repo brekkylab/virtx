@@ -2,7 +2,7 @@
 
 use virtx_core::{ImageJob as ImageJobInfo, ImageJobEntry, LogEntry};
 
-use crate::{Call, Client, Events};
+use crate::{Call, Client, Error, Events, JobEnd, Source};
 
 /// A build, pull or push the server runs, as starting it or asking for it answered, and the
 /// client that reaches it: what reads its log.
@@ -40,10 +40,27 @@ impl ImageJob {
         self.client.get_image_job(&self.info.id)
     }
 
-    /// Its log, from its start or after its `after`th entry, until its `end` entry. Dropping it
-    /// leaves the job as it is.
+    /// Its log, from its start or after its `after`th entry, until its `end` entry, or the
+    /// error in its place if the job failed. Dropping it leaves the job as it is.
     pub fn log(&self, after: Option<u64>) -> Events<LogEntry<ImageJobEntry>> {
         self.client.image_job_log(&self.info.id, after)
+    }
+
+    /// Follow it to its end, printing each line of its log to stdout if `print`: the digest
+    /// it ended with, or the error it failed with, of [`Source::Job`].
+    pub fn complete(&self, print: bool) -> JobEnd<ImageJobEntry, String> {
+        JobEnd::new(self.log(None), print, |entry, print| match entry {
+            ImageJobEntry::Log(line) => {
+                if print {
+                    println!("{line}");
+                }
+                None
+            }
+            ImageJobEntry::Truncated {} => None,
+            ImageJobEntry::End(end) => Some(end.digest.ok_or_else(|| {
+                Error::Call(Source::Server, "the job ended without a digest".into())
+            })),
+        })
     }
 
     /// Cancel it if it runs, and forget it.

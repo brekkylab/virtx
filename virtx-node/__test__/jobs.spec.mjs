@@ -29,7 +29,7 @@ describe('against virtx-stdio', () => {
     assert.deepEqual(await client.getSnapshot(name), snapshot)
     assert.ok((await client.listSnapshot()).some((s) => s.name === name))
     await snapshot.remove()
-    await assert.rejects(client.getSnapshot(name), { status: 404 })
+    await assert.rejects(client.getSnapshot(name), { source: 'server', status: 404 })
   })
 
   test('a volume is created and got', async () => {
@@ -69,6 +69,8 @@ describe('against virtx-stdio', () => {
       (await Array.fromAsync(failed.log())).map(({ id, ...entry }) => entry),
       [{ stderr: 'failed' }, { end: { code: 1 } }],
     )
+    assert.equal(await job.complete(), 0)
+    assert.equal(await failed.complete(), 1)
 
     await (await sandbox.job(job.id)).remove()
     await assert.rejects(got.job(job.id), { status: 404 })
@@ -93,6 +95,23 @@ describe('against virtx-stdio', () => {
     }
   })
 
+  test('a command completed prints its output and answers its code', async (t) => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    try {
+      const cmd = ['sh', '-c', 'echo out; echo err >&2; exit 3']
+      const log = t.mock.method(console, 'log', () => {})
+      const error = t.mock.method(console, 'error', () => {})
+      assert.equal(await sandbox.exec(cmd).complete(), 3)
+      assert.equal(log.mock.callCount() + error.mock.callCount(), 0)
+      assert.equal(await sandbox.exec(cmd).complete({ print: true }), 3)
+      assert.deepEqual(log.mock.calls.map((call) => call.arguments), [['out']])
+      assert.deepEqual(error.mock.calls.map((call) => call.arguments), [['err']])
+    } finally {
+      await sandbox.remove()
+    }
+  })
+
   test('a job is signalled', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
@@ -100,6 +119,7 @@ describe('against virtx-stdio', () => {
     await sleep.signal('SIGTERM')
     const end = (await Array.fromAsync(sleep.log())).at(-1)
     assert.deepEqual(end.end, { code: 128 + 15 })
+    assert.equal(await sleep.complete(), 128 + 15)
     assert.equal((await (await client.getSandbox(sandbox.id)).job(sleep.id)).running, false)
     await sandbox.remove()
   })
@@ -117,6 +137,7 @@ describe('against virtx-stdio', () => {
     assert.deepEqual(log.at(-1).end, { digest })
     assert.deepEqual(await Array.fromAsync(job.log(log[0].id)), log.slice(1))
     assert.equal((await job.get()).digest, digest)
+    assert.equal(await job.complete(), digest)
     assert.equal((await client.getImageJob(job.id)).digest, digest)
     assert.ok((await client.listImageJob()).some((j) => j.id === job.id))
 
@@ -130,6 +151,17 @@ describe('against virtx-stdio', () => {
     const reference = `${unique('iterated')}:latest`
     const log = await Array.fromAsync(client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference))
     assert.deepEqual(log.at(-1).end, { digest: (await tags(client))[reference] })
+    await client.removeImage(reference)
+  })
+
+  test('a started build completed prints its log and answers its digest', async (t) => {
+    await alpine(client)
+    const reference = `${unique('completed')}:latest`
+    const printed = t.mock.method(console, 'log', () => {})
+    const recipe = new virtx.Recipe(ALPINE).run(`echo ${reference}-step | tee /built`)
+    const digest = await client.buildImage(recipe, reference).complete({ print: true })
+    assert.equal((await tags(client))[reference], digest)
+    assert.ok(printed.mock.calls.some((call) => String(call.arguments[0]).includes(`${reference}-step`)))
     await client.removeImage(reference)
   })
 
@@ -181,14 +213,27 @@ describe('against virtx-stdio', () => {
     }
   })
 
-  test('a push is a job that ends with its end', async () => {
+  test('a push that fails throws its error from its log and its complete', async () => {
     await alpine(client)
     // A registry that does not resolve, so the push fails before it reaches anyone.
     const reference = `registry.invalid/${unique('pushed')}:latest`
     await client.tagImage(ALPINE, reference)
     const push = await client.pushImage(reference, { type: 'bearer', token: 'test-secret' })
     assert.equal(push.kind, 'push')
-    assert.ok((await Array.fromAsync(push.log())).at(-1).end.error)
+    const read = []
+    const failed = await (async () => {
+      try {
+        for await (const entry of push.log()) read.push(entry)
+      } catch (error) {
+        return error
+      }
+    })()
+    assert.ok(failed instanceof virtx.VirtxError, `${failed}`)
+    assert.ok(!read.some((entry) => 'end' in entry))
+    assert.equal(failed.source, 'job')
+    assert.equal(failed.status, null)
+    assert.equal((await push.get()).error, failed.message)
+    await assert.rejects(push.complete(), { name: 'VirtxError', message: failed.message })
     await client.removeImage(reference)
   })
 })

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::Source;
+
 /// Why a call failed.
 #[derive(Debug)]
 pub enum Error {
@@ -27,6 +29,9 @@ pub enum Error {
     /// A file on this machine could not be read or written, or a file is not what it should
     /// be: one read as text that is not UTF-8.
     File(String),
+    /// A job ended without doing what it was started for: why, for a person, as the job's
+    /// `error` says.
+    Job(String),
 }
 
 impl fmt::Display for Error {
@@ -36,6 +41,7 @@ impl fmt::Display for Error {
             Error::Json(reason) => f.write_str(reason),
             Error::Registry(reason) => f.write_str(reason),
             Error::File(reason) => f.write_str(reason),
+            Error::Job(reason) => f.write_str(reason),
             Error::Status(status, body) => {
                 let reason = http::StatusCode::from_u16(*status)
                     .ok()
@@ -69,6 +75,16 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
+    /// Where it failed.
+    pub fn source_kind(&self) -> Source {
+        match self {
+            Error::Status(..) | Error::Refusal { .. } | Error::Registry(_) => Source::Server,
+            Error::Job(_) => Source::Job,
+            Error::Transport(_) => Source::Transport,
+            Error::Json(_) | Error::File(_) => Source::Client,
+        }
+    }
+
     /// The HTTP status the server refused the request with, if it did.
     pub fn status(&self) -> Option<u16> {
         match self {
@@ -115,5 +131,22 @@ mod tests {
         );
         assert_eq!(Error::Transport("connection reset".into()).status(), None);
         assert_eq!(Error::Json("bad json".into()).status(), None);
+    }
+
+    #[test]
+    fn an_error_names_where_it_failed() {
+        let cases = [
+            (Error::Status(409, "in_use: held".into()), Source::Server),
+            (Error::Registry("no such manifest".into()), Source::Server),
+            (Error::Job("step 1 exited 3".into()), Source::Job),
+            (
+                Error::Transport("connection reset".into()),
+                Source::Transport,
+            ),
+            (Error::File("not UTF-8".into()), Source::Client),
+        ];
+        for (error, source) in cases {
+            assert_eq!(error.source_kind(), source, "{error:?}");
+        }
     }
 }

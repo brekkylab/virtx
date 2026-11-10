@@ -55,28 +55,19 @@ pip install virtx
 ```python
 import asyncio
 
-from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdout
+from virtx import Client, Recipe
 
 
 async def main() -> None:
     with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
-        async for entry in client.build_image(recipe, "jq:latest"):
-            match entry.entry:
-                case Log(line):
-                    print(line)
-                case ImageJobEnd(error=str(error)):
-                    raise RuntimeError(error)
+        await client.build_image(recipe, "jq:latest").complete(print=True)
 
         sandbox = await client.create_sandbox("jq:latest")
         try:
             cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-            async for entry in sandbox.exec(cmd):
-                match entry.entry:
-                    case Stdout(line) | Stderr(line):
-                        print(line)
-                    case SandboxJobEnd(code):
-                        print("exited", code)
+            code = await sandbox.exec(cmd).complete(print=True)
+            print("exited", code)
         finally:
             await sandbox.remove()
 
@@ -100,19 +91,13 @@ async function main() {
   const client = Client.spawn()
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
-    for await (const entry of client.buildImage(recipe, 'jq:latest')) {
-      if ('log' in entry) console.log(entry.log)
-      else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
-    }
+    await client.buildImage(recipe, 'jq:latest').complete({ print: true })
 
     const sandbox = await client.createSandbox('jq:latest')
     try {
       const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
-      for await (const entry of sandbox.exec(cmd)) {
-        if ('stdout' in entry) console.log(entry.stdout)
-        else if ('stderr' in entry) console.error(entry.stderr)
-        else if ('end' in entry) console.log('exited', entry.end.code)
-      }
+      const code = await sandbox.exec(cmd).complete({ print: true })
+      console.log('exited', code)
     } finally {
       await sandbox.remove()
     }
@@ -130,42 +115,28 @@ main()
 <summary><b>Rust</b></summary>
 
 ```sh
-cargo add virtx futures
+cargo add virtx
 cargo add tokio --features macros,rt-multi-thread
 ```
 
 ```rust
-use futures::StreamExt;
-use virtx::{
-    Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
-};
+use virtx::{Client, Recipe, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
-    let mut log = client.build_image(recipe, "jq:latest").log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            ImageJobEntry::Log(line) => println!("{line}"),
-            ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
-            _ => {}
-        }
-    }
+    let build = client.build_image(recipe, "jq:latest").await?;
+    build.complete(true).await?;
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .await?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
-            SandboxJobEntry::End(end) => println!("exited {}", end.code),
-            _ => {}
-        }
-    }
+    let job = sandbox.exec(&SandboxExecArgs::new(cmd)).await?;
+    let code = job.complete(true).await?;
+    println!("exited {code}");
     sandbox.remove().await?;
     Ok(())
 }

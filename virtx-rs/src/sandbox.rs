@@ -5,7 +5,7 @@ use virtx_core::{
     SandboxJobEntry,
 };
 
-use crate::{Call, Client, Events, StartedJob, files};
+use crate::{Call, Client, Events, JobEnd, StartedJob, files};
 
 /// A sandbox the server holds, as making it or asking for it answered, and the client that
 /// reaches it: what is needed to run processes in it, and its files, through
@@ -146,6 +146,27 @@ impl SandboxJob {
     pub fn log(&self, after: Option<u64>) -> Events<LogEntry<SandboxJobEntry>> {
         self.client
             .sandbox_job_log(&self.sandbox, &self.info.id, after)
+    }
+
+    /// Follow it to its end, printing what its process writes to stdout and stderr as it
+    /// wrote them if `print`: its exit status, `128 + signal` for one a signal ended.
+    pub fn complete(&self, print: bool) -> JobEnd<SandboxJobEntry, i32> {
+        JobEnd::new(self.log(None), print, |entry, print| match entry {
+            SandboxJobEntry::Stdout(line) => {
+                if print {
+                    println!("{line}");
+                }
+                None
+            }
+            SandboxJobEntry::Stderr(line) => {
+                if print {
+                    eprintln!("{line}");
+                }
+                None
+            }
+            SandboxJobEntry::Truncated {} => None,
+            SandboxJobEntry::End(end) => Some(Ok(end.code)),
+        })
     }
 
     /// Cancel it if it runs, killing its process, and forget it.

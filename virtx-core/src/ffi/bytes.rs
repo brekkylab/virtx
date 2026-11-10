@@ -5,14 +5,16 @@ use std::{ffi::c_int, ptr, slice};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{VIRTX_ERROR, VIRTX_OK};
-use crate::Error;
+use crate::{Error, Source};
 
-/// Why a call failed, as C reads it: `{"message": "..."}`, with `"status": 404` beside it when
+/// Why a call failed, as C reads it: `{"message": "...", "source": "server"}`, `source` where
+/// it failed (`server`, `job`, `transport` or `client`), with `"status": 404` beside it when
 /// the server refused the request with that HTTP status, and `"body"` where the refusal had a
 /// body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
+    source: Source,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,6 +25,7 @@ impl From<String> for Failure {
     fn from(message: String) -> Failure {
         Failure {
             message,
+            source: Source::Client,
             status: None,
             body: None,
         }
@@ -44,6 +47,7 @@ impl From<Error> for Failure {
         };
         Failure {
             message: error.to_string(),
+            source: error.source_kind(),
             status,
             body,
         }
@@ -126,6 +130,7 @@ mod tests {
             written(Error::Status(404, "not_found: no such file".into())),
             json!({
                 "message": "the server answered 404 Not Found: not_found: no such file",
+                "source": "server",
                 "status": 404,
             })
         );
@@ -137,13 +142,22 @@ mod tests {
             }),
             json!({
                 "message": "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes)",
+                "source": "server",
                 "status": 503,
                 "body": "<html>503</html>",
             })
         );
         assert_eq!(
             written(Error::Transport("the session ended".into())),
-            json!({"message": "the session ended"})
+            json!({"message": "the session ended", "source": "transport"})
+        );
+        assert_eq!(
+            written(Error::Job("step 1 exited 3".into())),
+            json!({"message": "step 1 exited 3", "source": "job"})
+        );
+        assert_eq!(
+            written("not JSON"),
+            json!({"message": "not JSON", "source": "client"})
         );
     }
 }

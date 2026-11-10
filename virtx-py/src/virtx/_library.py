@@ -20,7 +20,7 @@ import sys
 import threading
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 OK, ERROR, PENDING, END = 0, -1, 1, 2
 
@@ -40,8 +40,17 @@ def args(**args: Any) -> bytes:
     return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
 
 
+Source = Literal["server", "job", "transport", "client"]
+"""Where a request failed: the server answered it with an error, the job it started failed,
+the connection failed, or this side did."""
+
+
 class VirtxError(Exception):
-    """A request failed: the server's error, the transport's, or the library's."""
+    """A request failed: where, as ``source``, and with ``status`` the HTTP status the server
+    answered with."""
+
+    source: Source
+    """Where it failed. Tell errors apart by it and ``status``, not by the message."""
 
     status: int | None
     """The HTTP status the server refused the request with, if it did: ``404`` for what does
@@ -55,8 +64,10 @@ class VirtxError(Exception):
         message: str,
         status: int | None = None,
         body: str | None = None,
+        source: Source = "client",
     ) -> None:
         super().__init__(message)
+        self.source = source
         self.status = status
         self.body = body
 
@@ -232,7 +243,9 @@ class Library:
             if not data:
                 raise VirtxError("the call failed")
             failure = json.loads(data)
-            raise VirtxError(failure["message"], failure.get("status"), failure.get("body"))
+            raise VirtxError(
+                failure["message"], failure.get("status"), failure.get("body"), failure["source"]
+            )
         raise VirtxError(f"unknown status {status}")
 
     def _poll(

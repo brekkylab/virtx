@@ -660,7 +660,9 @@ mod tests {
     async fn pulls_a_public_image() {
         let scratch = Scratch::new("public");
         let registry = RegistryClient::new(scratch.0.clone(), None);
-        let reference: Reference = "alpine:3.21".parse().unwrap();
+        // Docker Hub's alpine from AWS's mirror of it: Docker Hub refuses anonymous pulls past a
+        // few an hour, which says nothing of the pull.
+        let reference: Reference = "public.ecr.aws/docker/library/alpine:3.21".parse().unwrap();
         let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
         let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
         assert_eq!(config.os().to_string(), "linux");
@@ -685,7 +687,7 @@ mod tests {
         let scratch = Scratch::new("pull");
         let store = &scratch.0;
         let registry = RegistryClient::new(store.clone(), None);
-        let reference: Reference = "docker.io/library/alpine:3.21".parse().unwrap();
+        let reference: Reference = "public.ecr.aws/docker/library/alpine:3.21".parse().unwrap();
 
         let mut said = Vec::new();
         let (digest, image) = registry

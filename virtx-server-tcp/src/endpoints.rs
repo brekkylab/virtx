@@ -112,6 +112,22 @@ pub fn set_capacity(capacity: Capacity) {
     let _ = HELD_TO.set(capacity);
 }
 
+/// Docker Hub's mirror, which this server's anonymous pulls of its images go to first, as an
+/// embedder sets it (virtx cloud's nodes do): none, unless set. See
+/// [`RegistryClient::with_mirror`].
+static REGISTRY_MIRROR: OnceLock<String> = OnceLock::new();
+
+/// Pull Docker Hub's images from its mirror at `mirror` first, from now on.
+pub fn set_registry_mirror(mirror: &str) {
+    let _ = REGISTRY_MIRROR.set(mirror.to_owned());
+}
+
+/// A registry client for this server's pulls: anonymous ones from Docker Hub's mirror, if one
+/// was set.
+fn registry(images: ImageStore, auth: Option<virtx_core::RegistryAuth>) -> RegistryClient {
+    RegistryClient::new(images, auth).with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
+}
+
 /// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;
 /// before any sandbox is tended. See [`virtx_uvm::sandbox::set_minute`].
 pub fn set_minute(minute: Duration) {
@@ -1196,7 +1212,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images.clone(), args.auth);
+            let registry = registry(images.clone(), args.auth);
             let (_, image) = registry.pull(&reference, report).await?;
             images.insert_tag(&reference, &image)?;
             Ok(image)
@@ -1281,7 +1297,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            RegistryClient::new(images.clone(), None)
+            registry(images.clone(), None)
                 .pull(&reference, report)
                 .await?
                 .1

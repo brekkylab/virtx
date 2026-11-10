@@ -101,6 +101,22 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Where `reference`, an image of Docker Hub, is in the mirror at `mirror`: none for another
+/// registry's.
+fn mirrored(reference: &Reference, mirror: &str) -> Option<Reference> {
+    if reference.registry() != "docker.io" {
+        return None;
+    }
+    let at = match (reference.digest(), reference.tag()) {
+        (Some(digest), _) => format!("@{digest}"),
+        (None, Some(tag)) => format!(":{tag}"),
+        (None, None) => ":latest".to_owned(),
+    };
+    format!("{mirror}/{}{at}", reference.repository())
+        .parse()
+        .ok()
+}
+
 /// A client of remote OCI registries, with one set of credentials, copying images to and from
 /// one store.
 ///
@@ -114,6 +130,8 @@ pub struct RegistryClient {
     store: Store,
     client: Client,
     auth: oci_client::secrets::RegistryAuth,
+    /// Docker Hub's mirror, for anonymous pulls ([`RegistryClient::with_mirror`]).
+    mirror: Option<String>,
 }
 
 impl std::fmt::Debug for RegistryClient {
@@ -142,7 +160,23 @@ impl RegistryClient {
             store,
             client: Client::new(ClientConfig::default()),
             auth,
+            mirror: None,
         }
+    }
+
+    /// As [`RegistryClient::new`], Docker Hub's images pulled anonymously from its mirror at
+    /// `mirror` first (`mirror.gcr.io`, say): Docker Hub refuses anonymous pulls past a few an
+    /// hour from one address, which a server pulling for many reaches. What the mirror does not
+    /// have, or will not answer, comes from Docker Hub after all; either way the image is the
+    /// one the reference names. None, or credentials -- which are Docker Hub's own, and go
+    /// there -- is no mirror: as a client is by default.
+    pub fn with_mirror(mut self, mirror: Option<&str>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.mirror = mirror
+            .map(|m| m.trim().trim_end_matches('/'))
+            .filter(|m| anonymous && !m.is_empty())
+            .map(str::to_owned);
+        self
     }
 
     /// `GET /v2/<name>/manifests/<reference>`: the image manifest `reference` names, its
@@ -395,7 +429,23 @@ impl RegistryClient {
         mut report: impl FnMut(String) + Send,
     ) -> Result<(Digest, Digest)> {
         report(format!("pulling {reference}"));
-        let (digest, served, manifest) = self.pull_manifest(reference).await?;
+        // Docker Hub's image from its mirror, if one is named and has it: the same manifest,
+        // byte for byte, so the same digest. Else from Docker Hub.
+        let from_mirror = match self.mirror.as_deref().and_then(|m| mirrored(reference, m)) {
+            Some(mirrored) => match self.pull_manifest(&mirrored).await {
+                Ok(pulled) => Some((mirrored, pulled)),
+                Err(e) => {
+                    report(format!("not from the mirror ({e}): from Docker Hub"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let (reference, (digest, served, manifest)) = match from_mirror {
+            Some((mirrored, pulled)) => (mirrored, pulled),
+            None => (reference.clone(), self.pull_manifest(reference).await?),
+        };
+        let reference = &reference;
         if let Some(image) = self.store.get_image_origin(&digest)? {
             return Ok((digest, image));
         }
@@ -652,6 +702,48 @@ mod tests {
         assert_eq!(diff_id.digest(), &format!("{:x}", Sha256::digest(&tar)));
         let read = FsTree::from_changeset(&MediaType::ImageLayerGzip, &blob[..]).unwrap();
         assert_eq!(read.digest(), tree.digest());
+    }
+
+    #[test]
+    fn docker_hub_s_images_are_found_in_its_mirror_by_name_and_no_other_registry_s() {
+        let at = |r: &str| mirrored(&r.parse().unwrap(), "mirror.gcr.io").map(|m| m.to_string());
+        assert_eq!(
+            at("alpine:3.21").as_deref(),
+            Some("mirror.gcr.io/library/alpine:3.21")
+        );
+        assert_eq!(
+            at("team/app").as_deref(),
+            Some("mirror.gcr.io/team/app:latest")
+        );
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            at(&format!("alpine@{digest}")),
+            Some(format!("mirror.gcr.io/library/alpine@{digest}"))
+        );
+        assert_eq!(at("ghcr.io/team/app:v1"), None);
+    }
+
+    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
+    /// mirror, with Docker Hub named: the same digest, tagged by Docker Hub's name.
+    #[tokio::test]
+    #[ignore]
+    async fn docker_hub_s_image_comes_from_its_mirror() {
+        let scratch = Scratch::new("mirror");
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.gcr.io"));
+        let reference: Reference = "alpine:3.21".parse().unwrap();
+        let mut said = Vec::new();
+        let (digest, _) = registry
+            .pull(&reference, |line| said.push(line))
+            .await
+            .unwrap();
+        assert_eq!(said[0], "pulling docker.io/library/alpine:3.21");
+        let direct = RegistryClient::new(scratch.0.clone(), None);
+        let mirrored: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
+        assert_eq!(direct.pull_manifest(&mirrored).await.unwrap().0, digest);
+        // One the mirror has not: from Docker Hub after all -- here, a name no one has, refused.
+        let none: Reference = "virtx-no-such-image-anywhere:0".parse().unwrap();
+        assert!(registry.pull(&none, |_| {}).await.is_err());
     }
 
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.

@@ -1321,11 +1321,13 @@ pub(super) fn abin_programs(vm: &[OsString]) -> PathBuf {
 /// `abins` refused, as a sandbox is made with them, unless each is a program in `programs`,
 /// given once.
 pub(super) fn abins_refused(abins: &[String], programs: &Path) -> Result<(), Error> {
+    // Every name given twice first, so what is said of a request does not hang on what this
+    // server has.
     let mut given = HashSet::new();
+    if let Some(name) = abins.iter().find(|name| !given.insert(*name)) {
+        return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
+    }
     for name in abins {
-        if !given.insert(name) {
-            return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
-        }
         if name.starts_with('.') || name.contains(['/', '\\']) || !programs.join(name).is_file() {
             return Err(Error::Invalid(format!(
                 "abins: this server has no program called `{name}`"

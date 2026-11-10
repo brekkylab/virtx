@@ -55,7 +55,7 @@ It forwards the port to an address on your machine, and you connect to that addr
 
 1. Pass `ports` to `create_sandbox` to open those ports in the sandbox.
 2. Each one comes back in `sandbox.ports` with a `url`.
-3. `PortForwarder.open` takes that port, or its `url`, and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to. In Python, `await PortForwarder.aopen(...)` opens it without holding up the event loop.
+3. `PortForwarder.open` takes that port, or its `url`, and gives you a local address, such as `127.0.0.1:54123`, that any TCP client can connect to.
 
 How the forwarding works depends on where the server runs:
 
@@ -80,7 +80,7 @@ from virtx import PortForwarder
 sandbox = await client.create_sandbox("alpine:latest", ports=[8000])
 await sandbox.exec(["httpd", "-f", "-p", "8000"])  # started, left running
 
-with await PortForwarder.aopen(client, sandbox.ports[0]) as forwarder:
+with PortForwarder.open(client, sandbox.ports[0]) as forwarder:
     print(f"http://{forwarder.address}")
 ```
 

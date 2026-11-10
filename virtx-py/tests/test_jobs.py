@@ -5,7 +5,6 @@ forwarded."""
 import asyncio
 import gc
 import logging
-import threading
 from pathlib import Path
 
 import pytest
@@ -187,7 +186,7 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
     caplog.set_level(logging.WARNING, logger="virtx")
     await alpine(tcp_client)
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
-    with await PortForwarder.aopen(tcp_client, sandbox.ports[0]) as forwarder:
+    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
         assert forwarder.last_error is None
         reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
         assert await reader.read() == b""
@@ -211,26 +210,6 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
         warned = [r for r in caplog.records if r.name == "virtx"]
         assert [(r.levelno, r.getMessage()) for r in warned][-1:] == [(logging.WARNING, str(error))]
     await sandbox.remove()
-
-
-async def test_an_awaited_open_leaves_the_event_loop_running(
-    tcp_client: Client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    lib = tcp_client._lib
-    opening = lib.virtx_port_forwarder_open
-    ran = threading.Event()
-
-    def open_once_the_loop_ran(*args: object) -> int:
-        # Set by a coroutine on the loop, which runs only if the open left it free.
-        assert ran.wait(60), "the event loop did not run while the forwarder opened"
-        return opening(*args)
-
-    monkeypatch.setattr(lib, "virtx_port_forwarder_open", open_once_the_loop_ran)
-    opened = asyncio.create_task(PortForwarder.aopen(tcp_client, "ports/nothing"))
-    await asyncio.sleep(0)
-    ran.set()
-    with await opened as forwarder:
-        assert forwarder.host == "127.0.0.1" and forwarder.port > 0
 
 
 def test_a_port_s_inbound_rules_read_and_write_as_the_wire_has_them() -> None:

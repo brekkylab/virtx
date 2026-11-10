@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import json
 from typing import TYPE_CHECKING
@@ -37,7 +36,9 @@ class PortForwarder:
     def open(cls, client: Client, port: SandboxPort | str) -> PortForwarder:
         """Forward ``port``, as ``create_sandbox`` answers one in ``ports``, or the ``url`` it
         answered for it, over ``client``'s session. Given the port, what a connection that
-        fails says names its number. Blocks until it is open; ``aopen`` awaits it."""
+        fails says names its number. Returns as soon as its address on this machine's loopback
+        is open, which takes no request of the server: each connection to it is carried as it
+        comes, so it holds up no event loop it is called on."""
         lib = client._lib
         if isinstance(port, SandboxPort):
             args = json.dumps({"url": port.url, "port": port.port}).encode()
@@ -50,11 +51,6 @@ class PortForwarder:
         )
         output = lib.take(status, out)
         return cls(raw.value or 0, lib, output["address"])
-
-    @classmethod
-    async def aopen(cls, client: Client, port: SandboxPort | str) -> PortForwarder:
-        """``open``, on a thread of its own, so the event loop runs on meanwhile."""
-        return await asyncio.to_thread(cls.open, client, port)
 
     @property
     def last_error(self) -> VirtxError | None:

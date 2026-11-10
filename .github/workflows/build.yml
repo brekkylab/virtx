@@ -7,9 +7,8 @@
 #   virtx-*.whl                      the wheels
 #   SHA256SUMS                       over all of them
 #
-# Jobs hand on through the cache rather than as artifacts: artifacts count against the
-# organization's storage quota, and the cache does not. Every key ends in the run id, which a
-# called workflow shares with its caller.
+# Jobs hand on through the cache. Every key ends in the run id, which a called workflow
+# shares with its caller.
 #
 # # Platforms
 #

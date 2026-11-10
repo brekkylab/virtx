@@ -107,12 +107,34 @@ jobs:
         with:
           key: abin-${{ matrix.arch }}
 
-      - name: abin
+      # alib is built in virtx machines, which need /dev/kvm: the runner has it, but only for
+      # root and the kvm group until a udev rule opens it.
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      # Each alib part as last built, which `build alib` builds again only where its files
+      # changed, and the sources it fetched.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            build/alib/parts
+            build/alib/sources
+          key: alib-${{ matrix.arch }}-${{ hashFiles('virtx-alibs/**') }}
+          restore-keys: alib-${{ matrix.arch }}-
+
+      # alib's machines run on a virtx-stdio `build alib` builds here, without the GPU: one
+      # downloaded would be of the version being released, before it is. libclang-dev for
+      # libkrun's bindgen.
+      - name: abin and alib
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm
+          sudo apt-get install -y -qq clang lld llvm libclang-dev
           cargo xtask build abin alib
-          ls -la target/release/abin target/release/alib
+          ls -la target/release/abin build/alib
 
       # alib as `build/alib/`, where `build alib` puts it and `build server-stdio` and `archive`
       # take it from, as they take the kernel from `build/krunfw/`.

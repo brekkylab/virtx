@@ -15,6 +15,10 @@
 //! the machine has whatever this host is, and against the C library of the image it runs in.
 //! The sources are fetched here, into `build/alib/sources/`, checked, and handed in, so the
 //! machine fetches nothing but its distribution's packages.
+//!
+//! What each build wrote is kept as a tar in `build/alib/parts/<arch>/`, beside the sum of what
+//! it was built from -- the part's files and the image -- and built again only when that sum
+//! changes. `build/alib/<arch>/` is unpacked from them every time.
 
 use std::{
     fs,
@@ -28,24 +32,24 @@ use virtx::{
     Client, Files as _, ImageJobEntry, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
 };
 
+/// Each build's tar and the sum it was built from, as `<part>-<line>.tar` and `.sum`.
+const PARTS: &str = "build/alib/parts";
+
 /// Where the build puts `/alib` for this host's guest.
 pub fn dir() -> anyhow::Result<PathBuf> {
     let arch = crate::guest_target()?.split('-').next().unwrap_or_default();
     Ok(crate::root_path().join("build/alib").join(arch))
 }
 
-/// Build every part on the client library at `library`, and the server at `server` if given,
-/// else `virtx-stdio` of the library's version.
-pub fn build(library: &Path, server: Option<&Path>) -> anyhow::Result<()> {
-    virtx::load(library).with_context(|| format!("loading {}", library.display()))?;
-    let client = match server {
-        Some(server) => Client::spawn(server.to_string_lossy(), [] as [&str; 0]),
-        None => Client::spawn_virtx([] as [&str; 0]),
-    }
-    .context("starting a virtx server")?;
-
+/// Build every part whose files or image changed since it was last built, on the client library
+/// at `library` and the server at `server`, then unpack them all into [`dir`].
+pub fn build(library: &Path, server: &Path) -> anyhow::Result<()> {
     let arch = crate::guest_target()?.split('-').next().unwrap_or_default();
-    // Emptied first, as every part is built again into it, some at its top.
+    let built = crate::root_path().join(PARTS).join(arch);
+    fs::create_dir_all(&built).with_context(|| format!("creating {}", built.display()))?;
+    // Started by the first part that is built, and by none when every one is as it was.
+    let mut client = None;
+    // Emptied first, as some parts unpack at its top.
     let out = dir()?;
     if out.exists() {
         fs::remove_dir_all(&out).with_context(|| format!("removing {}", out.display()))?;
@@ -60,19 +64,50 @@ pub fn build(library: &Path, server: Option<&Path>) -> anyhow::Result<()> {
         let images = dir.join("images");
         let text =
             fs::read_to_string(&images).with_context(|| format!("reading {}", images.display()))?;
-        for line in text
+        let lines = text
             .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        {
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+        for (n, line) in lines.enumerate() {
             let [part, image] = line.split_whitespace().collect::<Vec<_>>()[..] else {
                 bail!("{}: not `directory image`: {line}", images.display());
             };
-            build_part(
-                &client,
-                dir,
-                &image.replace("{arch}", arch),
-                &out.join(part),
-            )?;
+            let image = image.replace("{arch}", arch);
+            let name = dir
+                .file_name()
+                .expect("a part is a directory")
+                .to_string_lossy();
+            let tar = built.join(format!("{name}-{n}.tar"));
+            let sum_file = tar.with_extension("sum");
+            let sum = sum(dir, &image)?;
+            if tar.is_file() && fs::read_to_string(&sum_file).ok().as_deref() == Some(&sum) {
+                eprintln!("xtask: {name} for {image} is as it was built");
+            } else {
+                if client.is_none() {
+                    virtx::load(library)
+                        .with_context(|| format!("loading {}", library.display()))?;
+                    let spawned = Client::spawn(server.to_string_lossy(), [] as [&str; 0])
+                        .context("starting a virtx server")?;
+                    client = Some(spawned);
+                }
+                let _ = fs::remove_file(&sum_file);
+                build_part(client.as_ref().expect("started above"), dir, &image, &tar)?;
+                fs::write(&sum_file, &sum)
+                    .with_context(|| format!("writing {}", sum_file.display()))?;
+            }
+            // On its stdin, run from where it unpacks: Git Bash's GNU tar reads `C:` in a path
+            // as a remote host.
+            let at = out.join(part);
+            fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
+            let file =
+                fs::File::open(&tar).with_context(|| format!("opening {}", tar.display()))?;
+            let status = Command::new("tar")
+                .current_dir(&at)
+                .arg("-xf")
+                .arg("-")
+                .stdin(file)
+                .status()
+                .context("running tar")?;
+            ensure!(status.success(), "unpacking {} failed", tar.display());
         }
     }
     Ok(())
@@ -120,10 +155,34 @@ fn fetch_sources(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// What `dir`'s part is built from in `image`: the sha256 of the image's name and of each of the
+/// part's files, by name.
+fn sum(dir: &Path, image: &str) -> anyhow::Result<String> {
+    let mut files = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    files.sort();
+    let mut hash = Sha256::new();
+    hash.update(image);
+    for path in files.iter().filter(|path| path.is_file()) {
+        let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        hash.update([0]);
+        hash.update(
+            path.file_name()
+                .expect("a file has a name")
+                .as_encoded_bytes(),
+        );
+        hash.update([0]);
+        hash.update(Sha256::digest(&data));
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 /// Run `dir/build.sh OUT SOURCES` in a machine of `image`, with `dir`'s files at `/build` and
-/// its sources at `/build/tarballs`, and unpack what it wrote into `out`. Through a tar on the
-/// volume, which keeps the files' modes that a volume's own files do not.
-fn build_part(client: &Client, dir: &Path, image: &str, out: &Path) -> anyhow::Result<()> {
+/// its sources at `/build/tarballs`, and write what it wrote to `tar`: a tar, which keeps the
+/// files' modes that a volume's own files do not.
+fn build_part(client: &Client, dir: &Path, image: &str, tar: &Path) -> anyhow::Result<()> {
     let sources = fetch_sources(dir)?;
     eprintln!("xtask: pulling {image}");
     let mut pull = client.pull_image(image, None).log();
@@ -136,7 +195,6 @@ fn build_part(client: &Client, dir: &Path, image: &str, out: &Path) -> anyhow::R
     }
 
     let volume = client.create_volume(None::<String>).wait()?;
-    let tar = out.join(".build.tar");
     let built = (|| {
         for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
@@ -196,19 +254,8 @@ fn build_part(client: &Client, dir: &Path, image: &str, out: &Path) -> anyhow::R
             dir.display()
         );
         let data = volume.read_file("out.tar", 0, None).wait()?;
-        fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-        fs::write(&tar, data).with_context(|| format!("writing {}", tar.display()))
+        fs::write(tar, data).with_context(|| format!("writing {}", tar.display()))
     })();
     let _ = volume.remove().wait();
-    built?;
-
-    // A relative path, run from where it unpacks: Git Bash's GNU tar reads `C:` as a remote host.
-    let status = Command::new("tar")
-        .current_dir(out)
-        .arg("-xf")
-        .arg(tar.file_name().expect("the tar is a file"))
-        .status()
-        .context("running tar")?;
-    ensure!(status.success(), "unpacking {} failed", tar.display());
-    fs::remove_file(&tar).with_context(|| format!("removing {}", tar.display()))
+    built
 }

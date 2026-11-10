@@ -6,7 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -217,11 +219,13 @@ impl Sandbox {
         // and a release put them there.
         let programs = vm.first().and_then(|program| Path::new(program).parent());
         let programs = programs.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default();
+        // Every name for being given twice before any for being here, so that a list refused
+        // for itself is refused whatever this server has.
         let mut given = HashSet::new();
+        if let Some(name) = args.abins.iter().find(|name| !given.insert(*name)) {
+            return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
+        }
         for name in &args.abins {
-            if !given.insert(name) {
-                return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
-            }
             if name.starts_with('.') || name.contains(['/', '\\']) || !programs.join(name).is_file()
             {
                 return Err(Error::Invalid(format!(
@@ -294,7 +298,7 @@ impl Sandbox {
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
-                let (dir, names) = (Upper::dir(snapshots), args.abins.clone());
+                let (dir, names) = (Abin::dir(snapshots), args.abins.clone());
                 let made = move || Abin::create(&dir, &programs, &names);
                 Some(tokio::task::spawn_blocking(made).await??)
             }
@@ -701,41 +705,119 @@ impl Drop for Upper {
 }
 
 /// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
-/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own, and deleted
-/// as an [`Upper`] is.
+/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
 ///
-/// Each is `<name>.abin/` in `<root>/sandbox/`, beside `<name>.owner`.
+/// One is shared, read-only, by every sandbox made with the same programs as they stand: `<key>/`
+/// in `<root>/sandbox/abin/`, keyed by the programs' names, sizes and times, so that only the
+/// first copies them where a link cannot be made. Each sandbox holds `<key>.lock` shared for as
+/// long as it shows one, and [`Abin::sweep`] deletes those none holds.
 struct Abin {
     dir: PathBuf,
-    owner: PathBuf,
     _held: File,
 }
 
 impl Abin {
-    /// `names`, each a program in `programs`, and the `SKILL.md` of each that has one.
+    fn dir(snapshots: &SnapshotStore) -> PathBuf {
+        Upper::dir(snapshots).join(ABIN_HOST)
+    }
+
+    /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
+    /// that has one: made, when no sandbox has made it yet.
     fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
-        let (name, owner, held) = own(dir)?;
-        // Owned from here, so one that failed half made is deleted too.
-        let abin = Abin {
-            dir: dir.join(format!("{name}.abin")),
-            owner,
-            _held: held,
-        };
+        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let mut files = Vec::new();
         for program in names {
-            link(&programs.join(program), &abin.dir.join(program))?;
+            files.push(PathBuf::from(program));
             let skill = Path::new(SKILLS).join(program).join(SKILL);
             if programs.join(&skill).is_file() {
-                link(&programs.join(&skill), &abin.dir.join(&skill))?;
+                files.push(skill);
             }
         }
-        Ok(abin)
-    }
-}
+        files.sort();
+        let mut key = Sha256::new();
+        key.update(programs.as_os_str().as_encoded_bytes());
+        for file in &files {
+            let from = programs.join(file);
+            let meta = fs::metadata(&from).map_err(io(format!("reading {}", from.display())))?;
+            let time = meta.modified().ok();
+            let time = time.and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+            key.update([0]);
+            key.update(file.as_os_str().as_encoded_bytes());
+            key.update(meta.len().to_le_bytes());
+            key.update(time.unwrap_or_default().as_nanos().to_le_bytes());
+        }
+        let key = format!("{:x}", key.finalize())[..16].to_owned();
 
-impl Drop for Abin {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-        let _ = fs::remove_file(&self.owner);
+        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
+        let lock = dir.join(format!("{key}.lock"));
+        let held = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .map_err(io(format!("opening {}", lock.display())))?;
+        // Waited for: a sweep holds it alone only while it deletes.
+        held.lock_shared()
+            .map_err(io(format!("locking {}", lock.display())))?;
+        let made = dir.join(&key);
+        if !made.is_dir() {
+            // Filled under a name of its own, so that no sandbox shows one half made.
+            let name = pick(|name| dir.join(format!("{key}.{name}")).exists());
+            let part = dir.join(format!("{key}.{name}"));
+            let filled = files
+                .iter()
+                .try_for_each(|file| link(&programs.join(file), &part.join(file)))
+                .and_then(|()| {
+                    fs::rename(&part, &made).map_err(|source| {
+                        Error::from(SnapshotError::Io {
+                            context: format!("placing {}", made.display()),
+                            source,
+                        })
+                    })
+                });
+            // Placed by another sandbox meanwhile, where the rename failed for that.
+            if filled.is_err() {
+                let _ = fs::remove_dir_all(&part);
+                if !made.is_dir() {
+                    filled?;
+                }
+            }
+        }
+        Ok(Abin {
+            dir: made,
+            _held: held,
+        })
+    }
+
+    /// Delete each one in `dir` no sandbox holds, with what was being filled for it.
+    fn sweep(dir: &Path) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for lock in entries.flatten().map(|entry| entry.path()) {
+            if lock.extension().is_none_or(|e| e != "lock") {
+                continue;
+            }
+            let (Ok(file), Some(key)) = (File::open(&lock), lock.file_stem()) else {
+                continue;
+            };
+            if file.try_lock().is_err() {
+                continue;
+            }
+            let key = key.to_string_lossy();
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for made in entries.flatten().map(|entry| entry.path()) {
+                let name = made.file_name().unwrap_or_default().to_string_lossy();
+                let ours =
+                    name == *key || name.strip_prefix(&*key).is_some_and(|n| n.starts_with('.'));
+                if ours && made.is_dir() {
+                    let _ = fs::remove_dir_all(&made);
+                }
+            }
+            // The lock itself stays: one waiting for it holds what it opened, not a new one.
+        }
     }
 }
 
@@ -794,9 +876,9 @@ impl Sandbox {
                 path,
             }
             .delete();
-            let _ = fs::remove_dir_all(dir.join(format!("{name}.abin")));
             let _ = fs::remove_file(&owner);
         }
+        Abin::sweep(&Abin::dir(snapshots));
     }
 }
 
@@ -815,7 +897,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_abin_holds_the_programs_named_with_their_skills_until_it_is_dropped() {
+    fn an_abin_holds_the_programs_named_with_their_skills_shared_until_swept() {
         let host = tempfile::tempdir().unwrap();
         let programs = host.path().join(ABIN_HOST);
         fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
@@ -824,7 +906,7 @@ mod tests {
         }
         fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
 
-        let dir = host.path().join("sandbox");
+        let dir = host.path().join("sandbox").join(ABIN_HOST);
         let names = ["index".to_string(), "display".to_string()];
         let abin = Abin::create(&dir, &programs, &names).unwrap();
         assert_eq!(fs::read(abin.dir.join("index")).unwrap(), b"index");
@@ -837,9 +919,20 @@ mod tests {
         );
         assert!(!skills.join("display").exists());
 
-        let (made, owner) = (abin.dir.clone(), abin.owner.clone());
-        drop(abin);
-        assert!(!made.exists() && !owner.exists());
+        let reversed = ["display".to_string(), "index".to_string()];
+        let same = Abin::create(&dir, &programs, &reversed).unwrap();
+        assert_eq!(same.dir, abin.dir, "the same programs share one");
+        let other = Abin::create(&dir, &programs, &names[..1]).unwrap();
+        assert_ne!(other.dir, abin.dir);
+
+        let (made, other_made) = (abin.dir.clone(), other.dir.clone());
+        drop((abin, other));
+        Abin::sweep(&dir);
+        assert!(made.is_dir(), "one a sandbox still holds stays");
+        assert!(!other_made.exists());
+        drop(same);
+        Abin::sweep(&dir);
+        assert!(!made.exists());
         assert!(programs.join("index").is_file(), "the server's own stay");
     }
 }

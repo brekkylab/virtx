@@ -48,8 +48,8 @@ components:
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables a sandbox gets at /abin, those it names
   alib          what every VM gets at /alib, built from virtx-alibs/ in virtx machines into
-                build/alib/ -- on the server built into the same profile if there is one, else
-                on a downloaded one
+                build/alib/ -- on the server built into the same profile, built without the
+                GPU first if there is none; a part is built again only when its files changed
 
   --force         (init) resets every submodule to its pinned commit first, discarding
                   any local changes in it
@@ -470,14 +470,27 @@ fn build(options: &Options) -> anyhow::Result<()> {
         build_abin(options.debug, &options.out().join("abin"))?;
     }
     if options.has(Component::Alib) {
-        // Its machines are run through the client library.
+        // Its machines are run through the client library, on the server of this tree: one
+        // downloaded would be of the version being released, before it is. Without the GPU
+        // where none was built, as the machines need none.
         build_client(options)?;
         let out = options.out();
-        let server = out.join(format!("virtx-stdio{}", env::consts::EXE_SUFFIX));
-        alib::build(
-            &out.join(client_library()),
-            server.is_file().then_some(server.as_path()),
-        )?;
+        let server = out.join(format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX));
+        if !server.is_file() {
+            let mut cargo = cargo();
+            cargo
+                .current_dir(root_path())
+                .args(["build", "-p", SERVERS[0].1]);
+            if !options.debug {
+                cargo.arg("--release");
+            }
+            if options.locked {
+                cargo.arg("--locked");
+            }
+            run(cargo, "the server, without the GPU")?;
+            ready(&server)?;
+        }
+        alib::build(&out.join(client_library()), &server)?;
     }
     if options.has(Component::Kernel) {
         build_kernel()?;
@@ -720,6 +733,28 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
             .context("running fetch-musl-sysroot.sh")?;
         ensure!(status.success(), "fetching the musl sysroot failed");
         ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
+    }
+
+    // What `musl-cc.sh` and `musl-ar.sh` run, asked for here rather than failing deep in
+    // cc-rs's output. Not where `CC_<triple>` names a compiler of the caller's own, which
+    // `virtx-abins/.cargo/config.toml` leaves to win.
+    let own_cc = env::var_os(format!("CC_{}", target.replace('-', "_"))).is_some();
+    let llvm_ar = [
+        "llvm-ar",
+        "/opt/homebrew/opt/llvm/bin/llvm-ar",
+        "/usr/local/opt/llvm/bin/llvm-ar",
+    ];
+    let on_path = |name: &str| Command::new(name).arg("--version").output().is_ok();
+    if !own_cc && (!Path::new("/usr/bin/clang").is_file() || !llvm_ar.iter().any(|ar| on_path(ar)))
+    {
+        bail!(
+            "building abin needs /usr/bin/clang and llvm-ar -- {}",
+            if cfg!(target_os = "macos") {
+                "xcode-select --install, and brew install lld llvm"
+            } else {
+                "install the clang, lld and llvm packages (apt-get install clang lld llvm)"
+            }
+        );
     }
 
     let crate_dir = root.join("virtx-abins");

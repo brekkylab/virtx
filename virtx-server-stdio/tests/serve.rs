@@ -23,6 +23,18 @@ struct Server {
     owns: bool,
 }
 
+/// Where a test pulls `reference` from: Docker Hub's official images from AWS's mirror of them,
+/// as Docker Hub refuses anonymous pulls past a few an hour -- a test failing on that says
+/// nothing of what it tries. Anything else from where it names.
+fn mirrored(reference: &str) -> String {
+    let name = reference.strip_prefix("docker.io/").unwrap_or(reference);
+    let name = name.strip_prefix("library/").unwrap_or(name);
+    if name.contains('/') {
+        return reference.to_owned();
+    }
+    format!("public.ecr.aws/docker/library/{name}")
+}
+
 impl Server {
     fn spawn(name: &str) -> Server {
         Server::spawn_with(name, &[])
@@ -83,7 +95,8 @@ impl Server {
     /// Pull `reference` from its registry into the store the server reads, under its own name.
     async fn pull_image(&self, reference: &str) {
         let store = ImageStore::new(self.home.join("images")).unwrap();
-        let reference = reference.parse().unwrap();
+        let named = reference.parse().unwrap();
+        let reference = mirrored(reference).parse().unwrap();
         let registry = RegistryClient::new(store.clone(), None);
         let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
         let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
@@ -93,7 +106,7 @@ impl Server {
             layers.push(store.insert_layer(&tree).unwrap());
         }
         let image = store.insert_image(&config, &layers).unwrap();
-        store.insert_tag(&reference, &image).unwrap();
+        store.insert_tag(&named, &image).unwrap();
     }
 
     /// What `cmd` wrote in `sandbox`, a line at a time, and how it ended.
@@ -1121,7 +1134,8 @@ async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
 #[ignore]
 async fn a_built_image_runs_with_what_its_steps_made() {
     let server = Server::spawn("build");
-    let recipe = Recipe::new("alpine:3.20")
+    // The server pulls it itself: from the mirror, by name ([`mirrored`]).
+    let recipe = Recipe::new(mirrored("alpine:3.20"))
         .step("apk add --no-cache jq")
         .step(Step::env("GREETING", "hello"))
         .step(Step::workdir("/work"))
@@ -1129,7 +1143,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
     let (lines, built) = server.build(recipe, "built:latest").await;
     let digest = built.digest.unwrap_or_else(|| panic!("{:?}", built.error));
     assert!(
-        lines.contains(&"pulling docker.io/library/alpine:3.20".to_string()),
+        lines.contains(&format!("pulling {}", mirrored("alpine:3.20"))),
         "{lines:?}"
     );
     assert!(lines.contains(&"STEP 4/4: RUN echo \"$GREETING\" > note && rm /etc/motd".to_string()));
@@ -1178,7 +1192,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
 #[ignore]
 async fn a_cancelled_build_takes_its_machine_with_it() {
     let server = Server::spawn("cancel");
-    let recipe = Recipe::new("alpine:3.20").step("echo started; sleep infinity");
+    let recipe = Recipe::new(mirrored("alpine:3.20")).step("echo started; sleep infinity");
     let job = server
         .client
         .build_image(recipe, "never:latest")
@@ -1232,7 +1246,11 @@ async fn the_images_are_a_registry_beside_the_endpoints() {
 #[ignore]
 async fn a_pull_answers_the_image_it_tagged() {
     let server = Server::spawn("pull");
-    let job = server.client.pull_image("alpine:3.20", None).await.unwrap();
+    let job = server
+        .client
+        .pull_image(&mirrored("alpine:3.20"), None)
+        .await
+        .unwrap();
     let mut log = server.client.image_job_log(&job.id, None);
     let end = loop {
         if let ImageJobEntry::End(end) = log.next().await.unwrap().unwrap().entry {

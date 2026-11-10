@@ -29,6 +29,18 @@ struct Served {
     home: PathBuf,
 }
 
+/// Where a test pulls `reference` from: Docker Hub's official images from AWS's mirror of them,
+/// as Docker Hub refuses anonymous pulls past a few an hour -- a test failing on that says
+/// nothing of what it tries. Anything else from where it names.
+fn mirrored(reference: &str) -> String {
+    let name = reference.strip_prefix("docker.io/").unwrap_or(reference);
+    let name = name.strip_prefix("library/").unwrap_or(name);
+    if name.contains('/') {
+        return reference.to_owned();
+    }
+    format!("public.ecr.aws/docker/library/{name}")
+}
+
 impl Served {
     async fn spawn(name: &str) -> Served {
         Served::spawn_with(name, json!({})).await
@@ -148,7 +160,8 @@ impl Served {
     /// Pull `reference` from its registry into the store the server reads.
     async fn pull_image(&self, reference: &str) {
         let store = ImageStore::new(self.home.join("images")).unwrap();
-        let reference = reference.parse().unwrap();
+        let named = reference.parse().unwrap();
+        let reference = mirrored(reference).parse().unwrap();
         let registry = RegistryClient::new(store.clone(), None);
         let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
         let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
@@ -158,7 +171,7 @@ impl Served {
             layers.push(store.insert_layer(&tree).unwrap());
         }
         let image = store.insert_image(&config, &layers).unwrap();
-        store.insert_tag(&reference, &image).unwrap();
+        store.insert_tag(&named, &image).unwrap();
     }
 
     /// A port's URL, as a client resolves what making its sandbox answered: against the URL

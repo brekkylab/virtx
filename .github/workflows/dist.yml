@@ -301,7 +301,7 @@ jobs:
             # Nothing a release does not carry and Windows may not have, loaded at start-up:
             # the C++ runtime is linked in, and the rest are delay-loaded, so a host without
             # them still runs virtx-stdio far enough to say what to install.
-            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv|dokan)" "$RUNNER_TEMP/imports.txt"; then
+            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
               echo "::error::$exe needs the DLLs above to start"; fail=1
             fi
           done

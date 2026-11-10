@@ -3,7 +3,7 @@
 
 use std::{io::Read, net::TcpStream, thread, time::Duration};
 
-use virtx_rs::{PortForwarder, SandboxCreateArgs, SandboxExecArgs};
+use virtx::{PortForwarder, SandboxCreateArgs, SandboxExecArgs};
 
 mod common;
 
@@ -24,7 +24,7 @@ fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
 }
 
 /// Serve `hello` on 8000 in a sandbox of `client`'s that opens it, and answer the sandbox.
-fn serving(client: &virtx_rs::Client) -> virtx_rs::Sandbox {
+fn serving(client: &virtx::Client) -> virtx::Sandbox {
     common::alpine(client);
     let args = SandboxCreateArgs {
         ports: vec![8000],

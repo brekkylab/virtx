@@ -1,0 +1,30 @@
+---
+title: "Overview"
+description: "Run tasks in Linux microVMs from Python, Node.js, or Rust."
+---
+
+virtx runs tasks in Linux microVMs from your code, for jobs with dependencies you do not want to install on your machine, or code you do not want to run on it.
+
+Your code asks a virtx server for a sandbox booted from an image, runs commands in it, and keeps what should outlive it in a snapshot or a volume.
+
+## Getting started
+
+Start with [Hello world](/docs/hello-world/) to run a command in a sandbox, on virtx cloud, on your machine, or on your own server.
+
+## Guides
+
+- [Working with images](/docs/guides/images/): build, pull and push, tag, and remove images.
+- [Setting up sandboxes](/docs/guides/setting-sandboxes/): create a sandbox with the CPUs, memory, network, and storage a task needs.
+- [Running commands](/docs/guides/running-commands/): run commands in a sandbox, read their output, and control them.
+- [Reading and writing files](/docs/guides/reading-writing-files/): put files into a sandbox, get its output back, and move or remove files in it.
+- [Networks and ports](/docs/guides/networks-ports/): let a sandbox reach out, and reach services running in it.
+- [Keeping work in snapshots](/docs/guides/keeping-snapshots/): keep what a sandbox writes, read its files without a sandbox, and pick up where it left off.
+- [Mounting volumes](/docs/guides/mounting-volumes/): create volumes, mount them into sandboxes, and mount remote stores inside them.
+- [Using GPUs](/docs/guides/using-gpus/): give a sandbox the host's GPU through Vulkan.
+- [Coding agents](/docs/guides/coding-agents/): install the virtx skill for Claude or Codex.
+
+
+## Reference
+
+- [API reference](/docs/reference/api/): every client call by what it acts on, and the environment variables.
+- [CLI](/docs/reference/cli/): build and manage a server's images from a shell.

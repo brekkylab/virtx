@@ -1,5 +1,5 @@
 [package]
-name = "virtx-rs"
+name = "virtx"
 version = "0.1.2"
 edition = "2024"
 description = "A virtx client for Rust, over libvirtx_core's C ABI."

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1580 600" width="1580" height="600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="80" y="242" width="468" height="128" rx="20" fill="#2b2f38" stroke="#5c6270" stroke-width="2"/>
+<path d="M122 290 L106 306 L122 322 M156 290 L172 306 L156 322 M146 286 L132 326" fill="none" stroke="#a8a2f5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="204" y="324" font-size="52" font-weight="700" fill="#ffffff">virtx client</text>
+<g fill="none" stroke="#858b97" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+<path d="M548 306 H952"/>
+<path d="M952 114 H846 Q830 114 830 130 V482 Q830 498 846 498 H952"/>
+<path d="M940 104 L952 114 L940 124"/>
+<path d="M940 296 L952 306 L940 316"/>
+<path d="M940 488 L952 498 L940 508"/>
+</g>
+<g fill="rgba(122,113,224,0.15)" stroke="#7a71e0" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+<rect x="1008" y="76" width="88" height="58" rx="6"/><path d="M996 144 L1008 134 H1096 L1108 144 Q1110 152 1102 152 H1002 Q994 152 996 144 Z"/>
+<rect x="1004" y="266" width="96" height="34" rx="8"/><rect x="1004" y="310" width="96" height="34" rx="8"/><path d="M1020 283 H1046 M1020 327 H1046" fill="none"/><circle cx="1084" cy="283" r="3.5" fill="#7a71e0" stroke="none"/><circle cx="1084" cy="327" r="3.5" fill="#7a71e0" stroke="none"/>
+<path d="M1020 530 H1094 Q1112 530 1112 510 Q1112 490 1088 486 Q1080 458 1052 458 Q1024 458 1020 484 Q998 488 998 508 Q998 530 1020 530 Z"/>
+</g>
+<text x="1156" y="114" font-size="50" font-weight="700" fill="#7a71e0">Local</text>
+<text x="1156" y="156" font-size="32" fill="#7d8390">On the client machine</text>
+<text x="1156" y="306" font-size="50" font-weight="700" fill="#7a71e0">Remote</text>
+<text x="1156" y="348" font-size="32" fill="#7d8390">On another machine</text>
+<text x="1156" y="498" font-size="50" font-weight="700" fill="#7a71e0">Cloud</text>
+<text x="1156" y="540" font-size="32" fill="#7d8390">Hosted by virtx</text>
+</svg>

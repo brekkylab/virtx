@@ -1,0 +1,124 @@
+---
+title: "Setting up sandboxes"
+description: "Create a sandbox with the CPUs, memory, network, ports, storage, and GPU a task needs."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Create a sandbox
+
+`create_sandbox` takes an image and these options, named here as in Python. Whatever is left out, the server picks.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `vcpus` | 4 | Its CPUs. |
+| `memory_mib` | 4096 | Its memory, in MiB. |
+| `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
+| `ports` | none | TCP ports in it to reach from outside, even with `network` off; see [Networks and ports](/docs/guides/networks-ports/). |
+| `snapshot` | none | A snapshot for its root filesystem's writable layer; see [Keeping work in snapshots](/docs/guides/keeping-snapshots/). |
+| `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/guides/mounting-volumes/). |
+| `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/guides/using-gpus/). |
+
+This makes a sandbox with 2 vCPUs, 2 GiB of memory, and no way out:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox(
+    "alpine:latest", vcpus=2, memory_mib=2048, network=False
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', {
+  vcpus: 2,
+  memoryMib: 2048,
+  network: false,
+})
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest")
+    .vcpus(2)
+    .memory_mib(2048)
+    .network(false);
+let sandbox = client.create_sandbox(&args).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Find sandboxes
+
+`list_sandbox` lists every sandbox on the server, and `get_sandbox` finds one by its id. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `image`, the `snapshot` it stands on if any, and whether it is `running`. This is how to find one a program left behind.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+for sandbox in await client.list_sandbox():
+    print(sandbox.id, sandbox.image, sandbox.running)
+
+sandbox = await client.get_sandbox("<sandbox id>")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for (const sandbox of await client.listSandbox()) {
+  console.log(sandbox.id, sandbox.image, sandbox.running)
+}
+
+const sandbox = await client.getSandbox('<sandbox id>')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+for sandbox in client.list_sandbox().await? {
+    println!("{} {} {}", sandbox.id(), sandbox.info().image, sandbox.info().running);
+}
+
+let sandbox = client.get_sandbox("<sandbox id>").await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Remove a sandbox
+
+`remove` stops a sandbox, ends its jobs, and deletes what it wrote over its image, unless it stood on a snapshot. Its snapshot and volumes stay, for the next sandbox to use.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await sandbox.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await sandbox.remove()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+sandbox.remove().await?;
+```
+
+</TabItem>
+</Tabs>
+

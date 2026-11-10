@@ -10,6 +10,8 @@ export class VirtxError extends Error {
    * exist, `409` for what is in use or has ended, and the like.
    */
   status: number | null
+  /** The server's response body, where it was not a JSON error. */
+  body: string | null
 }
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
@@ -128,7 +130,7 @@ export type RegistryAuth =
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
 export type Auth = { type: 'bearer'; token: string }
 
-export interface ImageListItem {
+export interface ImageListOutputItem {
   /** The tag, as `name:tag`. */
   reference: string
   /** The digest of the manifest it points at, as `algorithm:hex`. */
@@ -462,7 +464,7 @@ export class Client {
   /** The image job `id`. */
   getImageJob(id: string): Promise<ImageJob>
   /** Every tag on the server's images, as `name:tag`, with the digest it points at. */
-  listImage(): Promise<ImageListItem[]>
+  listImage(): Promise<ImageListOutputItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
   tagImage(source: string, target: string): Promise<void>
   /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */

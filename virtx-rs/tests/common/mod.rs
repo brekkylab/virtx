@@ -18,7 +18,7 @@ use std::{
     thread::{self, Thread},
 };
 
-use virtx_rs::{
+use virtx::{
     Auth, Client, Event, Events, ImageJobEnd, ImageJobEntry, Sandbox, SandboxExecArgs,
     SandboxJobEntry,
 };
@@ -32,7 +32,7 @@ pub fn library() -> PathBuf {
     static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
-            if let Some(path) = env::var_os(virtx_rs::LIBRARY_ENV) {
+            if let Some(path) = env::var_os(virtx::LIBRARY_ENV) {
                 return path.into();
             }
             // This binary is in `target/<profile>/deps`.
@@ -66,7 +66,7 @@ pub fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
         let var = |name: &str| {
             env::var(name).unwrap_or_else(|_| {
-                panic!("{name} is not set: run these as `cargo xtask test -p virtx-rs`")
+                panic!("{name} is not set: run these as `cargo xtask test -p virtx`")
             })
         };
         Fixture {
@@ -80,14 +80,14 @@ pub fn fixture() -> &'static Fixture {
 
 /// A client of a `virtx-stdio` of its own, the library opened first.
 pub fn client() -> Client {
-    virtx_rs::load(library()).unwrap();
+    virtx::load(library()).unwrap();
     Client::spawn(&fixture().stdio, [] as [&str; 0]).unwrap()
 }
 
 /// A client of the fixture's `virtx-server-tcp`, with its token and project, the library
 /// opened first.
 pub fn tcp_client() -> Client {
-    virtx_rs::load(library()).unwrap();
+    virtx::load(library()).unwrap();
     let Fixture {
         url,
         token,
@@ -165,8 +165,8 @@ pub fn alpine(client: &Client) -> String {
 
 /// Each entry of `log`, to its end.
 pub fn entries<E: serde::de::DeserializeOwned>(
-    mut log: Events<virtx_rs::LogEntry<E>>,
-) -> Vec<virtx_rs::LogEntry<E>> {
+    mut log: Events<virtx::LogEntry<E>>,
+) -> Vec<virtx::LogEntry<E>> {
     let mut entries = Vec::new();
     while let Some(entry) = log.wait_next() {
         entries.push(entry.unwrap());

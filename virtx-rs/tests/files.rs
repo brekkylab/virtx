@@ -1,6 +1,6 @@
 //! The files of a volume, a snapshot and a sandbox, against the fixture's `virtx-stdio`.
 
-use virtx_rs::{Files, MountSource, MountType, SandboxCreateArgs};
+use virtx::{Files, MountSource, MountType, SandboxCreateArgs};
 
 mod common;
 
@@ -298,7 +298,7 @@ fn a_sandbox_s_files_are_what_its_processes_see() {
         let entries = sandbox.read_dir(path).wait().unwrap();
         entries.into_iter().map(|entry| entry.name).collect()
     };
-    let status = |refused: Result<(), virtx_rs::Error>| refused.unwrap_err().status();
+    let status = |refused: Result<(), virtx::Error>| refused.unwrap_err().status();
 
     // The root as a process sees it, but for the kernel's filesystems and the agent's.
     let listed = names("");

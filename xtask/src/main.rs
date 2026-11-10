@@ -30,7 +30,7 @@ usage: cargo xtask init     [--force]
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
-            the fixture where they name virtx-rs
+            the fixture where they name virtx
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -60,7 +60,7 @@ components:
                   the archive has no abin, and sessions from the release no /abin";
 
 /// The client's packages, which `check` checks before `init` has run.
-const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-rs", "virtx-cli"];
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
 /// The package the client library is built from.
 const CLIENT_PACKAGE: &str = "virtx-core";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
@@ -185,7 +185,7 @@ fn main() -> anyhow::Result<()> {
             match args.as_slice() {
                 [] => test_all(),
                 // virtx-rs's tests are against the fixture too.
-                _ if args.iter().any(|arg| arg == "virtx-rs") => {
+                _ if args.iter().any(|arg| arg == "virtx") => {
                     let fixture = Fixture::start()?;
                     run_target(args, true, &fixture.vars())
                 }
@@ -1010,7 +1010,7 @@ fn serve_fixture() -> anyhow::Result<()> {
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
-    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx-rs"]]),
+    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (
         "virtx-node",

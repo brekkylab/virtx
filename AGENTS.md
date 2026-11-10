@@ -4,8 +4,8 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 
 ## One behaviour, two ends
 
-- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx-rs`, `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
-- A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, each package's own `README.md`, and the examples.
+- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
+- A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md` and its translations (`README.*.md`), each package's own `README.md`, and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.
 - The wire between client and server is `virtx-core/PROTOCOL.md`, and both ends of it are here: the types and both transports in `virtx-core`, the servers that answer them beside it. A change to the protocol moves both ends in the same pull request.
@@ -21,17 +21,40 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the `packages` workflow runs to pack and smoke-test the client's packages. `.github/workflows/dist.yml` builds the server for every platform and attaches the archives to the tag's GitHub release.
 
-## Building
+## Building from source
 
-Every step is `cargo xtask`; `cargo xtask --help` lists them.
+Every step is `cargo xtask`, run from a clone of this repository; `cargo xtask --help` lists them.
 
 ```bash
-git clone https://github.com/brekkylab/virtx
-cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
-cargo xtask build client                          # libvirtx_core
-cargo xtask build kernel server-stdio server-tcp # the servers, signed on macOS; see virtx-uvm/README.md for what a host needs
-cargo xtask install                               # what was built, into $VIRTX_HOME/bin
+git clone https://github.com/brekkylab/virtx && cd virtx
 ```
+
+### Server
+
+The servers need more of the host than Rust; [virtx-uvm/README.md](virtx-uvm/README.md) lists what each host needs.
+
+```bash
+cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
+cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both servers, signed on macOS
+cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
+export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
+```
+
+### Clients
+
+Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+
+```bash
+cargo xtask build client
+cargo xtask install --prefix ~/.local
+export VIRTX_CORE_LIB=~/.local/bin/libvirtx_core.so   # .dylib on macOS, virtx_core.dll on Windows
+```
+
+Then, in your own project, install the package for your language from the clone:
+
+- **Python:** `pip install path/to/virtx/virtx-py`
+- **Node:** `npm install path/to/virtx/virtx-node`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
 
 - A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
 
@@ -62,7 +85,7 @@ cargo xtask test                                  # every suite, each summed up 
 cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
-cargo xtask test -p virtx-rs                      # Rust, against the fixture
+cargo xtask test -p virtx                         # Rust, against the fixture
 (cd virtx-py && uv run pytest)                    # Python; its conftest serves the fixture
 (cd virtx-node && npm install && npm test)        # Node; `npm test` serves the fixture
 cargo xtask fixture -- <command>                  # any command, against the fixture

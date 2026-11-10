@@ -3,7 +3,7 @@
 use std::{env, future, pin::Pin};
 
 use futures_core::Stream;
-use virtx_rs::{
+use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
     SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Step,
 };

@@ -1,20 +1,20 @@
 //! The client where no request is sent, and over HTTP to the fixture's server.
 
-use virtx_rs::{Auth, Client, Error};
+use virtx::{Auth, Client, Error};
 
 mod common;
 
 #[test]
 fn a_second_library_is_refused() {
-    virtx_rs::load(common::library()).unwrap();
-    let error = virtx_rs::load("/nonexistent/libvirtx_core").unwrap_err();
+    virtx::load(common::library()).unwrap();
+    let error = virtx::load("/nonexistent/libvirtx_core").unwrap_err();
     assert!(matches!(error, Error::Library(_)));
-    virtx_rs::load(common::library()).unwrap();
+    virtx::load(common::library()).unwrap();
 }
 
 #[test]
 fn a_client_over_http_sends_its_token_and_project() {
-    virtx_rs::load(common::library()).unwrap();
+    virtx::load(common::library()).unwrap();
     let common::Fixture {
         url,
         token,

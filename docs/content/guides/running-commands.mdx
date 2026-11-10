@@ -1,0 +1,256 @@
+---
+title: "Running commands"
+description: "Run commands in a sandbox, read their output, and control them while they run."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Run a command
+
+`exec` takes an argv and starts a job. Iterate the job to read its output, a line per entry, then how it ended. A sandbox runs any number of jobs at once, and leaving the loop leaves the command running.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+async for entry in sandbox.exec(["uname", "-a"]):
+    match entry.entry:
+        case Stdout(line) | Stderr(line):
+            print(line)
+        case SandboxJobEnd(code):
+            print("exited", code)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for await (const entry of sandbox.exec(['uname', '-a'])) {
+  if ('stdout' in entry) console.log(entry.stdout)
+  else if ('stderr' in entry) console.error(entry.stderr)
+  else if ('end' in entry) console.log('exited', entry.end.code)
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut log = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).log();
+while let Some(entry) = log.next().await {
+    match entry?.entry {
+        SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
+        SandboxJobEntry::End(end) => println!("exited {}", end.code),
+        _ => {}
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+A command that cannot start, such as one not found, is refused at `exec` and starts no job.
+A line longer than 64 KiB arrives as several entries.
+
+## Follow a job
+
+Each command runs as a **job**. The server runs it apart from the request that started it, so a job keeps going when a loop is left or a connection drops, and its output is kept in a log you can read again.
+
+The value `exec` returns is two things at once. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+job = await sandbox.exec(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 1; done"])
+print(job.id, job.running)
+
+job = await sandbox.job(job.id)  # later, from the sandbox
+async for entry in job.log():
+    print(entry.id, entry.entry)
+
+job = await job.get()
+print(job.running, job.code)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+let job = await sandbox.exec(['sh', '-c', 'for i in 1 2 3; do echo $i; sleep 1; done'])
+console.log(job.id, job.running)
+
+job = await sandbox.job(job.id) // later, from the sandbox
+for await (const entry of job.log()) console.log(entry)
+
+job = await job.get()
+console.log(job.running, job.code)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxExecArgs::new(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 1; done"]);
+let job = sandbox.exec(&args).await?;
+println!("{} {}", job.id(), job.info().running);
+
+let job = sandbox.job(job.id()).await?; // later, from the sandbox
+let mut log = job.log(None);
+while let Some(entry) = log.next().await {
+    let entry = entry?;
+    println!("{} {:?}", entry.id, entry.entry);
+}
+
+let job = job.get().await?;
+println!("{} {:?}", job.info().running, job.info().code);
+```
+
+</TabItem>
+</Tabs>
+
+It prints:
+
+```text frame="terminal" title="Output"
+4ea37caf True
+1 Stdout(line='1')
+2 Stdout(line='2')
+3 Stdout(line='3')
+4 SandboxJobEnd(code=0)
+False 0
+```
+
+A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes last.
+
+<Aside type="tip">
+Building, pulling, and pushing an image are jobs too, read the same way: iterate `build_image`, `pull_image`, or `push_image` for the log, or await it for the job. See [Working with images](/docs/guides/images/).
+</Aside>
+
+## Run several commands at once
+
+Awaiting `exec` starts a job and returns without waiting for it to end, so a command can run in the background while others run beside it.
+Here one job writes a line to a file every second, and another waits a few seconds and reads what has been written so far.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+writer = await sandbox.exec(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"])
+
+async for entry in sandbox.exec(["sh", "-c", "sleep $((RANDOM % 5 + 1)); cat /tmp/events"]):
+    print(entry.entry)  # Stdout(line='tick 1'), Stdout(line='tick 2'), ...
+
+await writer.remove()  # kills the writer, which never ends on its own
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const writer = await sandbox.exec(['sh', '-c', 'i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done'])
+
+for await (const entry of sandbox.exec(['sh', '-c', 'sleep $((RANDOM % 5 + 1)); cat /tmp/events'])) {
+  console.log(entry) // { id: 1, stdout: 'tick 1' }, { id: 2, stdout: 'tick 2' }, ...
+}
+
+await writer.remove() // kills the writer, which never ends on its own
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxExecArgs::new(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"]);
+let writer = sandbox.exec(&args).await?;
+
+let mut log = sandbox.exec(&SandboxExecArgs::new(["sh", "-c", "sleep $((RANDOM % 5 + 1)); cat /tmp/events"])).log();
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry); // Stdout("tick 1"), Stdout("tick 2"), ...
+}
+
+writer.remove().await?; // kills the writer, which never ends on its own
+```
+
+</TabItem>
+</Tabs>
+
+The reader prints as many ticks as seconds it waited, since the writer kept going the whole time.
+For example:
+
+```text frame="terminal" title="Output (Python, random wait: 4 s)"
+Stdout(line='tick 1')
+Stdout(line='tick 2')
+Stdout(line='tick 3')
+Stdout(line='tick 4')
+SandboxJobEnd(code=0)
+```
+
+A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it.
+
+## Set a timeout
+
+`timeout_ms` kills the process when the time runs out:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+async for entry in sandbox.exec(["sleep", "60"], timeout_ms=10_000):
+    ...
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for await (const entry of sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 })) {
+  // ...
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut args = SandboxExecArgs::new(["sleep", "60"]);
+args.timeout_ms = Some(10_000);
+let mut log = sandbox.exec(&args).log();
+```
+
+</TabItem>
+</Tabs>
+
+## Signal or cancel a job
+
+A job's `signal` sends a signal such as `SIGTERM` to its process and every process it started, and `remove` kills them and forgets the job.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+job = await sandbox.exec(["sleep", "600"])
+await job.signal("SIGTERM")
+await job.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const job = await sandbox.exec(['sleep', '600'])
+await job.signal('SIGTERM')
+await job.remove()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let job = sandbox.exec(&SandboxExecArgs::new(["sleep", "600"])).await?;
+job.signal("SIGTERM").await?;
+job.remove().await?;
+```
+
+</TabItem>
+</Tabs>
+

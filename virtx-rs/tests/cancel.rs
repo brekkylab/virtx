@@ -5,7 +5,7 @@
 
 use std::{env, process::Command, process::Stdio, thread, time::Duration};
 
-use virtx_rs::{ImageJobEntry, Recipe, Step};
+use virtx::{ImageJobEntry, Recipe, Step};
 
 mod common;
 

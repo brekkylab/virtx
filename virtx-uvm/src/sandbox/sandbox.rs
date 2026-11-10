@@ -209,9 +209,9 @@ impl Sandbox {
                 let reference: Reference = tag
                     .parse()
                     .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
-                images
-                    .get_tag(&reference)?
-                    .ok_or_else(|| Error::NotFound(format!("no image here is tagged {tag}")))?
+                images.get_tag(&reference)?.ok_or_else(|| {
+                    Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
+                })?
             }
             ImageName::Digest { digest } => {
                 let digest = digest

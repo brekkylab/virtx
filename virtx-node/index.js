@@ -40,11 +40,14 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null) {
+  constructor(message, status = null, body = null, code = null) {
     super(message)
     this.name = 'VirtxError'
     // The HTTP status the server refused the request with, if it did.
     this.status = status
+    // The protocol's code it refused with, where it answered one: `not_found`, `stopped`,
+    // `in_use` and the like -- what to branch on, not the message.
+    this.code = code
     // The server's response body, where it was not a JSON error.
     this.body = body
   }
@@ -195,7 +198,12 @@ class Library {
     if (status === ERROR) {
       if (!data.length) throw new VirtxError('the call failed')
       const failure = JSON.parse(data.toString('utf8'))
-      throw new VirtxError(failure.message, failure.status ?? null, failure.body ?? null)
+      throw new VirtxError(
+        failure.message,
+        failure.status ?? null,
+        failure.body ?? null,
+        failure.code ?? null,
+      )
     }
     throw new VirtxError(`unknown status ${status}`)
   }
@@ -389,6 +397,9 @@ class StartedJob extends Promise {
       yield* this._log(await this)
       return
     }
+    // Read as one with its log, a start that fails is the loop's to throw: the job's own
+    // promise, rejected with it, is not left unheard -- which would end the process.
+    Promise.prototype.then.call(this, undefined, () => {})
     yield* items
   }
 }

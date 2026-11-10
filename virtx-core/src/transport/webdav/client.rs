@@ -308,8 +308,22 @@ async fn send(
         .map_err(|e| Error::Transport(format!("reading the response: {e}")))?
         .to_bytes();
     if !status.is_success() {
-        let body = String::from_utf8_lossy(&body).trim().to_owned();
-        return Err(Error::Status(status.as_u16(), body));
+        // The protocol's error where the server answered one (`409 stopped` for a stopped
+        // sandbox's files), as every other endpoint's is read: `code: message`.
+        #[derive(serde::Deserialize)]
+        struct Refused {
+            error: Said,
+        }
+        #[derive(serde::Deserialize)]
+        struct Said {
+            code: String,
+            message: String,
+        }
+        let said = match serde_json::from_slice::<Refused>(&body) {
+            Ok(Refused { error }) => format!("{}: {}", error.code, error.message),
+            Err(_) => String::from_utf8_lossy(&body).trim().to_owned(),
+        };
+        return Err(Error::Status(status.as_u16(), said));
     }
     if status == StatusCode::MULTI_STATUS && per_path {
         // A `207` whose paths all succeeded is a success.

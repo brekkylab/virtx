@@ -10,6 +10,11 @@ export class VirtxError extends Error {
    * exist, `409` for what is in use or has ended, and the like.
    */
   status: number | null
+  /**
+   * The protocol's code it refused with, where it answered one: `not_found`, `stopped`,
+   * `in_use` and the like -- what to branch on, not the message.
+   */
+  code: string | null
   /** The server's response body, where it was not a JSON error. */
   body: string | null
 }

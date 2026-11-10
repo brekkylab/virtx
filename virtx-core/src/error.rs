@@ -29,6 +29,23 @@ pub enum Error {
     File(String),
 }
 
+impl Error {
+    /// The protocol's code of a refusal the server answered as `PROTOCOL.md`'s Resources do
+    /// (`{"error": {"code", "message"}}`): `not_found`, `stopped`, `in_use` and the like. What a
+    /// client branches on, rather than the message.
+    pub fn code(&self) -> Option<&str> {
+        let Error::Status(_, said) = self else {
+            return None;
+        };
+        let (code, _) = said.split_once(": ")?;
+        let protocol = !code.is_empty()
+            && code
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        protocol.then_some(code)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -67,3 +84,26 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_in_the_protocol_s_shape_says_its_code() {
+        let stopped = Error::Status(409, "stopped: the sandbox is stopped".into());
+        assert_eq!(stopped.code(), Some("stopped"));
+        assert_eq!(
+            Error::Status(404, "not_found: no sandbox s1".into()).code(),
+            Some("not_found")
+        );
+        // A body that is not the protocol's error, or none: no code.
+        assert_eq!(
+            Error::Status(500, "Internal Server Error".into()).code(),
+            None
+        );
+        assert_eq!(Error::Status(404, String::new()).code(), None);
+        assert_eq!(Error::Status(404, "/work/a.txt".into()).code(), None);
+        assert_eq!(Error::Transport("refused: x".into()).code(), None);
+    }
+}

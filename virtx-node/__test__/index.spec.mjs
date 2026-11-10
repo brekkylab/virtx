@@ -147,9 +147,33 @@ test("a sandbox's files are its own and go with it", async () => {
     )
     await sandbox.removeFile('work/dir/a.txt')
     await sandbox.remove()
-    await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
+    await assert.rejects(client.getSandbox(sandbox.id), { status: 404, code: 'not_found' })
     await assert.rejects(sandbox.readFile(''), { status: 404 })
   } finally {
+    await client.close()
+  }
+})
+
+test('an exec iterated at once whose start fails throws in the loop, and nowhere else', async () => {
+  const client = Client.spawn(testServer)
+  const unheard = []
+  const hear = (reason) => unheard.push(reason)
+  process.on('unhandledRejection', hear)
+  try {
+    const sandbox = await client.createSandbox('alpine:3.20')
+    await assert.rejects(
+      (async () => {
+        for await (const _ of sandbox.exec(['no-such-command'])) {
+          // no entry: its start fails
+        }
+      })(),
+      { status: 422, code: 'not_started' },
+    )
+    // A turn of the event loop for an unheard rejection to be told.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(unheard, [])
+  } finally {
+    process.off('unhandledRejection', hear)
     await client.close()
   }
 })

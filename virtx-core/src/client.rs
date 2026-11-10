@@ -2656,13 +2656,13 @@ pub(crate) mod ffi {
                         (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
                     }
                     Err(error) => {
-                        yield Err(error);
+                        yield Err(Failure::from(error));
                         return;
                     }
                 };
                 let mut items = client.exec_sandbox_with_log(&sandbox, &args);
                 while let Some(item) = items.next().await {
-                    yield item.map_err(|e| e.to_string());
+                    yield item.map_err(Failure::from);
                 }
             }
         })

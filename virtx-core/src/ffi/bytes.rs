@@ -8,13 +8,16 @@ use super::{VIRTX_ERROR, VIRTX_OK};
 use crate::Error;
 
 /// Why a call failed, as C reads it: `{"message": "..."}`, with `"status": 404` beside it when
-/// the server refused the request with that HTTP status, and `"body"` where the refusal had a
-/// body that was not a JSON error.
+/// the server refused the request with that HTTP status, `"code"` the protocol's where it
+/// answered its error as the protocol does (`not_found`, `stopped`), and `"body"` where the
+/// refusal had a body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
 }
@@ -24,6 +27,7 @@ impl From<String> for Failure {
         Failure {
             message,
             status: None,
+            code: None,
             body: None,
         }
     }
@@ -45,6 +49,7 @@ impl From<Error> for Failure {
         Failure {
             message: error.to_string(),
             status,
+            code: error.code().map(str::to_owned),
             body,
         }
     }

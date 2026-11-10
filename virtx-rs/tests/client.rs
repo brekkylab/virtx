@@ -194,6 +194,7 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
     volume.remove().unwrap_wait();
     let gone = client.get_volume("w").wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
+    assert_eq!(gone.code(), Some("not_found"), "{gone}");
     let gone = got.stat_file("c.txt").wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }

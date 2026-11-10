@@ -11,6 +11,8 @@ pub struct Job {
     log: Arc<Log<SandboxJobEntry>>,
     /// Its code, once it has ended.
     code: watch::Sender<Option<i32>>,
+    /// When it ended, once it has: the oldest ended go first ([`super::sandbox::KEEP_ENDED`]).
+    ended_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Job {
@@ -19,6 +21,7 @@ impl Job {
             job: Mutex::new(job),
             log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
             code: watch::channel(None).0,
+            ended_at: Mutex::new(None),
         })
     }
 
@@ -54,8 +57,14 @@ impl Job {
                 (job.running, job.code) = (false, Some(code));
             });
         if ended {
+            *self.ended_at.lock().unwrap() = Some(std::time::Instant::now());
             self.code.send_replace(Some(code));
         }
+    }
+
+    /// When it ended, once it has.
+    pub(super) fn ended_at(&self) -> Option<std::time::Instant> {
+        *self.ended_at.lock().unwrap()
     }
 
     pub(super) fn remove(&self) {

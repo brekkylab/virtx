@@ -111,7 +111,7 @@ async def test_a_sandbox_s_files_are_its_own_and_go_with_it(test_server: str) ->
         await sandbox.remove()
         with pytest.raises(VirtxError) as refused:
             await client.get_sandbox(sandbox.id)
-        assert refused.value.status == 404
+        assert (refused.value.status, refused.value.code) == (404, "not_found")
         with pytest.raises(VirtxError) as refused:
             await sandbox.read_file("")
         assert refused.value.status == 404

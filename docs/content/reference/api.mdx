@@ -159,6 +159,17 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
 | `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
 
+## Errors
+
+A call that fails raises `VirtxError` (Python, Node) or returns `virtx::Error` (Rust). It says
+why, for a person, and where the server refused the request:
+
+| Field | What it is |
+| --- | --- |
+| `status` | The HTTP status: `404` for what does not exist, `409` for what is in use or has ended, and the like. In Rust, `status()`. |
+| `code` | The server's code for the refusal, such as `not_found`, `stopped` or `in_use`: what to branch on, rather than the message. In Rust, `code()`. |
+| `body` | The response body, where the server's answer was not a JSON error. Python and Node only. |
+
 ## Environment variables
 
 | Variable | Read by | What it does |

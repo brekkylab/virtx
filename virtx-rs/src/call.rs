@@ -206,6 +206,8 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
 struct Failure {
     message: String,
     status: Option<u16>,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// # Safety
@@ -227,7 +229,12 @@ unsafe fn take_with<T>(
                 Ok(Failure {
                     message,
                     status: Some(status),
-                }) => Error::Status(status, message),
+                    code,
+                }) => Error::Status {
+                    status,
+                    code,
+                    message,
+                },
                 Ok(Failure { message, .. }) => Error::Call(message),
                 Err(e) => Error::Json(e.to_string()),
             }),

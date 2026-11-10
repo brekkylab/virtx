@@ -36,6 +36,45 @@ impl<'a> Registry<'a> {
         headers: &[(header::HeaderName, String)],
         body: Body,
     ) -> Result<Response<Body>, Error> {
+        let response = self.request(method.clone(), path, headers, body).await?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        Err(Error::Registry(format!(
+            "{method} {path}: {}",
+            failure(response).await
+        )))
+    }
+
+    /// `send`, with `404` as `None`: for what the registry had a moment ago and may not any more.
+    async fn send_found(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(header::HeaderName, String)],
+        body: Body,
+    ) -> Result<Option<Response<Body>>, Error> {
+        let response = self.request(method.clone(), path, headers, body).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if response.status().is_success() {
+            return Ok(Some(response));
+        }
+        Err(Error::Registry(format!(
+            "{method} {path}: {}",
+            failure(response).await
+        )))
+    }
+
+    /// Send `method` to `path`, under `images/oci/v2/`, and answer whatever came back.
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(header::HeaderName, String)],
+        body: Body,
+    ) -> Result<Response<Body>, Error> {
         let mut request = http::Request::builder()
             .method(method.clone())
             .uri(format!("/images/oci/v2/{path}"));
@@ -45,14 +84,7 @@ impl<'a> Registry<'a> {
         let request = request
             .body(body)
             .map_err(|e| Error::Registry(format!("{method} {path}: {e}")))?;
-        let response = self.client.send(request).await?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        Err(Error::Registry(format!(
-            "{method} {path}: {}",
-            failure(response).await
-        )))
+        self.client.send(request).await
     }
 
     /// Every repository, in the order the registry lists them.
@@ -67,10 +99,12 @@ impl<'a> Registry<'a> {
                 .map(|page| page.repositories.unwrap_or_default())
         })
         .await
+        .map(Option::unwrap_or_default)
     }
 
-    /// Every tag in `name`.
-    pub(crate) async fn tags(&self, name: &str) -> Result<Vec<String>, Error> {
+    /// Every tag in `name`, or `None` for a repository the registry does not have: one the
+    /// catalog named that lost its last tag since.
+    pub(crate) async fn tags(&self, name: &str) -> Result<Option<Vec<String>>, Error> {
         #[derive(Deserialize)]
         struct Tags {
             #[serde(default)]
@@ -83,28 +117,31 @@ impl<'a> Registry<'a> {
     }
 
     /// Each page of the listing at `path`, read by `read`, until one comes without a `Link` to
-    /// the next.
+    /// the next; `None` for a listing the registry does not have.
     async fn pages(
         &self,
         path: &str,
         read: impl Fn(&[u8]) -> serde_json::Result<Vec<String>>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Option<Vec<String>>, Error> {
         let mut all: Vec<String> = Vec::new();
         loop {
             let mut query = format!("{path}?n={PAGE}");
             if let Some(last) = all.last() {
                 query.push_str(&format!("&last={last}"));
             }
-            let response = self
-                .send(Method::GET, &query, &[], full(Bytes::new()))
-                .await?;
+            let Some(response) = self
+                .send_found(Method::GET, &query, &[], full(Bytes::new()))
+                .await?
+            else {
+                return Ok(None);
+            };
             let more = response.headers().contains_key(header::LINK);
             let page = read(&collect(response).await?)
                 .map_err(|e| Error::Registry(format!("GET {path}: {e}")))?;
             let ended = page.is_empty();
             all.extend(page);
             if !more || ended {
-                return Ok(all);
+                return Ok(Some(all));
             }
         }
     }
@@ -119,6 +156,27 @@ impl<'a> Registry<'a> {
         match header_value(&response, CONTENT_DIGEST) {
             Some(digest) => Ok(digest),
             None => Ok(self.manifest(name, target).await?.digest),
+        }
+    }
+
+    /// `manifest_digest`, or `None` for a `target` the registry does not have: a tag it had a
+    /// moment ago and lost since.
+    pub(crate) async fn manifest_digest_if_there(
+        &self,
+        name: &str,
+        target: &str,
+    ) -> Result<Option<String>, Error> {
+        let path = format!("{name}/manifests/{target}");
+        let accept = [(header::ACCEPT, MANIFEST_TYPES.to_owned())];
+        let Some(response) = self
+            .send_found(Method::HEAD, &path, &accept, full(Bytes::new()))
+            .await?
+        else {
+            return Ok(None);
+        };
+        match header_value(&response, CONTENT_DIGEST) {
+            Some(digest) => Ok(Some(digest)),
+            None => Ok(Some(self.manifest(name, target).await?.digest)),
         }
     }
 

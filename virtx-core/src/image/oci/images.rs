@@ -12,9 +12,16 @@ use crate::{Error, image::ImageListOutputItem, transport::TransportClient};
 pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
     let registry = Registry::new(client);
     let mut images = Vec::new();
+    // The catalog, a repository's tags and a tag's manifest are three requests, and another
+    // client may remove a repository or a tag between them: what is gone is left out.
     for name in registry.repositories().await? {
-        for tag in registry.tags(&name).await? {
-            let digest = registry.manifest_digest(&name, &tag).await?;
+        let Some(tags) = registry.tags(&name).await? else {
+            continue;
+        };
+        for tag in tags {
+            let Some(digest) = registry.manifest_digest_if_there(&name, &tag).await? else {
+                continue;
+            };
             images.push(ImageListOutputItem {
                 reference: format!("{name}:{tag}"),
                 digest,
@@ -85,4 +92,68 @@ pub(crate) async fn remove(client: &TransportClient, reference: &str) -> Result<
         Target::Tag(tag) => registry.manifest_digest(&reference.name, tag).await?,
     };
     registry.delete_manifest(&reference.name, &digest).await
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use axum::{
+        Json, Router,
+        http::{StatusCode, header},
+        response::IntoResponse,
+        routing::{get, head},
+    };
+    use serde_json::json;
+
+    use super::list;
+    use crate::transport::testing::piped;
+
+    #[tokio::test]
+    async fn a_list_leaves_out_what_was_removed_meanwhile() {
+        let unknown = |code: &'static str| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errors": [{"code": code, "message": "gone"}]})),
+            )
+        };
+        let router = Router::new()
+            .route(
+                "/images/oci/v2/_catalog",
+                get(|| async { Json(json!({"repositories": ["gone", "kept"]})) }),
+            )
+            .route(
+                "/images/oci/v2/gone/tags/list",
+                get(move || async move { unknown("NAME_UNKNOWN") }),
+            )
+            .route(
+                "/images/oci/v2/kept/tags/list",
+                get(|| async { Json(json!({"tags": ["latest", "lost"]})) }),
+            )
+            .route(
+                "/images/oci/v2/kept/manifests/latest",
+                head(|| async {
+                    [
+                        (
+                            header::CONTENT_TYPE.as_str(),
+                            "application/vnd.oci.image.manifest.v1+json",
+                        ),
+                        ("docker-content-digest", "sha256:ab12"),
+                    ]
+                    .into_response()
+                }),
+            )
+            .route(
+                "/images/oci/v2/kept/manifests/lost",
+                head(move || async move { unknown("MANIFEST_UNKNOWN") }),
+            );
+        let client = piped(router);
+        let listed = list(&client).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|image| (image.reference.as_str(), image.digest.as_str()))
+                .collect::<Vec<_>>(),
+            [("kept:latest", "sha256:ab12")]
+        );
+        client.close().await;
+    }
 }

@@ -1,12 +1,16 @@
-# What `build` left, tested the way a user meets it; `ci` and `release` call it after `build`.
+# The tests, after `build`; `ci` and `release` call it.
 #
-# - `check`: `cargo xtask check --client`, and the Python and Node packages' own tests.
+# - `check`: `cargo xtask check`: the format, clippy of the client and the servers, and the
+#   tests that boot nothing. It compiles the servers but runs none, so it answers first.
+# - `e2e`: `cargo xtask test` with the servers built here: the crates' own tests, then the
+#   packages' against the fixture, each booting machines. Linux x86_64 only, the one runner
+#   GitHub gives a hypervisor on; the guest kernel is the one `build` made.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
 #   the wheel pip picks, each opening the library it carries; then the server that library
 #   fetches, from a release layout served on localhost, started and asked to answer.
 #
-# Linux runs on ubuntu-22.04, below the build runners' glibc, so a build that needs more than
-# its floor fails to open here.
+# `packages` runs Linux on ubuntu-22.04, below the build runners' glibc, so a build that needs
+# more than its floor fails to open here.
 name: test
 
 on:
@@ -29,6 +33,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - id: toolchain
         run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
@@ -42,21 +48,76 @@ jobs:
         with:
           key: check
 
-      - run: cargo xtask check --client
+      # The guest init's cross-linker: clippy of the servers builds `virtx-uvm`, whose build
+      # script builds the guest agent for musl.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask check
+
+  e2e:
+    name: e2e (linux-x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+
+      # What building the servers takes on this host: the guest init's cross-linker, bindgen's
+      # libclang, and meson with Vulkan's headers for virglrenderer.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      # The runner has KVM, but /dev/kvm is root's until a rule says otherwise.
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: handoff
+          key: guest-x86_64-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Put the kernel in place
+        run: |
+          mkdir -p build/krunfw
+          cp -v handoff/kernel/libkrunfw.so.* build/krunfw/
 
       - uses: astral-sh/setup-uv@v6
-
-      - name: Python
-        working-directory: virtx-py
-        run: uv run pytest
 
       - uses: actions/setup-node@v7
         with:
           node-version: 22
 
-      - name: Node
-        working-directory: virtx-node
-        run: npm ci && npm test
+      - run: cargo xtask test
 
   packages:
     name: packages (${{ matrix.platform }})

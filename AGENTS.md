@@ -20,7 +20,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
-- `.github/workflows/` — `build` builds the server and the client's packages for every platform and `test` tests them; `ci` runs both on a pull request, and `release` runs both on a version tag and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which puts its npm packages and wheels on npm and PyPI.
+- `.github/workflows/` — `build` builds the server and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which puts its npm packages and wheels on npm and PyPI. `docs` builds `docs/` and checks its links on a pull request that touches it.
 
 ## Building from source
 

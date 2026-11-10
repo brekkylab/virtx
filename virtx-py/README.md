@@ -4,7 +4,9 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited, iterated or completed: `complete` follows the job to its end and answers what it ended with; iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it.
+The method that starts one answers a `StartedJob`, sent when it is first awaited, iterated or completed: `complete` follows the job to its end and answers what it ended with; iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job.
+Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
 
 ```python
 import asyncio
@@ -33,13 +35,15 @@ async for entry in job.log(after=1):  # from its second entry
     ...
 ```
 
-A sandbox runs commands as jobs the same way: `create_sandbox` answers a `Sandbox` that carries its client, and its `exec` starts one: completed, it answers the exit code; iterated, it yields its output, a line as it is written, then how it ended. Awaited, it is a `SandboxJob` that carries its client too: what signals the process, writes to its stdin and reads its log again. One value awaited and then iterated reads the log of the one job it started.
+A sandbox runs commands as jobs the same way: `create_sandbox` answers a `Sandbox` that carries its client, and its `exec` starts one: completed, it answers the exit code; iterated, it yields its output, a line as it is written, then how it ended.
+Awaited, it is a `SandboxJob` that carries its client too: what signals the process, writes to its stdin and reads its log again.
+One value awaited and then iterated reads the log of the one job it started.
 
 ```python
 from virtx import SandboxJobEnd, Stderr, Stdout
 
 sandbox = await client.create_sandbox("alpine:3.20")
-code = await sandbox.exec(["echo", "hi"]).complete(print=True)
+print("exited", await sandbox.exec(["uname", "-a"]).complete(print=True))
 run = sandbox.exec(["echo", "hi"])
 job = await run
 print("started", job.id)

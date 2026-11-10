@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import builtins
 import re
-from contextlib import aclosing
+import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -186,6 +187,11 @@ class ImageJob:
                 match item.entry:
                     case Log(line) if print:
                         builtins.print(line)
+                    case Truncated() if print:
+                        builtins.print(
+                            "(the log reached the server's limit; the rest is not kept)",
+                            file=sys.stderr,
+                        )
                     case ImageJobEnd(digest):
                         return digest
         raise VirtxError("the job was removed before it ended", source="job")

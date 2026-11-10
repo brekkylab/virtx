@@ -41,7 +41,8 @@ impl ImageJob {
     }
 
     /// Its log, from its start or after its `after`th entry, until its `end` entry, or the
-    /// error in its place if the job failed. Dropping it leaves the job as it is.
+    /// error in its place if the job failed: an `end` read here has its `digest`, never an
+    /// `error`. Dropping it leaves the job as it is.
     pub fn log(&self, after: Option<u64>) -> Events<LogEntry<ImageJobEntry>> {
         self.client.image_job_log(&self.info.id, after)
     }
@@ -70,7 +71,12 @@ impl Ends for ImageJob {
                 }
                 None
             }
-            ImageJobEntry::Truncated {} => None,
+            ImageJobEntry::Truncated {} => {
+                if print {
+                    eprintln!("(the log reached the server's limit; the rest is not kept)");
+                }
+                None
+            }
             ImageJobEntry::End(end) => Some(end.digest.ok_or_else(|| {
                 Error::Call(Source::Server, "the job ended without a digest".into())
             })),

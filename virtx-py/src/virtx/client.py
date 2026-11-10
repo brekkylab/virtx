@@ -297,8 +297,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
         the server pulls anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s; ``complete``, its digest. Sent when first awaited, iterated or waited
-        on."""
+        ``ImageJob.log``'s; ``complete``, its digest, as ``ImageJob.complete``'s. Sent when first
+        awaited, iterated or completed."""
         return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -308,8 +308,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Push the image ``reference`` points at to the registry ``reference`` names; without
         ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s; ``complete``, its digest. Sent when first awaited, iterated or waited
-        on."""
+        ``ImageJob.log``'s; ``complete``, its digest, as ``ImageJob.complete``'s. Sent when first
+        awaited, iterated or completed."""
         return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )

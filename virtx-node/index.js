@@ -812,6 +812,7 @@ class ImageJob {
   async complete({ print = false } = {}) {
     for await (const entry of this.log()) {
       if ('log' in entry && print) console.log(entry.log)
+      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.digest
     }
     throw new VirtxError('the job was removed before it ended', null, null, 'job')
@@ -956,6 +957,7 @@ class SandboxJob {
     for await (const entry of this.log()) {
       if ('stdout' in entry && print) console.log(entry.stdout)
       else if ('stderr' in entry && print) console.error(entry.stderr)
+      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.code
     }
     throw new VirtxError('the job was removed before it ended', null, null, 'job')

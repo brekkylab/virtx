@@ -13,13 +13,18 @@ console.log('built', digest)
 await client.close()
 ```
 
-A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job.
+A build, pull or push is a job the server runs.
+Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job.
 Its `complete` follows the job to its end and answers what it ended with, printing the log as it is read with `{ print: true }`.
-An image job that fails throws its `VirtxError`, from `complete` and from its log alike, in place of the `end` entry. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
+An image job that fails throws its `VirtxError`, from `complete` and from its log alike, in place of the `end` entry.
+Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again.
+Leaving a loop leaves the job running; its `remove` cancels it.
+A command in a sandbox is a job of the sandbox's, completed or read the same way.
+Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
-const code = await sandbox.exec(['echo', 'hi']).complete({ print: true })
+console.log('exited', await sandbox.exec(['uname', '-a']).complete({ print: true }))
 const run = sandbox.exec(['echo', 'hi'])
 const job = await run
 console.log('started', job.id)

@@ -178,7 +178,12 @@ impl Ends for SandboxJob {
                 }
                 None
             }
-            SandboxJobEntry::Truncated {} => None,
+            SandboxJobEntry::Truncated {} => {
+                if print {
+                    eprintln!("(the log reached the server's limit; the rest is not kept)");
+                }
+                None
+            }
             SandboxJobEntry::End(end) => Some(Ok(end.code)),
         }
     }

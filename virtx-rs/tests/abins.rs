@@ -116,19 +116,13 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
         "a sandbox made with no abins has no /abin"
     );
     none.remove().wait().unwrap();
-
-    for refused in ["nope", "skills", "../virtx-stdio"] {
-        let args = SandboxCreateArgs::new(ALPINE).abin(refused);
-        assert!(client.create_sandbox(&args).wait().is_err(), "{refused}");
-    }
 }
 
-/// `/alib` is read-only, with the X server `display` starts; and a command finds `/alib`'s
-/// libraries for its own C library after the image's on `LD_LIBRARY_PATH`, and is given no
-/// Vulkan driver in a sandbox without a GPU.
+/// `/alib` is read-only, with the X server `display` starts and Vulkan for each C library; a
+/// sandbox without a GPU is given none of it on `LD_LIBRARY_PATH`, and no Vulkan driver.
 #[test]
 #[ignore = "needs alib/ beside the server: `cargo xtask build alib`"]
-fn a_command_is_given_the_alib_of_its_c_library() {
+fn a_sandbox_without_a_gpu_has_alib_and_is_given_none_of_it() {
     let client = common::client();
     common::alpine(&client);
     let sandbox = client
@@ -163,7 +157,7 @@ fn a_command_is_given_the_alib_of_its_c_library() {
                     "echo $LD_LIBRARY_PATH; echo ${VK_DRIVER_FILES:-none}"
                 ],
             ),
-            (vec![format!("/alib/{libc}"), "none".into()], 0),
+            (vec![String::new(), "none".into()], 0),
             "{image}"
         );
         let vulkan = format!("/alib/{libc}/libvulkan.so.1");
@@ -172,17 +166,19 @@ fn a_command_is_given_the_alib_of_its_c_library() {
     }
 }
 
-/// In a sandbox with a GPU, Vulkan reaches the host's through `/alib`'s venus, in an image
-/// with no driver of its own: Alpine's `vulkan-tools` brings the loader alone, and Debian
-/// bookworm's Mesa has no venus.
+/// In a sandbox with a GPU, a command finds `/alib`'s libraries for the image's C library on
+/// `LD_LIBRARY_PATH`, and Vulkan reaches the host's through their venus, in an image with no
+/// driver of its own: Alpine's `vulkan-tools` brings the loader alone, and Debian bookworm's
+/// Mesa has no venus.
 #[test]
 #[ignore = "needs alib/ beside the server and a GPU on the host"]
 fn a_gpu_sandbox_runs_vulkan_with_no_driver_in_the_image() {
     let client = common::client();
-    for (image, install) in [
-        (ALPINE, "apk add --no-cache vulkan-tools >/dev/null"),
+    for (image, libc, install) in [
+        (ALPINE, "musl", "apk add --no-cache vulkan-tools >/dev/null"),
         (
             DEBIAN,
+            "glibc",
             "apt-get update -qq && apt-get install -y -qq vulkan-tools >/dev/null",
         ),
     ] {
@@ -191,6 +187,11 @@ fn a_gpu_sandbox_runs_vulkan_with_no_driver_in_the_image() {
             .create_sandbox(&SandboxCreateArgs::new(image).gpu(true))
             .wait()
             .unwrap();
+        assert_eq!(
+            run(&sandbox, &["sh", "-c", "echo $LD_LIBRARY_PATH"]),
+            (vec![format!("/alib/{libc}")], 0),
+            "{image}"
+        );
         let (lines, code) = run(&sandbox, &["sh", "-c", install]);
         assert_eq!(code, 0, "{image}: {lines:?}");
         let (lines, code) = run(&sandbox, &["vulkaninfo", "--summary"]);

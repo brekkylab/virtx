@@ -64,10 +64,11 @@ A server built without GPU support refuses a GPU sandbox rather than run it on t
 ## What the sandbox brings
 
 Every sandbox has `/alib`, a read-only directory of virtx's own libraries, with the Vulkan loader and venus built twice: in `/alib/musl` for images on musl, such as Alpine, and in `/alib/glibc` for images on glibc 2.28 or later, such as Debian and Ubuntu.
-When the sandbox starts, the directory for the image's C library goes on `LD_LIBRARY_PATH`, after any the image sets.
-In a GPU sandbox, `VK_DRIVER_FILES` names venus from there too, so a program finds the host's GPU whatever the image has installed.
+When a GPU sandbox starts, the directory for the image's C library, the one `/bin/sh` runs on, goes on `LD_LIBRARY_PATH`, after any the image sets.
+`VK_DRIVER_FILES` names venus from there too, so a program finds the host's GPU whatever the image has installed.
+A sandbox without a GPU gets neither, and runs the image's own Vulkan, if it has any.
 
 - **An image's own Vulkan driver is passed over in a GPU sandbox.** Set `VK_DRIVER_FILES` in the image to choose another.
-- **A program that links the Vulkan loader finds the one in `/alib` before the image's,** and one that opens `libvulkan.so.1` by name does too.
+- **In a GPU sandbox, a program that links the Vulkan loader finds the one in `/alib` before the image's,** and one that opens `libvulkan.so.1` by name does too.
 
 See [Working with images](/docs/guides/images/) for building the guest image, and [Running commands](/docs/guides/running-commands/) for reading command output.

@@ -562,9 +562,9 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
-/// looks, `abin/` and `alib/` beside it, where a machine's `/abin` and `/alib` are shared from,
-/// and the entitlement on it. `abin/` is built every time, in the debug profile, so a test runs
-/// the programs as they stand; `alib/` is what `build alib` last left, when it has run.
+/// looks, `alib/` beside it, where a machine's `/alib` is shared from, as `build alib` last
+/// left it, when it has run, and the entitlement on it. `abin/` is not built here: `build abin`
+/// puts it there, and the fixture before it serves.
 fn ready(exe: &Path) -> anyhow::Result<()> {
     let kernel = kernel_library()?;
     let dir = exe
@@ -574,7 +574,6 @@ fn ready(exe: &Path) -> anyhow::Result<()> {
     if !beside.is_file() {
         place(&kernel, &beside)?;
     }
-    build_abin(true, &dir.join("abin"))?;
     let alib = alib::dir()?;
     if alib.is_dir() {
         place_dir(&alib, &dir.join("alib"))?;
@@ -1168,6 +1167,8 @@ impl Fixture {
             locked: false,
         };
         build_servers(&options)?;
+        // The programs as they stand, for the tests that make a sandbox with them.
+        build_abin(options.debug, &options.out().join("abin"))?;
         let built = |name: &str| {
             options
                 .out()

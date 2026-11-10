@@ -948,15 +948,16 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 `/alib` holds what is not a program to run by name: the X server `display` starts, at `/alib/Xvfb` with its `xkbcomp` and `xkb/` beside it, and the Vulkan loader and venus driver a GPU sandbox uses, built twice, at `/alib/musl/` and `/alib/glibc/`.
 Each part is built from source by a `build.sh` under [`virtx-alibs/`](../virtx-alibs), in a virtx machine of the image its `images` names, into `build/alib/<arch>/`, where a server about to boot, `install` and `archive` take it from, as they take the guest kernel from `build/krunfw/`.
 
-The agent reads the image's C library when the machine starts, by whether `/lib` has musl's dynamic linker, and adds `/alib/musl` or `/alib/glibc` after the image's `LD_LIBRARY_PATH`.
-With a GPU, and no `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that directory's venus manifest in both, so the image needs neither a loader nor a driver of its own.
+When a machine with a GPU starts, the agent reads the image's C library, by the dynamic linker `/bin/sh` names, and adds `/alib/musl` or `/alib/glibc` after the image's `LD_LIBRARY_PATH`.
+Without `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that directory's venus manifest in both, so the image needs neither a loader nor a driver of its own.
+Without a GPU it adds neither: there is no driver to give, and the loader would only shadow one the image brings.
 
 A sandbox gets the programs it is made with, by its `abins`, from the `abin/` directory beside the server's binary, and every machine gets the `alib/` directory there.
 The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under the snapshots' `sandbox/`, deleted with the sandbox or by the next server's sweep.
 That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
 A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
 On Windows each file in them is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report.
-`cargo xtask test` builds `abin/` beside the server binary it tests, and places `alib/` there when `build alib` has run.
+`cargo xtask build abin` builds `abin/` beside the server binary, as the fixture `cargo xtask test` serves does, and `alib/` is placed there when `build alib` has run.
 
 ```sh
 cargo xtask build abin                     # -> target/release/abin, beside the server;

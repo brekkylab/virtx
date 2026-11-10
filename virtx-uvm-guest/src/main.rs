@@ -65,20 +65,27 @@ fn main() -> ExitCode {
     }
 }
 
-/// Put `/alib`'s libraries for the image's C library on `LD_LIBRARY_PATH`, after whatever the
-/// image set, and venus as the Vulkan driver when the machine has a GPU and the image names
-/// none. musl where the image has musl's dynamic linker, glibc otherwise. Nothing without an
-/// `/alib`.
+/// When the machine has a GPU, put `/alib`'s libraries for the image's C library on
+/// `LD_LIBRARY_PATH`, after whatever the image set, and venus as the Vulkan driver when the
+/// image names none. Without a GPU there is no driver to give, and `/alib`'s loader, searched
+/// before the image's own directories, would only shadow a loader the image brings, such as
+/// lavapipe's. Nothing without an `/alib`.
 ///
 /// # Safety
 ///
 /// Changes this process's environment: only while it has one thread.
 unsafe fn alib_env() {
-    let musl = fs::read_dir("/lib").is_ok_and(|entries| {
+    let gpu = fs::read_dir("/dev/dri").is_ok_and(|entries| {
         entries
             .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("ld-musl-"))
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
     });
+    if !gpu {
+        return;
+    }
+    // The C library `/bin/sh` runs on, by the dynamic linker it names, rather than whether one
+    // is installed: an image on glibc may have musl beside it.
+    let musl = fs::read("/bin/sh").is_ok_and(|sh| sh.windows(8).any(|w| w == b"ld-musl-"));
     let dir = Path::new(if musl { ALIB_MUSL } else { ALIB_GLIBC });
     if !dir.is_dir() {
         return;
@@ -87,18 +94,13 @@ unsafe fn alib_env() {
         Ok(set) if !set.is_empty() => format!("{set}:{}", dir.display()),
         _ => dir.display().to_string(),
     };
-    let gpu = fs::read_dir("/dev/dri").is_ok_and(|entries| {
-        entries
-            .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
-    });
     let named = ["VK_DRIVER_FILES", "VK_ICD_FILENAMES"]
         .iter()
         .any(|var| std::env::var_os(var).is_some());
     // SAFETY: the caller's.
     unsafe {
         std::env::set_var("LD_LIBRARY_PATH", path);
-        if gpu && !named {
+        if !named {
             // Both names: loaders built before 1.3.207 read only the second.
             let icd = dir.join(ALIB_ICD);
             std::env::set_var("VK_DRIVER_FILES", &icd);

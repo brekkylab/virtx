@@ -56,22 +56,22 @@ pub(crate) fn split(body: &str, chunking: Chunking) -> Vec<Span> {
         }];
     }
 
+    // Whether the unit after `last` joins the chunk of `first` through `last`: it fits, and is
+    // not a heading, which starts a chunk of its own once this one has half of what it may hold.
+    let joins = |first: usize, last: usize| {
+        let next = &units[last + 1];
+        chars(body, units[first].range.start..next.range.end) <= chunking.size
+            && !(next.heading
+                && chars(body, units[first].range.start..units[last].range.end)
+                    >= chunking.size / 2)
+    };
+
     let mut spans = Vec::new();
     let mut first = 0;
     loop {
         // As many units as fit, and always at least one: no unit is longer than a chunk.
         let mut last = first;
-        while last + 1 < units.len() {
-            let next = &units[last + 1];
-            if chars(body, units[first].range.start..next.range.end) > chunking.size {
-                break;
-            }
-            // A heading starts a chunk of its own once this one has half of what it may hold.
-            if next.heading
-                && chars(body, units[first].range.start..units[last].range.end) >= chunking.size / 2
-            {
-                break;
-            }
+        while last + 1 < units.len() && joins(first, last) {
             last += 1;
         }
 
@@ -85,9 +85,12 @@ pub(crate) fn split(body: &str, chunking: Chunking) -> Vec<Span> {
         }
 
         // The next chunk starts at the earliest unit after this one's first that lies within
-        // the overlap of its end; with none, at the unit after its last.
+        // the overlap of its end and still lets it reach past this one; with none, at the unit
+        // after its last. One that could not reach past would be a chunk inside this one.
         first = (first + 1..=last)
-            .find(|&k| chars(body, units[k].range.start..bytes.end) <= chunking.overlap)
+            .find(|&k| {
+                chars(body, units[k].range.start..bytes.end) <= chunking.overlap && joins(k, last)
+            })
             .unwrap_or(last + 1);
     }
 }
@@ -242,6 +245,12 @@ mod tests {
     fn paragraphs_are_kept_whole_where_they_fit() {
         let body = "aaaa aaaa\n\nbbbb bbbb\n\ncccc cccc\n";
         assert_eq!(texts(body, 20, 0), ["aaaa aaaa\n\nbbbb bbbb", "cccc cccc"]);
+    }
+
+    #[test]
+    fn the_overlap_starts_no_chunk_that_cannot_reach_past_the_last() {
+        let body = "aaaaa\n\nb\n\ncccccccccc\n";
+        assert_eq!(texts(body, 12, 2), ["aaaaa\n\nb", "cccccccccc"]);
     }
 
     #[test]

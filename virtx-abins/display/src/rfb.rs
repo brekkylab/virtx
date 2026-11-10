@@ -355,6 +355,9 @@ fn read_messages(
                 if !format.true_colour || ![8, 16, 32].contains(&format.bits_per_pixel) {
                     return Err(io::Error::other("a viewer asked for colour-map pixels"));
                 }
+                if format.shift.iter().any(|&s| s >= format.bits_per_pixel) {
+                    return Err(io::Error::other("a viewer asked for a colour outside its pixel"));
+                }
                 let mut state = state.lock().unwrap();
                 state.format = format;
                 // Pixels sent before are in the old format: send everything again.

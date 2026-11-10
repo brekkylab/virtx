@@ -202,6 +202,7 @@ impl Sandboxes {
                 "auto_stop_minutes: 0 stops it before it is used".into(),
             ));
         }
+        super::sandbox::abins_refused(&args.abins, &super::sandbox::abin_programs(&shared.vm))?;
 
         let digest = match &args.image {
             ImageName::Tag { tag } => {

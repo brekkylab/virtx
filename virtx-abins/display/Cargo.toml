@@ -1,0 +1,22 @@
+[package]
+name = "virtx-exec-display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `display` is what a caller types; the package name is not it.
+[[bin]]
+name = "display"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["env"] }
+# VNC authentication: the client answers a challenge DES-encrypted with the password.
+des = "0.8"
+# ZRLE's zlib stream. The default backend is miniz_oxide, Rust, so the build has no C here.
+flate2 = "1"
+# `PR_SET_PDEATHSIG`, so the X server and the command go when `display` does.
+libc = "0.2"
+png = "0.18"
+# Input from the viewer goes into the X server through XTEST; the cursor comes out of XFixes.
+x11rb = { version = "0.13", default-features = false, features = ["xfixes", "xtest"] }

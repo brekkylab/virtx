@@ -291,6 +291,8 @@ export interface SandboxInfo {
   usedAt: string
   /** Only as `createSandbox` and `startSandbox` answer it, if it has some, each `openPort` adding one and `closePort` dropping it. */
   ports?: SandboxPort[]
+  /** virtx's own programs it has at `/abin`, if it was made with some. */
+  abins?: string[]
 }
 
 /**
@@ -311,6 +313,7 @@ export class Sandbox extends Files implements SandboxInfo {
   autoDeleteDays?: number
   usedAt: string
   ports?: SandboxPort[]
+  abins?: string[]
   /**
    * Start `cmd` in it: the job, and its output as the job's `log`. Iterated at once, the job is
    * started and its log read as one request.
@@ -405,6 +408,8 @@ export interface SandboxCreateOptions {
   gpuMemoryMib?: number
   /** Each volume, or its name, and where it is mounted. */
   volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
+  /** virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at `/abin/skills/{name}/`. */
+  abins?: string[]
 }
 
 export interface SandboxExecOptions {

@@ -472,6 +472,7 @@ class Client:
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+        abins: Iterable[str] = (),
     ) -> Sandbox:
         """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
         ``SandboxVolume``. It is kept when it stops -- after ``auto_stop_minutes`` unused, or at
@@ -481,7 +482,8 @@ class Client:
         ``find_sandbox``. ``ports`` are ports in it to open -- a number for TCP, or a
         ``PortSpec`` (or its ``{port, label?, protocol?, inbound?}``) to say what it is for,
         whether it is HTTP and whom it lets in -- each answered here and by ``Sandbox.start``
-        with the ``url`` it is reached by.
+        with the ``url`` it is reached by. ``abins`` names virtx's programs it gets at ``/abin``,
+        each with its ``SKILL.md`` at ``/abin/skills/{name}/``.
         Whatever is left out the server picks."""
         args = json.loads(
             _args(
@@ -498,6 +500,7 @@ class Client:
                 gpu=gpu,
                 gpu_memory_mib=gpu_memory_mib,
                 volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
+                abins=list(abins) or None,
             )
         )
         if auto_delete_days == "never":

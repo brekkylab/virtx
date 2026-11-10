@@ -207,6 +207,9 @@ class Sandbox(Files):
         """Whether its VM is up."""
         return self.state == SandboxState.RUNNING
 
+    abins: list[str] = field(default_factory=list)
+    """virtx's own programs it has at ``/abin``."""
+
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Sandbox:
         return cls(
@@ -220,6 +223,7 @@ class Sandbox(Files):
             value.get("auto_delete_days"),
             value["used_at"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
+            list(value.get("abins", ())),
         )
 
     @property

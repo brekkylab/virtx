@@ -1730,7 +1730,7 @@ pub(crate) mod ffi {
     /// `{"image": {...}, "name": "...", "ephemeral": bool, "auto_stop_minutes": n,
     /// "auto_delete_days": n, "disk_gib": n, "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`,
+    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// `auto_delete_days` `null` to keep it until it is deleted, the image as
     /// `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the

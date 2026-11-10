@@ -260,8 +260,10 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         ALPINE,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
         ports=[8000],
+        abins=["index"],
     )
     assert sandbox.running
+    assert sandbox.abins == ["index"]
     assert [port.port for port in sandbox.ports] == [8000]
     assert SandboxVolume(volume, "/data").to_dict() == {
         "volume": volume.name,
@@ -269,7 +271,7 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         "readonly": False,
     }
     got = await client.get_sandbox(sandbox.id)
-    assert got.id == sandbox.id and got.ports == []
+    assert got.id == sandbox.id and got.ports == [] and got.abins == ["index"]
     assert sandbox.id in [item.id for item in await client.list_sandbox()]
 
     job = await sandbox.exec(["echo", "hi"])

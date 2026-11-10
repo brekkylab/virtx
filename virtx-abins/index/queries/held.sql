@@ -1,1 +1,1 @@
-select rowid, path, mtime, len from item where path is not null;
+select rowid, path, mtime, len from item;

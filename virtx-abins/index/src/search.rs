@@ -1,4 +1,4 @@
-//! `index search [-n N] <query>...` — ask the store.
+//! `index search [-n N] [--text] <query>...` — ask the store.
 
 use std::fmt::Write as _;
 
@@ -13,29 +13,41 @@ pub(crate) const DEFAULT_LIMIT: usize = 10;
 /// a query is answered from the store alone. `query` arrives already joined — a shell has split
 /// the words, and `index search notes.db rust ownership` is what a caller writes when they
 /// mean the phrase.
-pub(crate) fn run(store: &Store, limit: usize, query: &str) -> std::io::Result<String> {
+pub(crate) fn run(store: &Store, limit: usize, text: bool, query: &str) -> std::io::Result<String> {
     // A query with no words in it is answered here rather than asked of FTS5: the expression
     // would be empty, which is a syntax error, and "nothing is near this" is the truthful
     // answer to a question that has nothing in it.
     let Some(expression) = as_expression(query) else {
-        return Ok(render(&[]));
+        return Ok(render(&[], text));
     };
-    Ok(render(&store.search(&expression, limit)?))
+    Ok(render(&store.search(&expression, limit)?, text))
 }
 
-/// Score, path, then the snippet indented under it.
+/// Score, `path:first-last` line, title, then the snippet — or with `text`, every line of the
+/// chunk — indented under it.
 ///
 /// Line-oriented and tab-separated on purpose: this goes to a pipe, so it should survive `cut`
-/// and `grep` as well as being read. Two lines per hit rather than one: the snippet is the part
-/// that runs long, and keeping it on its own line leaves the first one cuttable by column.
-fn render(hits: &[Hit]) -> String {
+/// and `grep` as well as being read. What is under a hit starts with a tab and a hit does not,
+/// so the first line of each stays cuttable by column however long its text runs.
+fn render(hits: &[Hit], text: bool) -> String {
     if hits.is_empty() {
         return "no matches\n".into();
     }
     let mut out = String::new();
     for hit in hits {
-        let _ = writeln!(out, "{:.3}\t{}\t{}", hit.score, hit.path, hit.title);
-        let _ = writeln!(out, "\t{}", flatten(&hit.snippet));
+        let (first, last) = hit.lines;
+        let _ = writeln!(
+            out,
+            "{:.3}\t{}:{first}-{last}\t{}",
+            hit.score, hit.path, hit.title
+        );
+        if text {
+            for line in hit.text.lines() {
+                let _ = writeln!(out, "\t{line}");
+            }
+        } else {
+            let _ = writeln!(out, "\t{}", flatten(&hit.snippet));
+        }
     }
     out
 }

@@ -58,6 +58,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
 
+    /// The directory the guest sees at `/abin`, read-only: programs, and their `SKILL.md` under
+    /// `skills/`. `None` is no `/abin`.
+    #[serde(default)]
+    pub abin: Option<PathBuf>,
+
     /// TCP ports in the guest the machine's process reaches, each on its loopback at a port
     /// of its choosing: the way in, which does not need a
     /// [`network`](MachineSpec::network).
@@ -551,6 +556,7 @@ mod tests {
                 at: "/data".to_string(),
                 read_only: true,
             }],
+            abin: Some(PathBuf::from("/snapshot/sandbox/work.abin")),
             ports: vec![3000],
             chunks: None,
         };
@@ -560,6 +566,7 @@ mod tests {
         assert_eq!(read.config, sent.config);
         assert_eq!(read.snapshot, sent.snapshot);
         assert_eq!(read.volumes, sent.volumes);
+        assert_eq!(read.abin, sent.abin);
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
     }

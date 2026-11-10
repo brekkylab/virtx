@@ -72,11 +72,12 @@ fn ready() -> tempfile::TempDir {
     dir
 }
 
-/// The paths a search answered with, in the order it answered them.
+/// The paths a search answered with, in the order it answered them, without the lines.
 fn hits(said: &str) -> Vec<String> {
     said.lines()
         .filter(|line| !line.starts_with('\t'))
-        .filter_map(|line| line.split('\t').nth(1).map(str::to_owned))
+        .filter_map(|line| line.split('\t').nth(1))
+        .filter_map(|at| at.rsplit_once(':').map(|(path, _)| path.to_owned()))
         .collect()
 }
 
@@ -476,38 +477,34 @@ fn drop_refuses_what_is_not_a_store() {
     assert_eq!(missing.status.code(), Some(1));
 }
 
-/// The tables are shared with `mem`, so nothing about a file's *structure* says which
-/// command wrote it. `meta.kind` does, and these are the three places it has to be asked.
-///
-/// Without it `list` would count somebody's memories as documents, `drop` would delete them, and
-/// `search` would answer from rows whose path is null.
+/// Somebody else's SQLite database beside a store is not one: `list` passes over it, and
+/// nothing that writes or deletes will touch it.
 #[test]
-fn a_mem_store_is_not_one_of_these() {
+fn another_sqlite_database_is_not_one_of_these() {
     let dir = ready();
     ok(dir.path(), &["ingest", "notes.db", "docs"]);
 
-    // A store of the other kind, beside this one, made through the shared schema.
-    let theirs = dir.path().join("memories.db");
-    drop(virtx_exec_storebase::sqlite::create(&theirs, "mem").expect("a mem store"));
+    let theirs = dir.path().join("theirs.db");
+    rusqlite::Connection::open(&theirs)
+        .unwrap()
+        .execute_batch("create table meta (key text primary key, value text not null)")
+        .unwrap();
 
     assert_eq!(
         ok(dir.path(), &["list", "."]),
         "notes.db\t3 document(s)\n",
-        "only this kind is listed"
+        "only a store is listed"
     );
 
     for args in [
-        vec!["search", "memories.db", "ownership"],
-        vec!["drop", "memories.db"],
-        vec!["ingest", "memories.db", "docs"],
+        vec!["search", "theirs.db", "ownership"],
+        vec!["drop", "theirs.db"],
+        vec!["ingest", "theirs.db", "docs"],
     ] {
         let out = index(dir.path(), &args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let said = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            said.contains("mem") || said.contains("not a store"),
-            "{args:?} said: {said}"
-        );
+        assert!(said.contains("not a store"), "{args:?} said: {said}");
     }
     assert!(theirs.is_file(), "and it is still there");
 }
@@ -575,4 +572,119 @@ fn a_search_is_bounded_and_the_count_is_the_callers_to_raise() {
 
     let one = ok(dir.path(), &["search", "notes.db", "-n", "1", "the"]);
     assert_eq!(hits(&one).len(), 1, "{one}");
+}
+
+/// A long document is cut into chunks, and a search answers with the one that matched and the
+/// lines it spans — not the whole file.
+#[test]
+fn a_search_answers_with_the_chunk_and_its_lines() {
+    let dir = tree();
+    let body = "# Intro\n\nOpening words about nothing much.\n\n# Kernels\n\nA scheduler picks the next thread.\nIt runs on every core.\n";
+    std::fs::write(dir.path().join("docs/long.md"), body).unwrap();
+    ok(
+        dir.path(),
+        &["init", "notes.db", "--chunk-size", "80", "--overlap", "0"],
+    );
+    ok(dir.path(), &["ingest", "notes.db", "docs/long.md"]);
+
+    let said = ok(dir.path(), &["search", "notes.db", "scheduler"]);
+    let first = said.lines().next().unwrap();
+    assert_eq!(first.split('\t').nth(1), Some("docs/long.md:5-8"), "{said}");
+
+    let said = ok(dir.path(), &["search", "notes.db", "--text", "scheduler"]);
+    let under: Vec<&str> = said.lines().skip(1).collect();
+    assert_eq!(
+        under,
+        [
+            "\t# Kernels",
+            "\t",
+            "\tA scheduler picks the next thread.",
+            "\tIt runs on every core."
+        ],
+        "the chunk whole, a line under the hit for each of its lines"
+    );
+}
+
+/// `rechunk` cuts what the store already holds, with no file read, and the store keeps the new
+/// chunking for what comes after.
+#[test]
+fn rechunk_cuts_again_from_the_store_alone() {
+    let dir = tree();
+    let body = "alpha one\n\nbeta two\n\ngamma three\n";
+    std::fs::write(dir.path().join("docs/greek.md"), body).unwrap();
+    ok(dir.path(), &["init", "notes.db"]);
+    ok(dir.path(), &["ingest", "notes.db", "docs/greek.md"]);
+    let at = |said: &str| {
+        said.lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .nth(1)
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        at(&ok(dir.path(), &["search", "notes.db", "gamma"])),
+        "docs/greek.md:1-5"
+    );
+
+    std::fs::remove_file(dir.path().join("docs/greek.md")).unwrap();
+    assert_eq!(
+        ok(
+            dir.path(),
+            &[
+                "rechunk",
+                "notes.db",
+                "--chunk-size",
+                "12",
+                "--overlap",
+                "0"
+            ]
+        ),
+        "rechunked 1 document(s)\n"
+    );
+    assert_eq!(
+        at(&ok(dir.path(), &["search", "notes.db", "gamma"])),
+        "docs/greek.md:5-5"
+    );
+
+    std::fs::write(
+        dir.path().join("docs/more.md"),
+        "delta four\n\nepsilon five\n",
+    )
+    .unwrap();
+    ok(dir.path(), &["ingest", "notes.db", "docs/more.md"]);
+    assert_eq!(
+        at(&ok(dir.path(), &["search", "notes.db", "epsilon"])),
+        "docs/more.md:3-3",
+        "a later ingest is cut the new way"
+    );
+}
+
+/// A chunking that could not make progress is refused before anything is made or changed.
+#[test]
+fn a_chunking_that_cannot_progress_is_refused() {
+    let dir = tree();
+    for args in [
+        vec!["init", "notes.db", "--chunk-size", "0"],
+        vec![
+            "init",
+            "notes.db",
+            "--chunk-size",
+            "100",
+            "--overlap",
+            "100",
+        ],
+    ] {
+        let out = index(dir.path(), &args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(
+            !dir.path().join("notes.db").exists(),
+            "{args:?} made a store"
+        );
+    }
+
+    ok(dir.path(), &["init", "notes.db"]);
+    let out = index(dir.path(), &["rechunk", "notes.db", "--overlap", "5000"]);
+    assert_eq!(out.status.code(), Some(1));
 }

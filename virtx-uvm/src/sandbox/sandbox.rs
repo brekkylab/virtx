@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -105,6 +105,12 @@ pub fn signal_number(name: &str) -> Option<i32> {
     let index = SIGNALS.iter().position(|signal| *signal == name)?;
     Some(index as i32 + 1)
 }
+
+/// The directory beside the program machines run as that virtx's own programs for `/abin` are
+/// in, and where each one's `SKILL.md` is in that.
+const ABIN_HOST: &str = "abin";
+const SKILLS: &str = "skills";
+const SKILL: &str = "SKILL.md";
 
 /// What every sandbox of a server boots from and keeps itself in.
 pub(super) struct Shared {
@@ -379,6 +385,18 @@ impl Sandbox {
             None => None,
         };
         let lazily = chunks.is_some();
+        // The programs it was made with, as `/abin`: the same directory for every sandbox here
+        // made with the same, which none writes to.
+        let abin = match self.record.args.abins.is_empty() {
+            true => None,
+            false => {
+                let programs = abin_programs(&shared.vm);
+                let under = shared.kept.join(ABIN_HOST);
+                let names = self.record.args.abins.clone();
+                let made = move || abin_of(&under, &programs, &names);
+                Some(tokio::task::spawn_blocking(made).await??)
+            }
+        };
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
@@ -386,6 +404,7 @@ impl Sandbox {
             snapshot_held: true,
             spec,
             volumes,
+            abin,
             ports,
             chunks,
         };
@@ -1289,5 +1308,171 @@ mod keeping_ended {
         // Under the limit: nothing goes.
         keep_ended(&mut jobs, 10);
         assert_eq!(jobs.len(), 3);
+    }
+}
+
+/// Where a server's own programs for `/abin` are: `abin/` beside the program its machines run
+/// as, as `cargo xtask install` and a release put them there.
+pub(super) fn abin_programs(vm: &[OsString]) -> PathBuf {
+    let dir = vm.first().and_then(|program| Path::new(program).parent());
+    dir.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default()
+}
+
+/// `abins` refused, as a sandbox is made with them, unless each is a program in `programs`,
+/// given once.
+pub(super) fn abins_refused(abins: &[String], programs: &Path) -> Result<(), Error> {
+    let mut given = HashSet::new();
+    for name in abins {
+        if !given.insert(name) {
+            return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
+        }
+        if name.starts_with('.') || name.contains(['/', '\\']) || !programs.join(name).is_file() {
+            return Err(Error::Invalid(format!(
+                "abins: this server has no program called `{name}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The directory a machine of a sandbox made with `names` shows at `/abin`: each program in
+/// `programs` it names, and its `SKILL.md` under `skills/` where it has one, linked -- or copied,
+/// where a link cannot be, as across filesystems -- into a directory under `under`.
+///
+/// One for each set of names and the programs as they are, made the first time one is asked
+/// for and kept: every machine shows it read-only, so the sandboxes made with the same share
+/// it, and a boot after the first links and copies nothing. Programs replaced since are another
+/// set, of their sizes and times.
+fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
+    let io = |context: String| move |source| SnapshotError::Io { context, source };
+    let mut sorted: Vec<&String> = names.iter().collect();
+    sorted.sort();
+    let mut hasher = std::hash::DefaultHasher::new();
+    for name in &sorted {
+        let path = programs.join(name);
+        let meta = fs_err(std::fs::metadata(&path), &path)?;
+        hasher.write(name.as_bytes());
+        hasher.write_u64(meta.len());
+        if let Ok(modified) = meta.modified() {
+            let since = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default();
+            hasher.write_u128(since.as_nanos());
+        }
+    }
+    let set = sorted
+        .iter()
+        .map(|name| name.as_str())
+        .collect::<Vec<_>>()
+        .join("+");
+    let dir = under.join(format!("{set}.{:016x}", hasher.finish()));
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(under).map_err(io(format!("making {}", under.display())))?;
+    // Made aside, then put in place whole, so a boot never shows one half made.
+    let making = under.join(format!(".{set}.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&making);
+    let made = (|| {
+        for program in &sorted {
+            link(&programs.join(program), &making.join(program))?;
+            let skill = Path::new(SKILLS).join(program).join(SKILL);
+            if programs.join(&skill).is_file() {
+                link(&programs.join(&skill), &making.join(&skill))?;
+            }
+        }
+        Ok::<_, Error>(())
+    })();
+    if let Err(e) = made {
+        let _ = std::fs::remove_dir_all(&making);
+        return Err(e);
+    }
+    if std::fs::rename(&making, &dir).is_err() {
+        // Another boot put the same in place first.
+        let _ = std::fs::remove_dir_all(&making);
+        if !dir.is_dir() {
+            return Err(SnapshotError::Io {
+                context: format!("putting {} in place", dir.display()),
+                source: io::Error::other("it is not there"),
+            }
+            .into());
+        }
+    }
+    Ok(dir)
+}
+
+fn fs_err<T>(result: io::Result<T>, path: &Path) -> Result<T, Error> {
+    result.map_err(|source| {
+        SnapshotError::Io {
+            context: format!("reading {}", path.display()),
+            source,
+        }
+        .into()
+    })
+}
+
+/// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one.
+fn link(from: &Path, to: &Path) -> Result<(), Error> {
+    let io = |context: String| move |source| SnapshotError::Io { context, source };
+    let parent = to.parent().unwrap_or(to);
+    std::fs::create_dir_all(parent).map_err(io(format!("making {}", parent.display())))?;
+    if std::fs::hard_link(from, to).is_err() {
+        std::fs::copy(from, to).map_err(io(format!("copying {}", from.display())))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod abin_tests {
+    use super::*;
+
+    #[test]
+    fn a_set_of_programs_is_made_once_and_shared_by_those_named_alike() {
+        let host = tempfile::tempdir().unwrap();
+        let programs = host.path().join(ABIN_HOST);
+        std::fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
+        for program in ["index", "docread", "display"] {
+            std::fs::write(programs.join(program), program).unwrap();
+        }
+        std::fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
+        let under = host.path().join("kept").join(ABIN_HOST);
+
+        let names = ["index".to_string(), "display".to_string()];
+        let dir = abin_of(&under, &programs, &names).unwrap();
+        assert_eq!(std::fs::read(dir.join("index")).unwrap(), b"index");
+        assert_eq!(std::fs::read(dir.join("display")).unwrap(), b"display");
+        assert!(!dir.join("docread").exists());
+        assert_eq!(
+            std::fs::read(dir.join(SKILLS).join("index").join(SKILL)).unwrap(),
+            b"skill"
+        );
+        assert!(!dir.join(SKILLS).join("display").exists());
+
+        let again = ["display".to_string(), "index".to_string()];
+        assert_eq!(
+            abin_of(&under, &programs, &again).unwrap(),
+            dir,
+            "in any order"
+        );
+        let other = abin_of(&under, &programs, &["docread".to_string()]).unwrap();
+        assert_ne!(other, dir);
+        assert_eq!(
+            std::fs::read_dir(&under).unwrap().count(),
+            2,
+            "nothing half made left"
+        );
+
+        assert!(abins_refused(&names, &programs).is_ok());
+        for refused in [
+            vec!["index".to_string(), "index".to_string()],
+            vec!["nope".to_string()],
+            vec!["skills".to_string()],
+            vec!["../abin".to_string()],
+        ] {
+            assert!(
+                matches!(abins_refused(&refused, &programs), Err(Error::Invalid(_))),
+                "{refused:?}"
+            );
+        }
     }
 }

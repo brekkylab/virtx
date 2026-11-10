@@ -246,7 +246,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/` | | `200`, array of sandboxes |
-| `POST /sandboxes/` | `{image, name?, ephemeral?, auto_stop_minutes?, auto_delete_days?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, the sandbox, with `ports` |
+| `POST /sandboxes/` | `{image, name?, ephemeral?, auto_stop_minutes?, auto_delete_days?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, the sandbox, with `ports` |
 | `GET /sandboxes/{id}` | | `200`, the sandbox |
 | `POST /sandboxes/{id}/start` | `{}` | `200`, the sandbox, with `ports` |
 | `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
@@ -254,7 +254,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?, inbound?}` | `201`, the port; `200` for one open already |
 | `DELETE /sandboxes/{id}/ports/{port}` | | `204` |
 
-A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at}`, and in the answer to its `POST` and to `start`, `ports` too:
+A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at, abins?}`, and in the answer to its `POST` and to `start`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `name`, if given, names it among its organization's sandboxes -- the server's, on one that keeps no organizations apart -- so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
@@ -267,6 +267,7 @@ A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delet
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path that is not absolute, `/`, and two at one path are refused.
+- `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 Its files are reached at [`/sandboxes/{id}/files/`](#files) while it runs.
 
 A sandbox stands on the image it booted, by digest, for as long as it exists: started again, it boots that image, whatever its tag points at by then.

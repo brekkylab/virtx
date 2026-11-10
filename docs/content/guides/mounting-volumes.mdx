@@ -80,8 +80,7 @@ await sandbox.exec(['cat', '/data/config.json']).complete({ print: true })
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").volume(volume.name(), "/data");
 let sandbox = client.create_sandbox(&args).await?;
-let job = sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).await?;
-job.complete(true).await?;
+sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).complete(true).await?;
 ```
 
 </TabItem>

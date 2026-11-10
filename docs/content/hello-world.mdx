@@ -96,12 +96,11 @@ use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
-    client.pull_image("alpine:latest", None).await?.complete(false).await?;
+    client.pull_image("alpine:latest", None).complete(false).await?;
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
         .await?;
-    let job = sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).await?;
-    job.complete(true).await?;
+    sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).complete(true).await?;
     sandbox.remove().await?;
     Ok(())
 }

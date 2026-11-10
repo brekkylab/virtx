@@ -48,6 +48,12 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     assert_eq!(job.get().wait().unwrap().info().code, Some(0));
     assert_eq!(job.complete(false).wait().unwrap(), 0);
     assert_eq!(common::block_on(job.complete(true)).unwrap(), 0);
+    let exit = SandboxExecArgs::new(["sh", "-c", "exit 3"]);
+    assert_eq!(sandbox.exec(&exit).complete(false).wait().unwrap(), 3);
+    assert_eq!(
+        common::block_on(sandbox.exec(&exit).complete(false)).unwrap(),
+        3
+    );
     let held = sandbox.job_from(job.info().clone());
     assert_eq!(held.sandbox_id(), sandbox.id());
     assert_eq!(held.get().wait().unwrap().info().code, Some(0));

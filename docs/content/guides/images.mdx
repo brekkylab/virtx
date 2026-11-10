@@ -48,8 +48,7 @@ let recipe = Recipe::new("alpine:latest")
     .step(Step::run("apk add --no-cache jq"))
     .step(Step::env("LANG", "C.UTF-8"))
     .step(Step::workdir("/work"));
-let build = client.build_image(recipe, "jq:latest").await?;
-let digest = build.complete(true).await?;
+let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 ```
 
 </TabItem>
@@ -76,7 +75,7 @@ In Rust, `Recipe::from_dockerfile` reads a Dockerfile's text into a recipe for `
 
 ```rust
 let recipe = Recipe::from_dockerfile(std::fs::read_to_string("Dockerfile")?)?;
-let digest = client.build_image(recipe, "jq:latest").await?.complete(true).await?;
+let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 ```
 
 ### After a build
@@ -167,7 +166,7 @@ await client.pushImage('ghcr.io/me/jq:1', auth).complete({ print: true })
 <TabItem label="Rust">
 
 ```rust
-client.pull_image("python:3.12-slim", None).await?.complete(true).await?;
+client.pull_image("python:3.12-slim", None).complete(true).await?;
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("python:3.12-slim"))
     .await?;
@@ -177,7 +176,7 @@ let auth = RegistryAuth::Basic {
     username: "me".into(),
     password: std::env::var("GHCR_TOKEN")?,
 };
-client.push_image("ghcr.io/me/jq:1", Some(auth)).await?.complete(true).await?;
+client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 ```
 
 </TabItem>

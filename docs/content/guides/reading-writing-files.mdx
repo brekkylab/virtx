@@ -51,7 +51,7 @@ sandbox.create_dir_all("work").await?;
 sandbox.write_file("work/input.txt", "one two three\n", None).await?;
 
 let cmd = ["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"];
-sandbox.exec(&SandboxExecArgs::new(cmd)).await?.complete(false).await?;
+sandbox.exec(&SandboxExecArgs::new(cmd)).complete(false).await?;
 
 println!("{}", sandbox.read_text("work/count.txt").await?);
 ```

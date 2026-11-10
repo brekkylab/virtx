@@ -113,7 +113,7 @@ await sandbox.remove()
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
 let sandbox = client.create_sandbox(&args).await?;
 let cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"];
-sandbox.exec(&SandboxExecArgs::new(cmd)).await?.complete(false).await?;
+sandbox.exec(&SandboxExecArgs::new(cmd)).complete(false).await?;
 sandbox.remove().await?;
 ```
 
@@ -198,8 +198,7 @@ snapshot
 
 let args = SandboxCreateArgs::new("alpine:latest").snapshot(snapshot.name());
 let sandbox = client.create_sandbox(&args).await?;
-let job = sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).await?;
-job.complete(true).await?;
+sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).complete(true).await?;
 ```
 
 </TabItem>

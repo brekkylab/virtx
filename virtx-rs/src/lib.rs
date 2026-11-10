@@ -9,8 +9,8 @@
 //! Each request starts when its method is called, on the library's own runtime, and is a
 //! [`Call`] (a `Future`) or [`Events`] (a `Stream`), woken by the library, so any async runtime
 //! awaits them; or a thread without one blocks on [`Call::wait`] and [`Events::wait_next`].
-//! Starting a job is a [`StartedJob`], a call answering with the job, or its [`JobLog`]; a
-//! job's `complete` is a [`JobEnd`], what it ended with once it has.
+//! Starting a job is a [`StartedJob`], a call answering with the job, its [`JobLog`], or its
+//! `complete`: a [`JobEnd`], what the job ended with once it has.
 //!
 //! Making or asking for a sandbox, a volume or a snapshot answers a [`Sandbox`], a [`Volume`]
 //! or a [`Snapshot`], running a process in a sandbox a [`SandboxJob`], and building, pulling or

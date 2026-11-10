@@ -31,8 +31,7 @@ console.log('exited', code)
 <TabItem label="Rust">
 
 ```rust
-let job = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).await?;
-let code = job.complete(true).await?;
+let code = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).complete(true).await?;
 println!("exited {code}");
 ```
 
@@ -264,7 +263,7 @@ const code = await sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 }).complete
 ```rust
 let mut args = SandboxExecArgs::new(["sleep", "60"]);
 args.timeout_ms = Some(10_000);
-let code = sandbox.exec(&args).await?.complete(false).await?; // 137
+let code = sandbox.exec(&args).complete(false).await?; // 137
 ```
 
 </TabItem>

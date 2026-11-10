@@ -1,10 +1,27 @@
-//! Why a client's request failed, whichever endpoint it went to.
+//! Why a client's request failed, whichever endpoint it went to, and where.
 
+#[cfg(feature = "client")]
 use std::fmt;
 
-use crate::Source;
+use serde::{Deserialize, Serialize};
+
+/// Where a call failed, which every error names whatever else it carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The server answered the request with an error: its HTTP status says which.
+    Server,
+    /// The job the request started failed, or was removed before it ended.
+    Job,
+    /// The request or its answer did not get through: the connection failed or the session
+    /// ended.
+    Transport,
+    /// This side failed: an argument, a file on this machine, or an answer it could not read.
+    Client,
+}
 
 /// Why a call failed.
+#[cfg(feature = "client")]
 #[derive(Debug)]
 pub enum Error {
     /// The request did not reach the server, or its response did not come back: the
@@ -34,6 +51,7 @@ pub enum Error {
     Job(String),
 }
 
+#[cfg(feature = "client")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -72,8 +90,10 @@ impl fmt::Display for Error {
     }
 }
 
+#[cfg(feature = "client")]
 impl std::error::Error for Error {}
 
+#[cfg(feature = "client")]
 impl Error {
     /// Where it failed.
     pub fn source_kind(&self) -> Source {
@@ -94,7 +114,7 @@ impl Error {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
 

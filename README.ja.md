@@ -127,15 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
-    let build = client.build_image(recipe, "jq:latest").await?;
-    build.complete(true).await?;
+    client.build_image(recipe, "jq:latest").complete(true).await?;
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .await?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let job = sandbox.exec(&SandboxExecArgs::new(cmd)).await?;
-    let code = job.complete(true).await?;
+    let code = sandbox.exec(&SandboxExecArgs::new(cmd)).complete(true).await?;
     println!("exited {code}");
     sandbox.remove().await?;
     Ok(())

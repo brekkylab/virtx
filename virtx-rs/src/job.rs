@@ -137,24 +137,61 @@ impl<J, E: DeserializeOwned> Stream for JobLog<J, E> {
     }
 }
 
-/// What reads one entry of a job's log: what the job ended with if it is the `end` entry,
-/// printing it first if asked.
-pub(crate) type End<E, T> = fn(E, bool) -> Option<Result<T, Error>>;
+pub(crate) mod sealed {
+    use serde::de::DeserializeOwned;
 
-/// A job followed through its log to its end, as its `complete` gives it: awaited as a `Future`,
-/// or waited on with [`wait`](Self::wait), it answers what the job ended with, or the error it
-/// failed with. Each line is printed on the way if it was asked to. Dropping it stops reading
-/// the log and leaves the job running.
-#[must_use = "a job followed is not followed once dropped"]
-pub struct JobEnd<E, T> {
-    log: Events<LogEntry<E>>,
-    print: bool,
-    end: End<E, T>,
+    use crate::Error;
+
+    /// A job, as [`JobEnd`](super::JobEnd) follows it: its log's entries, and what it ends with.
+    pub trait Ends {
+        type Entry: DeserializeOwned;
+        type Output;
+
+        /// What the job ended with if `entry` is its `end` entry, printing it first if `print`.
+        fn ended(entry: Self::Entry, print: bool) -> Option<Result<Self::Output, Error>>;
+    }
 }
 
-impl<E, T> JobEnd<E, T> {
-    pub(crate) fn new(log: Events<LogEntry<E>>, print: bool, end: End<E, T>) -> JobEnd<E, T> {
-        JobEnd { log, print, end }
+impl<J: sealed::Ends> StartedJob<J, J::Entry> {
+    /// Follow the job to its end once it has started, as its `complete` does.
+    pub fn complete(self, print: bool) -> JobEnd<J> {
+        JobEnd {
+            log: self.log(),
+            print,
+        }
+    }
+}
+
+/// A job `J` followed through its log to its end, as its `complete` gives it: awaited as a
+/// `Future`, or waited on with [`wait`](Self::wait), it answers what the job ended with, or the
+/// error it failed with. Each line is printed on the way if it was asked to. Dropping it stops
+/// reading the log and leaves the job running.
+#[must_use = "a job followed is not followed once dropped"]
+pub struct JobEnd<J: sealed::Ends> {
+    log: JobLog<J, J::Entry>,
+    print: bool,
+}
+
+impl<J: sealed::Ends> JobEnd<J> {
+    /// `log`, a started job's, followed to its end.
+    pub(crate) fn new(log: Events<LogEntry<J::Entry>>, print: bool) -> JobEnd<J> {
+        JobEnd {
+            log: JobLog {
+                state: State::Reading(log),
+                job: None,
+            },
+            print,
+        }
+    }
+
+    /// Block this thread until the job ends, for a caller without an async runtime.
+    pub fn wait(mut self) -> Result<J::Output, Error> {
+        while let Some(entry) = self.log.wait_next() {
+            if let Some(ended) = J::ended(entry?.entry, self.print) {
+                return ended;
+            }
+        }
+        Err(removed())
     }
 }
 
@@ -163,22 +200,10 @@ fn removed() -> Error {
     Error::Call(Source::Job, "the job was removed before it ended".into())
 }
 
-impl<E: DeserializeOwned, T> JobEnd<E, T> {
-    /// Block this thread until the job ends, for a caller without an async runtime.
-    pub fn wait(mut self) -> Result<T, Error> {
-        while let Some(entry) = self.log.wait_next() {
-            if let Some(ended) = (self.end)(entry?.entry, self.print) {
-                return ended;
-            }
-        }
-        Err(removed())
-    }
-}
+impl<J: sealed::Ends> Unpin for JobEnd<J> {}
 
-impl<E, T> Unpin for JobEnd<E, T> {}
-
-impl<E: DeserializeOwned, T> Future for JobEnd<E, T> {
-    type Output = Result<T, Error>;
+impl<J: sealed::Ends> Future for JobEnd<J> {
+    type Output = Result<J::Output, Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
@@ -187,7 +212,7 @@ impl<E: DeserializeOwned, T> Future for JobEnd<E, T> {
                 Poll::Ready(None) => return Poll::Ready(Err(removed())),
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
                 Poll::Ready(Some(Ok(entry))) => {
-                    if let Some(ended) = (self.end)(entry.entry, self.print) {
+                    if let Some(ended) = J::ended(entry.entry, self.print) {
                         return Poll::Ready(ended);
                     }
                 }

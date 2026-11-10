@@ -49,13 +49,12 @@ let recipe = Recipe::new("alpine:latest").step(
     // The Vulkan loader, the venus driver that reaches the host's GPU, and vulkaninfo.
     "apk add --no-cache vulkan-loader mesa-vulkan-virtio vulkan-tools",
 );
-client.build_image(recipe, "vulkan:latest").await?.complete(true).await?;
+client.build_image(recipe, "vulkan:latest").complete(true).await?;
 let args = SandboxCreateArgs::new("vulkan:latest")
     .gpu(true)
     .gpu_memory_mib(8192);
 let sandbox = client.create_sandbox(&args).await?;
-let job = sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).await?;
-job.complete(true).await?;
+sandbox.exec(&SandboxExecArgs::new(["vulkaninfo", "--summary"])).complete(true).await?;
 ```
 
 </TabItem>

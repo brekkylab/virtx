@@ -108,7 +108,7 @@ mod tests {
     use crate::transport::testing::piped;
 
     #[tokio::test]
-    async fn a_list_leaves_out_what_was_removed_since_the_catalog_named_it() {
+    async fn a_list_leaves_out_what_was_removed_meanwhile() {
         let unknown = |code: &'static str| {
             (
                 StatusCode::NOT_FOUND,

@@ -626,7 +626,7 @@ mod tests {
     /// A list is three requests: the catalog, each repository's tags, each tag's manifest.
     /// Between the first two, another client removes a repository's only tag.
     #[tokio::test]
-    async fn a_list_leaves_out_a_repository_removed_between_its_requests() {
+    async fn a_repository_removed_mid_list_is_left_out() {
         let server = Server::spawn_after("list-race", |home, path| {
             if path == "/images/oci/v2/_catalog" {
                 let store = ImageStore::new(home.join("images")).unwrap();

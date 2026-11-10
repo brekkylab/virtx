@@ -125,10 +125,8 @@ impl PortForwarder {
         let tasks = Arc::new(AtomicUsize::new(0));
         let mut forwarding = JoinSet::new();
         #[cfg(test)]
-        let tasks_inner = Arc::clone(&tasks);
+        let count = Arc::clone(&tasks);
         forwarding.spawn(async move {
-            #[cfg(test)]
-            let tasks = tasks_inner;
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
@@ -146,7 +144,7 @@ impl PortForwarder {
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 }
                 #[cfg(test)]
-                tasks.store(connections.len(), SeqCst);
+                count.store(connections.len(), SeqCst);
             }
         });
         Ok(PortForwarder {

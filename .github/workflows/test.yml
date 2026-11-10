@@ -2,7 +2,7 @@
 #
 # - `check`: `cargo xtask check`: the format, clippy of the client and the servers, and the
 #   tests that boot nothing. It compiles the servers but runs none, so it answers first.
-# - `e2e`: `cargo xtask test` with the servers built here: the crates' own tests, then the
+# - `suites`: `cargo xtask test` with the servers built here: the crates' own tests, then the
 #   packages' against the fixture, each booting machines. Linux x86_64 only, the one runner
 #   GitHub gives a hypervisor on; the guest kernel is the one `build` made.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
@@ -60,8 +60,8 @@ jobs:
 
       - run: cargo xtask check
 
-  e2e:
-    name: e2e (linux-x86_64)
+  suites:
+    name: suites (linux-x86_64)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -79,7 +79,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: e2e
+          key: suites
 
       # What building the servers takes on this host: the guest init's cross-linker, bindgen's
       # libclang, and meson with Vulkan's headers for virglrenderer.

@@ -79,6 +79,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
 }
 
 #[test]
+#[ignore = "no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused"]
 fn stdin_written_comes_back_until_it_is_closed() {
     let client = common::client();
     common::alpine(&client);

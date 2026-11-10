@@ -111,6 +111,11 @@ async def test_a_log_is_read_again_after_an_entry(client: Client) -> None:
     await sandbox.remove()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=VirtxError,
+    reason="no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused",
+)
 async def test_stdin_written_comes_back_until_it_is_closed(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)

@@ -70,10 +70,12 @@ class StartedJob(Generic[J, E]):
             except BaseException as e:
                 if not job.done():
                     job.set_exception(e)
+                    job.exception()
                 raise
             finally:
                 if not job.done():
                     job.set_exception(RuntimeError("the job's log ended before its job"))
+                    job.exception()
                 if isinstance(items, AsyncGenerator):
                     await items.aclose()
             return

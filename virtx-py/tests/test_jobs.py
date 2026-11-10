@@ -1,6 +1,9 @@
 """Volumes, sandboxes and the jobs of images and sandboxes, against ``virtx-core``'s
 ``test_server`` example over stdio."""
 
+import asyncio
+import gc
+
 import pytest
 
 from virtx import (
@@ -21,6 +24,7 @@ from virtx import (
     SandboxPort,
     SandboxState,
     SandboxVolume,
+    StartedJob,
     Stderr,
     Stdout,
     Truncated,
@@ -348,3 +352,110 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(test_server: s
         assert log[-1] == ImageJobEnd(digest="sha256:0")
         assert (await client.get_image_job(job.id)).digest == "sha256:0"
         assert len(await client.list_image_job()) == before + 1
+
+
+async def test_a_started_job_failing_when_iterated_leaves_no_unretrieved_future_exception() -> None:
+    loop = asyncio.get_running_loop()
+    warnings: list[str] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
+    try:
+        async def failing_run():
+            raise RuntimeError("exec failed to start")
+            yield
+
+        job = StartedJob(lambda: None, lambda j: None, failing_run)
+        with pytest.raises(RuntimeError, match="exec failed to start"):
+            async for _ in job:
+                pass
+
+        del job
+        gc.collect()
+        assert not any("Future exception was never retrieved" in w for w in warnings)
+    finally:
+        loop.set_exception_handler(old_handler)
+
+
+async def test_a_started_job_failing_when_iterated_still_raises_when_awaited() -> None:
+    async def failing_run():
+        raise RuntimeError("exec failed to start")
+        yield
+
+    job = StartedJob(lambda: None, lambda j: None, failing_run)
+    with pytest.raises(RuntimeError, match="exec failed to start"):
+        async for _ in job:
+            pass
+
+    with pytest.raises(RuntimeError, match="exec failed to start"):
+        await job
+
+
+async def test_a_started_job_ending_before_its_job_leaves_no_unretrieved_future_exception() -> None:
+    loop = asyncio.get_running_loop()
+    warnings: list[str] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
+    try:
+        async def empty_run():
+            if False:
+                yield
+
+        job = StartedJob(lambda: None, lambda j: None, empty_run)
+        log = [entry async for entry in job]
+        assert log == []
+
+        del job
+        gc.collect()
+        assert not any("Future exception was never retrieved" in w for w in warnings)
+    finally:
+        loop.set_exception_handler(old_handler)
+
+
+async def test_a_started_job_ending_before_its_job_raises_when_awaited() -> None:
+    async def empty_run():
+        if False:
+            yield
+
+    job = StartedJob(lambda: None, lambda j: None, empty_run)
+    log = [entry async for entry in job]
+    assert log == []
+
+    with pytest.raises(RuntimeError, match="the job's log ended before its job"):
+        await job
+
+
+async def test_an_exec_failing_to_start_when_iterated_leaves_no_unretrieved_future_exception(
+    test_server: str,
+) -> None:
+    loop = asyncio.get_running_loop()
+    warnings: list[str] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
+    try:
+        with Client.spawn(test_server) as client:
+            exec_job = client.exec_sandbox("nonexistent", ["echo", "hi"])
+            with pytest.raises(VirtxError) as refused:
+                async for _ in exec_job:
+                    pass
+            assert refused.value.status == 404
+
+            del exec_job
+            gc.collect()
+            assert not any("Future exception was never retrieved" in w for w in warnings)
+    finally:
+        loop.set_exception_handler(old_handler)
+
+
+async def test_an_exec_failing_to_start_when_iterated_still_raises_when_awaited(
+    test_server: str,
+) -> None:
+    with Client.spawn(test_server) as client:
+        exec_job = client.exec_sandbox("nonexistent", ["echo", "hi"])
+        with pytest.raises(VirtxError) as refused:
+            async for _ in exec_job:
+                pass
+        assert refused.value.status == 404
+
+        with pytest.raises(VirtxError) as awaited_refused:
+            await exec_job
+        assert awaited_refused.value.status == 404

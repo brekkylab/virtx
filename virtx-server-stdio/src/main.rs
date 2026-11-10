@@ -325,6 +325,11 @@ mod tests {
         let mut args = here();
         args.vcpus = Some(0);
         assert_eq!(refused(args).await, 400);
+        for mib in [0, 16, 32] {
+            let mut args = here();
+            args.memory_mib = Some(mib);
+            assert_eq!(refused(args).await, 400, "memory_mib {mib}");
+        }
         let mut args = here();
         args.gpu_memory_mib = Some(1024);
         assert_eq!(refused(args).await, 400);
@@ -352,9 +357,15 @@ mod tests {
             path: path.into(),
             readonly: false,
         };
-        let mut args = here();
-        args.volumes = vec![at("/data"), at("/data/")];
-        assert_eq!(refused(args).await, 400);
+        for volumes in [
+            vec![at("/data"), at("/data/")],
+            vec![at("data")],
+            vec![at("/")],
+        ] {
+            let mut args = here();
+            args.volumes = volumes;
+            assert_eq!(refused(args).await, 400);
+        }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);
         let exec = async |cmd: &[&str]| {

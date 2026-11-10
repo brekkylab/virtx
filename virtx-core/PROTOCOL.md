@@ -256,8 +256,8 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
 - `network` is whether its processes reach a network at all, and is `true` without it.
-- `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
-- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. Two at one path are refused.
+- `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
+- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path that is not absolute, `/`, and two at one path are refused.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).

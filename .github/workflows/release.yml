@@ -43,12 +43,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
+          name: bundle
           path: dist/release
-          key: bundle-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
 
       - name: Attach to the draft
         env:

@@ -43,7 +43,7 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 
 ### Clients
 
-Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, so build it first and point the package at it:
 
 ```bash
 cargo xtask build client
@@ -55,7 +55,7 @@ Then, in your own project, install the package for your language from the clone:
 
 - **Python:** `pip install path/to/virtx/virtx-py`
 - **Node:** `npm install path/to/virtx/virtx-node`
-- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
 
 - A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
 

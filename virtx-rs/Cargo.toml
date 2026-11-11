@@ -6,11 +6,17 @@ description = "A virtx client for Rust, over libvirtx_core's C ABI."
 license = "Apache-2.0"
 publish = false
 
+[features]
+# The client linked into this crate, so that `cargo add virtx` is all a Rust program needs. Off,
+# `libvirtx_core` is opened at run time -- `load`, `$VIRTX_CORE_LIB`, or the system loader's
+# search -- so that a process with other modules over it (the Python or Node package) shares one.
+default = ["embedded"]
+embedded = ["virtx-core/ffi"]
+
 [dependencies]
-# The types every request takes and answers, and nothing of the client: that is the one in
-# `libvirtx_core`, opened at run time, so a process with other modules over it shares one.
+# The types every request takes and answers; and, with `embedded`, the client behind the C ABI.
 virtx-core = { path = "../virtx-core", default-features = false }
-# Opening `libvirtx_core` and finding its functions.
+# Opening `libvirtx_core` and finding its functions, without `embedded`.
 libloading = "0.8"
 # `Stream`, which a request answering item by item is.
 futures-core = "0.3"

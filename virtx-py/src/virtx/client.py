@@ -425,7 +425,10 @@ class Client:
         """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
         given, with ``volumes`` mounted into it, each a ``SandboxVolume``. ``ports`` are TCP
         ports in it to open, reserved as it is made and answered here only, each with the
-        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
+        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks.
+
+        ``image`` has to be on the server already, pulled or built: this does not pull it, and a
+        tag the server has no image by is refused with 404."""
         return Sandbox.from_dict(
             self,
             await self._call(

@@ -401,6 +401,9 @@ impl Client {
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
+    ///
+    /// The image has to be on the server already, pulled or built: this does not pull it, and a
+    /// tag the server has no image by is refused with 404.
     pub async fn create_sandbox(&self, args: &SandboxCreateArgs) -> Result<Sandbox, Error> {
         sandbox::client::create(&self.inner, args).await
     }

@@ -32,10 +32,15 @@
 //! An image a machine boots from is held (see [`Store::hold_image`]): a prune leaves it, with
 //! its layers and its root filesystem, and removing it is refused.
 //!
-//! Every change that checks a shelf before it writes or removes -- an image filed, a tag
-//! named, an image or a layer removed, a prune -- holds `<root>/lock` meanwhile, across
-//! threads and processes: the check and the step after it are one to every other change.
-//! Reads are not locked, and read what the last change left.
+//! Each change to a layer, an image or a tag -- one filed, renewed or removed, a prune --
+//! holds `<root>/lock` from its check to its write, across threads and processes: to every
+//! other change the two are one, and each waits for the one under way, so each is blocking
+//! work. A root filesystem or an origin is written and removed without it, being read as not
+//! there once what it names is gone. Reads are not locked, and read what the last change left.
+//!
+//! A prune leaves what is younger than its grace, for the pull or build still putting an image
+//! together over it: so a layer or an image filed again, or renewed by one that finds it here
+//! (see [`Store::renew_layer`]), is young again.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -43,7 +48,7 @@ use std::io::{self, BufReader, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use oci_spec::distribution::Reference;
 use oci_spec::image::{
@@ -183,7 +188,7 @@ impl Store {
     }
 
     /// File `tree` as a layer under the digest of its EROFS image, which is returned. A layer
-    /// already here is left as it is.
+    /// already here is renewed.
     ///
     /// The name is only known once the image is written, so it is written beside the layers
     /// first, and named after.
@@ -202,14 +207,10 @@ impl Store {
                 .expect("sha2 writes 64 lowercase hex characters")
                 .into();
             let path = self.layer_path(&digest);
-            if path.is_file() {
+            let _change = self.change()?;
+            if renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))? {
                 fs::remove_file(&part)
                     .map_err(|e| Error::io(format!("removing {}", part.display()), e))?;
-                // Young again: a prune's grace spares it for the image being made over it.
-                let _ = File::options()
-                    .write(true)
-                    .open(&path)
-                    .and_then(|file| file.set_modified(std::time::SystemTime::now()));
             } else {
                 fs::rename(&part, &path)
                     .map_err(|e| Error::io(format!("moving {} into place", path.display()), e))?;
@@ -220,6 +221,14 @@ impl Store {
             let _ = fs::remove_file(&part);
         }
         named
+    }
+
+    /// Make `layer` young again, if it is here: a prune's grace spares it for the image being
+    /// made over it. `false` if it is not here.
+    pub fn renew_layer(&self, layer: &Digest) -> Result<bool> {
+        let _change = self.change()?;
+        let path = self.layer_path(layer);
+        renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))
     }
 
     pub fn get_layer(&self, layer: &Digest) -> Result<Option<FsTree>> {
@@ -364,7 +373,8 @@ impl Store {
 
     /// File the image `manifest` and `config` are, each as it is, and answer with its digest:
     /// the manifest's. Refused unless `config` is the one the manifest names, each layer is an
-    /// EROFS one here, and the config's diff_ids are the layers.
+    /// EROFS one here, and the config's diff_ids are the layers. An image already here is
+    /// renewed.
     pub fn insert_image_manifest(&self, manifest: &[u8], config: &[u8]) -> Result<Digest> {
         let parsed: ImageManifest =
             serde_json::from_slice(manifest).map_err(|e| Error::Malformed(e.to_string()))?;
@@ -413,13 +423,21 @@ impl Store {
             .expect("sha2 writes 64 lowercase hex characters")
             .into();
         let path = self.shelf("image", &digest, "json");
-        if !path.is_file() {
+        if !renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))? {
             write_atomically(&path, |file| {
                 file.write_all(&bytes)
                     .map_err(|e| Error::io(format!("writing {}", path.display()), e))
             })?;
         }
         Ok(digest)
+    }
+
+    /// Make `image` young again, if it is here: a prune's grace spares it for the tag about to
+    /// name it. `false` if it is not here.
+    pub fn renew_image(&self, image: &Digest) -> Result<bool> {
+        let _change = self.change()?;
+        let path = self.shelf("image", image, "json");
+        renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))
     }
 
     /// An image's manifest and config, as they were filed.
@@ -451,14 +469,15 @@ impl Store {
     /// here.
     pub fn remove_image(&self, image: &Digest) -> Result<bool> {
         let _change = self.change()?;
-        self.remove_image_changing(image)
-    }
-
-    /// [`remove_image`](Store::remove_image) by a caller that holds the store's [`Change`].
-    fn remove_image_changing(&self, image: &Digest) -> Result<bool> {
         if let Some((reference, _)) = self.tags()?.into_iter().find(|(_, named)| named == image) {
             return Err(Error::InUse(image.clone(), reference.to_string()));
         }
+        self.remove_image_untagged(image)
+    }
+
+    /// [`remove_image`](Store::remove_image) by a caller that holds the store's [`Change`] and
+    /// has found no tag names `image`.
+    fn remove_image_untagged(&self, image: &Digest) -> Result<bool> {
         let path = self.shelf("image", image, "json");
         if !path.is_file() {
             return Ok(false);
@@ -526,7 +545,7 @@ impl Store {
                 continue;
             }
             let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-            match self.remove_image_changing(&image) {
+            match self.remove_image_untagged(&image) {
                 Ok(true) => {
                     pruned.reclaimed += len;
                     pruned.images.push(image);
@@ -636,6 +655,7 @@ impl Store {
 
     /// Take `reference` away, and say what it named.
     pub fn remove_tag(&self, reference: &Reference) -> Result<Option<Digest>> {
+        let _change = self.change()?;
         let Some(image) = self.get_tag(reference)? else {
             return Ok(None);
         };
@@ -902,6 +922,15 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
     Ok(part)
 }
 
+/// Make what is filed at `path` young again, or answer `false` when nothing is.
+fn renew(path: &Path) -> io::Result<bool> {
+    match File::options().write(true).open(path) {
+        Ok(file) => file.set_modified(SystemTime::now()).map(|()| true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// What is filed at `path`, or `None` when nothing is: a removal is its file removed, and
 /// a listing may name a file a removal takes before it is read.
 fn read_filed<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -1099,8 +1128,92 @@ mod tests {
         tagging.join().unwrap().unwrap();
         assert_eq!(
             store.get_tag(&reference("waited:latest")).unwrap(),
-            Some(image)
+            Some(image.clone())
         );
+
+        let change = store.change().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let removing = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                started.send(()).unwrap();
+                store.remove_tag(&reference("waited:latest"))
+            }
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !removing.is_finished(),
+            "a tag was taken away while a change was under way"
+        );
+        drop(change);
+        assert_eq!(removing.join().unwrap().unwrap(), Some(image));
+        assert_eq!(store.get_tag(&reference("waited:latest")).unwrap(), None);
+    }
+
+    fn age(path: &Path, by: Duration) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - by)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_layer_filed_again_or_renewed_is_young_again() {
+        let scratch = Scratch::new("young-layer");
+        let store = &scratch.0;
+        let grace = Duration::from_secs(3600);
+        let layer = store.insert_layer(&tree(b"young")).unwrap();
+
+        age(&store.layer_path(&layer), 2 * grace);
+        store.insert_layer(&tree(b"young")).unwrap();
+        store.prune(grace).unwrap();
+        assert!(
+            store.contains_layer(&layer),
+            "a layer filed again was pruned"
+        );
+
+        age(&store.layer_path(&layer), 2 * grace);
+        assert!(store.renew_layer(&layer).unwrap());
+        store.prune(grace).unwrap();
+        assert!(store.contains_layer(&layer), "a layer renewed was pruned");
+
+        age(&store.layer_path(&layer), 2 * grace);
+        store.prune(grace).unwrap();
+        assert!(!store.contains_layer(&layer));
+        assert!(!store.renew_layer(&layer).unwrap());
+    }
+
+    #[test]
+    fn an_image_filed_again_or_renewed_is_young_again() {
+        let scratch = Scratch::new("young-image");
+        let store = &scratch.0;
+        let grace = Duration::from_secs(3600);
+        let image = store.insert_image(&config("young"), &[]).unwrap();
+        let path = store.shelf("image", &image, "json");
+
+        age(&path, 2 * grace);
+        store.insert_image(&config("young"), &[]).unwrap();
+        store.prune(grace).unwrap();
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "an image filed again was pruned"
+        );
+
+        age(&path, 2 * grace);
+        assert!(store.renew_image(&image).unwrap());
+        store.prune(grace).unwrap();
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "an image renewed was pruned"
+        );
+
+        age(&path, 2 * grace);
+        store.prune(grace).unwrap();
+        assert!(store.get_image(&image).unwrap().is_none());
+        assert!(!store.renew_image(&image).unwrap());
     }
 
     #[cfg(unix)]

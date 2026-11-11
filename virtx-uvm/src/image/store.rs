@@ -14,6 +14,7 @@
 //!   tag/<hex>.json             one per reference: which image it names
 //!   origin/sha256/<hex>.json   one per registry blob or manifest, named by its digest: which layer
 //!                              or image it became
+//!   lock                       what a change holds while it checks and writes
 //! ```
 //!
 //! An image is its manifest and its config, each as a registry serves it, byte for byte: each
@@ -31,8 +32,10 @@
 //! An image a machine boots from is held (see [`Store::hold_image`]): a prune leaves it, with
 //! its layers and its root filesystem, and removing it is refused.
 //!
-//! Not locked otherwise: a check and the write after it are two steps, and another thread or
-//! process can act between them.
+//! Every change that checks a shelf before it writes or removes -- an image filed, a tag
+//! named, an image or a layer removed, a prune -- holds `<root>/lock` meanwhile, across
+//! threads and processes: the check and the step after it are one to every other change.
+//! Reads are not locked, and read what the last change left.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -125,6 +128,9 @@ enum OriginFile {
 /// An image held for as long as this lives: see [`Store::hold_image`].
 pub struct ImageHold(#[allow(dead_code)] File);
 
+/// The store's changes, one at a time, for as long as this lives: see the module.
+struct Change(#[allow(dead_code)] File);
+
 /// What a [`prune`](Store::prune) took away.
 #[derive(Debug, Default)]
 pub struct Pruned {
@@ -158,6 +164,16 @@ impl Store {
         &self.root
     }
 
+    /// Wait for every change under way, and keep others waiting for as long as the answer lives.
+    fn change(&self) -> Result<Change> {
+        let path = self.root.join("lock");
+        let file =
+            File::create(&path).map_err(|e| Error::io(format!("opening {}", path.display()), e))?;
+        file.lock()
+            .map_err(|e| Error::io(format!("locking {}", path.display()), e))?;
+        Ok(Change(file))
+    }
+
     pub fn layer_path(&self, layer: &Digest) -> PathBuf {
         self.shelf("layer", layer, "erofs")
     }
@@ -189,6 +205,11 @@ impl Store {
             if path.is_file() {
                 fs::remove_file(&part)
                     .map_err(|e| Error::io(format!("removing {}", part.display()), e))?;
+                // Young again: a prune's grace spares it for the image being made over it.
+                let _ = File::options()
+                    .write(true)
+                    .open(&path)
+                    .and_then(|file| file.set_modified(std::time::SystemTime::now()));
             } else {
                 fs::rename(&part, &path)
                     .map_err(|e| Error::io(format!("moving {} into place", path.display()), e))?;
@@ -213,6 +234,7 @@ impl Store {
 
     /// Delete a layer no image stacks. `false` if it was not here.
     pub fn remove_layer(&self, layer: &Digest) -> Result<bool> {
+        let _change = self.change()?;
         for image in self.images()? {
             if let Some((_, layers)) = self.get_image(&image)?
                 && layers.contains(layer)
@@ -352,6 +374,7 @@ impl Store {
                 parsed.config().digest()
             )));
         }
+        let _change = self.change()?;
         for layer in parsed.layers() {
             if layer.media_type().to_string() != EROFS_LAYER {
                 return Err(Error::Malformed(format!(
@@ -427,6 +450,12 @@ impl Store {
     /// Delete an image no tag names and nothing holds. Its layers stay. `false` if it was not
     /// here.
     pub fn remove_image(&self, image: &Digest) -> Result<bool> {
+        let _change = self.change()?;
+        self.remove_image_changing(image)
+    }
+
+    /// [`remove_image`](Store::remove_image) by a caller that holds the store's [`Change`].
+    fn remove_image_changing(&self, image: &Digest) -> Result<bool> {
         if let Some((reference, _)) = self.tags()?.into_iter().find(|(_, named)| named == image) {
             return Err(Error::InUse(image.clone(), reference.to_string()));
         }
@@ -480,6 +509,7 @@ impl Store {
     /// whose layer or image is gone, and what a write that stopped part-way left. `grace`
     /// spares what a pull or a build is still putting together. Blocking work.
     pub fn prune(&self, grace: Duration) -> Result<Pruned> {
+        let _change = self.change()?;
         let mut pruned = Pruned::default();
         let old = |path: &Path| {
             fs::metadata(path)
@@ -496,7 +526,7 @@ impl Store {
                 continue;
             }
             let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-            match self.remove_image(&image) {
+            match self.remove_image_changing(&image) {
                 Ok(true) => {
                     pruned.reclaimed += len;
                     pruned.images.push(image);
@@ -584,6 +614,7 @@ impl Store {
 
     /// Have `reference` name `image`, which must be here, in place of whatever it named.
     pub fn insert_tag(&self, reference: &Reference, image: &Digest) -> Result<()> {
+        let _change = self.change()?;
         if !self.shelf("image", image, "json").is_file() {
             return Err(Error::Missing(image.clone()));
         }
@@ -1042,6 +1073,34 @@ mod tests {
     fn gone(dir: &Path) {
         let gone = dir.join("gone.json");
         std::os::unix::fs::symlink(gone.with_extension("removed"), &gone).unwrap();
+    }
+
+    #[test]
+    fn a_change_waits_for_the_one_under_way() {
+        let scratch = Scratch::new("change");
+        let store = &scratch.0;
+        let image = store.insert_image(&config("a"), &[]).unwrap();
+        let change = store.change().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let tagging = std::thread::spawn({
+            let (store, image) = (store.clone(), image.clone());
+            move || {
+                started.send(()).unwrap();
+                store.insert_tag(&reference("waited:latest"), &image)
+            }
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !tagging.is_finished(),
+            "a tag was named while a change was under way"
+        );
+        drop(change);
+        tagging.join().unwrap().unwrap();
+        assert_eq!(
+            store.get_tag(&reference("waited:latest")).unwrap(),
+            Some(image)
+        );
     }
 
     #[cfg(unix)]

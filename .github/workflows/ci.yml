@@ -1,18 +1,25 @@
-# A pull request is built as a release would be, and tested; nothing is published. The docs
-# are `docs`'s.
+# A pull request, and `main` once merged, are built as a release would be, and tested; nothing
+# is published. The docs are `docs`'s. `main`'s runs leave the caches every other ref restores.
 name: ci
 
+# Markdown is left out, but for the READMEs the packages ship.
 on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!**/*.md"
+      - "!docs/**"
+      - virtx-py/README.md
+      - virtx-node/README.md
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - docs/**
+    paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot.
+# A newer push to the pull request makes an older run moot; a merge into `main` never is.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

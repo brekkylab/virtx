@@ -7,7 +7,8 @@ rust-version.workspace = true
 # The stdio server's: this binary links libkrun and becomes a machine just the same.
 build = "../virtx-server-stdio/build.rs"
 
-# The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names.
+# The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names;
+# and the library it is built from, which a server with tenants and routes of its own builds on.
 [features]
 gpu = ["virtx-uvm/gpu"]
 

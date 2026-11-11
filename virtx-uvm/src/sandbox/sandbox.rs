@@ -638,13 +638,21 @@ impl Upper {
     fn create(dir: &Path) -> Result<Upper, Error> {
         let io = |context: String| move |source| SnapshotError::Io { context, source };
         fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
-        let name = pick(|name| dir.join(format!("{name}.owner")).exists());
-        let owner = dir.join(format!("{name}.owner"));
-        let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
-        held.try_lock().map_err(|e| SnapshotError::Io {
-            context: format!("locking {}", owner.display()),
-            source: e.into(),
-        })?;
+        let (name, owner, held) = loop {
+            let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+            let owner = dir.join(format!("{name}.owner"));
+            let held =
+                File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
+            match held.try_lock() {
+                Ok(()) => break (name, owner, held),
+                // A sweep has it for the moment it takes to find it nobody's, and removes it.
+                Err(fs::TryLockError::WouldBlock) => continue,
+                Err(fs::TryLockError::Error(e)) => {
+                    let _ = fs::remove_file(&owner);
+                    return Err(io(format!("locking {}", owner.display()))(e).into());
+                }
+            }
+        };
         let path = dir.join(format!("{name}.ext4"));
         // Owned from here, so a disk that failed to format is deleted too.
         let upper = Upper {

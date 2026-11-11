@@ -401,15 +401,10 @@ impl Store {
 
     /// An image's manifest and config, as they were filed.
     pub fn get_image_manifest(&self, image: &Digest) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let path = self.shelf("image", image, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
-        };
-        let read: ImageFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(Some((read.manifest.into_bytes(), read.config.into_bytes())))
+        Ok(
+            read_filed::<ImageFile>(&self.shelf("image", image, "json"))?
+                .map(|read| (read.manifest.into_bytes(), read.config.into_bytes())),
+        )
     }
 
     /// An image's config and its layers, bottom first.
@@ -605,15 +600,7 @@ impl Store {
     }
 
     pub fn get_tag(&self, reference: &Reference) -> Result<Option<Digest>> {
-        let path = self.tag_path(reference);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
-        };
-        let read: TagFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(Some(read.image))
+        Ok(read_filed::<TagFile>(&self.tag_path(reference))?.map(|read| read.image))
     }
 
     /// Take `reference` away, and say what it named.
@@ -642,10 +629,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: TagFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<TagFile>(&path)? else {
+                continue;
+            };
             let reference = read.reference.parse::<Reference>().map_err(|e| {
                 Error::io(
                     format!("reading {}", path.display()),
@@ -689,14 +675,9 @@ impl Store {
 
     /// The layer the registry blob `blob` became, if it is still here.
     pub fn get_layer_origin(&self, blob: &Digest) -> Result<Option<Digest>> {
-        let path = self.shelf("origin", blob, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        let Some(read) = read_filed::<OriginFile>(&self.shelf("origin", blob, "json"))? else {
+            return Ok(None);
         };
-        let read: OriginFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
         match read {
             OriginFile::Layer { layer, .. } => Ok(self.contains_layer(&layer).then_some(layer)),
             OriginFile::Image { .. } => Ok(None),
@@ -717,10 +698,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: OriginFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<OriginFile>(&path)? else {
+                continue;
+            };
             if let OriginFile::Layer {
                 layer: of,
                 diff_id,
@@ -773,14 +753,9 @@ impl Store {
 
     /// The image the registry manifest or index `digest` became, if it is still here.
     pub fn get_image_origin(&self, digest: &Digest) -> Result<Option<Digest>> {
-        let path = self.shelf("origin", digest, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        let Some(read) = read_filed::<OriginFile>(&self.shelf("origin", digest, "json"))? else {
+            return Ok(None);
         };
-        let read: OriginFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
         match read {
             OriginFile::Image { image, .. } => Ok(self
                 .shelf("image", &image, "json")
@@ -804,10 +779,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: OriginFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<OriginFile>(&path)? else {
+                continue;
+            };
             if let OriginFile::Image {
                 image: of,
                 manifest,
@@ -895,6 +869,19 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
         return Err(e);
     }
     Ok(part)
+}
+
+/// What is filed at `path`, or `None` when nothing is: a removal is its file removed, and
+/// a listing may name a file a removal takes before it is read.
+fn read_filed<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))
 }
 
 #[cfg(test)]
@@ -1047,6 +1034,51 @@ mod tests {
         assert_eq!(tags.len(), 3, "{tags:?}");
         assert_eq!(store.get_tag(&reference("alpine:3.21")).unwrap(), Some(b));
         assert_eq!(store.get_tag(&reference("alpine:Latest")).unwrap(), Some(a));
+    }
+
+    /// A file a directory's listing names but a removal took before it is read: a dangling
+    /// link reads the same way.
+    #[cfg(unix)]
+    fn gone(dir: &Path) {
+        let gone = dir.join("gone.json");
+        std::os::unix::fs::symlink(gone.with_extension("removed"), &gone).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tag_removed_while_listing_is_left_out() {
+        let scratch = Scratch::new("listing");
+        let store = &scratch.0;
+        let image = store.insert_image(&config("a"), &[]).unwrap();
+        store.insert_tag(&reference("kept:latest"), &image).unwrap();
+        gone(&store.root().join("tag"));
+
+        let tags = store.tags().unwrap();
+        assert_eq!(tags.len(), 1, "{tags:?}");
+        assert_eq!(tags[0].0.to_string(), "docker.io/library/kept:latest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_origin_removed_while_listing_is_left_out() {
+        let scratch = Scratch::new("origin-listing");
+        let store = &scratch.0;
+        let digest = |hex: char| -> Digest {
+            format!("sha256:{}", hex.to_string().repeat(64))
+                .parse()
+                .unwrap()
+        };
+        let blob = Descriptor::new(MediaType::ImageLayerGzip, 1, digest('a'));
+        let diff_id = digest('1');
+        let layer = store.insert_layer(&tree(b"one")).unwrap();
+        store.insert_layer_origin(&blob, &diff_id, &layer).unwrap();
+        gone(&store.root().join("origin").join("sha256"));
+
+        assert_eq!(
+            store.layer_origins_of(&layer).unwrap(),
+            vec![(blob, diff_id)]
+        );
+        assert_eq!(store.image_origins_of(&layer).unwrap(), vec![]);
     }
 
     #[test]

@@ -1,0 +1,94 @@
+# A published release's npm packages and wheels, to npm and PyPI: the files `release` attached,
+# checked against its SHA256SUMS, and nothing built again. The release goes public first, so
+# a client installed from a registry always finds its server.
+#
+# One job per registry, so one that fails leaves the other published and is rerun alone. Each
+# skips what its registry already holds at this version, which makes a rerun safe. A dispatch
+# names the tag, for a release whose publishing failed.
+#
+# A release published with GITHUB_TOKEN runs no workflow, so a person publishes it.
+#
+# Secrets: `NPM_TOKEN` (may publish `@brekkylab/virtx` and `@brekkylab/virtx-*`) and
+# `PYPI_TOKEN` (for `virtx`).
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The published release's tag (vX.Y.Z)
+        required: true
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  npm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: The release's npm packages
+        run: |
+          gh release download "$TAG" --dir dist --pattern '*.tgz' --pattern SHA256SUMS
+          cd dist && sha256sum --check --ignore-missing SHA256SUMS
+
+      # Every platform package before `@brekkylab/virtx`, so each optional dependency it names
+      # is there to resolve by the time anyone can install it. A pre-release goes under `next`.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version=${TAG#v}
+          root="dist/brekkylab-virtx-$version.tgz"
+          [ -f "$root" ] || { echo "::error::$root is not among the release's packages"; exit 1; }
+          tag=latest; case "$version" in *-*) tag=next ;; esac
+          publish() {
+            name=$(tar -xzOf "$1" package/package.json | jq -r .name)
+            if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+              echo "$name@$version is on npm already"; return
+            fi
+            npm publish "$1" --access public --tag "$tag"
+            echo "published $name@$version"
+          }
+          for tgz in dist/*.tgz; do
+            [ "$tgz" = "$root" ] || publish "$tgz"
+          done
+          publish "$root"
+
+  pypi:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: The release's wheels
+        run: |
+          gh release download "$TAG" --dir dist --pattern '*.whl' --pattern SHA256SUMS
+          cd dist && sha256sum --check --ignore-missing SHA256SUMS
+
+      - name: Publish
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          for whl in dist/*.whl; do
+            case "$(basename "$whl")" in
+              "virtx-${TAG#v}-"*) ;;
+              *) echo "::error::$whl is not a wheel of virtx ${TAG#v}"; exit 1 ;;
+            esac
+          done
+          pipx run twine upload --non-interactive --skip-existing dist/*.whl

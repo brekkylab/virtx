@@ -188,9 +188,10 @@ fn a_snapshot_is_created_got_and_removed_and_refused_while_a_sandbox_holds_it() 
         (name.as_str(), false),
         "{created:?}"
     );
-    created.write_file("a.txt", "kept", None).wait().unwrap();
     let got = client.get_snapshot(&name).wait().unwrap();
     assert_eq!(got.info(), created.info());
+    // After the comparison: a write grows the size, what the snapshot takes on disk.
+    created.write_file("a.txt", "kept", None).wait().unwrap();
     assert_eq!(got.read_text("a.txt").wait().unwrap(), "kept");
 
     common::alpine(&client);

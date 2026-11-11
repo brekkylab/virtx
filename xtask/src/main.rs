@@ -424,6 +424,19 @@ fn check(client_only: bool) -> anyhow::Result<()> {
     clippy.extend(&client);
     clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
     cargo_in_root(&clippy, "clippy of the client")?;
+    cargo_in_root(
+        &[
+            "clippy",
+            "-p",
+            "virtx",
+            "--all-targets",
+            "--no-default-features",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        "clippy of virtx over an opened library",
+    )?;
     cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
 
     if client_only {
@@ -1008,9 +1021,17 @@ fn serve_fixture() -> anyhow::Result<()> {
 }
 
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
-/// cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
+/// cargo, over the library embedded and then opened, virtx-py's with pytest, and virtx-node's
+/// with Node's own runner.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
-    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
+    (
+        "virtx-rs",
+        ".",
+        &[
+            &["cargo", "test", "-p", "virtx"],
+            &["cargo", "test", "-p", "virtx", "--no-default-features"],
+        ],
+    ),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (
         "virtx-node",

@@ -277,7 +277,7 @@ let client = Client::connect(
 
 #### GPU（任意）
 
-GPUを使うサンドボックスの場合だけ必要です。ホストにはVulkanローダーを、イメージにはゲスト側のVulkanを用意してください。詳しくは[GPUを使う](docs/content/guides/using-gpus.mdx)を参照してください。
+GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](docs/content/guides/using-gpus.mdx)を参照してください。
 
 ## 仕組み
 

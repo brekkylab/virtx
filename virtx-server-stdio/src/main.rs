@@ -382,6 +382,17 @@ mod tests {
             args.volumes = volumes;
             assert_eq!(refused(args).await, 400);
         }
+        for name in ["nope", "skills", "../virtx-stdio"] {
+            assert_eq!(refused(here().abin(name)).await, 400, "{name}");
+        }
+        match server
+            .client
+            .create_sandbox(&here().abin("index").abin("index"))
+            .await
+        {
+            Err(Error::Status(400, body)) => assert!(body.contains("given twice"), "{body}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);
         let exec = async |cmd: &[&str]| {

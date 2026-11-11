@@ -277,7 +277,7 @@ let client = Client::connect(
 
 #### GPU（可选）
 
-只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器，镜像里要带上客户机这一侧的 Vulkan 组件。详见[使用 GPU](docs/content/guides/using-gpus.mdx)。
+只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](docs/content/guides/using-gpus.mdx)。
 
 ## 工作原理
 

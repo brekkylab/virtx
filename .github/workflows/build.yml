@@ -2,7 +2,7 @@
 # client's packages, for every platform. `ci` and `release` call it, and take what it built
 # from the cache, as `dist/release/` under `bundle-<run id>`:
 #
-#   virtx-stdio-<os>-<arch>.tar.gz   the server, the guest kernel and abin
+#   virtx-stdio-<os>-<arch>.tar.gz   the server, the guest kernel, abin and alib
 #   brekkylab-virtx-*.tgz            the npm packages
 #   virtx-*.whl                      the wheels
 #   SHA256SUMS                       over all of them
@@ -21,9 +21,9 @@
 #
 # The guest kernel is built in a Linux container (xtask/scripts/build-libkrunfw.sh), which
 # neither macOS runners (no Docker) nor Windows runners (Windows containers) can run, so the
-# two `guest-parts` jobs build every platform's kernel. abin goes the same way: it is the
-# guest's, so it depends on the architecture only, and its C is cross-compiled by a shell
-# script Windows cannot run.
+# two `guest-parts` jobs build every platform's kernel. abin and alib go the same way: they are
+# the guest's, so they depend on the architecture only, and abin's C is cross-compiled by a
+# shell script Windows cannot run.
 #
 # # The glibc floor
 #
@@ -76,7 +76,7 @@ jobs:
           echo "virtx $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # The guest kernel for every platform of the architecture, and abin.
+  # The guest kernel for every platform of the architecture, abin and alib.
   guest-parts:
     name: guest parts (${{ matrix.arch }})
     strategy:
@@ -126,18 +126,43 @@ jobs:
         with:
           key: abin-${{ matrix.arch }}
 
-      - name: abin
+      # alib is built in virtx machines, which need /dev/kvm: the runner has it, but only for
+      # root and the kvm group until a udev rule opens it.
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      # Each alib part as last built, which `build alib` builds again only where its files
+      # changed, and the sources it fetched.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            build/alib/parts
+            build/alib/sources
+          key: alib-${{ matrix.arch }}-${{ hashFiles('virtx-alibs/**') }}
+          restore-keys: alib-${{ matrix.arch }}-
+
+      # alib's machines run on a virtx-stdio `build alib` builds here, without the GPU: one
+      # downloaded would be of the version being released, before it is. libclang-dev for
+      # libkrun's bindgen.
+      - name: abin and alib
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm
-          cargo xtask build abin
-          ls -la target/release/abin
+          sudo apt-get install -y -qq clang lld llvm libclang-dev
+          cargo xtask build abin alib
+          ls -la target/release/abin build/alib
 
-      - name: Hand the kernel and abin on
+      # alib as `build/alib/`, where `build alib` puts it and `build server-stdio` and `archive`
+      # take it from, as they take the kernel from `build/krunfw/`.
+      - name: Hand the kernel, abin and alib on
         run: |
           mkdir -p handoff/kernel
           cp -v build/krunfw/* handoff/kernel/
           cp -R target/release/abin handoff/abin
+          cp -R build/alib handoff/alib
 
       - uses: actions/cache/save@v6
         with:
@@ -145,7 +170,7 @@ jobs:
           key: guest-${{ matrix.arch }}-${{ github.run_id }}
           enableCrossOsArchive: true
 
-  # `virtx-stdio`, archived with the kernel and abin.
+  # `virtx-stdio`, archived with the kernel, abin and alib.
   server:
     name: server (${{ matrix.release }})
     needs: guest-parts
@@ -240,7 +265,7 @@ jobs:
           fail-on-cache-miss: true
 
       # macOS links the kernel.c the Linux job built; the others take the library as it is.
-      - name: Put the kernel and abin in place
+      - name: Put the kernel, abin and alib in place
         run: |
           mkdir -p build/krunfw target/release
           case "${{ matrix.release }}" in
@@ -249,7 +274,8 @@ jobs:
             windows-*) cp -v handoff/kernel/libkrunfw.dll build/krunfw/ ;;
           esac
           cp -R handoff/abin target/release/
-          ls -la build/krunfw target/release/abin
+          cp -R handoff/alib build/
+          ls -la build/krunfw target/release/abin build/alib
 
       - name: Build
         run: cargo xtask build server-stdio --locked

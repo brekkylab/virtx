@@ -197,8 +197,8 @@ the guest runs Mesa's venus driver, virglrenderer serves it on the host, and
 MoltenVK turns that into Metal.
 
 A sandbox asks for one with `gpu`, and `gpu_memory_mib` for how much the guest's GPU may hold
-(libkrun's 8 GiB otherwise). The image carries the guest half
-(`apk add mesa-vulkan-virtio vulkan-loader`); one without it boots and finds no device.
+(libkrun's 8 GiB otherwise). The guest half, the loader and venus, comes from `/alib` (see
+[`/abin` and `/alib`](#abin-and-alib)), so the image needs neither.
 
 **The servers do not ignore it.** `cargo xtask build` always builds them with the feature, and
 a server built without it refuses a sandbox that asks for a GPU rather than running it on the
@@ -241,8 +241,8 @@ when built with a WSI platform:
 A sync fd is a Linux sync file, which MoltenVK cannot provide, and Alpine's
 `mesa-vulkan-virtio` is built with WSI (it pulls in libx11 and wayland). Mesa
 notes the coupling is for "code simplicity", so a headless Mesa build
-(`-Dplatforms= -Dvulkan-drivers=virtio`) would take the compile-time `true`
-branch and lift the cap to 1.3. Nothing here needs it so far.
+(`-Dplatforms= -Dvulkan-drivers=virtio`) takes the compile-time `true`
+branch instead. `/alib`'s venus is built that way, and reports the same 1.4.343.
 
 ### bfloat16 and cooperative matrices
 
@@ -871,8 +871,7 @@ Built on a Windows host at `8167744` with no further fixes, and carried to
 `e0a1caf` unchanged: `xtask/scripts/build-deps.ps1` compiles and installs it, a `--features gpu` build
 links against it, and the guest enumerates the device — `/dev/dri/card0`,
 `renderD128`, `card0-Virtual-1`. What that does not say is that anything has
-been *rendered* through it there; the image has to carry the guest half for
-that (`apk add mesa-vulkan-virtio vulkan-loader`). Its non-Windows half still
+been *rendered* through it there, with the guest half from `/alib`. Its non-Windows half still
 builds on macOS in both `render-server-mode=none` and `thread`.
 
 32 files. Most of it is the POSIX surface venus and vrend assume and Windows
@@ -943,40 +942,43 @@ numbers. Nothing here issues a DRM ioctl — the header is pulled in for the
 capset enums in `virtgpu_drm.h` — so the branch supplies the typedefs and lets
 the `DRM_IOCTL_*` definitions evaluate to zero.
 
-## `/abin`
+## `/abin` and `/alib`
 
-`/abin` is a directory of virtx's own executables for the guest: today `index` and `mem` --
-the programs in [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+`/abin` is a directory of virtx's own executables for the guest, from [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
+`/alib` holds what is not a program to run by name: the X server `display` starts, at `/alib/Xvfb` with its `xkbcomp` and `xkb/` beside it, and the Vulkan loader and venus driver a GPU sandbox uses, built twice, at `/alib/musl/` and `/alib/glibc/`.
+Each part is built from source by a `build.sh` under [`virtx-alibs/`](../virtx-alibs), in a virtx machine of the image its `images` names, into `build/alib/<arch>/`, where a server about to boot, `install` and `archive` take it from, as they take the guest kernel from `build/krunfw/`.
 
-**No machine is given it at present.** `cargo xtask build abin` builds it, `cargo xtask install`
-installs it beside the servers, and the `build` workflow puts it in a release, but neither server
-shares it into a machine: that went with the move to a machine per sandbox, and is not back.
+When a machine with a GPU starts, the agent reads the image's C library, by the dynamic linker `/bin/sh` names, and adds `/alib/musl` or `/alib/glibc` after the image's `LD_LIBRARY_PATH`.
+Without `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that directory's venus manifest in both, so the image needs neither a loader nor a driver of its own.
+Without a GPU it adds neither: there is no driver to give, and the loader would only shadow one the image brings.
+
+A sandbox gets the programs it is made with, by its `abins`, from the `abin/` directory beside the server's binary, and every machine gets the `alib/` directory there.
+The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under the snapshots' `sandbox/`, deleted with the sandbox or by the next server's sweep.
+That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
+A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
+On Windows each file directly in them, the programs run by path, is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report; what is in their directories is read, not run, and left as it is.
+`cargo xtask build abin` builds `abin/` beside the server binary, as the fixture `cargo xtask test` serves does, and `alib/` is placed there when `build alib` has run.
 
 ```sh
 cargo xtask build abin                     # -> target/release/abin, beside the server;
                                            #    fetches the musl sysroot the first time
-cargo xtask install --prefix <dir>         # -> <dir>/bin/abin, with the rest
+cargo xtask build alib                     # -> build/alib/<arch>/, in virtx machines: on the
+                                           #    server in the same profile, else a downloaded one
+cargo xtask install --prefix <dir>         # -> <dir>/bin/abin and alib, with the rest
 ```
 
-`docread` is in that workspace and not in `/abin`. It links pdfium into every build, pdfium is
-C++, and the musl sysroot this repository fetches is libc alone, so there is no toolchain here
-that can cross-compile it for the guest. What lifts it is a `libpdfium.a` built for
-`<arch>-unknown-linux-musl` somewhere that has that toolchain, dropped at
-`~/.cache/virtx/pdfium/chromium-7881/<triple>/libpdfium.a` where `docread/build.rs` looks,
-and `docread` added to `ABINS` in [`xtask`](../xtask/src/main.rs).
-
-What each program is travels with it: `virtx-abins/{program}/SKILLS.md` is installed at
-`abin/skills/{program}/SKILLS.md`, so whatever gets the programs gets the reading of them too.
+What each program is travels with it: `virtx-abins/{program}/SKILL.md` is installed at
+`abin/skills/{program}/SKILL.md`, so a sandbox that gets a program gets the reading of it too.
 Under `skills/` rather than beside the executables, because the top of `/abin` is what would go
 on `PATH` -- a file there that is not a program is something a shell would offer to run. A
-program whose crate carries no `SKILLS.md` has none installed.
+program whose crate carries no `SKILL.md` has none installed.
 
 What is in one is the program's own `--help`, copied out: the front matter's `name` and
 `description` are the usage line and the sentence clap opens with, and the body is that output,
 subcommand by subcommand where there are subcommands. The content is settled on purpose -- a
 program that answers `--help` has already written down what it is, and a second description
 kept beside it is one that drifts from the parser it describes -- but **the copying is by hand
-today**. Nothing checks that a `SKILLS.md` still says what its binary says, so a clap string
+today**. Nothing checks that a `SKILL.md` still says what its binary says, so a clap string
 that moves is a file to regenerate.
 
 ## Where a host keeps things
@@ -988,7 +990,7 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
 ```text
 <root>/
   bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
-                        beside them, libvirtx_core, abin/
+                        beside them, libvirtx_core, abin/, alib/
   images/               the image store, shared by both servers
   snapshot/             the stdio server's snapshots, one ext4 each
   volume/               the stdio server's volumes
@@ -1010,8 +1012,9 @@ virtx-server-tcp/          the same server over HTTP, to the users and projects 
 virtx-uvm-guest/            the agent in every machine, which runs the commands it is sent; its
                             own workspace, built for musl by this crate's build script and
                             embedded in it
-virtx-abins/                the programs for /abin -- index and mem, with docread beside them
-                            -- and a SKILLS.md each; its own workspace, built for musl
+virtx-abins/                the programs for /abin and a SKILL.md each; its own workspace,
+                            built for musl
+virtx-alibs/                what /alib holds, a build.sh per part, run in a virtx machine
 3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch
 3rdparty/MoltenVK/          fork of MoltenVK, with SPIRV-Cross; macOS builds only
 3rdparty/libepoxy/          fork of libepoxy at 1.5.10, unchanged; Windows builds only
@@ -1019,8 +1022,8 @@ xtask/                      every build, check and release step as `cargo xtask`
                             xtask/scripts/ has what it runs -- the guest kernel's and the GPU
                             libraries' builds, the musl sysroot fetch, and the musl cc/ar that
                             virtx-abins/ cross-compiles with
-build/                      untracked: the kernel, the GPU libraries, the musl sysroot and the
-                            meson venv, all reproducible from the scripts
+build/                      untracked: the kernel, the GPU libraries, alib's parts, the musl
+                            sysroot and the meson venv, all reproducible from the scripts
 ```
 
 `cargo xtask build` is what puts the server and the kernel in one directory: a server finds

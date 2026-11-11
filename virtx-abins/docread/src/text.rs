@@ -318,11 +318,11 @@ fn format_of(head: &[u8]) -> Option<&'static str> {
         (b"\x89PNG", "a PNG"),
         (b"\xff\xd8\xff", "a JPEG"),
         (b"GIF8", "a GIF"),
-        // A `mem` or `index` store. Those programs are how one is asked anything, and a
-        // caller who got here was reaching for what they answer.
+        // An `index` store. That program is how one is asked anything, and a caller who got
+        // here was reaching for what it answers.
         (
             b"SQLite format 3\0",
-            "a SQLite database — `mem` and `index` are what answer about those",
+            "a SQLite database — `index` is what answers about those",
         ),
     ];
     KNOWN
@@ -446,8 +446,8 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::InvalidData);
         assert!(e.to_string().contains("this is a PDF"), "{e}");
 
-        // A store is the case worth naming most: the caller was reaching for `mem` or
-        // `index`, and the refusal says so.
+        // A store is the case worth naming most: the caller was reaching for `index`, and the
+        // refusal says so.
         let e = read(
             &file(&dir, "notes.db", b"SQLite format 3\0the rest is pages"),
             1,

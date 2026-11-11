@@ -1,9 +1,13 @@
 select item.path,
        item.title,
-       -bm25(item_fts),
-       snippet(item_fts, 1, '', '', '…', 32)
-from item_fts
-join item on item.rowid = item_fts.rowid
-where item_fts match ?1
-order by bm25(item_fts), item.rowid
+       chunk.start_line,
+       chunk.end_line,
+       -bm25(chunk_fts),
+       snippet(chunk_fts, 1, '', '', '…', 32),
+       chunk_fts.text
+from chunk_fts
+join chunk on chunk.rowid = chunk_fts.rowid
+join item on item.rowid = chunk.item_id
+where chunk_fts match ?1
+order by bm25(chunk_fts), chunk.rowid
 limit ?2;

@@ -599,8 +599,8 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // Makes a sandbox, given
 // `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
 // "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-// `{"type": "tag", "tag": "name:tag"}` or
+// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
+// the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
 // sandbox as `virtx_client_list_sandbox` answers each, and
 // `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.

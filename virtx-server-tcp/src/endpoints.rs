@@ -31,8 +31,8 @@ use virtx_core::{
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
-    RegistryClient, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -45,10 +45,33 @@ pub const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// How long an image job that has ended is kept, for its end to be read, before it is removed.
 const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 
+/// What answers the requests to `/images/oci/v2/`, as an OCI registry does. A
+/// [`RegistryServer`] is one, of the images it holds; a server that keeps images elsewhere
+/// too answers around one.
+pub trait Images: Send + Sync {
+    fn handle(
+        &self,
+        request: axum::extract::Request,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send + '_>>;
+}
+
+impl Images for RegistryServer {
+    fn handle(
+        &self,
+        request: axum::extract::Request,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let answered = RegistryServer::handle(self, request).await;
+            answered.map(Body::new).into_response()
+        })
+    }
+}
+
 /// What one project's requests reach: the stores, and the sandboxes and jobs its members made
 /// from them, which are theirs together.
 pub struct Home {
     images: ImageStore,
+    registry: Arc<dyn Images>,
     pub snapshots: SnapshotStore,
     volumes: VolumeStore,
     /// The files of the snapshots and volumes, over WebDAV.
@@ -63,24 +86,34 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, shared with every other project, and the snapshots and volumes
+    /// The images in `images`, which `registry` answers for, and the snapshots and volumes
     /// under `root`.
-    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
+    pub fn new(images: ImageStore, registry: Arc<dyn Images>, root: &Path) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         Sandbox::sweep(&snapshots);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
+            registry,
             files: Files::new(snapshots.clone(), volumes.clone()),
             snapshots,
             volumes,
             vm: vec![
                 std::env::current_exe()?.into(),
-                crate::MACHINE_SUBCOMMAND.into(),
+                crate::serve::MACHINE_SUBCOMMAND.into(),
             ],
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
         })
+    }
+
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// What answers this home's `/images/oci/v2/`.
+    pub fn registry(&self) -> &Arc<dyn Images> {
+        &self.registry
     }
 
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is

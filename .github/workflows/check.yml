@@ -44,6 +44,9 @@ jobs:
           for f in virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
+          # The `virtx-core` a published `virtx` depends on is the one released with it.
+          dep=$(sed -n 's/^virtx-core = {.*version = "\([^"]*\)".*/\1/p' virtx-rs/Cargo.toml)
+          [ "$dep" = "$version" ] || wrong="$wrong virtx-rs/Cargo.toml:virtx-core=$dep"
           [ -z "$wrong" ] || { echo "::error::virtx-core/Cargo.toml says $version, but:$wrong"; exit 1; }
           # Only these pre-releases have a PEP 440 form `publish` matches the wheels by.
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || {

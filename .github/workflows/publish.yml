@@ -1,15 +1,16 @@
-# A published release's npm packages and wheels, to npm and PyPI: the files `release` attached,
-# checked against its SHA256SUMS, and nothing built again. The release goes public first, so
-# a client installed from a registry always finds its server.
+# A published release, to the registries: its npm packages and wheels, the files `release`
+# attached and checked against its SHA256SUMS, to npm and PyPI, nothing built again; and the
+# crates, from the tag's source, to crates.io. The release goes public first, so a client
+# installed from a registry always finds its server.
 #
-# One job per registry, so one that fails leaves the other published and is rerun alone. Each
+# One job per registry, so one that fails leaves the others published and is rerun alone. Each
 # skips what its registry already holds at this version, which makes a rerun safe. A dispatch
 # names the tag, for a release whose publishing failed.
 #
 # A release published with GITHUB_TOKEN runs no workflow, so a person publishes it.
 #
-# Secrets: `NPM_TOKEN` (may publish `@brekkylab/virtx` and `@brekkylab/virtx-*`) and
-# `PYPI_TOKEN` (for `virtx`).
+# Secrets: `NPM_TOKEN` (may publish `@brekkylab/virtx` and `@brekkylab/virtx-*`), `PYPI_TOKEN`
+# (for `virtx`) and `CARGO_REGISTRY_TOKEN` (may publish `virtx-core` and `virtx`).
 name: publish
 
 on:
@@ -92,3 +93,33 @@ jobs:
             esac
           done
           pipx run twine upload --non-interactive --skip-existing dist/*.whl
+
+  crates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      # `virtx-core` first: `virtx` depends on it by version, and `cargo publish` waits for what
+      # it published to be in the index before returning.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=${TAG#v}
+          for crate in virtx-core virtx; do
+            if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/$crate/$version"; then
+              echo "$crate $version is on crates.io already"; continue
+            fi
+            cargo publish -p "$crate"
+            echo "published $crate $version"
+          done

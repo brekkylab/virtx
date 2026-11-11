@@ -69,6 +69,9 @@ jobs:
           for f in virtx-core/Cargo.toml virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
+          # The `virtx-core` a published `virtx` depends on is the one released with it.
+          dep=$(sed -n 's/^virtx-core = {.*version = "\([^"]*\)".*/\1/p' virtx-rs/Cargo.toml)
+          [ "$dep" = "$version" ] || wrong="$wrong virtx-rs/Cargo.toml:virtx-core=$dep"
           [ -z "$wrong" ] || { echo "::error::virtx-node/package.json says $version, but:$wrong"; exit 1; }
           if [ "$REF_TYPE" = tag ] && [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG, but the manifests say $version"; exit 1

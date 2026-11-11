@@ -2,8 +2,9 @@
 name = "virtx-core"
 version = "0.1.2"
 edition = "2024"
+description = "The virtx client: the types every request takes and answers, the wire, and the C ABI of libvirtx_core."
 license = "Apache-2.0"
-publish = false
+repository = "https://github.com/brekkylab/virtx"
 
 [lib]
 # `rlib` for Rust (this crate's tests, and any crate that depends on it); `cdylib` and

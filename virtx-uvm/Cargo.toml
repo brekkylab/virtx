@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [features]
 # Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus support --
-# `cargo xtask build host` builds it first.
+# `cargo xtask build server-stdio` or `server-tcp` builds it first.
 gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]

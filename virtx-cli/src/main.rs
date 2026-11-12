@@ -294,145 +294,65 @@ fn open(url: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use axum::extract::{Form, State};
-    use axum::http::StatusCode;
-    use axum::routing::{get, post};
-    use base64::Engine as _;
-    use serde_json::Value;
+    //! Against the fixture: its server, and the provider that names to sign in to, which
+    //! approves a device at the second ask and replaces the refresh token with each refresh.
 
     use super::*;
 
-    /// What the provider has seen and issued.
-    #[derive(Default)]
-    struct Seen {
-        /// How many times the device's tokens were asked for.
-        asked: usize,
-        /// The refresh tokens issued: the last is the session's.
-        refreshes: usize,
-        revoked: Vec<String>,
-    }
-
-    type Form_ = Form<std::collections::HashMap<String, String>>;
-
-    /// An ID token for `alice@example.com`, running out `lasts` seconds from now, unsigned.
-    fn id_token(lasts: u64) -> String {
-        let encode = |value: Value| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+    /// The fixture's server, and the provider it says to sign in to.
+    fn fixture() -> (String, SignIn) {
+        let url = std::env::var("VIRTX_TEST_URL")
+            .expect("VIRTX_TEST_URL is not set: run these as `cargo xtask test -p virtx-cli`");
+        let (issuer, client_id) = provider::advertised(&url).unwrap().unwrap();
+        let sign_in = SignIn {
+            issuer,
+            client_id,
+            client_secret: None,
         };
-        let claims = json!({ "email": "alice@example.com", "exp": now() + lasts });
-        format!(
-            "{}.{}.sig",
-            encode(json!({ "alg": "none" })),
-            encode(claims)
-        )
-    }
-
-    fn refused(error: &str) -> (StatusCode, String) {
-        (
-            StatusCode::BAD_REQUEST,
-            json!({ "error": error }).to_string(),
-        )
-    }
-
-    /// A provider of one client, `virtx`: its device flow approved at the second ask, each
-    /// refresh replacing the refresh token, and the one before it no session's.
-    fn provider() -> (String, Arc<Mutex<Seen>>) {
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let issuer = format!("http://{}", listener.local_addr().unwrap());
-        let discovery = json!({
-            "issuer": issuer,
-            "token_endpoint": format!("{issuer}/token"),
-            "device_authorization_endpoint": format!("{issuer}/device"),
-            "revocation_endpoint": format!("{issuer}/revoke"),
-        });
-        let device = json!({
-            "device_code": "d-1",
-            "user_code": "ABCD",
-            "verification_uri": format!("{issuer}/approve"),
-            "expires_in": 60,
-            "interval": 1,
-        });
-        let token = |State(seen): State<Arc<Mutex<Seen>>>, Form(form): Form_| async move {
-            let mut seen = seen.lock().unwrap();
-            if form["client_id"] != "virtx" {
-                return refused("invalid_client");
-            }
-            let issued = |seen: &mut Seen, lasts| {
-                seen.refreshes += 1;
-                let refresh = format!("r-{}", seen.refreshes);
-                let tokens = json!({ "id_token": id_token(lasts), "refresh_token": refresh });
-                (StatusCode::OK, tokens.to_string())
-            };
-            match form["grant_type"].as_str() {
-                "refresh_token" if form["refresh_token"] == format!("r-{}", seen.refreshes) => {
-                    issued(&mut seen, 3600)
-                }
-                "refresh_token" => refused("invalid_grant"),
-                _ if form["device_code"] != "d-1" => refused("expired_token"),
-                _ => {
-                    seen.asked += 1;
-                    match seen.asked {
-                        1 => refused("authorization_pending"),
-                        // Running out already: the next `virtx token` refreshes it.
-                        _ => issued(&mut seen, 60),
-                    }
-                }
-            }
-        };
-        let revoke = |State(seen): State<Arc<Mutex<Seen>>>, Form(form): Form_| async move {
-            seen.lock().unwrap().revoked.push(form["token"].clone());
-        };
-        let router = axum::Router::new()
-            .route(
-                "/.well-known/openid-configuration",
-                get(move || async move { discovery.to_string() }),
-            )
-            .route("/device", post(move || async move { device.to_string() }))
-            .route("/token", post(token))
-            .route("/revoke", post(revoke))
-            .with_state(Arc::clone(&seen));
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            runtime.block_on(async {
-                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                axum::serve(listener, router).await.unwrap();
-            });
-        });
-        (issuer, seen)
+        (url, sign_in)
     }
 
     #[test]
     fn signing_in_keeps_a_session_its_tokens_are_refreshed_from_until_signed_out() {
-        let (issuer, seen) = provider();
+        let (url, sign_in) = fixture();
         let dir = std::env::temp_dir().join(format!("virtx-cli-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let sign_in = SignIn {
-            issuer,
-            client_id: "virtx".into(),
-            client_secret: None,
-        };
 
         login(&dir, &sign_in, "openid", false, |_, _| {}).unwrap();
-        assert_eq!(seen.lock().unwrap().asked, 2);
-        assert_eq!(session::signed_in(&dir).unwrap().client_id, "virtx");
+        assert_eq!(session::signed_in(&dir).unwrap().issuer, sign_in.issuer);
 
         // The one signing in issued has a minute left: refreshed, and the one after it kept.
         let first = token(&dir, &sign_in, false, false).unwrap();
-        assert_eq!(who(&first.token), "alice@example.com");
-        assert_eq!(seen.lock().unwrap().refreshes, 2);
+        assert_eq!(who(&first.token), "test@example.com");
+        assert!(first.expires_at - now() > FRESH_FOR);
         let again = token(&dir, &sign_in, false, false).unwrap();
         assert_eq!(again.token, first.token);
-        assert_eq!(seen.lock().unwrap().refreshes, 2);
+        // The server takes it.
+        let listed = reqwest::blocking::Client::new()
+            .get(format!("{url}volumes/"))
+            .bearer_auth(&first.token)
+            .header(
+                "virtx-project",
+                std::env::var("VIRTX_TEST_PROJECT").unwrap(),
+            )
+            .send()
+            .unwrap();
+        assert_eq!(listed.status(), 200);
         // Refused by a server, it is refreshed whatever it has left.
-        token(&dir, &sign_in, true, false).unwrap();
-        assert_eq!(seen.lock().unwrap().refreshes, 3);
+        let renewed = token(&dir, &sign_in, true, false).unwrap();
+        assert_ne!(renewed.token, first.token);
 
+        // Signing out ends the session at the provider too.
+        let session = Session::new(&dir, &sign_in.issuer, false);
+        let refresh = session.kept().unwrap().unwrap();
         logout(&dir, &sign_in, false).unwrap();
-        assert_eq!(seen.lock().unwrap().revoked, ["r-3"]);
+        assert!(
+            discover(&sign_in)
+                .unwrap()
+                .refresh(&refresh)
+                .unwrap()
+                .is_none()
+        );
         let ended = token(&dir, &sign_in, false, false).err().unwrap();
         assert!(ended.to_string().contains("not signed in"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -440,15 +360,11 @@ mod tests {
 
     #[test]
     fn a_session_the_provider_has_ended_says_to_sign_in_again() {
-        let (issuer, _seen) = provider();
+        let (_, sign_in) = fixture();
         let dir = std::env::temp_dir().join(format!("virtx-cli-ended-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let sign_in = SignIn {
-            issuer: issuer.clone(),
-            client_id: "virtx".into(),
-            client_secret: None,
-        };
-        Session::new(&dir, &issuer, false).keep("r-stale").unwrap();
+        let session = Session::new(&dir, &sign_in.issuer, false);
+        session.keep("r-stale").unwrap();
         let ended = token(&dir, &sign_in, false, false).err().unwrap();
         assert!(ended.to_string().contains("the session has ended"));
         let _ = std::fs::remove_dir_all(&dir);

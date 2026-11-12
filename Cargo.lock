@@ -291,7 +291,6 @@ dependencies = [
  "axum-core",
  "base64 0.22.1",
  "bytes",
- "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -307,7 +306,6 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sha1",
  "sync_wrapper",
  "tokio",
@@ -4402,14 +4400,12 @@ name = "virtx-cli"
 version = "0.1.2"
 dependencies = [
  "anyhow",
- "axum",
  "base64 0.22.1",
  "clap",
  "keyring",
  "reqwest",
  "serde",
  "serde_json",
- "tokio",
  "virtx-core",
 ]
 

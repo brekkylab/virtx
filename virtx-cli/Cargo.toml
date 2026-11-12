@@ -25,8 +25,3 @@ base64 = "0.22"
 # there is none, as on a server with no desktop.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 anyhow = "1"
-
-[dev-dependencies]
-# A provider to sign in to, served in the test.
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "tokio"] }
-tokio = { version = "1", features = ["net", "rt-multi-thread"] }

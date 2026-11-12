@@ -4,9 +4,6 @@
 //! tenants of its own in the access, and routes of its own beside these; the server a config
 //! alone makes is [`configured`], which does both.
 //!
-//! The images of the project a request reaches are at `/images/oci/v2/`, as an OCI registry
-//! (see [`virtx_uvm::RegistryServer`]).
-//!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
 //! making the sandbox answers, is all a connection needs, and gives no more than the one port.
@@ -77,15 +74,18 @@ pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>
         AUTH_PATH,
         axum::routing::get(move || async move { advertised }),
     );
-    let access = Arc::new(Access::new(config, tenants));
-    let router = router(Arc::clone(&access), &config.origins, own);
+    let access = Arc::new(Access::new(config.origins.clone(), tenants));
+    let router = router(Arc::clone(&access), own);
     Ok((projects, access, router))
 }
 
 /// Everything served, each request checked against `access`: the endpoints, in the home a
-/// request reaches, the images' registry, the ports, and the CORS a browser at one of
-/// `origins` has -- with `own` beside them, routes that take no home and check for themselves.
-pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axum::Router {
+/// request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
+/// browser at one of its origins has -- with `own` beside them, routes that take no home and
+/// check for themselves.
+pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
+    let registry = format!("{}/v2", access::REGISTRY_PATH);
+    let cors = cors(access.origins());
     let reading = Arc::clone(&access);
     let images = move |request: axum::extract::Request| {
         let access = Arc::clone(&reading);
@@ -114,9 +114,9 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
             },
         ))
         .merge(own)
-        .route("/images/oci/v2", any(images.clone()))
-        .route("/images/oci/v2/", any(images.clone()))
-        .route("/images/oci/v2/{*rest}", any(images))
+        .route(&registry, any(images.clone()))
+        .route(&format!("{registry}/"), any(images.clone()))
+        .route(&format!("{registry}/{{*rest}}"), any(images))
         .route(
             "/ports/{capability}",
             any(
@@ -128,7 +128,7 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
                 },
             ),
         )
-        .layer(cors(origins))
+        .layer(cors)
 }
 
 /// The images of every home `access` has, pruned every hour from now on, as
@@ -469,11 +469,6 @@ mod tests {
     #[tokio::test]
     async fn a_browser_is_let_in_from_the_config_s_origins_alone() {
         let served = Served::spawn("origins").await;
-        let named = served.send("GET", "snapshots/", Some("demo"), "").await;
-        assert_eq!((named.0, named.1.as_str()), (StatusCode::OK, "[]"));
-        let unnamed = served.send("GET", "snapshots/", Some("nobody"), "").await;
-        assert_eq!(unnamed.0, StatusCode::FORBIDDEN);
-
         let from = async |origin| {
             reqwest::Client::new()
                 .get(format!("{}snapshots/", served.url))

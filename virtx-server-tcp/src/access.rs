@@ -53,12 +53,13 @@ pub struct Access {
 }
 
 impl Access {
-    /// Requests from where `config` lets a browser call, to `tenants`.
-    pub fn new(config: &Config, tenants: Arc<dyn Tenants>) -> Access {
-        Access {
-            origins: config.origins.clone(),
-            tenants,
-        }
+    /// Requests from the `origins` a browser may call from, to `tenants`.
+    pub fn new(origins: Vec<String>, tenants: Arc<dyn Tenants>) -> Access {
+        Access { origins, tenants }
+    }
+
+    pub fn origins(&self) -> &[String] {
+        &self.origins
     }
 
     /// Every home there is.
@@ -84,17 +85,16 @@ impl Access {
     pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
         self.origin(headers)?;
         let named = project_named(headers)?;
-        self.tenants.home(bearer(headers).ok(), named).await
+        self.tenants.home(bearer(headers), named).await
     }
 }
 
-/// The bearer token `headers` carry: `401` without one.
-pub fn bearer(headers: &HeaderMap) -> Result<&str, StatusCode> {
+/// The bearer token `headers` carry, if any.
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 /// The project `headers` name, if any: `400` for one that is no string.
@@ -202,7 +202,8 @@ mod tests {
     /// The access the config at `path` makes, over its own projects.
     fn configured(path: &std::path::Path) -> anyhow::Result<Access> {
         let config = Config::read(path)?;
-        Ok(Access::new(&config, Arc::new(Projects::new(&config)?)))
+        let projects = Arc::new(Projects::new(&config)?);
+        Ok(Access::new(config.origins, projects))
     }
 
     fn headers(token: Option<&str>, project: Option<&str>, origin: Option<&str>) -> HeaderMap {

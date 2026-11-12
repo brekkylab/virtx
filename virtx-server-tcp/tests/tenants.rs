@@ -83,13 +83,13 @@ async fn a_server_of_its_own_tenants_and_routes_is_built_from_the_library() {
         made: Mutex::default(),
     });
     let tenants: Arc<dyn Tenants> = keys.clone();
-    let access = Arc::new(Access::new(&config, tenants));
+    let access = Arc::new(Access::new(config.origins.clone(), tenants));
     let counting = Arc::clone(&access);
     let own = axum::Router::new().route(
         "/node/homes",
         axum::routing::get(move || async move { counting.homes().len().to_string() }),
     );
-    let router = serve::router(access, &config.origins, own);
+    let router = serve::router(access, own);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, router).await });

@@ -39,8 +39,9 @@ use wire::{
 /// never interleave.
 type Out = Arc<Mutex<File>>;
 
-/// The terminal of each process on one, by its pid: what the host types into it, and resizes.
-type Terminals = Arc<Mutex<HashMap<u32, File>>>;
+/// The terminal of each process on one, by its pid: what is resized, and asked whose group has
+/// it -- and its [`Input`], what the host types into it.
+type Terminals = Arc<Mutex<HashMap<u32, (File, Input)>>>;
 
 /// The cgroup every command run here goes under -- each in one of its own within it -- its
 /// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, its memory to all
@@ -143,9 +144,65 @@ fn in_jobs(command: &mut Command) -> Option<File> {
     }
     Some(procs)
 }
-/// The stdin of each process started with one, by pid: what the host writes, written on a
-/// thread of its own, so that a process not reading it holds up nothing else; `None` closes it.
-type Stdins = Arc<Mutex<HashMap<u32, std::sync::mpsc::Sender<Option<String>>>>>;
+/// The stdin of each process started with one, by pid: its [`Input`].
+type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
+
+/// How many writes to one process's input are queued at most. The host sends the next only once
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is said
+/// written, and dropped, rather than the loop waiting.
+const INPUT_QUEUED: usize = 4;
+
+/// What one write to a process's input asks: `data`, then its stdin closed if `eof`.
+struct Typed {
+    data: String,
+    eof: bool,
+}
+
+/// A process's input -- its stdin, or its terminal -- written on a thread of its own, each write
+/// said [`Written`](CtrlResp::Written) once it is (issue #159). The loop that takes the host's
+/// requests never waits on a process's reading, and what a process has not read is never more
+/// than [`INPUT_QUEUED`] writes: the host holds the next back until the last is written.
+/// Dropped, what is queued is still written, and then its input closed.
+struct Input(std::sync::mpsc::SyncSender<Typed>);
+
+impl Input {
+    /// The input of process `id`, written to `to`.
+    fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
+        let (queued, taken) = std::sync::mpsc::sync_channel::<Typed>(INPUT_QUEUED);
+        let out = Arc::clone(out);
+        thread::spawn(move || {
+            let mut to = Some(to);
+            while let Ok(Typed { data, eof }) = taken.recv() {
+                if let Some(writer) = &mut to
+                    && !data.is_empty()
+                    && writer.write_all(data.as_bytes()).is_err()
+                {
+                    // Its reader gone: nothing more is written.
+                    to = None;
+                }
+                if eof {
+                    to = None;
+                }
+                send(&out, &CtrlResp::Written { id });
+            }
+        });
+        Input(queued)
+    }
+
+    /// `typed` queued, for process `id`: said written at once -- and dropped -- where the queue
+    /// is full or the writer is gone.
+    fn put(&self, out: &Out, id: u32, typed: Typed) {
+        if let Err(e) = self.0.try_send(typed) {
+            if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
+                eprintln!(
+                    "{}: process {id}'s input past {INPUT_QUEUED} writes: one dropped",
+                    env!("CARGO_BIN_NAME")
+                );
+            }
+            send(out, &CtrlResp::Written { id });
+        }
+    }
+}
 
 /// The most of a line one message carries: escaped as JSON, a byte is at most six, well within
 /// a frame.
@@ -197,24 +254,25 @@ fn serve() -> io::Result<()> {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             CtrlReq::ExecTty { cmd, cols, rows } => exec_tty(&out, &terminals, cmd, cols, rows),
+            // Handed to its writer, never written here: a process not reading holds up no other.
+            // Each answered `Written` -- at once, for a process with no input here.
             CtrlReq::Stdin { id, data, eof } => {
-                if let Some(terminal) = terminals.lock().unwrap().get_mut(&id) {
-                    let _ = terminal.write_all(data.as_bytes());
+                if let Some((_, input)) = terminals.lock().unwrap().get(&id) {
+                    // A terminal's is not closed: typing has no end.
+                    input.put(&out, id, Typed { data, eof: false });
                 } else {
                     let mut stdins = stdins.lock().unwrap();
-                    if let Some(writer) = stdins.get(&id) {
-                        if !data.is_empty() {
-                            let _ = writer.send(Some(data));
-                        }
-                        if eof {
-                            let _ = writer.send(None);
-                            stdins.remove(&id);
-                        }
+                    match stdins.get(&id) {
+                        Some(input) => input.put(&out, id, Typed { data, eof }),
+                        None => send(&out, &CtrlResp::Written { id }),
+                    }
+                    if eof {
+                        stdins.remove(&id);
                     }
                 }
             }
             CtrlReq::Resize { id, cols, rows } => {
-                if let Some(terminal) = terminals.lock().unwrap().get(&id) {
+                if let Some((terminal, _)) = terminals.lock().unwrap().get(&id) {
                     let size = window(cols, rows);
                     // SAFETY: a pty's descriptor, and a valid winsize.
                     unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ, &size) };
@@ -240,11 +298,15 @@ fn serve() -> io::Result<()> {
             // Its terminal's foreground group not its own -- it leads its session, so its
             // group is its pid -- is another it started: a command a shell runs.
             CtrlReq::Foreground { id } => {
-                let busy = terminals.lock().unwrap().get(&id).is_some_and(|terminal| {
-                    // SAFETY: a pty's descriptor.
-                    let group = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
-                    group > 0 && group != id as libc::pid_t
-                });
+                let busy = terminals
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .is_some_and(|(terminal, _)| {
+                        // SAFETY: a pty's descriptor.
+                        let group = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
+                        group > 0 && group != id as libc::pid_t
+                    });
                 send(&out, &CtrlResp::Foreground { id, busy });
             }
         }
@@ -419,17 +481,11 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     };
     let id = child.id();
     // Its stdin taken before its start is said, so that a write the host sends at once finds it.
-    if let Some(mut pipe) = child.stdin.take() {
-        let (writes, written) = std::sync::mpsc::channel::<Option<String>>();
-        stdins.lock().unwrap().insert(id, writes);
-        thread::spawn(move || {
-            // Until `None`, or the process gone: dropped, the pipe closes.
-            while let Ok(Some(data)) = written.recv() {
-                if pipe.write_all(data.as_bytes()).is_err() {
-                    break;
-                }
-            }
-        });
+    if let Some(pipe) = child.stdin.take() {
+        stdins
+            .lock()
+            .unwrap()
+            .insert(id, Input::start(out, id, pipe));
     }
     send(out, &CtrlResp::Started(Ok(id)));
 
@@ -456,10 +512,8 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         // wrote before it ended is said first, so its end is the last thing said of it: each
         // pipe read up to what was in it as the process ended, or to its end if sooner.
         let code = code(&mut child);
-        // Its stdin, if still open, closed: no process reads it.
-        if let Some(writer) = stdins.lock().unwrap().remove(&id) {
-            let _ = writer.send(None);
-        }
+        // Its stdin, if still open, closed once what is queued is: no process reads it.
+        drop(stdins.lock().unwrap().remove(&id));
         stdout.exited();
         stderr.exited();
         for _ in 0..2 {
@@ -648,14 +702,17 @@ fn exec_tty(out: &Out, terminals: &Terminals, cmd: Vec<String>, cols: u16, rows:
     };
     let id = child.id();
     let master = File::from(master);
-    let typed = match master.try_clone() {
-        Ok(typed) => typed,
-        Err(e) => {
+    let (resized, typed) = match (master.try_clone(), master.try_clone()) {
+        (Ok(resized), Ok(typed)) => (resized, typed),
+        (Err(e), _) | (_, Err(e)) => {
             let _ = child.kill();
             return refused(format!("a terminal for {}: {e}", cmd[0]));
         }
     };
-    terminals.lock().unwrap().insert(id, typed);
+    terminals
+        .lock()
+        .unwrap()
+        .insert(id, (resized, Input::start(out, id, typed)));
     send(out, &CtrlResp::Started(Ok(id)));
 
     let (out, terminals) = (Arc::clone(out), Arc::clone(terminals));

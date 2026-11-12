@@ -73,8 +73,9 @@ pub enum CtrlReq {
         rows: u16,
     },
     /// Write `data` to the terminal of the process `id`, as typed -- or to the stdin of one
-    /// [`Exec`](CtrlReq::Exec) started with it, closed after if `eof`. Not answered: a
-    /// process that does not read it holds up none but itself.
+    /// [`Exec`](CtrlReq::Exec) started with it, closed after if `eof`. Answered with
+    /// [`Written`](CtrlResp::Written) once it is written, each in turn: a process that does
+    /// not read it holds up none but whoever writes to it.
     Stdin {
         id: u32,
         data: String,
@@ -137,6 +138,9 @@ pub enum CtrlResp {
     /// The answer to a [`Foreground`](CtrlReq::Foreground): whether the process `id` has
     /// another in its terminal's foreground; `false` for one with no terminal, or ended.
     Foreground { id: u32, busy: bool },
+    /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: what it
+    /// asked is written -- or will never be, the process or its input gone.
+    Written { id: u32 },
     /// The answer to a [`Mark`](CtrlReq::Mark): whether its disk is marked so -- not one
     /// with no disk kept, or why it could not be.
     Marked {

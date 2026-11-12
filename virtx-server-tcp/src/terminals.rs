@@ -156,10 +156,12 @@ impl Session {
         }
     }
 
-    /// `data` typed into the shell.
-    pub fn write(&self, data: String) -> Result<(), Refused> {
-        match &*self.terminal.lock().unwrap() {
-            Some(terminal) => Ok(terminal.write(data)?),
+    /// `data` typed into the shell: done once the guest has written it, so a shell that does
+    /// not read holds back the connection typing into it.
+    pub async fn write(&self, data: String) -> Result<(), Refused> {
+        let typing = self.terminal.lock().unwrap().as_ref().map(|t| t.typing());
+        match typing {
+            Some(typing) => Ok(typing.write(data).await?),
             None => Ok(()),
         }
     }

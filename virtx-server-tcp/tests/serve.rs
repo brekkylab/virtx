@@ -1446,6 +1446,113 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
     );
 }
 
+/// Boots VMs, as the one above does. Input a process does not read holds back whoever writes
+/// it, and nothing else in its sandbox (issue #159): a job's stdin write is answered only once
+/// it is written, and typing into a shell that does not read holds up no command run beside
+/// it. Until then, a write to a job's stdin was answered at
+/// once and piled up in the guest, and typing into a busy shell held every request to the
+/// sandbox until the shell read it.
+#[tokio::test]
+#[ignore]
+async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() {
+    let served = Served::spawn("unread-input").await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("a-token");
+    let id = client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    // What `echo` beside them says, run to its end: answered, whatever they hold.
+    let beside = async || {
+        let job = client
+            .exec_sandbox(&id, &SandboxExecArgs::new(["echo", "beside"]))
+            .await
+            .unwrap();
+        let log: Vec<_> = client
+            .sandbox_job_log(&id, &job.id, None)
+            .try_collect()
+            .await
+            .unwrap();
+        log.iter()
+            .any(|e| e.entry == SandboxJobEntry::Stdout("beside".into()))
+    };
+
+    // A job that never reads its stdin: a write past its pipe's buffer is not answered.
+    let mut args = SandboxExecArgs::new(["sleep", "600"]);
+    args.stdin = true;
+    let sleeper = client.exec_sandbox(&id, &args).await.unwrap();
+    let writing = {
+        let (client, id, job) = (served.connect("a-token"), id.clone(), sleeper.id.clone());
+        tokio::spawn(async move {
+            client
+                .write_sandbox_job_stdin(&id, &job, Some("x".repeat(1 << 20)), false)
+                .await
+        })
+    };
+
+    // A shell on a terminal running a command, typed far past what it reads.
+    let mut url = Url::parse(&served.url)
+        .unwrap()
+        .join(&format!("terminal/{id}?cols=80&rows=24"))
+        .unwrap();
+    url.set_scheme("ws").unwrap();
+    let mut request = url.as_str().into_client_request().unwrap();
+    let headers = request.headers_mut();
+    headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
+    headers.insert("authorization", "Bearer a-token".parse().unwrap());
+    headers.insert("virtx-project", "demo".parse().unwrap());
+    let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut typing, mut shown) = socket.split();
+    let mut said = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while !String::from_utf8_lossy(&said).contains("# ") {
+            if let Some(Ok(Message::Binary(bytes))) = shown.next().await {
+                said.extend_from_slice(&bytes);
+            }
+        }
+    })
+    .await
+    .expect("a prompt");
+    let typed = tokio::spawn(async move {
+        typing
+            .send(Message::binary(b"sleep 600\n".to_vec()))
+            .await
+            .unwrap();
+        let line = format!("# {}\n", "y".repeat(78)).into_bytes();
+        for _ in 0..3300 {
+            if typing.send(Message::binary(line.clone())).await.is_err() {
+                break;
+            }
+        }
+    });
+    // Shown what it writes all along, read so nothing holds there.
+    tokio::spawn(async move { while shown.next().await.is_some() {} });
+    // Let the typing get ahead of the shell.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(60), beside()).await;
+    assert_eq!(answered, Ok(true), "a command beside them answered");
+    assert!(
+        !writing.is_finished(),
+        "the unread write is answered only once written"
+    );
+
+    // The sleeper ended: its write answered -- refused, its reader gone.
+    client
+        .signal_sandbox_job(&id, &sleeper.id, "SIGKILL")
+        .await
+        .unwrap();
+    let written = tokio::time::timeout(std::time::Duration::from_secs(60), writing)
+        .await
+        .expect("answered once its reader is gone")
+        .unwrap();
+    if written.is_err() {
+        assert_eq!(status(written), 409, "refused as ended");
+    }
+    typed.abort();
+}
+
 /// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]

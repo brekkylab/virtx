@@ -1771,8 +1771,9 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Write to the stdin of a job started with one, and close it if `eof`. Refused `409`, `ended`,
-/// for one started without, one whose stdin is closed, and one that has ended.
+/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is
+/// written, so a job that does not read holds the answer back. Refused `409`, `ended`, for one
+/// started without, one whose stdin is closed, and one that has ended.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
@@ -1780,7 +1781,9 @@ async fn sandbox_job_stdin(
 ) -> Answer {
     let args: SandboxStdinArgs = body(&request)?;
     let sandbox = home.sandbox(&id)?;
-    sandbox.write_stdin(&job, args.data.unwrap_or_default(), args.eof)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

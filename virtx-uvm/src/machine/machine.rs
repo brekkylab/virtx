@@ -237,13 +237,9 @@ impl Machine {
         .map_err(|e| Error::io("sending the command", e))
     }
 
-    /// Write `data` to the terminal of the process `id`, as typed.
-    pub fn stdin(&self, id: u32, data: String) -> Result<()> {
-        self.write_stdin(id, data, false)
-    }
-
     /// Write `data` to the stdin of the process `id`, started with one by
-    /// [`exec`](Machine::exec), and close it after if `eof`.
+    /// [`exec`](Machine::exec), and close it after if `eof` -- or to its terminal, as typed:
+    /// answered by a [`Written`](CtrlResp::Written) from [`recv`](Machine::recv), each in turn.
     pub fn write_stdin(&self, id: u32, data: String, eof: bool) -> Result<()> {
         wire::send(
             &mut *self.ctrlin.lock().unwrap(),

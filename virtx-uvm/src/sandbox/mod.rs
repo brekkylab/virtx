@@ -23,7 +23,7 @@ pub use hooks::{Held, Hooks, NoHooks, Wanted, Written};
 pub use job::Job;
 pub use sandbox::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LABEL_MOST, LOG_LIMIT, Resources, Sandbox,
-    Terminal, signal_number,
+    Terminal, Typing, signal_number,
 };
 pub use sandboxes::{
     AUTO_DELETE_DAYS, AUTO_STOP_MINUTES, Given, Sandboxes, forget_unrecorded, minute, set_minute,

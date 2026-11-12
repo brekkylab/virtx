@@ -808,7 +808,9 @@ async fn sandbox_job_stdin(
 ) -> Answer {
     let args: SandboxStdinArgs = body(&request)?;
     let sandbox = home.sandboxes.get(&id)?;
-    sandbox.write_stdin(&job, args.data.unwrap_or_default(), args.eof)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

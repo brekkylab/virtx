@@ -139,26 +139,21 @@ fn main() -> std::process::ExitCode {
 /// The provider `cli` names, or else the one `server` says to sign in to, or else the one
 /// last signed in to.
 fn sign_in(cli: &Cli, server: Option<&str>, dir: &Path) -> anyhow::Result<SignIn> {
-    if let (None, None, Some(server)) = (&cli.issuer, &cli.client_id, server) {
-        let (issuer, client_id) = provider::advertised(server)?
-            .with_context(|| format!("{server} names no provider to sign in to"))?;
-        return Ok(SignIn {
-            issuer,
-            client_id,
-            client_secret: cli.client_secret.clone(),
-        });
-    }
-    match (&cli.issuer, &cli.client_id) {
-        (Some(issuer), Some(client_id)) => Ok(SignIn {
-            issuer: issuer.clone(),
-            client_id: client_id.clone(),
-            client_secret: cli.client_secret.clone(),
-        }),
-        (None, None) => {
-            session::signed_in(dir).context("not signed in; run virtx login <the server's URL>")
+    let (issuer, client_id) = match (&cli.issuer, &cli.client_id, server) {
+        (Some(issuer), Some(client_id), _) => (issuer.clone(), client_id.clone()),
+        (None, None, Some(server)) => provider::advertised(server)?
+            .with_context(|| format!("{server} names no provider to sign in to"))?,
+        (None, None, None) => {
+            return session::signed_in(dir)
+                .context("not signed in; run virtx login <the server's URL>");
         }
         _ => bail!("a provider is named by both --issuer and --client-id"),
-    }
+    };
+    Ok(SignIn {
+        issuer,
+        client_id,
+        client_secret: cli.client_secret.clone(),
+    })
 }
 
 fn now() -> u64 {

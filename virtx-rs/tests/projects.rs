@@ -204,9 +204,9 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         let catalog: Value = serde_json::from_str(&catalog).unwrap();
         serde_json::from_value(catalog["repositories"].clone()).unwrap()
     };
-    let theirs = repositories(&served.carol, "demo");
-    let repository = theirs.iter().find(|name| name.ends_with("alpine"));
-    let repository = repository.unwrap_or_else(|| panic!("no alpine among {theirs:?}"));
+    let repos = repositories(&served.carol, "demo");
+    let repository = repos.iter().find(|name| name.ends_with("alpine"));
+    let repository = repository.unwrap_or_else(|| panic!("no alpine among {repos:?}"));
     let manifest = format!("{repository}/manifests/3.20");
     assert_eq!(registry(&manifest, Some(&served.carol), "demo").0, 200);
     assert_eq!(repositories(&served.bob, "other"), [] as [&str; 0]);
@@ -227,7 +227,8 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         &["sh", "-c", "echo from the sandbox > /data/s.txt"],
     );
     assert_eq!(wrote.1, 0, "{wrote:?}");
-    assert_eq!(theirs_text(&carol, &name, "s.txt"), "from the sandbox\n");
+    let written = carol.get_volume(&name).wait().unwrap().read_text("s.txt");
+    assert_eq!(written.wait().unwrap(), "from the sandbox\n");
 
     let theirs = carol.get_sandbox(sandbox.id()).wait().unwrap();
     let read = common::run(&theirs, &["cat", "/data/s.txt"]);
@@ -268,15 +269,35 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     assert!(!listed(&alice));
 }
 
-/// What `path` holds in the volume `name`, as `client` reads it.
-fn theirs_text(client: &Client, name: &str, path: &str) -> String {
-    let volume = client.get_volume(name).wait().unwrap();
-    volume.read_text(path).wait().unwrap()
-}
-
 #[test]
 fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provider() {
     members_share_a_project_and_no_one_else_reaches_it(&Served::fixture());
+}
+
+/// The provider's keys are asked for again for a token of a key the server has not, and not
+/// again for each such token.
+#[test]
+fn a_key_unknown_has_the_provider_s_keys_asked_for_again_once_not_for_each_token() {
+    let served = Served::fixture();
+    let (_, told) = served.send("GET", ".well-known/virtx-auth", None, None, "");
+    let told: Value = serde_json::from_str(&told).unwrap();
+    let issuer = told["oidc"]["issuer"].as_str().unwrap();
+    let asked = || -> u64 {
+        let asked = reqwest::blocking::get(format!("{issuer}/keys/asked")).unwrap();
+        asked.text().unwrap().parse().unwrap()
+    };
+    let unknown = served
+        .refused
+        .iter()
+        .find(|(why, _)| why.contains("has not"));
+    let unknown = unknown.unwrap().1.as_str();
+
+    let before = asked();
+    for _ in 0..5 {
+        let refused = served.send("GET", "volumes/", Some(unknown), Some("demo"), "");
+        assert_eq!(refused.0, 401);
+    }
+    assert!(asked() - before <= 1);
 }
 
 /// With tokens Dex issued, for the password of each of its users.

@@ -30,6 +30,11 @@ const MACHINE: &str = "vm";
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
+/// The image a GPU sandbox is made of: edge, the one Alpine whose repositories carry venus's
+/// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
+/// test.
+const GPU_IMAGE: &str = "alpine:edge";
+
 /// A snapshot's size here: a ceiling, the file sparse.
 const GIB: u64 = 1 << 30;
 
@@ -343,6 +348,49 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
+/// A sandbox that asks for a GPU finds the host's, through venus: the guest's Vulkan
+/// enumerates `Virtio-GPU Venus (<the host's GPU>)`. The image carries no guest half, so the
+/// test installs Alpine's; a guest without it boots and finds no device, which is not what
+/// this asks.
+///
+/// venus hands the guest every Vulkan device the host has, the host's software rasterizer
+/// among them where one is installed -- a Linux host with Mesa's lavapipe shows the guest
+/// `Virtio-GPU Venus (llvmpipe (...))` beside its GPU. So a device counts here only if what
+/// it stands for is not one of those, and a host whose only Vulkan is software fails.
+async fn a_gpu_sandbox_finds_the_host_s_gpu_through_venus(home: Home) {
+    let sandbox = home
+        .sandbox(&SandboxCreateArgs::new(GPU_IMAGE).gpu(true), None)
+        .await;
+    let install = [
+        "apk",
+        "add",
+        "--no-cache",
+        "--quiet",
+        "mesa-vulkan-virtio",
+        "vulkan-loader",
+        "vulkan-tools",
+    ];
+    let (lines, code) = run(&sandbox, &install, None).await.unwrap();
+    assert_eq!(code, 0, "{lines:#?}");
+    let (lines, code) = run(&sandbox, &["vulkaninfo", "--summary"], None)
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{lines:#?}");
+    let devices: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix("deviceName"))
+        .map(|rest| rest.trim_start_matches([' ', '=']))
+        .collect();
+    eprintln!("the guest's Vulkan devices: {devices:?}");
+    const SOFTWARE: [&str; 3] = ["llvmpipe", "lavapipe", "SwiftShader"];
+    let hardware = devices.iter().any(|name| {
+        name.strip_prefix("Virtio-GPU Venus (")
+            .is_some_and(|host| !SOFTWARE.iter().any(|sw| host.contains(sw)))
+    });
+    assert!(hardware, "no host GPU among {devices:?}");
+    close(sandbox).await;
+}
+
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
 /// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
 /// nothing, not by `1`.
@@ -377,18 +425,25 @@ fn main() -> ExitCode {
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let images = ImageStore::new(scratch.join("images")).unwrap();
+    // Only where `VIRTX_TEST_GPU=1` says the host has a GPU with a Vulkan driver: a `gpu` build
+    // runs on hosts without one too, and there a guest finds no device. Said on a build without
+    // the feature, the test fails -- the sandbox is refused -- rather than passing on nothing.
+    let gpu = env::var_os("VIRTX_TEST_GPU").is_some_and(|v| v == "1");
+    let pulled: &[&str] = if gpu { &[ALPINE, GPU_IMAGE] } else { &[ALPINE] };
     runtime.block_on(async {
-        let reference = ALPINE.parse().unwrap();
         let registry = RegistryClient::new(images.clone(), None);
-        let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
-        let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
-        let mut layers = Vec::new();
-        for descriptor in manifest.layers() {
-            let tree = registry.pull_layer(&reference, descriptor).await.unwrap();
-            layers.push(images.insert_layer(&tree).unwrap());
+        for name in pulled {
+            let reference = name.parse().unwrap();
+            let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
+            let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
+            let mut layers = Vec::new();
+            for descriptor in manifest.layers() {
+                let tree = registry.pull_layer(&reference, descriptor).await.unwrap();
+                layers.push(images.insert_layer(&tree).unwrap());
+            }
+            let image = images.insert_image(&config, &layers).unwrap();
+            images.insert_tag(&reference, &image).unwrap();
         }
-        let image = images.insert_image(&config, &layers).unwrap();
-        images.insert_tag(&reference, &image).unwrap();
     });
 
     type Test = fn(Home) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
@@ -397,7 +452,7 @@ fn main() -> ExitCode {
             [$((stringify!($test), (|home| Box::pin($test(home))) as Test)),*]
         };
     }
-    let tests = tests![
+    let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
@@ -407,7 +462,10 @@ fn main() -> ExitCode {
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
-    ];
+    ]);
+    if gpu {
+        tests.extend(tests![a_gpu_sandbox_finds_the_host_s_gpu_through_venus]);
+    }
     let filter = filter(env::args().skip(1));
     let mut failed = 0;
     for (name, test) in tests {

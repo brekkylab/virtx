@@ -340,7 +340,8 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth);
             let (_, image) = registry.pull(&reference, report).await?;
-            images.insert_tag(&reference, &image)?;
+            let (store, tagged) = (images.clone(), image.clone());
+            tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
     ))
@@ -399,8 +400,12 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
                 virtx_uvm::history_kept(&mut image, step.to_string(), layered, layers.len());
             }
             virtx_uvm::recipe_kept(&mut image, &recipe);
-            let digest = images.insert_image(&image, &layers)?;
-            images.insert_tag(&reference, &digest)?;
+            let digest = tokio::task::spawn_blocking(move || {
+                let digest = images.insert_image(&image, &layers)?;
+                images.insert_tag(&reference, &digest)?;
+                Ok::<_, ImageStoreError>(digest)
+            })
+            .await??;
             Ok(digest)
         },
     ))
@@ -808,7 +813,9 @@ async fn sandbox_job_stdin(
 ) -> Answer {
     let args: SandboxStdinArgs = body(&request)?;
     let sandbox = home.sandboxes.get(&id)?;
-    sandbox.write_stdin(&job, args.data.unwrap_or_default(), args.eof)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

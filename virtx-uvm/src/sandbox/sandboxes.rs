@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
 
@@ -74,6 +75,7 @@ impl Sandboxes {
         let kept = root.join("sandbox");
         std::fs::create_dir_all(&kept)?;
         sweep(&kept);
+        forget_unrecorded(&snapshots, root);
         let records = Record::load_all(&kept, &images);
         let shared = Arc::new(Shared {
             images,
@@ -296,8 +298,28 @@ impl Sandboxes {
             all.insert(id, Arc::clone(&sandbox));
             sandbox
         };
-        let id = sandbox.id().to_owned();
+        // From here on its making ends one way or the other in a task of its own (issue #155):
+        // a caller gone -- its request dropped, as a server drops a handler whose client went
+        // away -- neither leaves it half made, nor skips the undo of one that failed. And one
+        // made for a caller gone by then is undone too: nobody was told of it.
+        let gone = Arc::new(AtomicBool::new(false));
+        let _waiting = Waiting(Arc::clone(&gone));
+        let this = self.clone();
+        tokio::spawn(async move { this.make(sandbox, moved, booted, &gone).await }).await?
+    }
 
+    /// Sandbox `sandbox`, in the map already, made: its disk -- or, `moved` here, the one kept
+    /// for it -- and booted, if `booted`; then kept, unless `gone` says its caller went away
+    /// meanwhile. Undone, but for a disk kept elsewhere, if either fails or its caller left.
+    async fn make(
+        &self,
+        sandbox: Arc<Sandbox>,
+        moved: bool,
+        booted: bool,
+        gone: &AtomicBool,
+    ) -> Result<virtx_core::Sandbox, Error> {
+        let shared = &self.0.shared;
+        let id = sandbox.id().to_owned();
         // Its disk: made here -- or, for one made again here, the one kept for it, brought
         // here. Where none was kept -- its server gone before it kept one -- a new one.
         let kept = match moved {
@@ -331,7 +353,15 @@ impl Sandboxes {
             }
             Ok::<_, Error>(())
         };
-        if let Err(e) = made.await {
+        let made = match made.await {
+            Ok(()) if gone.load(Ordering::SeqCst) => {
+                eprintln!("sandbox {id} made for a caller gone: undone");
+                sandbox.abandon().await;
+                Err(Error::NotFound(format!("sandbox {id}'s caller went away")))
+            }
+            made => made,
+        };
+        if let Err(e) = made {
             self.0.all.lock().unwrap().remove(&id);
             if !kept {
                 let _ = shared.hooks.deleting(&id).await;
@@ -534,6 +564,38 @@ impl Sandboxes {
     }
 }
 
+/// Its caller still waiting on a making ([`Sandboxes::create`]): once dropped -- answered, or gone
+/// -- the making's task is told so.
+struct Waiting(Arc<AtomicBool>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The disks under `snapshots` that no sandbox's record under `root` names, removed: those of a
+/// making cut short -- the server ended, or its caller left, before it was kept -- which nothing
+/// lists or deletes (issue #155). One a machine runs over stays. Called before anything counts
+/// what is here: a server's keeping, and [`Sandboxes::new`].
+pub fn forget_unrecorded(snapshots: &SnapshotStore, root: &Path) {
+    let kept = root.join("sandbox");
+    let Ok(all) = snapshots.list() else {
+        return;
+    };
+    for snapshot in all {
+        if kept.join(format!("{}.json", snapshot.name)).exists() {
+            continue;
+        }
+        if snapshots.remove(&snapshot.name).is_ok() {
+            eprintln!(
+                "disk {} removed: no sandbox here was made of it",
+                snapshot.name
+            );
+        }
+    }
+}
+
 /// What a server before sandboxes were kept left under `dir`: a disk, `<name>.ext4`, for each
 /// lock file `<name>.owner` that the process that made it no longer holds.
 fn sweep(dir: &Path) {
@@ -571,6 +633,11 @@ mod tests {
 
     /// Sandboxes over a store under `root`, with an empty image tagged `here:latest`.
     fn sandboxes(root: &Path) -> Sandboxes {
+        sandboxes_with(root, Arc::new(NoHooks))
+    }
+
+    /// As [`sandboxes`], with `hooks`.
+    fn sandboxes_with(root: &Path, hooks: Arc<dyn Hooks>) -> Sandboxes {
         let images = ImageStore::new(root.join("images")).unwrap();
         if images
             .get_tag(&"here:latest".parse().unwrap())
@@ -593,9 +660,84 @@ mod tests {
             VolumeStore::new(root).unwrap(),
             root,
             Vec::new(),
-            Arc::new(NoHooks),
+            hooks,
         )
         .unwrap()
+    }
+
+    /// Hooks whose `made` waits, once it is reached, until it is let go on.
+    #[derive(Default)]
+    struct HeldMade {
+        reached: tokio::sync::Notify,
+        go_on: tokio::sync::Notify,
+    }
+
+    impl Hooks for HeldMade {
+        fn made<'a>(
+            &'a self,
+            _: &'a str,
+            _: u64,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), Error>> {
+            Box::pin(async move {
+                self.reached.notify_one();
+                self.go_on.notified().await;
+                Ok(())
+            })
+        }
+    }
+
+    /// A making whose caller goes away midway -- its future dropped, as a server drops a
+    /// handler whose client left -- ends undone: no sandbox listed, no record, no disk; and
+    /// the next server starts with none of it (issue #155).
+    #[tokio::test]
+    async fn a_making_whose_caller_goes_away_leaves_nothing() {
+        let root = std::env::temp_dir().join(format!("virtx-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let hooks = Arc::new(HeldMade::default());
+        let here = sandboxes_with(&root, hooks.clone());
+        let making = here.create(SandboxCreateArgs::new("here:latest"), None, false);
+        tokio::select! {
+            made = making => panic!("made before its hook let it: {made:?}"),
+            () = hooks.reached.notified() => {}
+        }
+        // Its caller gone, its disk made already: let go on.
+        assert_eq!(here.list(None).len(), 1, "being made");
+        hooks.go_on.notify_one();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !here.list(None).is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "never undone");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let left = |dir: &str| {
+            std::fs::read_dir(root.join(dir))
+                .map(|entries| entries.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        assert_eq!(left("snapshot"), Vec::<OsString>::new(), "its disk");
+        assert_eq!(left("sandbox"), Vec::<OsString>::new(), "its record");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A disk no sandbox's record names -- a making a server ended midway left it -- is removed
+    /// as the next server starts; one a record names stays.
+    #[tokio::test]
+    async fn a_disk_no_sandbox_was_made_of_is_removed_as_a_server_starts() {
+        let root = std::env::temp_dir().join(format!("virtx-unrecorded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let here = sandboxes(&root);
+        let made = here
+            .create(SandboxCreateArgs::new("here:latest"), None, false)
+            .await
+            .unwrap();
+        here.snapshots().create("half-made", 64 << 20).unwrap();
+        drop(here);
+        let next = sandboxes(&root);
+        assert!(next.snapshots().open("half-made").is_err());
+        assert!(next.snapshots().open(&made.id).is_ok());
+        assert_eq!(next.list(None).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

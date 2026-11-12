@@ -167,9 +167,35 @@ pub(super) struct Run {
     pub(super) rebased: Mutex<Option<Waiting>>,
     /// Its jobs started with a stdin still open, by id.
     stdins: Mutex<HashSet<String>>,
+    /// Who waits for each write to a process's input -- its stdin, or its terminal -- to be
+    /// [`Written`](CtrlResp::Written), by pid, in the order sent; and each process's turn to
+    /// write, one write at a time ([`Run::typed`]).
+    written: Mutex<HashMap<u32, VecDeque<oneshot::Sender<()>>>>,
+    typing: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Run {
+    /// `data` written to the input of process `pid` -- its stdin, closed after if `eof`, or its
+    /// terminal -- answered once the guest has written it (issue #159): one write at a time for
+    /// each process, so a process that does not read holds back whoever writes to it, as
+    /// PROTOCOL.md says of a job's stdin, and what it has not read never piles up in the guest.
+    /// Refused as ended once the process, or the machine, is.
+    async fn typed(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
+        let turn = Arc::clone(self.typing.lock().unwrap().entry(pid).or_default());
+        let _turn = turn.lock().await;
+        let written = {
+            // Sent and waited for in one order: the guest answers each process's in turn.
+            let mut waiting = self.written.lock().unwrap();
+            self.machine.write_stdin(pid, data, eof)?;
+            let (told, written) = oneshot::channel();
+            waiting.entry(pid).or_default().push_back(told);
+            written
+        };
+        written
+            .await
+            .map_err(|_| Error::JobEnded("the job has ended"))
+    }
+
     /// What it held let go of: its machine has ended.
     fn release(&self) {
         drop(self.held.lock().unwrap().take());
@@ -425,6 +451,8 @@ impl Sandbox {
             marked: Mutex::default(),
             rebased: Mutex::default(),
             stdins: Mutex::default(),
+            written: Mutex::default(),
+            typing: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Running(Arc::clone(&run));
         self.used();
@@ -519,6 +547,21 @@ impl Sandbox {
             self.halt(&run);
             self.keep();
         }
+    }
+
+    /// Its machine stopped, if it runs, and it forgotten here with nothing of it kept -- no record
+    /// written, its disk left to whoever undoes its making ([`Sandboxes::create`]): what a
+    /// making whose caller went away ends with. What the guest wrote is marked changed, so a
+    /// disk kept elsewhere still keeps it.
+    ///
+    /// [`Sandboxes::create`]: super::Sandboxes::create
+    pub(super) async fn abandon(self: &Arc<Self>) {
+        let _turn = self.turn.lock().await;
+        if let Ok(Some(run)) = self.take_run() {
+            let stopping = Arc::clone(self);
+            let _ = tokio::task::spawn_blocking(move || stopping.halt(&run)).await;
+        }
+        self.forgotten();
     }
 
     /// Deleted: stopped first if it runs, its disk removed -- from wherever else it is kept
@@ -691,8 +734,10 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`.
-    pub fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
+    /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
+    /// answered once it is written, so a job that does not read holds the writer back
+    /// ([`Run::typed`]).
+    pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
         let (pid, running) = self.job(id)?.pid();
         let ended = Error::JobEnded(
             "the job has ended, or its stdin is closed, or it was started without one",
@@ -700,15 +745,16 @@ impl Sandbox {
         let Some(run) = self.run().filter(|_| running) else {
             return Err(ended);
         };
-        let mut stdins = run.stdins.lock().unwrap();
-        if !stdins.contains(id) {
-            return Err(ended);
+        {
+            let mut stdins = run.stdins.lock().unwrap();
+            if !stdins.contains(id) {
+                return Err(ended);
+            }
+            if eof {
+                stdins.remove(id);
+            }
         }
-        run.machine.write_stdin(pid, data, eof)?;
-        if eof {
-            stdins.remove(id);
-        }
-        Ok(())
+        run.typed(pid, data, eof).await
     }
 
     /// Port `port` opened, as `label` and `protocol` say -- TCP where it says none -- as those
@@ -1055,6 +1101,9 @@ impl Sandbox {
                 }
                 CtrlResp::Exited { id, code } => {
                     run.terminals.lock().unwrap().remove(&id);
+                    // Its writes not yet written never will be: their writers told so.
+                    run.written.lock().unwrap().remove(&id);
+                    run.typing.lock().unwrap().remove(&id);
                     if let Some(job) = running.remove(&id) {
                         self.used();
                         job.end(code);
@@ -1098,6 +1147,13 @@ impl Sandbox {
                         self.used();
                     }
                 }
+                CtrlResp::Written { id } => {
+                    if let Some(waiting) = run.written.lock().unwrap().get_mut(&id)
+                        && let Some(told) = waiting.pop_front()
+                    {
+                        let _ = told.send(());
+                    }
+                }
                 CtrlResp::Ready(_) => {}
             }
         }
@@ -1108,6 +1164,7 @@ impl Sandbox {
         drop(starting);
         run.terminals.lock().unwrap().clear();
         run.publishing.lock().unwrap().clear();
+        run.written.lock().unwrap().clear();
         for job in running.into_values() {
             job.end(128 + SIGKILL);
         }
@@ -1226,6 +1283,22 @@ impl Drop for Activity {
     }
 }
 
+/// What types into a [`Terminal`] ([`Terminal::typing`]).
+#[derive(Clone)]
+pub struct Typing {
+    sandbox: Arc<Sandbox>,
+    run: Arc<Run>,
+    pid: u32,
+}
+
+impl Typing {
+    /// As [`Terminal::write`].
+    pub async fn write(&self, data: String) -> Result<(), Error> {
+        self.sandbox.used();
+        self.run.typed(self.pid, data, false).await
+    }
+}
+
 /// A process on a terminal in a sandbox, as [`Sandbox::terminal`] starts it: its job, what it
 /// writes, and how to type into it, resize it and end it.
 pub struct Terminal {
@@ -1238,10 +1311,19 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    /// `data` typed into it: the sandbox used now.
-    pub fn write(&self, data: String) -> Result<(), Error> {
-        self.sandbox.used();
-        Ok(self.run.machine.stdin(self.pid, data)?)
+    /// What types into it, apart from it: so a write is waited for with nothing of it held.
+    pub fn typing(&self) -> Typing {
+        Typing {
+            sandbox: Arc::clone(&self.sandbox),
+            run: Arc::clone(&self.run),
+            pid: self.pid,
+        }
+    }
+
+    /// `data` typed into it: the sandbox used now. Answered once the guest has written it, so
+    /// a program that does not read holds the typist back ([`Run::typed`]).
+    pub async fn write(&self, data: String) -> Result<(), Error> {
+        self.typing().write(data).await
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Error> {

@@ -361,8 +361,18 @@ async fn shell(mut socket: WebSocket, session: Arc<Session>, attached: bool) {
     {
         return session.detach(which);
     }
+    // What it typed last, until the guest has written it: nothing more is read from it until
+    // then, so a shell that does not read holds the connection back, while what it writes is
+    // still shown.
+    let mut typing: Option<std::pin::Pin<Box<dyn Future<Output = bool> + Send>>> = None;
     let said = loop {
         tokio::select! {
+            typed = async { typing.as_mut().expect("typing").await }, if typing.is_some() => {
+                typing = None;
+                if !typed {
+                    break None;
+                }
+            }
             out = shown.recv() => match out {
                 Some(Shown::Data(data)) => {
                     if socket.send(Message::Binary(data.into_bytes().into())).await.is_err() {
@@ -376,11 +386,11 @@ async fn shell(mut socket: WebSocket, session: Arc<Session>, attached: bool) {
                     "message": "the terminal is open in another window",
                 } })),
             },
-            received = socket.recv() => match received {
+            received = socket.recv(), if typing.is_none() => match received {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if session.write(String::from_utf8_lossy(&bytes).into_owned()).is_err() {
-                        break None;
-                    }
+                    let (session, data) =
+                        (Arc::clone(&session), String::from_utf8_lossy(&bytes).into_owned());
+                    typing = Some(Box::pin(async move { session.write(data).await.is_ok() }));
                 }
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(asked) = serde_json::from_str::<Asked>(&text) {

@@ -48,7 +48,7 @@ const UPLOAD_GRACE: Duration = Duration::from_secs(60 * 60);
 /// What the temp directory a server keeps its pushes in is named after.
 const UPLOADS: &str = "virtx-uvm-uploads-";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RegistryServer {
     store: Store,
     /// The path the spec's `/v2/` is under, such as `/images`.
@@ -230,10 +230,17 @@ impl RegistryServer {
             ("manifests", Method::GET) => self.get_manifest(name, last, true).await,
             ("manifests", Method::HEAD) => self.get_manifest(name, last, false).await,
             ("manifests", Method::PUT) => self.put_manifest(name, last, request.into_body()).await,
-            ("manifests", Method::DELETE) => self.delete_manifest(name, last),
+            // A removal waits for the store's change under way: blocking work.
+            ("manifests", Method::DELETE) => {
+                let (server, name, last) = (self.clone(), name.to_owned(), last.to_owned());
+                tokio::task::spawn_blocking(move || server.delete_manifest(&name, &last)).await?
+            }
             ("blobs", Method::GET) => self.get_blob(last, true).await,
             ("blobs", Method::HEAD) => self.get_blob(last, false).await,
-            ("blobs", Method::DELETE) => self.delete_blob(last),
+            ("blobs", Method::DELETE) => {
+                let (server, last) = (self.clone(), last.to_owned());
+                tokio::task::spawn_blocking(move || server.delete_blob(&last)).await?
+            }
             ("referrers", Method::GET) => self.referrers(last, asked("artifactType")).await,
             ("uploads", method) => {
                 let name = name.strip_suffix("/blobs").ok_or_else(unknown)?;
@@ -434,22 +441,30 @@ impl RegistryServer {
                 manifest.config().digest().to_string(),
             )
         })?;
-        self.store
-            .insert_image_manifest(&body, &config)
-            .map_err(|e| match e {
-                store::Error::Missing(missing) => refusal(
-                    StatusCode::NOT_FOUND,
-                    "MANIFEST_BLOB_UNKNOWN",
-                    missing.to_string(),
-                ),
-                store::Error::Malformed(what) => invalid(what),
-                e => e.into(),
-            })?;
-        // Kept with the image now.
-        let _ = std::fs::remove_file(self.uploads.join(manifest.config().digest().digest()));
-        if let Some(tag) = tag {
-            self.store.insert_tag(&tag, &digest)?;
-        }
+        // Filing and tagging each wait for the store's change under way: blocking work.
+        let (store, uploads) = (self.store.clone(), self.uploads.clone());
+        let config_digest = manifest.config().digest().digest().to_owned();
+        let filed = digest.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            store
+                .insert_image_manifest(&body, &config)
+                .map_err(|e| match e {
+                    store::Error::Missing(missing) => refusal(
+                        StatusCode::NOT_FOUND,
+                        "MANIFEST_BLOB_UNKNOWN",
+                        missing.to_string(),
+                    ),
+                    store::Error::Malformed(what) => invalid(what),
+                    e => e.into(),
+                })?;
+            // Kept with the image now.
+            let _ = std::fs::remove_file(uploads.join(config_digest));
+            if let Some(tag) = tag {
+                store.insert_tag(&tag, &filed)?;
+            }
+            Ok(())
+        })
+        .await??;
 
         let mut response = empty(StatusCode::CREATED);
         let headers = response.headers_mut();

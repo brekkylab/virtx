@@ -1450,12 +1450,28 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
 #[tokio::test]
 #[ignore]
 async fn a_fork_bomb_leaves_the_sandbox_answering() {
-    let served = Served::spawn("fork-bomb").await;
+    // Large enough for more threads than the kernel's pids, as most are.
+    answered_beside_a_bomb("fork-bomb", 2048, "f(){ f & f & wait; }; f").await;
+}
+
+/// Boots VMs, as the one above does.
+#[tokio::test]
+#[ignore]
+async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering() {
+    // Each of its processes holding 600 KB of its own: the memory runs out long before the
+    // pids do, in a machine of any size.
+    let bomb = r#"s=$(head -c 300000 /dev/zero | tr "\0" x); f(){ y="$s$s"; f & f & wait; }; f"#;
+    answered_beside_a_bomb("fork-bomb-memory", 1024, bomb).await;
+}
+
+/// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
+/// end, as it goes on.
+async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
+    let served = Served::spawn(name).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("a-token");
-    // Large enough for more threads than the kernel's pids, as most are.
     let mut args = SandboxCreateArgs::new("alpine:3.20");
-    args.memory_mib = Some(2048);
+    args.memory_mib = Some(memory_mib);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let ran = async |cmd: &str| {
         let job = client
@@ -1474,7 +1490,10 @@ async fn a_fork_bomb_leaves_the_sandbox_answering() {
             })
             .collect::<Vec<_>>()
     };
-    ran("sh -c 'f(){ f & f & wait; }; f' >/dev/null 2>&1 </dev/null & echo started").await;
+    ran(&format!(
+        "sh -c '{bomb}' >/dev/null 2>&1 </dev/null & echo started"
+    ))
+    .await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     // Answered while the bomb goes on, rightly: how soon is not what is tried here. The
     // timeout only keeps a sandbox that never answers from holding the suite.

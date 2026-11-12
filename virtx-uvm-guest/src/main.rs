@@ -43,19 +43,30 @@ type Out = Arc<Mutex<File>>;
 type Terminals = Arc<Mutex<HashMap<u32, File>>>;
 
 /// The cgroup every command run here goes under -- each in one of its own within it -- its
-/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, and its CPU weighed under
-/// one of this agent's threads: so that a command forking without end -- a fork bomb -- leaves
-/// this agent the processes and the CPU it needs to answer the host and to stop, and a command
-/// run beside it the CPU of one command, not one of the bomb's thousands of processes. None
-/// where the kernel has no cgroup2 or no `pids` controller.
+/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, its memory to all
+/// but [`AGENT_MEMORY`], and its CPU weighed under one of this agent's threads: so that a
+/// command forking without end -- a fork bomb -- leaves this agent the processes, the memory and
+/// the CPU it needs to answer the host and to stop, and a command run beside it the CPU of one
+/// command, not one of the bomb's thousands of processes. None where the kernel has no cgroup2
+/// or no `pids` controller.
 static JOBS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 /// What of the kernel's threads the commands may not take: this agent's.
 const AGENT_PIDS: u64 = 256;
+/// What of the machine's memory the commands may not take, for this agent and the kernel: an
+/// eighth of it, up to this.
+const AGENT_MEMORY: u64 = 128 << 20;
+/// What of the commands' memory one command may not take, for another to start beside it: a
+/// sixteenth of the machine's, up to this. Without it, one that takes all there is leaves every
+/// other reclaiming beside it to start.
+const JOB_ROOM: u64 = 64 << 20;
+/// The most memory one command may take, where the kernel has the `memory` controller.
+static JOB_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 /// The next command's cgroup.
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
-/// [`AGENT_PIDS`].
+/// [`AGENT_PIDS`]; its `memory.max` the machine's less [`AGENT_MEMORY`], and each command's that
+/// less [`JOB_ROOM`].
 fn jobs_cgroup() -> Option<PathBuf> {
     let root = std::path::Path::new("/sys/fs/cgroup");
     std::fs::write(root.join("cgroup.subtree_control"), "+pids").ok()?;
@@ -63,12 +74,14 @@ fn jobs_cgroup() -> Option<PathBuf> {
     // so answers the host while they take the rest -- all of it, when this agent waits, as it
     // mostly does. Without the controller, the pids alone.
     let weighed = std::fs::write(root.join("cgroup.subtree_control"), "+cpu").is_ok();
+    let memory = std::fs::write(root.join("cgroup.subtree_control"), "+memory").is_ok();
     let jobs = root.join("jobs");
     std::fs::create_dir_all(&jobs).ok()?;
     // The kernel's own default for its pids, where it was built with fewer: a machine's
     // processes held by its memory (`threads-max`), not by 4096 whatever its size.
     let _ = std::fs::write("/proc/sys/kernel/pid_max", "32768");
-    let read = |path: &str| -> Option<u64> { std::fs::read_to_string(path).ok()?.trim().parse().ok() };
+    let read =
+        |path: &str| -> Option<u64> { std::fs::read_to_string(path).ok()?.trim().parse().ok() };
     // Whichever runs out first: threads, or pids.
     let threads = read("/proc/sys/kernel/threads-max")?.min(read("/proc/sys/kernel/pid_max")?);
     let most = threads.saturating_sub(AGENT_PIDS).max(64);
@@ -78,7 +91,22 @@ fn jobs_cgroup() -> Option<PathBuf> {
         let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+cpu");
     }
     let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+pids");
+    if memory && let Some(total) = memory_total() {
+        let together = total - (total / 8).min(AGENT_MEMORY);
+        let limited = std::fs::write(jobs.join("memory.max"), together.to_string()).is_ok();
+        if limited && std::fs::write(jobs.join("cgroup.subtree_control"), "+memory").is_ok() {
+            let _ = JOB_MEMORY.set(together - (total / 16).min(JOB_ROOM));
+        }
+    }
     Some(jobs)
+}
+
+/// The machine's memory, in bytes: `MemTotal` in `/proc/meminfo`.
+fn memory_total() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib << 10)
 }
 
 /// `command`'s process put in a cgroup of its own under [`JOBS`] before it starts, if there is
@@ -97,6 +125,9 @@ fn in_jobs(command: &mut Command) -> Option<File> {
     let n = NEXT_JOB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let own = jobs.join(n.to_string());
     std::fs::create_dir(&own).ok()?;
+    if let Some(most) = JOB_MEMORY.get() {
+        let _ = std::fs::write(own.join("memory.max"), most.to_string());
+    }
     let procs = File::options()
         .write(true)
         .open(own.join("cgroup.procs"))
@@ -382,10 +413,7 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     let mut child = match started {
         Ok(child) => child,
         Err(e) => {
-            send(
-                out,
-                &CtrlResp::Started(Err(format!("{}: {e}", cmd[0]))),
-            );
+            send(out, &CtrlResp::Started(Err(format!("{}: {e}", cmd[0]))));
             return;
         }
     };

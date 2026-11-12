@@ -67,10 +67,8 @@ pub struct Project {
 impl Config {
     /// The config at `path`.
     pub fn read(path: &Path) -> anyhow::Result<Config> {
-        let text = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let value = serde_json::from_slice(&text);
-        let value = value.with_context(|| format!("reading {}", path.display()))?;
-        Config::parse(value).with_context(|| format!("reading {}", path.display()))
+        let read = || Config::parse(serde_json::from_slice(&std::fs::read(path)?)?);
+        read().with_context(|| format!("reading {}", path.display()))
     }
 
     /// The config `value` is, refused when it names a project by a name that is no

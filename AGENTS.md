@@ -15,7 +15,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-core/` — the methods' args and outputs (`image/`, `sandbox/`, `snapshot/`, `volume/`), the client and server ends of the transport (`transport/`, plain HTTP over TCP or over a child's stdio), the C ABI (`ffi/`, declared by `include/virtx.h`, which the build writes).
 - `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`.
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
-- `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in.
+- `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in. `virtx-server-tcp` is a library too, which its binary and a server with tenants and routes of its own are built from.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs every VM gets at `/abin`.
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
@@ -87,12 +87,13 @@ cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
 cargo xtask test -p virtx                         # Rust, against the fixture
+cargo xtask test -p virtx-cli                     # the command's signing in, against the fixture
 (cd virtx-py && uv run pytest)                    # Python; its conftest serves the fixture
 (cd virtx-node && npm install && npm test)        # Node; `npm test` serves the fixture
 cargo xtask fixture -- <command>                  # any command, against the fixture
 ```
 
-- The fixture is `virtx-stdio` and `virtx-server-tcp`, built and signed, over a home of the run's own, removed once it ends. `cargo xtask fixture` serves it and names it to the tests in `VIRTX_TEST_STDIO`, `VIRTX_TEST_URL`, `VIRTX_TEST_TOKEN` and `VIRTX_TEST_PROJECT`; a test reads those, and starts no server of its own.
+- The fixture is `virtx-stdio` and `virtx-server-tcp`, built and signed, over a home of the run's own, removed once it ends, and an OpenID Connect provider of the run's own, which the server takes the tokens of and `virtx login` signs in to. `cargo xtask fixture` serves it and names it to the tests in `VIRTX_TEST_STDIO`, `VIRTX_TEST_URL`, `VIRTX_TEST_TOKEN` and `VIRTX_TEST_PROJECT`, and the tokens of two more projects' members in `VIRTX_TEST_USERS`; a test reads those, and starts no server of its own.
 - A run already under the fixture, as `cargo xtask test` runs `npm test` and `uv run pytest`, serves no other.
 
 ## Lint and the gate

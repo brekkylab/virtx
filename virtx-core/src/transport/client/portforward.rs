@@ -16,9 +16,10 @@ use std::{
 
 use super::{
     Connection, TransportClient,
+    credentials::Credentials,
     tcp::{Shared, authorized, current},
 };
-use crate::{Auth, Error};
+use crate::Error;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, StatusCode, header};
 use tokio::{
@@ -66,7 +67,7 @@ impl PortForwarder {
                 Ok(url) => {
                     PortForwarder::tunnel(
                         tcp.http.clone(),
-                        Arc::clone(&tcp.auth),
+                        Arc::clone(&tcp.credentials),
                         Arc::clone(&tcp.headers),
                         url,
                     )
@@ -108,10 +109,10 @@ impl PortForwarder {
     }
 
     /// A loopback port of this client's own, each connection to it carried to `url` in a
-    /// WebSocket that `http` opens with the `auth` and `headers` current then.
+    /// WebSocket that `http` opens with the token and `headers` current then.
     async fn tunnel(
         http: reqwest::Client,
-        auth: Shared<Auth>,
+        credentials: Arc<Credentials>,
         headers: Shared<HeaderMap>,
         url: reqwest::Url,
     ) -> Result<PortForwarder, String> {
@@ -133,10 +134,12 @@ impl PortForwarder {
                     accepted = listener.accept() => {
                         let Ok((accepted, _)) = accepted else { break };
                         let (http, url) = (http.clone(), url.clone());
-                        let (auth, headers) = (current(&auth), current(&headers));
+                        let (credentials, headers) = (Arc::clone(&credentials), current(&headers));
                         connections.spawn(async move {
                             // Refused, the connection closes: as a port nothing listens on does.
-                            if let Ok(socket) = open(&http, &auth, headers, url).await {
+                            if let Ok(token) = credentials.token().await
+                                && let Ok(socket) = open(&http, token.as_deref(), headers, url).await
+                            {
                                 carry(accepted, socket).await;
                             }
                         });
@@ -157,15 +160,15 @@ impl PortForwarder {
 }
 
 /// A WebSocket of `virtx.tcp` to `url`, its handshake an HTTP/1.1 upgrade `http` sends with
-/// `auth` and `headers`.
+/// `token` and `headers`.
 async fn open(
     http: &reqwest::Client,
-    auth: &Auth,
+    token: Option<&str>,
     headers: HeaderMap,
     url: reqwest::Url,
 ) -> Result<WebSocketStream<reqwest::Upgraded>, String> {
     let key = generate_key();
-    let response = authorized(http.get(url), headers, auth)
+    let response = authorized(http.get(url), headers, token)
         .header(header::CONNECTION, "Upgrade")
         .header(header::UPGRADE, "websocket")
         .header(header::SEC_WEBSOCKET_VERSION, "13")
@@ -225,6 +228,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::Auth;
     use axum::{
         extract::{
             Path,

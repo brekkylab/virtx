@@ -175,18 +175,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
-在服务器上生成一个令牌，再写一份 `server.json`，允许该令牌对应的用户访问某个项目：
-
-```sh
-virtx-server-tcp token   # 打印令牌及其 token_sha256
-```
+在服务器上写一份 `server.json`，然后启动服务器：
 
 ```json
 {
   "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "home": "/var/lib/virtx"
 }
 ```
 
@@ -194,16 +188,70 @@ virtx-server-tcp token   # 打印令牌及其 token_sha256
 virtx-server-tcp serve --config server.json
 ```
 
-在客户端，不再调用 `Client.spawn()`，而是带上令牌和项目名去连接。其余部分和本地示例完全一样。
+在客户端，不再调用 `Client.spawn()`，而是连接到这台服务器。其余部分和本地示例完全一样。
 
 <details open>
 <summary><b>Python</b></summary>
 
 ```python
-from virtx import BearerAuth, Client
+from virtx import Client
+
+client = Client.connect("http://127.0.0.1:8470")
+```
+
+</details>
+
+<details>
+<summary><b>Node</b></summary>
+
+```js
+const client = Client.connect('http://127.0.0.1:8470')
+```
+
+</details>
+
+<details>
+<summary><b>Rust</b></summary>
+
+```rust
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::None,
+    [("virtx-project", "default")],
+)?;
+```
+
+</details>
+
+监听回环地址的服务器不要求认证。
+要给其他机器提供服务，请指定你的 OpenID Connect 提供方，以及每个项目允许访问的用户：
+
+```json
+{
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+  "projects": { "demo": { "members": ["alice@example.com"] } }
+}
+```
+
+用户就是提供方签发给 `client_id` 这个客户端的 ID 令牌里的 `email`。该客户端需要是使用设备流程的公开客户端。
+用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌和项目名去连接：
+
+```sh
+virtx login https://virtx.example
+```
+
+<details open>
+<summary><b>Python</b></summary>
+
+```python
+from virtx import Client, CommandAuth
 
 client = Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
+    {"virtx-project": "demo"},
 )
 ```
 
@@ -214,8 +262,8 @@ client = Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] },
   { 'virtx-project': 'demo' }
 )
 ```
@@ -227,8 +275,8 @@ const client = Client.connect(
 
 ```rust
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
     [("virtx-project", "demo")],
 )?;
 ```

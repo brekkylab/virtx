@@ -2,7 +2,7 @@
 name = "virtx-cli"
 version = "0.1.2"
 edition = "2024"
-description = "The `virtx` command: build and manage a virtx server's images from a shell."
+description = "The `virtx` command: build and manage a virtx server's images from a shell, and sign in to its OpenID Connect provider for the SDKs to use."
 license = "Apache-2.0"
 publish = false
 
@@ -13,3 +13,15 @@ path = "src/main.rs"
 [dependencies]
 # The command itself, without the C ABI: a binary has no other module to share one library with.
 virtx-core = { path = "../virtx-core", default-features = false, features = ["cli"] }
+clap = { version = "4", features = ["derive", "env"] }
+# The provider's discovery document, device flow and tokens, over HTTPS.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "blocking", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# An ID token's claims, read for when it runs out.
+base64 = "0.22"
+# Where a session's refresh token is kept: the OS's keychain -- macOS's Keychain, Windows'
+# Credential Manager, Linux's Secret Service -- and a file only readable by its owner where
+# there is none, as on a server with no desktop.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+anyhow = "1"

@@ -8,6 +8,7 @@
 //! copy either way skips what the other side has already.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -23,6 +24,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWrite;
 use virtx_core::RegistryAuth;
 
+use super::registry_proxy::{Pass, Proxy, Refusal};
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
 
@@ -60,6 +62,16 @@ pub enum Error {
         reference: String,
         #[source]
         source: Box<OciDistributionError>,
+    },
+
+    /// A host a client held to public registries ([`RegistryClient::public_only`]) did not
+    /// connect to: the registry `reference` names, or one it sent the client to, on an address
+    /// that is not public, or a plain `http://` URL.
+    #[error("{reference}: {host} is not reachable from virtx cloud: {why}")]
+    Unreachable {
+        reference: String,
+        host: String,
+        why: String,
     },
 
     /// What the registry served is not what it should be: a manifest that does not parse,
@@ -143,6 +155,9 @@ pub struct RegistryClient {
     auth: oci_client::secrets::RegistryAuth,
     /// Docker Hub's mirror, for anonymous pulls ([`RegistryClient::with_mirror`]).
     mirror: Option<String>,
+    /// The proxy every connection goes through, for a client held to public registries
+    /// ([`RegistryClient::public_only`]).
+    pass: Option<Pass>,
 }
 
 impl std::fmt::Debug for RegistryClient {
@@ -172,6 +187,52 @@ impl RegistryClient {
             client: Client::new(ClientConfig::default()),
             auth,
             mirror: None,
+            pass: None,
+        }
+    }
+
+    /// As [`RegistryClient::new`], held to registries on public addresses: every connection it
+    /// makes -- to the registry, its token realm, a redirect, a layer's URL -- goes through a
+    /// proxy in this process that resolves the host itself and connects only to an address of
+    /// it on the internet, never the host's own, a private network's, a link's (the cloud's
+    /// metadata address among them) or carrier-grade NAT's. A plain `http://` URL is refused
+    /// whatever it names. What it refuses fails as [`Error::Unreachable`]. A client is not held
+    /// so by default, and reaches a registry on the host or its network as any other.
+    pub fn public_only(self) -> Result<Self> {
+        let proxy = Proxy::shared().map_err(|source| Error::Io {
+            context: "starting the registry proxy".into(),
+            source,
+        })?;
+        self.through(&proxy)
+    }
+
+    /// As [`RegistryClient::public_only`], through `proxy`.
+    fn through(mut self, proxy: &Arc<Proxy>) -> Result<Self> {
+        let pass = proxy.pass();
+        let config = ClientConfig {
+            https_proxy: Some(pass.url().to_owned()),
+            http_proxy: Some(pass.url().to_owned()),
+            ..ClientConfig::default()
+        };
+        // `Client::new` would fall back to a client with no proxy at all.
+        self.client = Client::try_from(config).map_err(|e| Error::Io {
+            context: "making a registry client".into(),
+            source: std::io::Error::other(e),
+        })?;
+        self.pass = Some(pass);
+        Ok(self)
+    }
+
+    /// `source`, as an error at `reference`: what the proxy refused this client, if it did,
+    /// and else as [`Error::registry`] tells it.
+    fn failed(&self, reference: &Reference, source: OciDistributionError) -> Error {
+        match self.pass.as_ref().and_then(Pass::refused) {
+            Some(Refusal { host, why }) => Error::Unreachable {
+                reference: reference.to_string(),
+                host,
+                why,
+            },
+            None => Error::registry(reference, source),
         }
     }
 
@@ -190,11 +251,11 @@ impl RegistryClient {
         self
     }
 
-    /// `source`, as an error at `reference` in a read: a 401 without credentials is
+    /// As [`failed`](Self::failed), in a read: a 401 without credentials is
     /// [`NotFoundOrPrivate`](Error::NotFoundOrPrivate), with them [`Unauthorized`](Error::Unauthorized).
     fn pull_error(&self, reference: &Reference, source: OciDistributionError) -> Error {
         let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
-        match Error::registry(reference, source) {
+        match self.failed(reference, source) {
             // Only `UnauthorizedError` is a 401: `AuthenticationFailure` is any token answer
             // but 200.
             Error::Unauthorized { reference, source }
@@ -368,7 +429,7 @@ impl RegistryClient {
         self.client
             .blob_exists(reference, digest.as_ref())
             .await
-            .map_err(|e| Error::registry(reference, e))
+            .map_err(|e| self.failed(reference, e))
     }
 
     /// `POST /v2/<name>/blobs/uploads/` and what follows: upload `blob`, which the registry
@@ -385,7 +446,7 @@ impl RegistryClient {
         self.client
             .push_blob(reference, blob, digest.as_ref())
             .await
-            .map_err(|e| Error::registry(reference, e))?;
+            .map_err(|e| self.failed(reference, e))?;
         Ok(())
     }
 
@@ -403,7 +464,7 @@ impl RegistryClient {
         self.client
             .mount_blob(reference, from, digest.as_ref())
             .await
-            .map_err(|e| Error::registry(reference, e))
+            .map_err(|e| self.failed(reference, e))
     }
 
     /// `PUT /v2/<name>/manifests/<reference>`: put the manifest `body`, of type
@@ -431,7 +492,7 @@ impl RegistryClient {
         self.client
             .push_manifest_raw(reference, body, content_type)
             .await
-            .map_err(|e| Error::registry(reference, e))?;
+            .map_err(|e| self.failed(reference, e))?;
         Ok(digest)
     }
 
@@ -787,6 +848,107 @@ mod tests {
         assert_eq!(at("ghcr.io/team/app:v1"), None);
     }
 
+    /// A listener on the loopback, standing in for a registry there, that answers nothing.
+    fn listener() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn a_client_held_to_public_registries_connects_to_none_on_the_loopback() {
+        let scratch = Scratch::new("public-only");
+        let (listener, port) = listener();
+        let registry = RegistryClient::new(scratch.0.clone(), None)
+            .public_only()
+            .unwrap();
+
+        // A guard against a hang, not a measure of anything.
+        let pulled = async |reference: &Reference| {
+            let pull = registry.pull(reference, |_| {});
+            tokio::time::timeout(std::time::Duration::from_secs(60), pull)
+                .await
+                .expect("the pull went on")
+                .unwrap_err()
+        };
+
+        let reference: Reference = format!("127.0.0.1:{port}/team/app:1").parse().unwrap();
+        let e = pulled(&reference).await;
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "127.0.0.1:{port}/team/app:1: 127.0.0.1:{port} is not reachable from virtx cloud: \
+                 it is at 127.0.0.1, which is not a public address"
+            )
+        );
+        let reference: Reference = format!("localhost:{port}/team/app:1").parse().unwrap();
+        let e = pulled(&reference).await;
+        assert!(
+            matches!(&e, Error::Unreachable { host, .. } if *host == format!("localhost:{port}")),
+            "{e}"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the registry was connected to"
+        );
+    }
+
+    /// The first bytes `registry` sends `listener` as it pulls `reference`: the pull is
+    /// dropped once they come, and an error from it before is the test's failure.
+    async fn first_bytes(
+        registry: &RegistryClient,
+        listener: std::net::TcpListener,
+        reference: &Reference,
+    ) -> Vec<u8> {
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let accepted = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut first = vec![0; 5];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut first)
+                .await
+                .unwrap();
+            first
+        };
+        // A guard against a hang, not a measure of anything.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::select! {
+                first = accepted => first,
+                pulled = registry.pull(reference, |_| {}) => panic!("connected nowhere: {pulled:?}"),
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_client_not_held_connects_to_a_registry_on_the_loopback() {
+        let scratch = Scratch::new("not-held");
+        let (listener, port) = listener();
+        let registry = RegistryClient::new(scratch.0.clone(), None);
+        let reference: Reference = format!("127.0.0.1:{port}/team/app:1").parse().unwrap();
+        let first = first_bytes(&registry, listener, &reference).await;
+        // A TLS handshake's record: the client reached the listener itself.
+        assert_eq!(first[0], 0x16, "{first:?}");
+    }
+
+    #[tokio::test]
+    async fn a_client_held_to_public_registries_reaches_an_allowed_one_through_the_proxy() {
+        let scratch = Scratch::new("through");
+        let (listener, port) = listener();
+        // A proxy that lets the loopback through, as the process's lets a public address.
+        let proxy = Proxy::start(|_| true).unwrap();
+        let registry = RegistryClient::new(scratch.0.clone(), None)
+            .through(&proxy)
+            .unwrap();
+        let reference: Reference = format!("127.0.0.1:{port}/team/app:1").parse().unwrap();
+        let first = first_bytes(&registry, listener, &reference).await;
+        // The client's TLS handshake, carried through the tunnel the proxy opened for it.
+        assert_eq!(first[0], 0x16, "{first:?}");
+        assert_eq!(registry.pass.as_ref().unwrap().refused(), None);
+    }
+
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
     /// mirror, with Docker Hub named: the same digest, tagged by Docker Hub's name.
     #[tokio::test]
@@ -808,6 +970,31 @@ mod tests {
         // One the mirror has not: from Docker Hub after all -- here, a name no one has, refused.
         let none: Reference = "virtx-no-such-image-anywhere:0".parse().unwrap();
         assert!(registry.pull(&none, |_| {}).await.is_err());
+    }
+
+    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
+    /// mirror, held to public registries: the mirror, its token realm and wherever it sends a
+    /// blob are on public addresses.
+    #[tokio::test]
+    #[ignore]
+    async fn docker_hub_s_image_comes_from_its_mirror_held_to_public_registries() {
+        let scratch = Scratch::new("mirror-public");
+        let registry = RegistryClient::new(scratch.0.clone(), None)
+            .with_mirror(Some("mirror.gcr.io"))
+            .public_only()
+            .unwrap();
+        let reference: Reference = "alpine:3.21".parse().unwrap();
+        let mut said = Vec::new();
+        registry
+            .pull(&reference, |line| said.push(line))
+            .await
+            .unwrap();
+        assert!(
+            !said
+                .iter()
+                .any(|line| line.starts_with("not from the mirror")),
+            "{said:?}"
+        );
     }
 
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.

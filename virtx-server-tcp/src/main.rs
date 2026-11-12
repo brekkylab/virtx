@@ -374,6 +374,50 @@ mod tests {
         );
     }
 
+    /// A server held to public registries, as virtx cloud's nodes are: a pull from a registry on
+    /// the host's loopback fails saying so, and nothing there is connected to.
+    #[tokio::test]
+    async fn a_server_held_to_public_registries_pulls_from_none_on_the_loopback() {
+        use futures_util::StreamExt as _;
+        use virtx_core::ImageJobEntry;
+
+        let served = Served::spawn("public-registries").await;
+        virtx_server_tcp::endpoints::set_public_registries_only();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = served.connect("a-token");
+
+        let reference = format!("127.0.0.1:{port}/team/app:1");
+        let job = client.pull_image(&reference, None).await.unwrap();
+        let mut log = client.image_job_log(&job.id, None);
+        // A guard against a hang, not a measure of anything.
+        let end = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if let ImageJobEntry::End(end) = log.next().await.unwrap().unwrap().entry {
+                    break end;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            end.error.as_deref(),
+            Some(
+                format!(
+                    "{reference}: 127.0.0.1:{port} is not reachable from virtx cloud: \
+                     it is at 127.0.0.1, which is not a public address"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the registry was connected to"
+        );
+    }
+
     #[tokio::test]
     async fn the_files_endpoints_take_the_same_token_and_project() {
         let served = Served::spawn("files").await;

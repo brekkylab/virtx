@@ -46,9 +46,8 @@ pub struct Files {
     snapshots: SnapshotStore,
     volumes: VolumeStore,
     /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
-    /// and each sandbox's [conditional writes](conditional), by `sandbox:` and its id. A
-    /// volume's are held by a lock file in it instead, which another process over the home
-    /// holds too.
+    /// and each sandbox's [conditional writes](conditional), by `sandbox:` and its id, and each
+    /// volume's, by `volume:` and its name, before its [lock file](Files::writing) too.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -113,9 +112,10 @@ impl Files {
                     Ok(request) => request,
                     Err(refusal) => return refusal.into_response(),
                 };
-                let key = format!("sandbox:{id}");
-                let serial = Arc::clone(self.serial.lock().unwrap().entry(key).or_default());
-                (request, Some(serial.lock_owned().await))
+                (
+                    request,
+                    Some(self.serial(format!("sandbox:{id}")).lock_owned().await),
+                )
             }
             false => (request, None),
         };
@@ -128,6 +128,43 @@ impl Files {
                 frame
             }))
         })
+    }
+
+    /// What holds the requests under `key` one at a time.
+    fn serial(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(self.serial.lock().unwrap().entry(key).or_default())
+    }
+
+    /// Hold the volume `name`, whose own directory is `dir`, for one conditional write, waiting
+    /// while another holds it, in this process or another over the home: first in this
+    /// process, then its `writing` file, locked, which the system lets go of with a process that
+    /// ends. The file is tried, not waited on, so a write waiting holds no thread, and one whose
+    /// client is gone stops waiting. Held only once the write's body has all arrived.
+    async fn writing(
+        &self,
+        name: &str,
+        dir: &std::path::Path,
+    ) -> io::Result<(tokio::sync::OwnedMutexGuard<()>, std::fs::File)> {
+        let held = self.serial(format!("volume:{name}")).lock_owned().await;
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("writing"))
+            .await?
+            .into_std()
+            .await;
+        let mut wait = std::time::Duration::from_millis(2);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok((held, file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(std::time::Duration::from_millis(100));
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
+        }
     }
 
     /// A WebDAV request to `root`, a volume or a snapshot.
@@ -148,7 +185,7 @@ impl Files {
                             Ok(request) => request,
                             Err(refusal) => return refusal.into_response(),
                         };
-                        match writing(volume.path()).await {
+                        match self.writing(name, volume.path()).await {
                             Ok(held) => (request, Some(held)),
                             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                                 let gone = VolumeError::Unknown(name.clone());
@@ -267,7 +304,11 @@ async fn spooled(request: Request<Body>) -> Result<Request<Body>, Refusal> {
 
     let failed = |e: io::Error| refused(StatusCode::INTERNAL_SERVER_ERROR, e);
     let (parts, mut body) = request.into_parts();
-    let mut file = tokio::fs::File::from_std(tempfile::tempfile().map_err(failed)?);
+    // Written a quarter of a MiB at a time, not as each small piece arrives.
+    let mut file = tokio::io::BufWriter::with_capacity(
+        256 << 10,
+        tokio::fs::File::from_std(tempfile::tempfile().map_err(failed)?),
+    );
     while let Some(frame) = body.frame().await {
         let frame = frame
             .map_err(|e| refused(StatusCode::BAD_REQUEST, format!("the body broke off: {e}")))?;
@@ -276,27 +317,15 @@ async fn spooled(request: Request<Body>) -> Result<Request<Body>, Refusal> {
         }
     }
     file.flush().await.map_err(failed)?;
+    let mut file = file.into_inner();
     file.rewind().await.map_err(failed)?;
-    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    // Read back as much at a time as a volume's `GET` reads, since a volume opens the file again
+    // for each piece it writes.
+    let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+        file,
+        volume::READ,
+    ));
     Ok(Request::from_parts(parts, body))
-}
-
-/// Hold the volume whose own directory is `dir` for one conditional write, waiting while another
-/// holds it, in this process or another over the home: its `writing` file, locked, which the
-/// system lets go of with a process that ends. Held only once the write's body has all arrived.
-async fn writing(dir: &std::path::Path) -> io::Result<std::fs::File> {
-    let at = dir.join("writing");
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&at)?;
-        file.lock()?;
-        Ok(file)
-    })
-    .await
-    .map_err(io::Error::other)?
 }
 
 /// The first segment of `rest`, what follows a root's kind in a path.

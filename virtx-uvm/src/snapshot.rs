@@ -20,6 +20,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -87,10 +88,9 @@ impl Snapshot {
     /// filesystem -- laid out by [`FsTree::to_ext4`] with no room to grow in place, which a
     /// kernel will not grow either -- is read whole and written again at `size`: a new image
     /// beside it, moved over it once whole, so a failure leaves it as it was. What it costs is
-    /// what is written to it, not `size`. Held while it is, and refused while anything else
-    /// holds it.
-    pub fn grow(&self, size: u64) -> Result<()> {
-        let _held = self.lock()?;
+    /// what is written to it, not `size`. `_held` is its [lock](Snapshot::lock), which the
+    /// caller holds throughout.
+    pub fn grow(&self, size: u64, _held: &Lock) -> Result<()> {
         if self.capacity()? >= size {
             return Ok(());
         }
@@ -129,6 +129,21 @@ impl Snapshot {
             Err(fs::TryLockError::WouldBlock) => Err(Error::InUse(self.name.clone())),
             Err(fs::TryLockError::Error(e)) => {
                 Err(Error::io(format!("locking {}", path.display()), e))
+            }
+        }
+    }
+
+    /// Hold it, as [`lock`](Snapshot::lock) does, tried again while anything else holds it
+    /// until `within` has passed: what holds it a moment -- a copy of it, or a process this one
+    /// spawns, which shares every descriptor open as it forks until it execs -- is waited out.
+    pub fn lock_within(&self, within: Duration) -> Result<Lock> {
+        let began = Instant::now();
+        loop {
+            match self.lock() {
+                Err(Error::InUse(_)) if began.elapsed() < within => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                held => return held,
             }
         }
     }
@@ -401,6 +416,34 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    /// Taken and let go of as processes are spawned: each, forked, shares the lock's descriptor
+    /// until it execs, and so holds the lock a moment past its letting go.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_a_spawned_process_shares_a_moment_is_waited_out() {
+        use std::os::unix::process::CommandExt as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scratch = Scratch::new("spawned");
+        let snapshot = scratch.0.create("work", Snapshot::SIZE).unwrap();
+        let spawning = AtomicBool::new(true);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..500 {
+                    let mut command = std::process::Command::new("true");
+                    // SAFETY: nothing runs between the fork and the exec; a hook at all is
+                    // what makes it a fork.
+                    unsafe { command.pre_exec(|| Ok(())) };
+                    command.status().unwrap();
+                }
+                spawning.store(false, Ordering::Relaxed);
+            });
+            while spawning.load(Ordering::Relaxed) {
+                drop(snapshot.lock_within(Duration::from_secs(10)).unwrap());
+            }
+        });
     }
 
     #[test]

@@ -58,7 +58,7 @@ fn keep_ended(jobs: &mut BTreeMap<String, Arc<Job>>, keep: usize) {
 pub const LABEL_MOST: usize = 128;
 
 /// How long a sandbox starting waits for its disk to be let go of: by what keeps it, as it
-/// stopped.
+/// stopped, or by a process spawned as it was held.
 const DISK_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a machine has to say where a port it was asked to publish is.
@@ -326,26 +326,26 @@ impl Sandbox {
         let mut held = shared.hooks.booting(self, &spec).await?;
 
         let disk = shared.snapshots.open(&id)?;
-        // Held a moment -- copied to be kept, as it stopped -- waited for; held longer, as by
-        // a machine another server runs it in, refused.
-        let mut waited = Duration::ZERO;
-        while disk.in_use()? {
-            if waited >= DISK_WAIT {
-                return Err(SnapshotError::InUse(id).into());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            waited += Duration::from_millis(200);
-        }
-        // Grown since it last booted: its filesystem written again as large.
+        // Held from here until its machine has ended, against every other machine, removal
+        // and copy of it, in this process or another: taken once, as a lock let go of is held
+        // on by a process spawned meanwhile until it execs. Held a moment, waited for; held
+        // longer, as by a machine another server runs it in, refused.
+        let locking = disk.clone();
+        let mut lock =
+            tokio::task::spawn_blocking(move || locking.lock_within(DISK_WAIT)).await??;
+        // Grown since it last booted: made whole, which holds it itself, and its filesystem
+        // written again as large.
         let wanted = self.record.disk_size();
         if disk.capacity()? < wanted {
+            drop(lock);
             shared.hooks.materialize(&id, &disk.path).await?;
             let growing = disk.clone();
-            tokio::task::spawn_blocking(move || growing.grow(wanted)).await??;
+            lock = tokio::task::spawn_blocking(move || {
+                let lock = growing.lock_within(DISK_WAIT)?;
+                growing.grow(wanted, &lock).map(|()| lock)
+            })
+            .await??;
         }
-        // Held from here until its machine has ended, against every other machine, removal
-        // and copy of it, in this process or another.
-        let lock = disk.lock()?;
         let volumes = self
             .record
             .args

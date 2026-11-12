@@ -46,8 +46,8 @@ use virtx_uvm::sandbox::{Activity, Given, Held, Hooks, Sandbox, Wanted, Written}
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, signal_number,
+    RegistryError, RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, signal_number,
 };
 
 use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
@@ -122,10 +122,30 @@ pub fn set_registry_mirror(mirror: &str) {
     let _ = REGISTRY_MIRROR.set(mirror.to_owned());
 }
 
-/// A registry client for this server's pulls: anonymous ones from Docker Hub's mirror, if one
-/// was set.
-fn registry(images: ImageStore, auth: Option<virtx_core::RegistryAuth>) -> RegistryClient {
-    RegistryClient::new(images, auth).with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
+/// Whether this server's pulls, pushes and builds reach registries on public addresses only,
+/// as an embedder sets it (virtx cloud's nodes do): any registry, the host's own and its
+/// network's among them, unless set. See [`RegistryClient::public_only`].
+static PUBLIC_REGISTRIES_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Reach registries on public addresses only, from now on: no registry, token realm, redirect or
+/// layer URL on the host's loopback, a private network, a link-local address (the cloud's
+/// metadata address among them) or carrier-grade NAT, and no plain `http://`.
+pub fn set_public_registries_only() {
+    PUBLIC_REGISTRIES_ONLY.store(true, Ordering::Relaxed);
+}
+
+/// A registry client for this server's pulls and pushes: anonymous pulls from Docker Hub's
+/// mirror, if one was set, and held to public registries, if this server is.
+fn registry(
+    images: ImageStore,
+    auth: Option<virtx_core::RegistryAuth>,
+) -> Result<RegistryClient, RegistryError> {
+    let client =
+        RegistryClient::new(images, auth).with_mirror(REGISTRY_MIRROR.get().map(String::as_str));
+    if PUBLIC_REGISTRIES_ONLY.load(Ordering::Relaxed) {
+        return client.public_only();
+    }
+    Ok(client)
 }
 
 /// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;
@@ -1212,7 +1232,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = registry(images.clone(), args.auth);
+            let registry = registry(images.clone(), args.auth)?;
             let (_, image) = registry.pull(&reference, report).await?;
             images.insert_tag(&reference, &image)?;
             Ok(image)
@@ -1229,7 +1249,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images, args.auth);
+            let registry = registry(images, args.auth)?;
             Ok(registry.push(&reference, report).await?)
         },
     ))
@@ -1297,7 +1317,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            registry(images.clone(), None)
+            registry(images.clone(), None)?
                 .pull(&reference, report)
                 .await?
                 .1

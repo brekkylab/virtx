@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use http::{HeaderMap, StatusCode, header};
-use virtx_uvm::{ImageStore, RegistryServer};
+use virtx_uvm::{ImageStore, RegistryServer, VolumeStore};
 
 use crate::config::{Auth, Config, DEFAULT_PROJECT};
 use crate::endpoints::Home;
@@ -134,7 +134,11 @@ impl Projects {
             let images = ImageStore::new(dir.join("images"))?;
             let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
             let members: HashSet<String> = members.iter().cloned().collect();
-            Ok((members, Arc::new(Home::new(images, registry, &dir)?)))
+            let volumes = Arc::new(VolumeStore::new(&dir)?);
+            Ok((
+                members,
+                Arc::new(Home::new(images, registry, volumes, &dir)?),
+            ))
         };
         let mut projects = HashMap::new();
         for (name, named) in &config.projects {

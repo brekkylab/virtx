@@ -5,6 +5,7 @@
 //!   [`access::Projects`].
 //! - [`endpoints::Images`]: what answers a home's registry. The binary's is a
 //!   [`virtx_uvm::RegistryServer`].
+//! - [`endpoints::Volumes`]: a home's volumes. The binary's are a [`virtx_uvm::VolumeStore`].
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
 
 pub mod access;

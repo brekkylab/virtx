@@ -1,5 +1,6 @@
 //! A server built on this one, from outside the crate: tenants of its own in place of the
-//! config's projects, and a route of its own beside the server's.
+//! config's projects, images and volumes kept elsewhere too, and a route of its own beside the
+//! server's.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,11 +10,12 @@ use std::sync::{Arc, Mutex};
 use axum::response::{IntoResponse as _, Response};
 use http::StatusCode;
 use serde_json::json;
+use virtx_core::{MountSource, VolumeListOutputItem, VolumeMountListOutputItem};
 use virtx_server_tcp::access::{Access, Checked, REGISTRY_PATH, Tenants};
 use virtx_server_tcp::config::Config;
-use virtx_server_tcp::endpoints::{Home, Images};
+use virtx_server_tcp::endpoints::{Asked, Home, Images, Volumes, refused};
 use virtx_server_tcp::serve;
-use virtx_uvm::{ImageStore, RegistryServer};
+use virtx_uvm::{ImageStore, RegistryServer, VolumeStore};
 
 /// Each token `<project>-key` is its project's, whose home is made the first time it is
 /// named, its images its own.
@@ -41,7 +43,8 @@ impl Tenants for Keys {
                 let images = ImageStore::new(dir.join("images")).unwrap();
                 let registry = RegistryServer::new(images.clone(), REGISTRY_PATH).unwrap();
                 let registry = Arc::new(Kept(Arc::new(registry)));
-                Arc::new(Home::new(images, registry, &dir).unwrap())
+                let volumes = Arc::new(Elsewhere(VolumeStore::new(&dir).unwrap()));
+                Arc::new(Home::new(images, registry, volumes, &dir).unwrap())
             });
             Ok((project.to_owned(), Arc::clone(home)))
         })
@@ -67,6 +70,74 @@ impl Images for Kept {
                 true => "kept elsewhere".into_response(),
                 false => answered,
             }
+        })
+    }
+}
+
+/// Volumes answered around: one named `theirs-…` is held by a sandbox on another server.
+struct Elsewhere(VolumeStore);
+
+impl Elsewhere {
+    fn held(name: &str) -> Asked<'_, ()> {
+        Box::pin(async move {
+            match name.starts_with("theirs-") {
+                true => Err(refused(
+                    StatusCode::CONFLICT,
+                    "in_use",
+                    format!("{name} is held on another server"),
+                )),
+                false => Ok(()),
+            }
+        })
+    }
+}
+
+impl Volumes for Elsewhere {
+    fn disk(&self) -> &VolumeStore {
+        &self.0
+    }
+
+    fn list(&self) -> Asked<'_, Vec<VolumeListOutputItem>> {
+        Volumes::list(&self.0)
+    }
+
+    fn create<'a>(&'a self, name: Option<&'a str>) -> Asked<'a, VolumeListOutputItem> {
+        Volumes::create(&self.0, name)
+    }
+
+    fn get<'a>(&'a self, name: &'a str) -> Asked<'a, VolumeListOutputItem> {
+        self.0.get(name)
+    }
+
+    fn remove<'a>(&'a self, name: &'a str) -> Asked<'a, ()> {
+        Box::pin(async move {
+            Elsewhere::held(name).await?;
+            Volumes::remove(&self.0, name).await
+        })
+    }
+
+    fn mounts<'a>(&'a self, name: &'a str) -> Asked<'a, Vec<VolumeMountListOutputItem>> {
+        self.0.mounts(name)
+    }
+
+    fn mount<'a>(&'a self, name: &'a str, path: &'a str, source: MountSource) -> Asked<'a, ()> {
+        Box::pin(async move {
+            Elsewhere::held(name).await?;
+            self.0.mount(name, path, source).await
+        })
+    }
+
+    fn unmount<'a>(&'a self, name: &'a str, path: &'a str) -> Asked<'a, ()> {
+        Box::pin(async move {
+            Elsewhere::held(name).await?;
+            self.0.unmount(name, path).await
+        })
+    }
+
+    fn hold<'a>(&'a self, name: &'a str, readonly: bool) -> Asked<'a, Box<dyn Send + Sync>> {
+        Box::pin(async move {
+            Elsewhere::held(name).await?;
+            self.0.hold(name, readonly).await
         })
     }
 }
@@ -148,6 +219,41 @@ async fn a_server_of_its_own_tenants_and_routes_is_built_from_the_library() {
             .0,
         StatusCode::NOT_FOUND
     );
+
+    // A volume held elsewhere is neither removed nor mounted here; its own is removed.
+    let send = async |method: http::Method, path: &str, body: serde_json::Value| {
+        let request = reqwest::Client::new()
+            .request(method, format!("{url}{path}"))
+            .bearer_auth("acme-key")
+            .json(&body);
+        let response = request.send().await.unwrap();
+        (response.status(), response.text().await.unwrap())
+    };
+    for name in ["theirs-data", "ours-data"] {
+        let made = send(http::Method::POST, "/volumes/", json!({ "name": name })).await;
+        assert_eq!(made.0, StatusCode::CREATED, "{made:?}");
+    }
+    let (status, body) = send(http::Method::DELETE, "/volumes/theirs-data", json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("in_use") && body.contains("held on another server"));
+    let unmounted = send(
+        http::Method::DELETE,
+        "/volumes/theirs-data/mounts/docs",
+        json!({}),
+    )
+    .await;
+    assert_eq!(unmounted.0, StatusCode::CONFLICT, "{unmounted:?}");
+    let mounting = json!({
+        "image": { "type": "tag", "tag": "alpine" },
+        "volumes": [{ "volume": "theirs-data", "path": "/data" }],
+    });
+    let (status, body) = send(http::Method::POST, "/sandboxes/", mounting).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("held on another server"));
+    let removed = send(http::Method::DELETE, "/volumes/ours-data", json!({})).await;
+    assert_eq!(removed.0, StatusCode::NO_CONTENT, "{removed:?}");
+    let (_, listed) = get("/volumes/", Some("acme-key"), None).await;
+    assert!(listed.contains("theirs-data") && !listed.contains("ours-data"));
 
     task.abort();
     for home in keys.homes() {

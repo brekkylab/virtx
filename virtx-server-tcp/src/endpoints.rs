@@ -24,15 +24,15 @@ use tokio::task::AbortHandle;
 
 use virtx_core::{
     ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
-    ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
+    ImagePullArgs, ImagePushArgs, Log, MountSource, SandboxCreateArgs, SandboxExecArgs,
+    SandboxPort, SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
     RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    Volume, VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -67,13 +67,112 @@ impl Images for RegistryServer {
     }
 }
 
+/// What is answered once a server's own has had its say, or the refusal it gives.
+pub type Asked<'a, T> = std::pin::Pin<Box<dyn Future<Output = Result<T, Refused>> + Send + 'a>>;
+
+/// A home's volumes: what answers the requests to `/volumes/`, and holds each for the sandboxes
+/// that mount it. A [`VolumeStore`] is one, of the volumes on this server's disk; a server
+/// whose volumes are kept elsewhere too answers around one.
+pub trait Volumes: Send + Sync {
+    /// Where the volumes are on this server's disk, which a machine mounts them from and
+    /// their files are served from.
+    fn disk(&self) -> &VolumeStore;
+
+    fn list(&self) -> Asked<'_, Vec<VolumeListOutputItem>>;
+
+    /// A new volume named `name`, or as the store names it.
+    fn create<'a>(&'a self, name: Option<&'a str>) -> Asked<'a, VolumeListOutputItem>;
+
+    fn get<'a>(&'a self, name: &'a str) -> Asked<'a, VolumeListOutputItem>;
+
+    /// Remove `name` and everything in it: refused while it is held.
+    fn remove<'a>(&'a self, name: &'a str) -> Asked<'a, ()>;
+
+    /// The remote sources mounted in `name`.
+    fn mounts<'a>(&'a self, name: &'a str) -> Asked<'a, Vec<VolumeMountListOutputItem>>;
+
+    fn mount<'a>(&'a self, name: &'a str, path: &'a str, source: MountSource) -> Asked<'a, ()>;
+
+    fn unmount<'a>(&'a self, name: &'a str, path: &'a str) -> Asked<'a, ()>;
+
+    /// `name`, held for a sandbox that mounts it, only to read if `readonly`, until what is
+    /// answered drops.
+    fn hold<'a>(&'a self, name: &'a str, readonly: bool) -> Asked<'a, Box<dyn Send + Sync>>;
+}
+
+fn listed(volume: &Volume) -> VolumeListOutputItem {
+    VolumeListOutputItem {
+        name: volume.name().to_owned(),
+        size: volume.size(),
+    }
+}
+
+impl Volumes for VolumeStore {
+    fn disk(&self) -> &VolumeStore {
+        self
+    }
+
+    fn list(&self) -> Asked<'_, Vec<VolumeListOutputItem>> {
+        Box::pin(async move {
+            let mut volumes = Vec::new();
+            for name in VolumeStore::list(self)? {
+                volumes.push(listed(&self.open(&name)?));
+            }
+            Ok(volumes)
+        })
+    }
+
+    fn create<'a>(&'a self, name: Option<&'a str>) -> Asked<'a, VolumeListOutputItem> {
+        Box::pin(async move {
+            let name = match name {
+                Some(name) => name.to_owned(),
+                None => pick(|name| self.open(name).is_ok()),
+            };
+            Ok(listed(&VolumeStore::create(self, &name)?))
+        })
+    }
+
+    fn get<'a>(&'a self, name: &'a str) -> Asked<'a, VolumeListOutputItem> {
+        Box::pin(async move { Ok(listed(&self.open(name)?)) })
+    }
+
+    fn remove<'a>(&'a self, name: &'a str) -> Asked<'a, ()> {
+        Box::pin(async move { Ok(VolumeStore::remove(self, name)?) })
+    }
+
+    fn mounts<'a>(&'a self, name: &'a str) -> Asked<'a, Vec<VolumeMountListOutputItem>> {
+        Box::pin(async move {
+            let volume = self.open(name)?;
+            let mounts = volume.mounts().iter();
+            Ok(mounts
+                .map(|mount| VolumeMountListOutputItem {
+                    path: mount.path.clone(),
+                    mount_type: mount.source.mount_type(),
+                })
+                .collect())
+        })
+    }
+
+    fn mount<'a>(&'a self, name: &'a str, path: &'a str, source: MountSource) -> Asked<'a, ()> {
+        Box::pin(async move { Ok(self.open(name)?.mount(path.to_owned(), source)?) })
+    }
+
+    fn unmount<'a>(&'a self, name: &'a str, path: &'a str) -> Asked<'a, ()> {
+        Box::pin(async move { Ok(self.open(name)?.unmount(path)?) })
+    }
+
+    fn hold<'a>(&'a self, name: &'a str, _readonly: bool) -> Asked<'a, Box<dyn Send + Sync>> {
+        Box::pin(async move { Ok(Box::new(self.open(name)?.hold()?) as Box<dyn Send + Sync>) })
+    }
+}
+
 /// What one project's requests reach: the stores, and the sandboxes and jobs its members made
 /// from them, which are theirs together.
 pub struct Home {
     images: ImageStore,
     registry: Arc<dyn Images>,
     pub snapshots: SnapshotStore,
-    volumes: VolumeStore,
+    volumes: Arc<dyn Volumes>,
     /// The files of the snapshots and volumes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
@@ -86,16 +185,20 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, which `registry` answers for, and the snapshots and volumes
-    /// under `root`.
-    pub fn new(images: ImageStore, registry: Arc<dyn Images>, root: &Path) -> anyhow::Result<Home> {
+    /// The images in `images`, which `registry` answers for, the volumes `volumes` is, and
+    /// the snapshots under `root`.
+    pub fn new(
+        images: ImageStore,
+        registry: Arc<dyn Images>,
+        volumes: Arc<dyn Volumes>,
+        root: &Path,
+    ) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         Sandbox::sweep(&snapshots);
-        let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
             registry,
-            files: Files::new(snapshots.clone(), volumes.clone()),
+            files: Files::new(snapshots.clone(), volumes.disk().clone()),
             snapshots,
             volumes,
             vm: vec![
@@ -137,11 +240,11 @@ impl Home {
             .lock()
             .unwrap()
             .drain()
-            .map(|(_, held)| held.sandbox)
+            .map(|(_, held)| held)
             .collect();
         std::thread::scope(|scope| {
-            for sandbox in &closed {
-                scope.spawn(|| sandbox.close());
+            for held in &closed {
+                scope.spawn(|| held.sandbox.close());
             }
         });
     }
@@ -185,10 +288,12 @@ impl Tunnel {
     }
 }
 
-/// A sandbox, and the port each capability its making answered opens.
+/// A sandbox, the port each capability its making answered opens, and the volumes it mounts,
+/// held until it is closed.
 struct Held {
     sandbox: Arc<Sandbox>,
     capabilities: HashMap<String, u16>,
+    volumes: Vec<Box<dyn Send + Sync>>,
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -579,42 +684,28 @@ async fn snapshot_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
-    Ok(VolumeListOutputItem {
-        size: home.volumes.open(&name)?.size(),
-        name,
-    })
-}
-
 async fn volume_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let mut listed = Vec::new();
-    for name in home.volumes.list()? {
-        listed.push(volume(&home, name)?);
-    }
-    Ok(json(&listed))
+    Ok(json(&home.volumes.list().await?))
 }
 
 async fn volume_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
     let args: VolumeCreateArgs = body(&request)?;
-    let name = args
-        .name
-        .unwrap_or_else(|| pick(|name| home.volumes.open(name).is_ok()));
-    let name = home.volumes.create(&name)?.name().to_owned();
-    Ok(created(format!("/volumes/{name}"), &volume(&home, name)?))
+    let made = home.volumes.create(args.name.as_deref()).await?;
+    Ok(created(format!("/volumes/{}", made.name), &made))
 }
 
 async fn volume_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    Ok(json(&volume(&home, name)?))
+    Ok(json(&home.volumes.get(&name).await?))
 }
 
 async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    home.volumes.remove(&name)?;
+    home.volumes.remove(&name).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -622,16 +713,7 @@ async fn volume_mount_list(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    let volume = home.volumes.open(&name)?;
-    let listed: Vec<_> = volume
-        .mounts()
-        .iter()
-        .map(|mount| VolumeMountListOutputItem {
-            path: mount.path.clone(),
-            mount_type: mount.source.mount_type(),
-        })
-        .collect();
-    Ok(json(&listed))
+    Ok(json(&home.volumes.mounts(&name).await?))
 }
 
 async fn volume_mount_create(
@@ -641,7 +723,7 @@ async fn volume_mount_create(
 ) -> Answer {
     let args: VolumeMountCreateArgs = body(&request)?;
     let mount_type = args.source.mount_type();
-    home.volumes.open(&name)?.mount(path.clone(), args.source)?;
+    home.volumes.mount(&name, &path, args.source).await?;
     let location = format!("/volumes/{name}/mounts/{path}");
     Ok(created(
         location,
@@ -653,7 +735,7 @@ async fn volume_mount_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments((name, path)): Segments<(String, String)>,
 ) -> Answer {
-    home.volumes.open(&name)?.unmount(&path)?;
+    home.volumes.unmount(&name, &path).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -689,10 +771,14 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    let mut volumes = Vec::new();
+    for asked in &args.volumes {
+        volumes.push(home.volumes.hold(&asked.volume, asked.readonly).await?);
+    }
     let sandbox = Sandbox::create(
         &home.images,
         &home.snapshots,
-        &home.volumes,
+        home.volumes.disk(),
         |name| home.holds(name),
         &args,
         home.vm.clone(),
@@ -724,6 +810,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
         let held = Held {
             sandbox: Arc::clone(&sandbox),
             capabilities,
+            volumes,
         };
         sandboxes.insert(id.clone(), held);
         id
@@ -748,7 +835,11 @@ async fn sandbox_remove(
 ) -> Answer {
     let removed = home.sandboxes.lock().unwrap().remove(&id);
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
+    let Held {
+        sandbox, volumes, ..
+    } = removed;
+    tokio::task::spawn_blocking(move || sandbox.close()).await?;
+    drop(volumes);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

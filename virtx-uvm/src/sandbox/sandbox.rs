@@ -638,13 +638,13 @@ impl Upper {
     fn create(dir: &Path) -> Result<Upper, Error> {
         let io = |context: String| move |source| SnapshotError::Io { context, source };
         fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
-        let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+        let (name, held) = loop {
+            let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+            if let Some(held) = Upper::claim(dir, &name)? {
+                break (name, held);
+            }
+        };
         let owner = dir.join(format!("{name}.owner"));
-        let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
-        held.try_lock().map_err(|e| SnapshotError::Io {
-            context: format!("locking {}", owner.display()),
-            source: e.into(),
-        })?;
         let path = dir.join(format!("{name}.ext4"));
         // Owned from here, so a disk that failed to format is deleted too.
         let upper = Upper {
@@ -658,6 +658,29 @@ impl Upper {
             .to_ext4(file, Snapshot::SIZE)
             .map_err(SnapshotError::from)?;
         Ok(upper)
+    }
+
+    /// Hold `<name>.owner` under `dir`, or `None` for one another holds: a sandbox's, or a
+    /// sweep's for the moment it takes to find it nobody's and remove it.
+    fn claim(dir: &Path, name: &str) -> Result<Option<File>, Error> {
+        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let owner = dir.join(format!("{name}.owner"));
+        let held = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&owner)
+            .map_err(io(format!("creating {}", owner.display())))?;
+        match held.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(io(format!("locking {}", owner.display()))(e).into());
+            }
+        }
+        // A sweep that had it first has removed it: this is a lock on nothing.
+        Ok(owner.exists().then_some(held))
     }
 }
 
@@ -708,5 +731,33 @@ fn pick(taken: impl Fn(&str) -> bool) -> String {
         if !taken(&name) {
             return name;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_another_holds_is_not_claimed() {
+        let dir = std::env::temp_dir().join(format!("virtx-uvm-upper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let owner = dir.join("0badf00d.owner");
+
+        // A sweep's, for the moment it takes to find it nobody's.
+        let sweep = File::create(&owner).unwrap();
+        sweep.lock().unwrap();
+        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
+
+        drop(sweep);
+        fs::remove_file(&owner).unwrap();
+        let held = Upper::claim(&dir, "0badf00d").unwrap();
+        assert!(held.is_some());
+        assert!(owner.is_file());
+        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
+
+        drop(held);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

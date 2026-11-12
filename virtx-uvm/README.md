@@ -865,6 +865,37 @@ the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
 ceiling. macOS is aarch64, where the interrupt controller is a GIC and
 `IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
 
+### libkrun commit `whp-prefault`
+
+Under WHP each page the guest first touches is a fault the hypervisor resolves
+on its own, one page at a time. On a desktop that is cheap. Nested — a Windows
+instance in a cloud, which is what a CI runner is — one costs about 130µs, and
+a 4 GiB guest touches tens of thousands of pages before it reaches init:
+
+| what the guest is doing                      | pages  | time |
+|----------------------------------------------|--------|------|
+| initialising its struct pages (64 MiB)       | ~16000 | ~2s  |
+| zeroing swiotlb's bounce buffer (64 MiB)     | 16384  | 2.1s |
+
+Measured on an m8i.2xlarge with nested virtualization; the host process held
+206 MiB of the 4 GiB once the guest was up, so it is these, not the RAM.
+
+The bounce buffer goes on the guest's side: `boot.rs` boots a Windows guest
+with `swiotlb=noforce`. The guest sets one aside because its RAM reaches past
+4 GiB over the MMIO hole, and nothing bounces through it — no device offers
+`VIRTIO_F_ACCESS_PLATFORM`, so virtio reaches guest memory directly, and WHP
+passes no device through. A boot went from 6.4s to 3.8s.
+
+The struct pages do not: the guest has to initialise them for its RAM below
+4 GiB before it boots, and `DEFERRED_STRUCT_PAGE_INIT` defers only the zone
+above, which saved 0.15s. So the commit gives the host the other side of it.
+`VmmBuilder::prefault_memory(true)` has `memory_init` ask
+`WHvAdviseGpaRange` to populate each region it maps, writable, which is 1.2s
+for 4 GiB at once. The price is that all of the guest's RAM is resident on the
+host from the start, used or not, so it is off by default; `boot.rs` turns it
+on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner and nothing else. The
+machine tests on that runner take 59s with it and 182s without.
+
 ### virglrenderer commit `windows`
 
 Built on a Windows host at `8167744` with no further fixes, and carried to

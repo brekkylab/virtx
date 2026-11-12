@@ -9,7 +9,15 @@
 #   runner has. They run on `virtx-windows-ci`, an EC2 instance of our own with nested
 #   virtualization, registered to this repository: `windows-runner` starts it, and it stops
 #   itself once no job has run on it for 20 minutes. A fork's pull request has no AWS role to
-#   start it with, and does not ask.
+#   start it with, and does not ask; that a fork's workflow cannot reach the runner while it is
+#   up is the repository's fork approval setting's to say, not this file's.
+#
+#   What the runner has to have, for whoever builds it again (from the `virtx-windows-ci-*`
+#   AMI, which has all of it): WHP on (`HypervisorPlatform`, and nested virtualization on the
+#   instance); the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git with its `bin` on
+#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config; and zstd on PATH --
+#   without it `actions/cache` looks for a gzip archive of a key Linux saved with zstd, and
+#   misses.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
 #   the wheel pip picks, each opening the library it carries; then the server that library
 #   fetches, from a release layout served on localhost, started and asked to answer.

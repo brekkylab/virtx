@@ -253,6 +253,8 @@ impl Home {
     ) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         let volumes = VolumeStore::new(root)?;
+        // The disks no sandbox was made of gone before its keeping counts what is here.
+        virtx_uvm::sandbox::forget_unrecorded(&snapshots, root);
         let keeping = keeping.map(|make| make(&snapshots, &volumes)).transpose()?;
         let mut registry = RegistryServer::new(images.clone(), "/images/oci")?;
         if let Some(keeping) = &keeping {
@@ -1255,6 +1257,28 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
     ))
 }
 
+/// What a build's `RUN` steps each boot a machine of.
+const BUILD_MACHINE: MachineSpec = MachineSpec {
+    vcpus: DEFAULT_VCPUS,
+    ram_mib: DEFAULT_MEMORY_MIB,
+    gpu: false,
+    gpu_memory_mib: None,
+    network: Network::Public,
+};
+
+/// The room a build of `recipe` takes of the capacity, as it is asked for (issue #151): one
+/// [`BUILD_MACHINE`]'s, if a step of it boots one -- its steps boot one at a time -- refused
+/// `503` `capacity`, as a sandbox's boot is, where there is none; none for a recipe that boots
+/// nothing. So a build's machine counts in what this server's machines take, and builds at
+/// once are held to the room there is.
+fn build_room(recipe: &virtx_core::Recipe) -> Result<Option<Taken>, Refused> {
+    let boots = recipe
+        .steps
+        .iter()
+        .any(|step| matches!(step, virtx_core::Step::Run(_)));
+    boots.then(|| Taken::of(&BUILD_MACHINE)).transpose()
+}
+
 async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
     let args: ImageBuildArgs = body(&request)?;
     let reference = reference(&args.reference)?;
@@ -1263,11 +1287,14 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let recipe = args.recipe;
+    let room = build_room(&recipe)?;
     Ok(image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
         move |mut report| async move {
+            // Held until the build ends, or is cancelled: its future dropped.
+            let _room = room;
             let (mut image, mut layers, _base) = base(&images, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
@@ -1279,13 +1306,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
                     &mut layers,
                     step,
                     &vm,
-                    &MachineSpec {
-                        vcpus: DEFAULT_VCPUS,
-                        ram_mib: DEFAULT_MEMORY_MIB,
-                        gpu: false,
-                        gpu_memory_mib: None,
-                        network: Network::Public,
-                    },
+                    &BUILD_MACHINE,
                     &mut report,
                 )
                 .await?;
@@ -2155,14 +2176,24 @@ impl From<SandboxError> for Refused {
 mod tests {
     use super::*;
 
-    #[test]
-    fn machines_past_the_capacity_are_refused_until_one_ends() {
+    /// What the capacity's tests hold while each takes and gives back room: they share it, as
+    /// they share the one capacity.
+    static ROOM: Mutex<()> = Mutex::new(());
+
+    /// The capacity every test of it holds this server's machines to: set once.
+    fn held_to_eight_vcpus() {
         set_capacity(Capacity {
-            vcpus: 4,
+            vcpus: 8,
             memory_mib: 8192,
         });
+    }
+
+    #[test]
+    fn machines_past_the_capacity_are_refused_until_one_ends() {
+        let _room = ROOM.lock().unwrap_or_else(|e| e.into_inner());
+        held_to_eight_vcpus();
         let spec = MachineSpec {
-            vcpus: 2,
+            vcpus: 4,
             ram_mib: 4096,
             gpu: false,
             gpu_memory_mib: None,
@@ -2177,6 +2208,50 @@ mod tests {
         );
         drop(one);
         assert!(Taken::of(&spec).is_ok());
+    }
+
+    /// A build that boots a machine takes its room as it is asked for -- counted in what the
+    /// machines take, refused `capacity` where there is none -- and gives it back as it ends;
+    /// one that boots nothing takes none (issue #151).
+    #[test]
+    fn a_build_takes_its_machine_s_room_and_is_refused_past_the_capacity() {
+        let _room = ROOM.lock().unwrap_or_else(|e| e.into_inner());
+        held_to_eight_vcpus();
+        let recipe = |steps: Vec<virtx_core::Step>| {
+            let mut recipe = virtx_core::Recipe::new("scratch");
+            recipe.steps = steps;
+            recipe
+        };
+        let runs = recipe(vec![
+            virtx_core::Step::Env {
+                key: "A".into(),
+                value: "1".into(),
+            },
+            virtx_core::Step::Run("true".into()),
+        ]);
+        let sets = recipe(vec![virtx_core::Step::Workdir("/w".into())]);
+        let before = capacity_and_taken().1;
+        let one = build_room(&runs)
+            .ok()
+            .flatten()
+            .expect("room for one build");
+        assert_eq!(
+            capacity_and_taken().1,
+            Capacity {
+                vcpus: before.vcpus + u64::from(DEFAULT_VCPUS),
+                memory_mib: before.memory_mib + u64::from(DEFAULT_MEMORY_MIB),
+            },
+            "counted in what the machines take"
+        );
+        let _two = build_room(&runs).ok().flatten().expect("room for two");
+        let refused = build_room(&runs).err().expect("no room for a third");
+        assert_eq!(
+            (refused.0, refused.1),
+            (StatusCode::SERVICE_UNAVAILABLE, "capacity")
+        );
+        assert!(matches!(build_room(&sets), Ok(None)), "one booting nothing");
+        drop(one);
+        assert!(matches!(build_room(&runs), Ok(Some(_))));
     }
 
     #[test]

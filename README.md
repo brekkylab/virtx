@@ -176,6 +176,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Remote
 
+Each [release](https://github.com/brekkylab/virtx/releases) carries the server as `virtx-server-tcp-<os>-<arch>.tar.gz`, for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64`. It holds `virtx-server-tcp`, the guest kernel and `abin/`. Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
+
 On the server machine, make a token and write a `server.json` that lets its user into a project:
 
 ```sh

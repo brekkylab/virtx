@@ -175,6 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### リモート
 
+各[リリース](https://github.com/brekkylab/virtx/releases)にはサーバーが `virtx-server-tcp-<os>-<arch>.tar.gz` として含まれます（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。中身は `virtx-server-tcp`、ゲストカーネル、`abin/` です。専用のディレクトリに展開すると、`virtx-server-tcp` は隣にあるゲストカーネルを見つけるので、`PATH` やライブラリパスを設定せずにそのまま実行できます。
+
 サーバーマシンでトークンを発行し、`server.json`でそのトークンを持つユーザーにプロジェクトへのアクセス権を付与します。
 
 ```sh

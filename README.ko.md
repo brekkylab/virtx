@@ -177,6 +177,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
+각 [릴리스](https://github.com/brekkylab/virtx/releases)에는 서버가 `virtx-server-tcp-<os>-<arch>.tar.gz`로 들어 있습니다(`macos-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`). 안에는 `virtx-server-tcp`, 게스트 커널, `abin/`이 있습니다. 별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
+
 서버 머신에서 토큰을 만들고, 그 토큰을 가진 사용자가 프로젝트에 접근할 수 있도록 `server.json`을 작성합니다.
 
 ```sh

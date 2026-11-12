@@ -13,7 +13,7 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
-       cargo xtask archive  [--with-abin]
+       cargo xtask archive  [<server>...] [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
        cargo xtask fixture  -- <command>...
@@ -25,8 +25,10 @@ usage: cargo xtask init     [--force]
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
-  archive   archives the stdio server and the guest kernel, for this platform, as a release
-            carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
+  archive   archives each <server> named (server-stdio, server-tcp; both when none is) with
+            the guest kernel, for this platform, as a release carries them:
+            target/release/dist/virtx-stdio-<os>-<arch>.tar.gz and
+            virtx-server-tcp-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
@@ -57,7 +59,7 @@ components:
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
   --with-abin     (archive) puts the abin that was built in the archive too; without it
-                  the archive has no abin, and sessions from the release no /abin";
+                  the archives have no abin, and sessions from the release no /abin";
 
 /// The client's packages, which `check` checks before `init` has run.
 const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
@@ -70,9 +72,9 @@ const SERVER_PACKAGES: &[&str] = &[
     "virtx-server-tcp",
     "xtask",
 ];
-/// Each server: its component, the package it is built from, and the binary it builds. The
-/// stdio server's binary is `virtx-stdio`, which is what a release archive carries
-/// and what a client spawns.
+/// Each server: its component, the package it is built from, and the binary it builds, which
+/// also names its release archive. The stdio server's binary is `virtx-stdio`, which a client
+/// spawns.
 const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
@@ -168,16 +170,17 @@ fn main() -> anyhow::Result<()> {
             check(client_only)
         }
         Some("archive") => {
-            let abin = match args.next() {
-                None => false,
-                Some(arg) if arg == "--with-abin" => true,
-                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
-            };
-            ensure!(
-                args.next().is_none(),
-                "archive takes only --with-abin\n\n{USAGE}"
-            );
-            archive(abin)
+            let mut abin = false;
+            let mut servers = Vec::new();
+            for arg in args {
+                match arg.to_str() {
+                    Some("--with-abin") => abin = true,
+                    Some("server-stdio") => servers.push(Component::ServerStdio),
+                    Some("server-tcp") => servers.push(Component::ServerTcp),
+                    _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+                }
+            }
+            archive(abin, &servers)
         }
         Some("run") => run_target(args.collect(), false, &[]),
         Some("test") => {
@@ -792,39 +795,61 @@ fn dist_platform() -> anyhow::Result<String> {
     Ok(format!("{os}-{arch}"))
 }
 
-/// Archive the set `install` would put in `bin/`, as a release carries it:
-/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
-/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
-/// which commit that was.
-fn archive(abin: bool) -> anyhow::Result<()> {
+/// Archive each of `servers`, every server when it is empty, with the set `install` would put
+/// beside it in `bin/`, as a release carries them:
+/// `target/release/dist/<binary>-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
+/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about which
+/// commit that was.
+fn archive(abin: bool, servers: &[Component]) -> anyhow::Result<()> {
     let platform = dist_platform()?;
-
-    // Staged under the release profile's own directory, and emptied first: a file a
-    // previous build had and this one does not must not ride along.
     let dist = target_path().join("release").join("dist");
-    let name = format!("virtx-stdio-{platform}");
-    let stage = dist.join(&name);
-    if stage.exists() {
-        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
-    }
     let built = target_path().join("release");
     ensure!(
         !abin || built.join("abin").is_dir(),
         "--with-abin, but no abin in {} -- run `cargo xtask build abin` first",
         built.display()
     );
-    let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
-    ensure!(
-        built.join(&stdio).is_file(),
-        "no {stdio} in {} -- run `cargo xtask build server-stdio` first",
-        built.display()
-    );
-    stage_bin(&built, &stage, &[stdio], abin)?;
+    let servers: Vec<_> = SERVERS
+        .iter()
+        .filter(|(component, _, _)| servers.is_empty() || servers.contains(component))
+        .collect();
+    // Each one named is checked before any is archived, so a missing one leaves nothing half done.
+    for (_, package, binary) in &servers {
+        let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+        ensure!(
+            built.join(&file).is_file(),
+            "no {file} in {} -- run `cargo xtask build {}` first",
+            built.display(),
+            package.trim_start_matches("virtx-")
+        );
+    }
+    for (_, _, binary) in &servers {
+        archive_server(&built, &dist, binary, &platform, abin)?;
+    }
     if !abin {
         eprintln!(
             "xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)"
         );
     }
+    Ok(())
+}
+
+fn archive_server(
+    built: &Path,
+    dist: &Path,
+    binary: &str,
+    platform: &str,
+    abin: bool,
+) -> anyhow::Result<()> {
+    // Staged under the release profile's own directory, and emptied first: a file a
+    // previous build had and this one does not must not ride along.
+    let name = format!("{binary}-{platform}");
+    let stage = dist.join(&name);
+    if stage.exists() {
+        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
+    }
+    let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+    stage_bin(built, &stage, &[file], abin)?;
 
     // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
     // remote host, and Windows' own bsdtar has no `--force-local` to say otherwise.
@@ -835,7 +860,7 @@ fn archive(abin: bool) -> anyhow::Result<()> {
         .collect::<Result<_, _>>()?;
     entries.sort();
     let status = Command::new("tar")
-        .current_dir(&dist)
+        .current_dir(dist)
         // macOS' bsdtar otherwise adds an AppleDouble `._` file for any file with xattrs.
         .env("COPYFILE_DISABLE", "1")
         .arg("-czf")

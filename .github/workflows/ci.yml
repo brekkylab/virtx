@@ -1,0 +1,28 @@
+# A pull request is built as a release would be, and tested; nothing is published. The docs
+# are `docs`'s.
+name: ci
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - docs/**
+  workflow_dispatch:
+
+# A newer push to the pull request makes an older run moot.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  test:
+    needs: build
+    uses: ./.github/workflows/test.yml
+    with:
+      version: ${{ needs.build.outputs.version }}

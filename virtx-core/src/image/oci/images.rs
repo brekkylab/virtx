@@ -8,15 +8,18 @@ use super::{
 };
 use crate::{Error, image::ImageListOutputItem, transport::TransportClient};
 
-/// Every tag in every repository, with the digest it points at, sorted by reference. A
-/// repository or a tag gone between the catalog and reading it, as another client removes it,
-/// is passed over.
+/// Every tag in every repository, with the digest it points at, sorted by reference.
 pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
     let registry = Registry::new(client);
     let mut images = Vec::new();
+    // The catalog, a repository's tags and a tag's manifest are three requests, and another
+    // client may remove a repository or a tag between them: what is gone is left out.
     for name in registry.repositories().await? {
-        for tag in registry.tags(&name).await? {
-            let Some(digest) = registry.manifest_digest_found(&name, &tag).await? else {
+        let Some(tags) = registry.tags(&name).await? else {
+            continue;
+        };
+        for tag in tags {
+            let Some(digest) = registry.manifest_digest_if_there(&name, &tag).await? else {
                 continue;
             };
             images.push(ImageListOutputItem {
@@ -93,62 +96,64 @@ pub(crate) async fn remove(client: &TransportClient, reference: &str) -> Result<
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
-    use axum::{Router, routing::get};
-    use http::{HeaderMap, StatusCode};
-    use hyper::service::Service as _;
-    use hyper_util::service::TowerToHyperService;
+    use axum::{
+        Json, Router,
+        http::{StatusCode, header},
+        response::IntoResponse,
+        routing::{get, head},
+    };
+    use serde_json::json;
 
-    use super::*;
-    use crate::transport::serve_stdio;
+    use super::list;
+    use crate::transport::testing::piped;
 
     #[tokio::test]
-    async fn a_listing_passes_over_what_goes_while_it_is_read() {
-        // `gone` lost its last tag, and `kept:2` its tag, after the catalog named them.
-        let digest = "sha256:".to_owned() + &"ab".repeat(32);
+    async fn a_list_leaves_out_what_was_removed_meanwhile() {
+        let unknown = |code: &'static str| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errors": [{"code": code, "message": "gone"}]})),
+            )
+        };
         let router = Router::new()
             .route(
                 "/images/oci/v2/_catalog",
-                get(|| async { r#"{"repositories": ["gone", "kept"]}"# }),
+                get(|| async { Json(json!({"repositories": ["gone", "kept"]})) }),
             )
             .route(
                 "/images/oci/v2/gone/tags/list",
-                get(|| async { StatusCode::NOT_FOUND }),
+                get(move || async move { unknown("NAME_UNKNOWN") }),
             )
             .route(
                 "/images/oci/v2/kept/tags/list",
-                get(|| async { r#"{"tags": ["1", "2"]}"# }),
+                get(|| async { Json(json!({"tags": ["latest", "lost"]})) }),
             )
             .route(
-                "/images/oci/v2/kept/manifests/1",
-                get({
-                    let digest = digest.clone();
-                    || async move {
-                        let mut headers = HeaderMap::new();
-                        headers.insert("docker-content-digest", digest.parse().unwrap());
-                        (headers, "")
-                    }
+                "/images/oci/v2/kept/manifests/latest",
+                head(|| async {
+                    [
+                        (
+                            header::CONTENT_TYPE.as_str(),
+                            "application/vnd.oci.image.manifest.v1+json",
+                        ),
+                        ("docker-content-digest", "sha256:ab12"),
+                    ]
+                    .into_response()
                 }),
             )
             .route(
-                "/images/oci/v2/kept/manifests/2",
-                get(|| async { StatusCode::NOT_FOUND }),
+                "/images/oci/v2/kept/manifests/lost",
+                head(move || async move { unknown("MANIFEST_UNKNOWN") }),
             );
-        let (pipe, server) = tokio::io::duplex(64 * 1024);
-        let (input, output) = tokio::io::split(server);
-        let service = TowerToHyperService::new(router);
-        let handle = move |request| {
-            let service = service.clone();
-            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
-        };
-        tokio::spawn(serve_stdio(handle, input, output));
-        let client = TransportClient::over(pipe);
-
+        let client = piped(router);
+        let listed = list(&client).await.unwrap();
         assert_eq!(
-            list(&client).await.unwrap(),
-            [ImageListOutputItem {
-                reference: "kept:1".into(),
-                digest,
-            }]
+            listed
+                .iter()
+                .map(|image| (image.reference.as_str(), image.digest.as_str()))
+                .collect::<Vec<_>>(),
+            [("kept:latest", "sha256:ab12")]
         );
+        client.close().await;
     }
 }

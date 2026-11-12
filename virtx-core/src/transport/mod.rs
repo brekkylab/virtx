@@ -32,6 +32,29 @@ pub use webdav::{
     Metadata,
 };
 
+/// What a test of a client call shares: a router, served in memory as stdio serves one.
+#[cfg(all(test, feature = "server"))]
+pub(crate) mod testing {
+    use axum::Router;
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
+
+    use super::{TransportClient, serve_stdio};
+
+    /// A client over an in-memory pipe to `router`.
+    pub(crate) fn piped(router: Router) -> TransportClient {
+        let (pipe, server) = tokio::io::duplex(64 * 1024);
+        let (input, output) = tokio::io::split(server);
+        let service = TowerToHyperService::new(router);
+        let handle = move |request| {
+            let service = service.clone();
+            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
+        };
+        tokio::spawn(serve_stdio(handle, input, output));
+        TransportClient::over(pipe)
+    }
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     //! Both ends together: a router over HTTP, served by axum, and over an in-memory HTTP/2

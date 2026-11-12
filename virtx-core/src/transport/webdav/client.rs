@@ -660,24 +660,9 @@ mod refusals {
     use std::sync::Arc;
 
     use axum::Router;
-    use hyper::service::Service as _;
-    use hyper_util::service::TowerToHyperService;
 
     use super::*;
-    use crate::transport::serve_stdio;
-
-    /// A client over an in-memory pipe to `router`, served as stdio serves one.
-    fn piped(router: Router) -> TransportClient {
-        let (pipe, server) = tokio::io::duplex(64 * 1024);
-        let (input, output) = tokio::io::split(server);
-        let service = TowerToHyperService::new(router);
-        let handle = move |request| {
-            let service = service.clone();
-            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
-        };
-        tokio::spawn(serve_stdio(handle, input, output));
-        TransportClient::over(pipe)
-    }
+    use crate::transport::testing::piped;
 
     #[tokio::test]
     async fn a_non_json_refusal_says_what_it_was_without_quoting_it() {

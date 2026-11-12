@@ -75,7 +75,10 @@ mod tests {
     //! the endpoints over a `VIRTX_HOME` of the test's own, and the files of its volumes among
     //! them.
 
-    use std::path::PathBuf;
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
@@ -94,15 +97,27 @@ mod tests {
 
     impl Server {
         fn spawn(name: &str) -> Server {
+            Server::spawn_after(name, |_, _| {})
+        }
+
+        /// `spawn`, with `after` run once the app has answered each request, given the home
+        /// and the request's path: for what another client does between a client's requests.
+        fn spawn_after(name: &str, after: impl Fn(&Path, &str) + Send + Sync + 'static) -> Server {
             let home =
                 std::env::temp_dir().join(format!("virtx-stdio-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
             let (app, _) = app(&home).unwrap();
+            let after = Arc::new(after);
+            let served = home.clone();
             let handle = move |request: http::Request<_>| {
                 let app = app.clone();
+                let after = Arc::clone(&after);
+                let home = served.clone();
                 async move {
+                    let path = request.uri().path().to_owned();
                     let Ok(response) = app.oneshot(request).await;
+                    after(&home, &path);
                     response
                 }
             };
@@ -135,13 +150,11 @@ mod tests {
         }
     }
 
-    /// The HTTP status a request was refused with, whatever the body it came with.
     fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
+        // Either kind: a Files refusal is plain HTTP, not the protocol's error body.
         match answered {
-            Err(e) => e
-                .status()
-                .unwrap_or_else(|| panic!("not refused by the server: {e}")),
-            Ok(answer) => panic!("expected a refusal, got {answer:?}"),
+            Err(ref e) if e.status().is_some() => e.status().expect("checked"),
+            other => panic!("expected a refusal, got {other:?}"),
         }
     }
 
@@ -439,6 +452,28 @@ mod tests {
         let listed = server.client.list_image().await.unwrap();
         assert_eq!(listed.len(), 1, "{listed:?}");
         assert_eq!(listed[0].digest, digest);
+    }
+
+    /// A list is three requests: the catalog, each repository's tags, each tag's manifest.
+    /// Between the first two, another client removes a repository's only tag.
+    #[tokio::test]
+    async fn a_repository_removed_mid_list_is_left_out() {
+        let server = Server::spawn_after("list-race", |home, path| {
+            if path == "/images/oci/v2/_catalog" {
+                let store = ImageStore::new(home.join("images")).unwrap();
+                store.remove_tag(&"gone:latest".parse().unwrap()).unwrap();
+            }
+        });
+        let kept = server.file_image("kept:latest");
+        server.file_image("gone:latest");
+        let listed = server.client.list_image().await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|image| (image.reference.as_str(), image.digest.as_str()))
+                .collect::<Vec<_>>(),
+            [("docker.io/library/kept:latest", kept.as_str())]
+        );
     }
 
     /// A prune takes an image no tag names once it is old, and what only it held, and leaves a

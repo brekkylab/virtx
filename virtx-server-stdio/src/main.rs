@@ -688,10 +688,10 @@ mod tests {
     }
 
     /// Two conditional writes to one file at once, from two apps over one home as two server
-    /// processes are, each with its own requests in memory: the second, sent and landed while
-    /// the first is still sending its body, lands, and the first is refused `412` as it lands,
-    /// over a file no longer the one its condition was checked against. For `If-None-Match: *`
-    /// to a new file, and for one `If-Match` to a file there.
+    /// processes are, each with its own requests in memory: the second, sent while the first is
+    /// still sending its body, is not held up by it and lands, and the first, checked once its
+    /// body has arrived, is refused `412` over a file no longer the one its condition named. For
+    /// `If-None-Match: *` to a new file, and for one `If-Match` to a file there.
     #[tokio::test]
     async fn of_two_conditional_writes_to_one_file_from_two_servers_one_lands() {
         use axum::body::{Body, Bytes};
@@ -730,14 +730,14 @@ mod tests {
                     response.status().as_u16()
                 }
             };
-            // The first's body: a part, then the rest once let go. Its first part is read
-            // only after its condition was checked.
-            let (checked, read) = oneshot::channel();
+            // The first's body: a part, then the rest once let go. Once its first part is
+            // read the first is still sending, and the second goes meanwhile.
+            let (sending, read) = oneshot::channel();
             let (go, let_go) = oneshot::channel::<()>();
-            let slow = stream::unfold((Some(checked), Some(let_go)), |state| async move {
+            let slow = stream::unfold((Some(sending), Some(let_go)), |state| async move {
                 match state {
-                    (Some(checked), let_go) => {
-                        let _ = checked.send(());
+                    (Some(sending), let_go) => {
+                        let _ = sending.send(());
                         Some((
                             Ok::<_, std::io::Error>(Bytes::from("first, ")),
                             (None, let_go),

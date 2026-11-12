@@ -40,6 +40,8 @@ form_urlencoded = "1"
 # server mounts them.
 axum = { version = "0.8", default-features = false }
 dav-server = { version = "0.11", default-features = false }
+# The body of a conditional write, read to its end before its volume or sandbox is held.
+tempfile = "3"
 # Notion's page ids.
 uuid = { version = "1", features = ["v4", "serde"] }
 # A volume's files, resolved under its root however a guest rearranges the tree under them.

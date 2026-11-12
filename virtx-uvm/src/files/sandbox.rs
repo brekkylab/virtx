@@ -13,22 +13,12 @@ use dav_server::fs::{
 };
 use futures_util::stream;
 
-use super::Condition;
 use super::volume::Meta;
 use crate::machine::Machine;
 use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 
 #[derive(Clone)]
-pub(super) struct Fs {
-    pub(super) machine: Arc<Machine>,
-    /// The request's condition, if it has one, which a whole write checks again as it lands.
-    pub(super) condition: Option<Arc<Condition>>,
-}
-
-/// Held by a write with a condition while it checks what is at its path and goes over it, so
-/// no other lands between. A sandbox's requests are all answered in the process its machine is
-/// in, this one, so one hold here is enough; it is only as long as the two steps.
-static LANDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) struct Fs(pub(super) Arc<Machine>);
 
 /// A file open for reading, or for writing from its start.
 struct File {
@@ -38,9 +28,6 @@ struct File {
     /// then, and removed if this drops first. So nothing is at `path` but what was there
     /// until all of the write has arrived.
     saving: Option<String>,
-    /// For a whole write with a condition: the condition, and what was at `path` when it was
-    /// checked, `None` for nothing, which must be there still when the write lands.
-    checked: Option<(Arc<Condition>, Option<Meta>)>,
     /// What has arrived and is not yet written, sent a [`MAX_DATA`] at a time.
     pending: Vec<u8>,
     offset: u64,
@@ -96,7 +83,7 @@ impl DavFileSystem for Fs {
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         Box::pin(async move {
             let path = at(path);
-            let there = match stat(&self.machine, &path).await {
+            let there = match stat(&self.0, &path).await {
                 Ok(meta) => Some(meta),
                 Err(FsError::NotFound) => None,
                 Err(e) => return Err(e),
@@ -105,10 +92,6 @@ impl DavFileSystem for Fs {
                 return Err(FsError::Forbidden);
             }
             let mut saving = None;
-            let checked = match (&self.condition, options.write && options.truncate) {
-                (Some(condition), true) => Some((Arc::clone(condition), there.clone())),
-                _ => None,
-            };
             let meta = match (options.write, there) {
                 (false, Some(meta)) => meta,
                 (false, None) => return Err(FsError::NotFound),
@@ -125,7 +108,7 @@ impl DavFileSystem for Fs {
                         path: saving.clone().unwrap_or_else(|| path.clone()),
                         offset: (!options.truncate).then_some(0),
                     };
-                    done(&self.machine, request).await?;
+                    done(&self.0, request).await?;
                     Meta {
                         is_dir: false,
                         len: 0,
@@ -134,10 +117,9 @@ impl DavFileSystem for Fs {
                 }
             };
             Ok(Box::new(File {
-                machine: Arc::clone(&self.machine),
+                machine: Arc::clone(&self.0),
                 path,
                 saving,
-                checked,
                 pending: Vec::new(),
                 offset: 0,
                 meta,
@@ -152,7 +134,7 @@ impl DavFileSystem for Fs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         Box::pin(async move {
             let request = IoReq::ReadDir { path: at(path) };
-            let IoResp::Entries(entries) = io(&self.machine, request, Vec::new()).await?.0 else {
+            let IoResp::Entries(entries) = io(&self.0, request, Vec::new()).await?.0 else {
                 return Err(FsError::GeneralFailure);
             };
             let entries: Vec<_> = entries
@@ -169,21 +151,21 @@ impl DavFileSystem for Fs {
     }
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
-        Box::pin(async move {
-            Ok(Box::new(stat(&self.machine, &at(path)).await?) as Box<dyn DavMetaData>)
-        })
+        Box::pin(
+            async move { Ok(Box::new(stat(&self.0, &at(path)).await?) as Box<dyn DavMetaData>) },
+        )
     }
 
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::CreateDir { path: at(path) }).await })
+        Box::pin(async move { done(&self.0, IoReq::CreateDir { path: at(path) }).await })
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
+        Box::pin(async move { done(&self.0, IoReq::Remove { path: at(path) }).await })
     }
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
+        Box::pin(async move { done(&self.0, IoReq::Remove { path: at(path) }).await })
     }
 
     /// What was at `to` is gone already: `dav-server` takes it away first, or refuses the
@@ -195,7 +177,7 @@ impl DavFileSystem for Fs {
                 to: at(to),
                 keep: false,
             };
-            done(&self.machine, request).await
+            done(&self.0, request).await
         })
     }
 
@@ -206,7 +188,7 @@ impl DavFileSystem for Fs {
                 from: at(from),
                 to: at(to),
             };
-            done(&self.machine, request).await
+            done(&self.0, request).await
         })
     }
 }
@@ -275,36 +257,21 @@ impl DavFile for File {
         })
     }
 
-    /// A whole write, all here now, goes over the path, as what was there was; with a
-    /// condition, only over what the condition was checked against.
+    /// A whole write, all here now, goes over the path, as what was there was.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             self.send(0).await?;
-            let Some(saving) = self.saving.clone() else {
-                return Ok(());
-            };
-            let _landing = match &self.checked {
-                Some(_) => Some(LANDING.lock().await),
-                None => None,
-            };
-            if let Some((condition, there)) = &self.checked {
-                let now = match stat(&self.machine, &self.path).await {
-                    Ok(meta) => Some(meta),
-                    Err(FsError::NotFound) => None,
-                    Err(e) => return Err(e),
+            if let Some(saving) = self.saving.take() {
+                let request = IoReq::Rename {
+                    from: saving.clone(),
+                    to: self.path.clone(),
+                    keep: true,
                 };
-                if now != *there {
-                    condition.broke();
-                    return Err(FsError::GeneralFailure);
+                if let Err(e) = done(&self.machine, request).await {
+                    self.saving = Some(saving);
+                    return Err(e);
                 }
             }
-            let request = IoReq::Rename {
-                from: saving,
-                to: self.path.clone(),
-                keep: true,
-            };
-            done(&self.machine, request).await?;
-            self.saving = None;
             Ok(())
         })
     }

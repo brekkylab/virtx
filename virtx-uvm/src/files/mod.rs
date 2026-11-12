@@ -8,6 +8,13 @@
 //! it, so a snapshot's requests go one at a time. A snapshot in use -- a sandbox's, or under a
 //! machine -- answers `423` to everything. A sandbox's are its machine's root as its processes
 //! see it, asked of the agent there ([`Machine::io`]).
+//!
+//! A write with `If-Match` or `If-None-Match` to a volume or a sandbox is answered in one step
+//! once its body has all arrived: the body is read to its end first, holding nothing, and then,
+//! holding the volume or the sandbox, `dav-server` checks the condition and writes. `dav-server` checks a condition
+//! before it reads the body and moves a write into place only after, so two that checked one
+//! state would both write; held across both, the second is checked against what the first
+//! wrote. Read first, a slow or stalled sender holds up no other writer.
 
 mod sandbox;
 mod snapshot;
@@ -16,7 +23,6 @@ mod volume;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -39,7 +45,10 @@ pub type Held<'a> = &'a (dyn Fn(&str) -> bool + Sync);
 pub struct Files {
     snapshots: SnapshotStore,
     volumes: VolumeStore,
-    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole.
+    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
+    /// and each sandbox's [conditional writes](conditional), by `sandbox:` and its id. A
+    /// volume's are held by a lock file in it instead, which another process over the home
+    /// holds too.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -98,18 +107,22 @@ impl Files {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
-        let path = request.uri().path().to_owned();
-        let condition = Condition::of(&request);
-        let fs = sandbox::Fs {
-            machine,
-            condition: condition.clone(),
+        let (request, _writing) = match conditional(&request) {
+            true => {
+                let request = match spooled(request).await {
+                    Ok(request) => request,
+                    Err(refusal) => return refusal.into_response(),
+                };
+                let key = format!("sandbox:{id}");
+                let serial = Arc::clone(self.serial.lock().unwrap().entry(key).or_default());
+                (request, Some(serial.lock_owned().await))
+            }
+            false => (request, None),
         };
-        let handler = handler.filesystem(Box::new(fs)).build_handler();
-        let response = handler.handle(request).await;
-        if let Some(refusal) = Condition::broken(condition.as_deref(), &path) {
-            return refusal.into_response();
-        }
-        response.map(|body| {
+        let handler = handler
+            .filesystem(Box::new(sandbox::Fs(machine)))
+            .build_handler();
+        handler.handle(request).await.map(|body| {
             Body::new(body.map_frame(move |frame| {
                 let _ = &activity;
                 frame
@@ -129,18 +142,31 @@ impl Files {
                     Ok(volume) => Arc::new(volume),
                     Err(e) => return refused(status(&e), e).into_response(),
                 };
-                let path = request.uri().path().to_owned();
-                let condition = Condition::of(&request);
-                let fs = volume::Fs {
-                    volume,
-                    condition: condition.clone(),
+                let (request, _writing) = match conditional(&request) {
+                    true => {
+                        let request = match spooled(request).await {
+                            Ok(request) => request,
+                            Err(refusal) => return refusal.into_response(),
+                        };
+                        match writing(volume.path()).await {
+                            Ok(held) => (request, Some(held)),
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                                let gone = VolumeError::Unknown(name.clone());
+                                return refused(status(&gone), gone).into_response();
+                            }
+                            Err(e) => {
+                                let why = format!("holding {name} for a write: {e}");
+                                return refused(StatusCode::INTERNAL_SERVER_ERROR, why)
+                                    .into_response();
+                            }
+                        }
+                    }
+                    false => (request, None),
                 };
-                let handler = handler.filesystem(Box::new(fs)).build_handler();
-                let response = handler.handle(request).await;
-                match Condition::broken(condition.as_deref(), &path) {
-                    Some(refusal) => refusal.into_response(),
-                    None => response.map(Body::new),
-                }
+                let handler = handler
+                    .filesystem(Box::new(volume::Fs(volume)))
+                    .build_handler();
+                handler.handle(request).await.map(Body::new)
             }
             Root::Snapshot(name) => {
                 let image = match self.load(name, held).await {
@@ -216,42 +242,66 @@ fn takes_root(prefix: &str, request: &Request<Body>) -> bool {
         || (matches!(method, "MOVE" | "COPY") && destination.is_some_and(|to| is_root(to.path())))
 }
 
+/// Whether `request` is a conditional write: one that may change what is at its path, with
+/// `If-Match` or `If-None-Match`. A read with either is not: `If-None-Match` on a `GET` is a
+/// cache asking whether it is current.
+fn conditional<B>(request: &Request<B>) -> bool {
+    let method = request.method();
+    let reads = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || method.as_str() == "PROPFIND";
+    let headers = request.headers();
+    !reads
+        && (headers.contains_key(header::IF_MATCH) || headers.contains_key(header::IF_NONE_MATCH))
+}
+
+/// `request` with its body read to its end first, into a file of its own that goes once it
+/// is closed, and read back from it: what holds a root while `dav-server` answers the request
+/// holds it only as long as reading a local file takes, not as long as the sender does. One
+/// with no body, as a `DELETE` has, is left as it is.
+async fn spooled(request: Request<Body>) -> Result<Request<Body>, Refusal> {
+    use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
+
+    if http_body::Body::is_end_stream(request.body()) {
+        return Ok(request);
+    }
+
+    let failed = |e: io::Error| refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+    let (parts, mut body) = request.into_parts();
+    let mut file = tokio::fs::File::from_std(tempfile::tempfile().map_err(failed)?);
+    while let Some(frame) = body.frame().await {
+        let frame = frame
+            .map_err(|e| refused(StatusCode::BAD_REQUEST, format!("the body broke off: {e}")))?;
+        if let Ok(data) = frame.into_data() {
+            file.write_all(&data).await.map_err(failed)?;
+        }
+    }
+    file.flush().await.map_err(failed)?;
+    file.rewind().await.map_err(failed)?;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    Ok(Request::from_parts(parts, body))
+}
+
+/// Hold the volume whose own directory is `dir` for one conditional write, waiting while another
+/// holds it, in this process or another over the home: its `writing` file, locked, which the
+/// system lets go of with a process that ends. Held only once the write's body has all arrived.
+async fn writing(dir: &std::path::Path) -> io::Result<std::fs::File> {
+    let at = dir.join("writing");
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&at)?;
+        file.lock()?;
+        Ok(file)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
 /// The first segment of `rest`, what follows a root's kind in a path.
 fn name(rest: &str) -> String {
     rest.split('/').next().unwrap_or("").to_owned()
-}
-
-/// A request's `If-Match` or `If-None-Match`, which a whole write checks again as it lands:
-/// what is at its path must be what `dav-server` checked the condition against when the write
-/// opened it, or the write is refused, so of two over one etag only the first to land does.
-/// `dav-server` has no failure that answers `412` once the body has been read, so the write
-/// marks the condition broken here, and the request is answered from that.
-#[derive(Default)]
-pub(super) struct Condition(AtomicBool);
-
-impl Condition {
-    /// `request`'s, if it has one.
-    fn of<B>(request: &Request<B>) -> Option<Arc<Condition>> {
-        let headers = request.headers();
-        let conditional =
-            headers.contains_key(header::IF_MATCH) || headers.contains_key(header::IF_NONE_MATCH);
-        conditional.then(Arc::default)
-    }
-
-    /// Mark it broken: its file changed while the write's body arrived.
-    pub(super) fn broke(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// The `412` a request to `path` is answered with if its `condition` broke.
-    fn broken(condition: Option<&Condition>, path: &str) -> Option<Refusal> {
-        condition.filter(|c| c.0.load(Ordering::Relaxed)).map(|_| {
-            refused(
-                StatusCode::PRECONDITION_FAILED,
-                format!("{path} changed while this write's body arrived: read it again and retry"),
-            )
-        })
-    }
 }
 
 /// A request refused: the status, and a line saying why.

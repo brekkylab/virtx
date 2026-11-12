@@ -253,7 +253,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 context: format!("creating {}", path.display()),
                 source: e,
             })?;
-            FsTree::new().to_ext4(file, Snapshot::SIZE)?;
+            FsTree::new().to_ext4(Snapshot::sparse(file), Snapshot::SIZE)?;
             path
         }
     };

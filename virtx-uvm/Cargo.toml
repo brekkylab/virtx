@@ -88,6 +88,11 @@ windows-sys = { version = "0.61.2", features = [
     # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an adapter's
     # shape is NDIS's, and windows-sys gates the whole call on it.
     "Win32_NetworkManagement_Ndis",
+    # `FSCTL_SET_SPARSE`, which keeps a snapshot's disk sparse on NTFS.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    # A volume's root opened sharing deletion.
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]

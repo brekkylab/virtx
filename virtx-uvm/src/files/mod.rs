@@ -9,6 +9,7 @@
 //! machine -- answers `423` to everything. A sandbox's are its machine's root as its processes
 //! see it, asked of the agent there ([`Machine::io`]).
 
+mod lock;
 mod sandbox;
 mod snapshot;
 mod volume;
@@ -38,10 +39,11 @@ pub type Held<'a> = &'a (dyn Fn(&str) -> bool + Sync);
 pub struct Files {
     snapshots: SnapshotStore,
     volumes: VolumeStore,
-    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
-    /// and each volume's that write over an etag, by `volume:` and its name, so the etag each
-    /// checks is the one the file has when it writes.
+    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// A sandbox's [conditional writes](lock) under way, by its id and the path, each refused
+    /// a second. A volume's are held by its lock files instead, which another process sees.
+    writes: lock::Keyed,
 }
 
 /// Whose files a request names.
@@ -67,6 +69,7 @@ impl Files {
             snapshots,
             volumes,
             serial: Mutex::default(),
+            writes: lock::Keyed::default(),
         }
     }
 
@@ -95,13 +98,21 @@ impl Files {
         activity: Activity,
         request: Request<Body>,
     ) -> Response {
-        let handler = match handler(format!("/sandboxes/{id}/files"), &request) {
+        let prefix = format!("/sandboxes/{id}/files");
+        let handler = match handler(prefix.clone(), &request) {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
         let handler = handler
             .filesystem(Box::new(sandbox::Fs(machine)))
             .build_handler();
+        let _writing = match lock::conditional(&prefix, &request) {
+            Some(path) => match self.writes.hold(format!("{id}\0{path}")) {
+                Some(held) => Some(held),
+                None => return under_way(&request).into_response(),
+            },
+            None => None,
+        };
         handler.handle(request).await.map(|body| {
             Body::new(body.map_frame(move |frame| {
                 let _ = &activity;
@@ -122,19 +133,20 @@ impl Files {
                     Ok(volume) => Arc::new(volume),
                     Err(e) => return refused(status(&e), e).into_response(),
                 };
+                let _writing = match lock::conditional(&root.to_string(), &request) {
+                    Some(path) => match lock::volume(volume.path(), &path) {
+                        Ok(Some(held)) => Some(held),
+                        Ok(None) => return under_way(&request).into_response(),
+                        Err(e) => {
+                            let why = format!("holding {path} in {name} to write it: {e}");
+                            return refused(StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+                        }
+                    },
+                    None => None,
+                };
                 let handler = handler
                     .filesystem(Box::new(volume::Fs(volume)))
                     .build_handler();
-                let conditional = request.headers().contains_key(http::header::IF_MATCH);
-                let _serial = match conditional {
-                    true => {
-                        let key = format!("volume:{name}");
-                        let serial =
-                            Arc::clone(self.serial.lock().unwrap().entry(key).or_default());
-                        Some(serial.lock_owned().await)
-                    }
-                    false => None,
-                };
                 handler.handle(request).await.map(Body::new)
             }
             Root::Snapshot(name) => {
@@ -214,6 +226,18 @@ fn takes_root(prefix: &str, request: &Request<Body>) -> bool {
 /// The first segment of `rest`, what follows a root's kind in a path.
 fn name(rest: &str) -> String {
     rest.split('/').next().unwrap_or("").to_owned()
+}
+
+/// `request`, a [conditional write](lock), refused with `409` while another to its path is
+/// under way: read the file again, and write again.
+fn under_way<B>(request: &Request<B>) -> Refusal {
+    refused(
+        StatusCode::CONFLICT,
+        format!(
+            "another write to {} with a condition is under way: read it again and retry",
+            request.uri().path()
+        ),
+    )
 }
 
 /// A request refused: the status, and a line saying why.

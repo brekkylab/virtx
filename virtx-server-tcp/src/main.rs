@@ -206,6 +206,7 @@ fn cors(origins: &[String]) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::IF_MATCH,
+            header::IF_NONE_MATCH,
             header::RANGE,
             HeaderName::from_static(access::PROJECT_HEADER),
             HeaderName::from_static("depth"),
@@ -838,8 +839,8 @@ mod tests {
         );
     }
 
-    /// Two clients writing over one etag at once: the first to write lands, and the other is
-    /// refused the etag it read, gone stale under it.
+    /// Two clients writing over one etag at once: one lands, and the other is refused, with
+    /// `409` while the first is under way or `412` for the etag gone stale under it after.
     #[tokio::test]
     async fn of_two_writes_over_one_etag_one_lands() {
         let served = Served::spawn("etag").await;
@@ -856,9 +857,10 @@ mod tests {
                 a.write_file(&root, "read", from_a.clone(), Some(&etag)),
                 b.write_file(&root, "read", from_b.clone(), Some(&etag)),
             );
+            let refused = |e: &virtx_core::Error| matches!(e.status(), Some(409 | 412));
             let landed = match (by_a, by_b) {
-                (Ok(()), Err(virtx_core::Error::Status(412, _))) => &from_a,
-                (Err(virtx_core::Error::Status(412, _)), Ok(())) => &from_b,
+                (Ok(()), Err(e)) if refused(&e) => &from_a,
+                (Err(e), Ok(())) if refused(&e) => &from_b,
                 (by_a, by_b) => panic!("round {round}, over one etag: {by_a:?} and {by_b:?}"),
             };
             let read = a.read_file(&root, "read", 0, None).await.unwrap();

@@ -686,4 +686,84 @@ mod tests {
         assert!(!store.contains_layer(&layer));
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
+
+    /// Two conditional writes to one file at once, from two apps over one home as two server
+    /// processes are, each with its own requests in memory: the second is refused `409` while
+    /// the first is still sending its body, the first writes, and the second sent again is
+    /// checked against what the first wrote. For `If-None-Match: *` to a new file, and for one
+    /// `If-Match` to a file there.
+    #[tokio::test]
+    async fn of_two_conditional_writes_to_one_file_from_two_servers_one_lands() {
+        use axum::body::{Body, Bytes};
+        use futures_util::stream;
+        use http::header;
+        use tokio::sync::oneshot;
+
+        let server = Server::spawn("conditional-writes");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        let etag = client
+            .stat_file(&volume, "there")
+            .await
+            .unwrap()
+            .etag
+            .unwrap();
+        let (one, _) = app(&server.home).unwrap();
+        let (two, _) = app(&server.home).unwrap();
+
+        for (path, condition, value) in [
+            ("new", header::IF_NONE_MATCH, "*".to_owned()),
+            ("there", header::IF_MATCH, etag),
+        ] {
+            let put = |app: axum::Router, body: Body| {
+                let request = http::Request::put(format!("/volumes/data/files/{path}"))
+                    .header(condition.clone(), &value)
+                    .body(body)
+                    .unwrap();
+                async move {
+                    let Ok(response) = app.oneshot(request).await;
+                    response.status().as_u16()
+                }
+            };
+            // The first's body: a part, then the rest once let go. Its first part is read
+            // only after its condition was checked.
+            let (checked, read) = oneshot::channel();
+            let (go, let_go) = oneshot::channel::<()>();
+            let slow = stream::unfold((Some(checked), Some(let_go)), |state| async move {
+                match state {
+                    (Some(checked), let_go) => {
+                        let _ = checked.send(());
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from("first, ")),
+                            (None, let_go),
+                        ))
+                    }
+                    (None, Some(let_go)) => {
+                        let _ = let_go.await;
+                        Some((Ok(Bytes::from("whole")), (None, None)))
+                    }
+                    (None, None) => None,
+                }
+            });
+            let first = tokio::spawn(put(one.clone(), Body::from_stream(slow)));
+            read.await.unwrap();
+            assert_eq!(put(two.clone(), Body::from("second")).await, 409, "{path}");
+            go.send(()).unwrap();
+            let first = first.await.unwrap();
+            assert!(
+                matches!(first, 201 | 204),
+                "{path}: the first answered {first}"
+            );
+            assert_eq!(put(two.clone(), Body::from("second")).await, 412, "{path}");
+            assert_eq!(
+                client.read_text(&volume, path).await.unwrap(),
+                "first, whole"
+            );
+        }
+    }
 }

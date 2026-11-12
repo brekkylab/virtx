@@ -348,47 +348,231 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
-/// A sandbox that asks for a GPU finds the host's, through venus: the guest's Vulkan
-/// enumerates `Virtio-GPU Venus (<the host's GPU>)`. The image carries no guest half, so the
-/// test installs Alpine's; a guest without it boots and finds no device, which is not what
-/// this asks.
+/// What a guest installs to reach venus and ask it what it finds: venus's guest driver, the
+/// Vulkan loader, and `vulkaninfo`. The image carries none of it; a guest without it boots
+/// and finds no device, which is not what the GPU's tests ask.
+const GPU_GUEST: [&str; 3] = ["mesa-vulkan-virtio", "vulkan-loader", "vulkan-tools"];
+
+/// And what it installs to build `tests/gpu/gpu.c` and its shader against them.
+const GPU_BUILD: [&str; 4] = [
+    "build-base",
+    "vulkan-headers",
+    "vulkan-loader-dev",
+    "glslang",
+];
+
+/// What the GPU's tests run on the guest's GPU, and the compute shader it dispatches -- see
+/// the file.
+const GPU_C: &str = include_str!("gpu/gpu.c");
+const TRIPLE_COMP: &str = include_str!("gpu/triple.comp");
+
+/// The host rasterizers venus hands a guest beside a GPU -- see [`is_gpu`].
+const SOFTWARE: [&str; 3] = ["llvmpipe", "lavapipe", "SwiftShader"];
+
+/// Whether a device the guest's Vulkan names is the host's GPU through venus.
 ///
 /// venus hands the guest every Vulkan device the host has, the host's software rasterizer
 /// among them where one is installed -- a Linux host with Mesa's lavapipe shows the guest
-/// `Virtio-GPU Venus (llvmpipe (...))` beside its GPU. So a device counts here only if what
-/// it stands for is not one of those, and a host whose only Vulkan is software fails.
-async fn a_gpu_sandbox_finds_the_host_s_gpu_through_venus(home: Home) {
-    let sandbox = home
-        .sandbox(&SandboxCreateArgs::new(GPU_IMAGE).gpu(true), None)
-        .await;
-    let install = [
-        "apk",
-        "add",
-        "--no-cache",
-        "--quiet",
-        "mesa-vulkan-virtio",
-        "vulkan-loader",
-        "vulkan-tools",
-    ];
-    let (lines, code) = run(&sandbox, &install, None).await.unwrap();
+/// `Virtio-GPU Venus (llvmpipe (...))` beside its GPU. So a device counts only if what it
+/// stands for is not one of those, and a host whose only Vulkan is software has no GPU here.
+fn is_gpu(name: &str) -> bool {
+    name.strip_prefix("Virtio-GPU Venus (")
+        .is_some_and(|host| !SOFTWARE.iter().any(|sw| host.contains(sw)))
+}
+
+/// `packages` installed in `sandbox`, from Alpine's repositories.
+async fn apk_add(sandbox: &Arc<Sandbox>, packages: &[&str]) {
+    let mut cmd = vec!["apk", "add", "--no-cache", "--quiet"];
+    cmd.extend(packages);
+    let (lines, code) = run(sandbox, &cmd, None).await.unwrap();
     assert_eq!(code, 0, "{lines:#?}");
-    let (lines, code) = run(&sandbox, &["vulkaninfo", "--summary"], None)
+}
+
+/// The Vulkan devices `sandbox`'s guest enumerates, by name, as `vulkaninfo --summary` lists
+/// them; none where it finds no driver to list them with.
+async fn vulkan_devices(sandbox: &Arc<Sandbox>) -> Vec<String> {
+    let (lines, _) = run(sandbox, &["vulkaninfo", "--summary"], None)
+        .await
+        .unwrap();
+    let devices = lines
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix("deviceName"))
+        .map(|rest| rest.trim_start_matches([' ', '=']).to_owned())
+        .collect();
+    eprintln!("the guest's Vulkan devices: {devices:?}");
+    devices
+}
+
+/// A sandbox with a GPU of `memory_mib` (libkrun's 8 GiB for `None`) and the guest half
+/// installed.
+async fn gpu_sandbox(home: &Home, memory_mib: Option<u32>, park: Option<Duration>) -> Arc<Sandbox> {
+    let mut args = SandboxCreateArgs::new(GPU_IMAGE).gpu(true);
+    if let Some(mib) = memory_mib {
+        args = args.gpu_memory_mib(mib);
+    }
+    let sandbox = home.sandbox(&args, park).await;
+    apk_add(&sandbox, &GPU_GUEST).await;
+    sandbox
+}
+
+/// `tests/gpu/gpu.c` built in `sandbox` as `/root/gpu`, and its shader as `/root/triple.spv`.
+async fn build_gpu_tool(sandbox: &Arc<Sandbox>) {
+    apk_add(sandbox, &GPU_BUILD).await;
+    for (path, text) in [("/root/gpu.c", GPU_C), ("/root/triple.comp", TRIPLE_COMP)] {
+        let write = format!("cat > {path} <<'VIRTX_EOF'\n{text}VIRTX_EOF\n");
+        let (lines, code) = run(sandbox, &["sh", "-c", &write], None).await.unwrap();
+        assert_eq!(code, 0, "{lines:#?}");
+    }
+    let build = [
+        "sh",
+        "-c",
+        "glslangValidator -V /root/triple.comp -o /root/triple.spv \
+         && cc -O2 -Wall -o /root/gpu /root/gpu.c -lvulkan",
+    ];
+    let (lines, code) = run(sandbox, &build, None).await.unwrap();
+    assert_eq!(code, 0, "{lines:#?}");
+}
+
+/// What `/root/gpu compute` printed: one line, `computed <n> on <device>`.
+async fn compute(sandbox: &Arc<Sandbox>) -> String {
+    let (lines, code) = run(sandbox, &["/root/gpu", "compute", "/root/triple.spv"], None)
         .await
         .unwrap();
     assert_eq!(code, 0, "{lines:#?}");
-    let devices: Vec<&str> = lines
-        .iter()
-        .filter_map(|line| line.trim().strip_prefix("deviceName"))
-        .map(|rest| rest.trim_start_matches([' ', '=']))
-        .collect();
-    eprintln!("the guest's Vulkan devices: {devices:?}");
-    const SOFTWARE: [&str; 3] = ["llvmpipe", "lavapipe", "SwiftShader"];
-    let hardware = devices.iter().any(|name| {
-        name.strip_prefix("Virtio-GPU Venus (")
-            .is_some_and(|host| !SOFTWARE.iter().any(|sw| host.contains(sw)))
-    });
-    assert!(hardware, "no host GPU among {devices:?}");
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    lines.into_iter().next().unwrap()
+}
+
+/// A sandbox that asks for a GPU finds the host's, through venus: the guest's Vulkan
+/// enumerates `Virtio-GPU Venus (<the host's GPU>)`.
+async fn a_gpu_sandbox_finds_the_host_s_gpu_through_venus(home: Home) {
+    let sandbox = gpu_sandbox(&home, None, None).await;
+    let devices = vulkan_devices(&sandbox).await;
+    assert!(
+        devices.iter().any(|name| is_gpu(name)),
+        "no host GPU among {devices:?}"
+    );
     close(sandbox).await;
+}
+
+/// A sandbox that does not ask for one gets no GPU, in a build that has them and on a host
+/// that has one: the same guest, the same driver, and nothing for it to find.
+async fn a_sandbox_that_asks_for_no_gpu_finds_none(home: Home) {
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(GPU_IMAGE), None).await;
+    apk_add(&sandbox, &GPU_GUEST).await;
+    let devices = vulkan_devices(&sandbox).await;
+    assert!(
+        !devices.iter().any(|name| name.contains("Venus")),
+        "{devices:?}"
+    );
+    close(sandbox).await;
+}
+
+/// The GPU's memory is what the sandbox asked for: venus caps every heap the guest's device
+/// reports at the window (`VKR_HEAP_SIZE_MAX`), so a guest sizes itself to what it can map
+/// rather than to the host device's whole heap.
+async fn a_gpu_sandbox_s_heaps_are_the_memory_it_asked_for(home: Home) {
+    const MIB: u32 = 2048;
+    let sandbox = gpu_sandbox(&home, Some(MIB), None).await;
+    build_gpu_tool(&sandbox).await;
+    let (lines, code) = run(&sandbox, &["/root/gpu", "heaps"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:#?}");
+    let sizes: Vec<u64> = lines
+        .iter()
+        .filter_map(|line| line.split_once("size=")?.1.parse().ok())
+        .collect();
+    eprintln!("the guest's heaps: {sizes:?}");
+    let window = u64::from(MIB) << 20;
+    assert!(!sizes.is_empty(), "{lines:#?}");
+    assert!(sizes.iter().all(|size| *size <= window), "{sizes:?}");
+    assert_eq!(sizes.iter().max(), Some(&window), "{sizes:?}");
+    close(sandbox).await;
+}
+
+/// The guest's GPU does work and hands it back: a compute shader triples-and-adds-one each
+/// of a million words in a buffer the guest filled, and the guest reads every one back.
+async fn a_gpu_sandbox_runs_a_compute_shader_and_reads_its_answer(home: Home) {
+    let sandbox = gpu_sandbox(&home, None, None).await;
+    build_gpu_tool(&sandbox).await;
+    let done = compute(&sandbox).await;
+    assert!(
+        done.strip_prefix("computed 1048576 on ")
+            .is_some_and(is_gpu),
+        "{done}"
+    );
+    close(sandbox).await;
+}
+
+/// What the guest maps of its GPU's memory is mapped through one window the size of that
+/// memory: mappings held at once fit until they would pass it, and the one that would is
+/// refused with `VK_ERROR_OUT_OF_DEVICE_MEMORY` rather than handed back half-made.
+async fn a_gpu_sandbox_s_mappings_end_at_its_memory(home: Home) {
+    const OUT_OF_DEVICE_MEMORY: &str = "-2";
+    let sandbox = gpu_sandbox(&home, Some(256), None).await;
+    build_gpu_tool(&sandbox).await;
+    let (lines, code) = run(&sandbox, &["/root/gpu", "maps", "100", "3"], None)
+        .await
+        .unwrap();
+    assert_eq!(code, 0, "{lines:#?}");
+    eprintln!("100 MiB mappings in a 256 MiB window: {lines:?}");
+    assert_eq!(
+        lines[..2],
+        ["map 0 alloc=0 map=0", "map 1 alloc=0 map=0"],
+        "{lines:#?}"
+    );
+    let third = lines.get(2).expect("a third mapping was tried");
+    assert!(
+        third.ends_with(&format!("={OUT_OF_DEVICE_MEMORY}")),
+        "{lines:#?}"
+    );
+    close(sandbox).await;
+}
+
+/// A GPU sandbox whose machine stops when idle boots again with its GPU: the device is the
+/// sandbox's, not its first machine's.
+async fn a_parked_gpu_sandbox_boots_again_with_its_gpu(home: Home) {
+    let sandbox = gpu_sandbox(&home, None, Some(Duration::from_millis(500))).await;
+    assert!(
+        vulkan_devices(&sandbox)
+            .await
+            .iter()
+            .any(|name| is_gpu(name))
+    );
+    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
+    run(
+        &sandbox,
+        &["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"],
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (lines, _) = run(&sandbox, &["sh", "-c", "ps | grep -c '[s]leep 1000'"], None)
+        .await
+        .unwrap();
+    assert_eq!(lines, ["0"], "the machine did not stop");
+    let devices = vulkan_devices(&sandbox).await;
+    assert!(
+        devices.iter().any(|name| is_gpu(name)),
+        "no host GPU among {devices:?}"
+    );
+    close(sandbox).await;
+}
+
+/// Sandboxes with GPUs at once each have their own, and each gets its own work back. Each
+/// asks for 1 GiB, so two fit beside each other's RAM on any host these run on.
+async fn gpu_sandboxes_made_at_once_each_compute_their_own(home: Home) {
+    let made = join_all((0..2).map(|_| gpu_sandbox(&home, Some(1024), None))).await;
+    join_all(made.iter().map(build_gpu_tool)).await;
+    let done = join_all(made.iter().map(compute)).await;
+    for done in done {
+        assert!(
+            done.strip_prefix("computed 1048576 on ")
+                .is_some_and(is_gpu),
+            "{done}"
+        );
+    }
+    join_all(made.into_iter().map(close)).await;
 }
 
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
@@ -464,7 +648,15 @@ fn main() -> ExitCode {
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
     ]);
     if gpu {
-        tests.extend(tests![a_gpu_sandbox_finds_the_host_s_gpu_through_venus]);
+        tests.extend(tests![
+            a_gpu_sandbox_finds_the_host_s_gpu_through_venus,
+            a_sandbox_that_asks_for_no_gpu_finds_none,
+            a_gpu_sandbox_s_heaps_are_the_memory_it_asked_for,
+            a_gpu_sandbox_runs_a_compute_shader_and_reads_its_answer,
+            a_gpu_sandbox_s_mappings_end_at_its_memory,
+            a_parked_gpu_sandbox_boots_again_with_its_gpu,
+            gpu_sandboxes_made_at_once_each_compute_their_own,
+        ]);
     }
     let filter = filter(env::args().skip(1));
     let mut failed = 0;

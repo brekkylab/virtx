@@ -87,12 +87,13 @@ cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
 cargo xtask test -p virtx                         # Rust, against the fixture
+cargo xtask test -p virtx-cli                     # the command's signing in, against the fixture
 (cd virtx-py && uv run pytest)                    # Python; its conftest serves the fixture
 (cd virtx-node && npm install && npm test)        # Node; `npm test` serves the fixture
 cargo xtask fixture -- <command>                  # any command, against the fixture
 ```
 
-- The fixture is `virtx-stdio` and `virtx-server-tcp`, built and signed, over a home of the run's own, removed once it ends, and an OpenID Connect provider of the run's own whose token the server takes. `cargo xtask fixture` serves it and names it to the tests in `VIRTX_TEST_STDIO`, `VIRTX_TEST_URL`, `VIRTX_TEST_TOKEN` and `VIRTX_TEST_PROJECT`; a test reads those, and starts no server of its own.
+- The fixture is `virtx-stdio` and `virtx-server-tcp`, built and signed, over a home of the run's own, removed once it ends, and an OpenID Connect provider of the run's own, which the server takes the tokens of and `virtx login` signs in to. `cargo xtask fixture` serves it and names it to the tests in `VIRTX_TEST_STDIO`, `VIRTX_TEST_URL`, `VIRTX_TEST_TOKEN` and `VIRTX_TEST_PROJECT`, and the tokens of two more projects' members in `VIRTX_TEST_USERS`; a test reads those, and starts no server of its own.
 - A run already under the fixture, as `cargo xtask test` runs `npm test` and `uv run pytest`, serves no other.
 
 ## Lint and the gate

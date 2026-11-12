@@ -180,18 +180,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 why,
             })
         };
-        // Asked of the text rather than of `Path`, which answers by this host's rules: on
-        // Windows `/data` is not absolute.
-        let at = asked.at.trim_end_matches('/');
-        if !asked.at.starts_with('/') {
-            return refused("a path in the guest is absolute");
-        }
-        if at.is_empty() {
-            return refused("/ is the guest's root");
-        }
+        // Mounted at the spelling checked, so the guest mounts it where it was checked.
+        let at = match crate::mount_point(&asked.at) {
+            Ok(at) => at,
+            Err(why) => return refused(why),
+        };
         if machine.volumes[..i]
             .iter()
-            .any(|other| other.at.trim_end_matches('/') == at)
+            .any(|other| crate::mount_point(&other.at).is_ok_and(|other| other == at))
         {
             return refused("another volume is mounted there");
         }
@@ -200,7 +196,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
         let host = utf8(&files)?;
-        init = init.mount(at, MOUNT_FSTYPE, &tag);
+        init = init.mount(&at, MOUNT_FSTYPE, &tag);
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
             match asked.read_only {

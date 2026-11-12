@@ -377,14 +377,23 @@ mod tests {
             path: path.into(),
             readonly: false,
         };
+        // Each as the guest reads it: `.` and repeated `/` resolve, so the root and one path
+        // spelled another way are what they are spelled as.
         for volumes in [
             vec![at("/data"), at("/data/")],
+            vec![at("/data"), at("//data")],
             vec![at("data")],
             vec![at("/")],
+            vec![at("/.")],
+            vec![at("/./")],
+            vec![at("/..")],
+            vec![at("/data"), at("/data/.")],
+            vec![at("/data/../etc")],
         ] {
+            let spelled: Vec<_> = volumes.iter().map(|v| v.path.clone()).collect();
             let mut args = here();
             args.volumes = volumes;
-            assert_eq!(refused(args).await, 400);
+            assert_eq!(refused(args).await, 400, "{spelled:?}");
         }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);

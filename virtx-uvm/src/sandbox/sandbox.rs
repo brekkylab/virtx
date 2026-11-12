@@ -502,6 +502,21 @@ impl Sandbox {
         }
     }
 
+    /// Its machine stopped, if it runs, and it forgotten here with nothing of it kept -- no record
+    /// written, its disk left to whoever undoes its making ([`Sandboxes::create`]): what a
+    /// making whose caller went away ends with. What the guest wrote is marked changed, so a
+    /// disk kept elsewhere still keeps it.
+    ///
+    /// [`Sandboxes::create`]: super::Sandboxes::create
+    pub(super) async fn abandon(self: &Arc<Self>) {
+        let _turn = self.turn.lock().await;
+        if let Ok(Some(run)) = self.take_run() {
+            let stopping = Arc::clone(self);
+            let _ = tokio::task::spawn_blocking(move || stopping.halt(&run)).await;
+        }
+        self.forgotten();
+    }
+
     /// Deleted: stopped first if it runs, its disk removed -- from wherever else it is kept
     /// first -- and its jobs and its record with it. Its volumes stay.
     pub(super) async fn delete(self: &Arc<Self>) -> Result<(), Error> {

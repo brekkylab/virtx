@@ -9,7 +9,6 @@
 //! machine -- answers `423` to everything. A sandbox's are its machine's root as its processes
 //! see it, asked of the agent there ([`Machine::io`]).
 
-mod lock;
 mod sandbox;
 mod snapshot;
 mod volume;
@@ -17,6 +16,7 @@ mod volume;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -41,9 +41,6 @@ pub struct Files {
     volumes: VolumeStore,
     /// Each snapshot's requests one at a time, by name, since each reads or writes it whole.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// A sandbox's [conditional writes](lock) under way, by its id and the path, each refused
-    /// a second. A volume's are held by its lock files instead, which another process sees.
-    writes: lock::Keyed,
 }
 
 /// Whose files a request names.
@@ -69,7 +66,6 @@ impl Files {
             snapshots,
             volumes,
             serial: Mutex::default(),
-            writes: lock::Keyed::default(),
         }
     }
 
@@ -98,22 +94,22 @@ impl Files {
         activity: Activity,
         request: Request<Body>,
     ) -> Response {
-        let prefix = format!("/sandboxes/{id}/files");
-        let handler = match handler(prefix.clone(), &request) {
+        let handler = match handler(format!("/sandboxes/{id}/files"), &request) {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
-        let handler = handler
-            .filesystem(Box::new(sandbox::Fs(machine)))
-            .build_handler();
-        let _writing = match lock::conditional(&prefix, &request) {
-            Some(path) => match self.writes.hold(format!("{id}\0{path}")) {
-                Some(held) => Some(held),
-                None => return under_way(&request).into_response(),
-            },
-            None => None,
+        let path = request.uri().path().to_owned();
+        let condition = Condition::of(&request);
+        let fs = sandbox::Fs {
+            machine,
+            condition: condition.clone(),
         };
-        handler.handle(request).await.map(|body| {
+        let handler = handler.filesystem(Box::new(fs)).build_handler();
+        let response = handler.handle(request).await;
+        if let Some(refusal) = Condition::broken(condition.as_deref(), &path) {
+            return refusal.into_response();
+        }
+        response.map(|body| {
             Body::new(body.map_frame(move |frame| {
                 let _ = &activity;
                 frame
@@ -133,21 +129,18 @@ impl Files {
                     Ok(volume) => Arc::new(volume),
                     Err(e) => return refused(status(&e), e).into_response(),
                 };
-                let _writing = match lock::conditional(&root.to_string(), &request) {
-                    Some(path) => match lock::volume(volume.path(), &path) {
-                        Ok(Some(held)) => Some(held),
-                        Ok(None) => return under_way(&request).into_response(),
-                        Err(e) => {
-                            let why = format!("holding {path} in {name} to write it: {e}");
-                            return refused(StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
-                        }
-                    },
-                    None => None,
+                let path = request.uri().path().to_owned();
+                let condition = Condition::of(&request);
+                let fs = volume::Fs {
+                    volume,
+                    condition: condition.clone(),
                 };
-                let handler = handler
-                    .filesystem(Box::new(volume::Fs(volume)))
-                    .build_handler();
-                handler.handle(request).await.map(Body::new)
+                let handler = handler.filesystem(Box::new(fs)).build_handler();
+                let response = handler.handle(request).await;
+                match Condition::broken(condition.as_deref(), &path) {
+                    Some(refusal) => refusal.into_response(),
+                    None => response.map(Body::new),
+                }
             }
             Root::Snapshot(name) => {
                 let image = match self.load(name, held).await {
@@ -228,16 +221,37 @@ fn name(rest: &str) -> String {
     rest.split('/').next().unwrap_or("").to_owned()
 }
 
-/// `request`, a [conditional write](lock), refused with `409` while another to its path is
-/// under way: read the file again, and write again.
-fn under_way<B>(request: &Request<B>) -> Refusal {
-    refused(
-        StatusCode::CONFLICT,
-        format!(
-            "another write to {} with a condition is under way: read it again and retry",
-            request.uri().path()
-        ),
-    )
+/// A request's `If-Match` or `If-None-Match`, which a whole write checks again as it lands:
+/// what is at its path must be what `dav-server` checked the condition against when the write
+/// opened it, or the write is refused, so of two over one etag only the first to land does.
+/// `dav-server` has no failure that answers `412` once the body has been read, so the write
+/// marks the condition broken here, and the request is answered from that.
+#[derive(Default)]
+pub(super) struct Condition(AtomicBool);
+
+impl Condition {
+    /// `request`'s, if it has one.
+    fn of<B>(request: &Request<B>) -> Option<Arc<Condition>> {
+        let headers = request.headers();
+        let conditional =
+            headers.contains_key(header::IF_MATCH) || headers.contains_key(header::IF_NONE_MATCH);
+        conditional.then(Arc::default)
+    }
+
+    /// Mark it broken: its file changed while the write's body arrived.
+    pub(super) fn broke(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// The `412` a request to `path` is answered with if its `condition` broke.
+    fn broken(condition: Option<&Condition>, path: &str) -> Option<Refusal> {
+        condition.filter(|c| c.0.load(Ordering::Relaxed)).map(|_| {
+            refused(
+                StatusCode::PRECONDITION_FAILED,
+                format!("{path} changed while this write's body arrived: read it again and retry"),
+            )
+        })
+    }
 }
 
 /// A request refused: the status, and a line saying why.

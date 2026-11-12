@@ -8,6 +8,7 @@
 //!   volume/<name>/files/        what the volume holds, and what a machine shares
 //!   volume/<name>/mounts.json   its mounts, credentials and all: readable by this user alone
 //!   volume/<name>/lock          what a machine that mounts it, or a removal of it, holds
+//!   volume/<name>/landing       what a write with a condition holds as it lands
 //! ```
 //!
 //! A machine a volume is mounted into writes the same directory, and may put a symbolic link
@@ -456,6 +457,49 @@ impl Volume {
                 return Err(io::ErrorKind::AlreadyExists.into());
             }
             self.root.rename(&from_at, &self.root, &to_at)
+        };
+        rename().map_err(|e| self.failed(e, &format!("{from} -> {to}")))
+    }
+
+    /// Move the file `from` over `to` if what is at `to`, `None` for nothing, passes `check`,
+    /// and answer whether it did. One such move lands at a time in the volume, from this process
+    /// or another over the home, so what `check` is shown is what the move goes over. Where
+    /// nothing was, the move is a link that a file made there since by any write refuses.
+    pub fn rename_if(
+        &self,
+        from: &str,
+        to: &str,
+        check: impl FnOnce(Option<&Stat>) -> bool,
+    ) -> Result<bool> {
+        let from_at = not_root(relative(from)?, from)?;
+        let to_at = not_root(relative(to)?, to)?;
+        self.unmounted(&from_at, from)?;
+        self.unmounted(&to_at, to)?;
+        let rename = || -> io::Result<bool> {
+            self.local(&from_at)?;
+            self.local(&to_at)?;
+            existing(&self.root, &from_at)?;
+            let landing = File::options()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(self.dir.join("landing"))?;
+            landing.lock()?;
+            let there = target(&self.root, &to_at)?
+                .map(|meta| described(&meta))
+                .transpose()?;
+            if !check(there.as_ref()) {
+                return Ok(false);
+            }
+            match there {
+                Some(_) => self.root.rename(&from_at, &self.root, &to_at)?,
+                None => match self.root.hard_link(&from_at, &self.root, &to_at) {
+                    Ok(()) => self.root.remove_file(&from_at)?,
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+                    Err(e) => return Err(e),
+                },
+            }
+            Ok(true)
         };
         rename().map_err(|e| self.failed(e, &format!("{from} -> {to}")))
     }

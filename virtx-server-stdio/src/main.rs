@@ -688,10 +688,10 @@ mod tests {
     }
 
     /// Two conditional writes to one file at once, from two apps over one home as two server
-    /// processes are, each with its own requests in memory: the second is refused `409` while
-    /// the first is still sending its body, the first writes, and the second sent again is
-    /// checked against what the first wrote. For `If-None-Match: *` to a new file, and for one
-    /// `If-Match` to a file there.
+    /// processes are, each with its own requests in memory: the second, sent and landed while
+    /// the first is still sending its body, lands, and the first is refused `412` as it lands,
+    /// over a file no longer the one its condition was checked against. For `If-None-Match: *`
+    /// to a new file, and for one `If-Match` to a file there.
     #[tokio::test]
     async fn of_two_conditional_writes_to_one_file_from_two_servers_one_lands() {
         use axum::body::{Body, Bytes};
@@ -752,18 +752,14 @@ mod tests {
             });
             let first = tokio::spawn(put(one.clone(), Body::from_stream(slow)));
             read.await.unwrap();
-            assert_eq!(put(two.clone(), Body::from("second")).await, 409, "{path}");
-            go.send(()).unwrap();
-            let first = first.await.unwrap();
+            let second = put(two.clone(), Body::from("second")).await;
             assert!(
-                matches!(first, 201 | 204),
-                "{path}: the first answered {first}"
+                matches!(second, 201 | 204),
+                "{path}: the second answered {second}"
             );
-            assert_eq!(put(two.clone(), Body::from("second")).await, 412, "{path}");
-            assert_eq!(
-                client.read_text(&volume, path).await.unwrap(),
-                "first, whole"
-            );
+            go.send(()).unwrap();
+            assert_eq!(first.await.unwrap(), 412, "{path}");
+            assert_eq!(client.read_text(&volume, path).await.unwrap(), "second");
         }
     }
 }

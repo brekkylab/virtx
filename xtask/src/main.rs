@@ -34,7 +34,10 @@ usage: cargo xtask init     [--force]
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
-            loopback; both and the home are gone once it ends, and its exit is this one's.
+            loopback; VIRTX_TEST_USERS a token of each of alice and carol, of its project
+            `demo`, and of bob, of `other`, and VIRTX_TEST_REFUSED tokens it lets no one in
+            with, both as JSON; all and the home are gone once it ends, and its exit is this
+            one's.
             Where the environment names them already, <command> runs as it is. With --serve,
             it writes each of those as NAME=value on stdout, then `ready`, and serves until
             its stdin closes, for a test runner to start it the way pytest's conftest does
@@ -964,66 +967,131 @@ fn cache_root() -> std::path::PathBuf {
         .join("virtx");
 }
 
-/// The user the fixture's server over HTTP lets through, and the client its token is for.
+/// The user every suite's requests are from, and the client the fixture's tokens are for.
 const FIXTURE_USER: &str = "test";
 const FIXTURE_CLIENT: &str = "virtx-test";
 /// The key the fixture's provider signs with, made up and no one's.
 const FIXTURE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2VGrzT1wOXvQVtaT\nL+shE0n9BR9/rn3Qn7RrXiJOcHKhRANCAAQCHMHdyNbFbHDPyRIdE7zhyTcL7XuZ\nlymVLSds5EVclDhHznH6nXaR6DUzWH+gad5rKfYNLAnnobLUNbrydOJS\n-----END PRIVATE KEY-----";
+/// The projects of the fixture's server, and the members of each: [`FIXTURE_PROJECT`] for
+/// every suite, and two that share nothing for the tests of who reaches what.
+const FIXTURE_PROJECTS: &[(&str, &[&str])] = &[
+    (FIXTURE_PROJECT, &[FIXTURE_USER]),
+    ("demo", &["alice", "carol"]),
+    ("other", &["bob"]),
+];
 
-/// An OpenID Connect provider for the fixture's server, on the loopback until this process
-/// ends: its issuer, and an ID token of [`FIXTURE_USER`]'s it signed, good for a day. It
-/// serves its discovery document and its key, which is all a server asks of one.
-fn fixture_provider() -> anyhow::Result<(String, String)> {
-    use jsonwebtoken::jwk::{Jwk, JwkSet};
-    use jsonwebtoken::{Algorithm, EncodingKey, Header};
-    use std::io::{BufRead as _, Write as _};
+/// The fixture's OpenID Connect provider, on the loopback until this process ends: it serves
+/// its discovery document and its key, which is all a server asks of one.
+struct FixtureProvider {
+    issuer: String,
+    key: jsonwebtoken::EncodingKey,
+}
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("serving a provider")?;
-    let issuer = format!("http://{}", listener.local_addr()?);
-    let key = EncodingKey::from_ec_pem(FIXTURE_KEY.as_bytes())?;
-    let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256)?;
-    jwk.common.key_id = Some("fixture".into());
-    let keys = serde_json::to_string(&JwkSet { keys: vec![jwk] })?;
-    let discovery =
-        serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/keys") }).to_string();
+impl FixtureProvider {
+    fn serve() -> anyhow::Result<FixtureProvider> {
+        use jsonwebtoken::jwk::{Jwk, JwkSet};
+        use jsonwebtoken::{Algorithm, EncodingKey};
+        use std::io::{BufRead as _, Write as _};
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let claims = serde_json::json!({
-        "iss": issuer,
-        "aud": FIXTURE_CLIENT,
-        "sub": FIXTURE_USER,
-        "iat": now,
-        "exp": now + 24 * 60 * 60,
-    });
-    let mut header = Header::new(Algorithm::ES256);
-    header.kid = Some("fixture".into());
-    let token = jsonwebtoken::encode(&header, &claims, &key)?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").context("serving a provider")?;
+        let issuer = format!("http://{}", listener.local_addr()?);
+        let key = EncodingKey::from_ec_pem(FIXTURE_KEY.as_bytes())?;
+        let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256)?;
+        jwk.common.key_id = Some("fixture".into());
+        let keys = serde_json::to_string(&JwkSet { keys: vec![jwk] })?;
+        let discovery =
+            serde_json::json!({ "issuer": issuer, "jwks_uri": format!("{issuer}/keys") })
+                .to_string();
 
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut lines = std::io::BufReader::new(&stream).lines();
-            let asked = lines.next().and_then(Result::ok).unwrap_or_default();
-            // The rest of the request, read so that closing does not reset the connection.
-            lines
-                .map_while(Result::ok)
-                .take_while(|line| !line.is_empty())
-                .for_each(drop);
-            let body = match asked.split(' ').nth(1) {
-                Some("/keys") => &keys,
-                _ => &discovery,
-            };
-            let _ = write!(
-                &stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-                 connection: close\r\n\r\n{body}",
-                body.len()
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut lines = std::io::BufReader::new(&stream).lines();
+                let asked = lines.next().and_then(Result::ok).unwrap_or_default();
+                // The rest of the request, read so that closing does not reset the connection.
+                lines
+                    .map_while(Result::ok)
+                    .take_while(|line| !line.is_empty())
+                    .for_each(drop);
+                let body = match asked.split(' ').nth(1) {
+                    Some("/keys") => &keys,
+                    _ => &discovery,
+                };
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Ok(FixtureProvider { issuer, key })
+    }
+
+    /// An ID token of `user`'s for `client`, good for `seconds` from now -- or since, below 0.
+    fn token(&self, user: &str, client: &str, seconds: i64) -> anyhow::Result<String> {
+        self.signed(
+            jsonwebtoken::Algorithm::ES256,
+            &self.key,
+            user,
+            client,
+            seconds,
+        )
+    }
+
+    fn signed(
+        &self,
+        algorithm: jsonwebtoken::Algorithm,
+        key: &jsonwebtoken::EncodingKey,
+        user: &str,
+        client: &str,
+        seconds: i64,
+    ) -> anyhow::Result<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let claims = serde_json::json!({
+            "iss": self.issuer,
+            "aud": client,
+            "sub": user,
+            "iat": now.min(now + seconds),
+            "exp": now + seconds,
+        });
+        let mut header = jsonwebtoken::Header::new(algorithm);
+        header.kid = Some("fixture".into());
+        Ok(jsonwebtoken::encode(&header, &claims, key)?)
+    }
+
+    /// A token of each member of [`FIXTURE_PROJECTS`], by user, as JSON.
+    fn users(&self) -> anyhow::Result<String> {
+        let mut users = serde_json::Map::new();
+        for user in FIXTURE_PROJECTS.iter().flat_map(|(_, members)| *members) {
+            users.insert(
+                (*user).to_owned(),
+                self.token(user, FIXTURE_CLIENT, DAY)?.into(),
             );
         }
-    });
-    Ok((issuer, token))
+        Ok(serde_json::Value::from(users).to_string())
+    }
+
+    /// Tokens naming a member that the server lets no one in with, by what is wrong with each,
+    /// as JSON.
+    fn refused(&self) -> anyhow::Result<String> {
+        use jsonwebtoken::{Algorithm, EncodingKey};
+        // A shared secret anyone could sign with: the key's public half is no secret.
+        let shared = EncodingKey::from_secret(b"fixture");
+        Ok(serde_json::json!({
+            "expired": self.token("alice", FIXTURE_CLIENT, -DAY)?,
+            "for another client": self.token("alice", "another", DAY)?,
+            "signed with a shared secret":
+                self.signed(Algorithm::HS256, &shared, "alice", FIXTURE_CLIENT, DAY)?,
+        })
+        .to_string())
+    }
 }
+
+/// How long the fixture's tokens are good for, in seconds.
+const DAY: i64 = 24 * 60 * 60;
+
 /// The one project the fixture's server over HTTP lets a request reach.
 const FIXTURE_PROJECT: &str = "test";
 
@@ -1166,8 +1234,11 @@ struct Fixture {
     process: std::process::Child,
     stdio: PathBuf,
     url: String,
-    /// An ID token its provider signed, which the server over HTTP lets through.
+    /// An ID token its provider signed for [`FIXTURE_USER`], one for each member of
+    /// [`FIXTURE_PROJECTS`] as JSON, and ones the server refuses, as JSON too.
     token: String,
+    users: String,
+    refused: String,
     scratch: PathBuf,
 }
 
@@ -1198,11 +1269,24 @@ impl Fixture {
         }
         let home = scratch.join("home");
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
-        let (issuer, token) = fixture_provider()?;
+        let provider = FixtureProvider::serve()?;
+        let projects: serde_json::Map<_, _> = FIXTURE_PROJECTS
+            .iter()
+            .map(|(name, members)| {
+                (
+                    (*name).to_owned(),
+                    serde_json::json!({ "members": members }),
+                )
+            })
+            .collect();
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
-            "oidc": { "issuer": issuer, "client_id": FIXTURE_CLIENT, "username_claim": "sub" },
-            "projects": { FIXTURE_PROJECT: { "members": [FIXTURE_USER] } },
+            "oidc": {
+                "issuer": provider.issuer,
+                "client_id": FIXTURE_CLIENT,
+                "username_claim": "sub",
+            },
+            "projects": projects,
         });
         let config_path = scratch.join("config.json");
         fs::write(&config_path, config.to_string())
@@ -1225,7 +1309,9 @@ impl Fixture {
             process,
             stdio: built("virtx-stdio"),
             url: String::new(),
-            token,
+            token: provider.token(FIXTURE_USER, FIXTURE_CLIENT, DAY)?,
+            users: provider.users()?,
+            refused: provider.refused()?,
             scratch,
         };
         let line = lines
@@ -1254,6 +1340,8 @@ impl Fixture {
             ("VIRTX_TEST_URL", self.url.clone().into()),
             ("VIRTX_TEST_TOKEN", self.token.clone().into()),
             ("VIRTX_TEST_PROJECT", FIXTURE_PROJECT.into()),
+            ("VIRTX_TEST_USERS", self.users.clone().into()),
+            ("VIRTX_TEST_REFUSED", self.refused.clone().into()),
         ]
     }
 }

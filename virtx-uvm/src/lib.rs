@@ -52,11 +52,12 @@ pub fn is_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// `at`, where a volume is mounted in the guest, spelled the one way the guest reads it:
-/// repeated and trailing `/` dropped. Refused, saying why, unless it is absolute, has no `.`
-/// or `..` segment, and is not the guest's root, so that two paths the guest takes for one
-/// are one here too. Asked of the text rather than of `Path`, which answers by this host's
-/// rules: on Windows `/data` is not absolute.
+/// `at`, where a volume is mounted in the guest, spelled one way: repeated and trailing `/`
+/// dropped. Refused, saying why, unless it is absolute, has no `.` or `..` segment, and is
+/// not the guest's root, so that two spellings of one path are one here too. Only the text:
+/// a symlink in the guest's tree, which the guest follows when it mounts, is not seen here.
+/// Asked of the text rather than of `Path`, which answers by this host's rules: on Windows
+/// `/data` is not absolute.
 pub(crate) fn mount_point(at: &str) -> std::result::Result<String, &'static str> {
     if !at.starts_with('/') {
         return Err("a path in the guest is absolute");

@@ -180,7 +180,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 why,
             })
         };
-        // Mounted at the spelling checked, so the guest mounts it where it was checked.
+        // The guest is given the spelling checked, not the one asked.
         let at = match crate::mount_point(&asked.at) {
             Ok(at) => at,
             Err(why) => return refused(why),

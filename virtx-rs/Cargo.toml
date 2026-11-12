@@ -17,3 +17,7 @@ futures-core = "0.3"
 # What crosses the C ABI is JSON.
 serde_json = "1"
 serde = "1"
+
+[dev-dependencies]
+# The server's wire, spoken by hand where the client has no call for it, and a provider's.
+reqwest = { version = "0.13", default-features = false, features = ["blocking"] }

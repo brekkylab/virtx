@@ -637,7 +637,7 @@ impl Client {
     /// here only.
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
-    /// tag the server has no image by is refused with 404.
+    /// tag the server has no image by is refused with `404`.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
         let client = self.clone();
         let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);

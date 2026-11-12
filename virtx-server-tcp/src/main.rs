@@ -30,6 +30,7 @@ use axum::response::{IntoResponse as _, Response};
 use axum::routing::any;
 use clap::Parser;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use http_body_util::BodyExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower_http::cors::CorsLayer;
 use virtx_uvm::RegistryServer;
@@ -174,8 +175,72 @@ fn app(config: &Config, access: Arc<Access>) -> anyhow::Result<axum::Router> {
                 },
             ),
         )
-        .layer(cors(&config.origins));
+        .layer(cors(&config.origins))
+        .layer(axum::middleware::map_request(lingering));
     Ok(router)
+}
+
+/// How long a request's body dropped unread is read after: time for a client to have read the
+/// answer it was sent, and not so long that a large body is taken in whole for nothing.
+const LINGER: Duration = Duration::from_secs(1);
+
+/// `request`, its body [`Lingering`] if it came over HTTP/1. Outermost, so it holds for every
+/// refusal, a token's or a project's too.
+async fn lingering(request: axum::extract::Request) -> axum::extract::Request {
+    if request.version() >= http::Version::HTTP_2 {
+        return request;
+    }
+    request.map(|body| axum::body::Body::new(Lingering(Some(body))))
+}
+
+/// A request's body that, dropped before its end, is read to its end and thrown away for up to
+/// [`LINGER`] by a task of its own. An HTTP/1 connection closed with a body unread is reset, and
+/// a client on Windows then loses an answer it has not read yet: one that refuses the request
+/// before reading its body, as most refusals do. HTTP/2 ends the request's stream alone.
+struct Lingering(Option<axum::body::Body>);
+
+impl http_body::Body for Lingering {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        match self.0.as_mut() {
+            Some(body) => std::pin::Pin::new(body).poll_frame(cx),
+            None => std::task::Poll::Ready(None),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.as_ref().is_none_or(http_body::Body::is_end_stream)
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.0
+            .as_ref()
+            .map(http_body::Body::size_hint)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Lingering {
+    fn drop(&mut self) {
+        let Some(mut body) = self.0.take() else {
+            return;
+        };
+        if http_body::Body::is_end_stream(&body) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let rest = async { while let Some(Ok(_)) = body.frame().await {} };
+            let _ = tokio::time::timeout(LINGER, rest).await;
+        });
+    }
 }
 
 /// What a browser at one of the config's `origins` may do here: every method the endpoints
@@ -864,6 +929,62 @@ mod tests {
             };
             let read = a.read_file(&root, "read", 0, None).await.unwrap();
             assert!(read == *landed, "round {round}: not the write that landed");
+        }
+    }
+
+    /// A request refused before its body is read, here a write to a volume that is not, leaves
+    /// its HTTP/1 connection to the next request: the rest of the body is read, not left for
+    /// the connection to be reset under a client still sending it, which on Windows loses the
+    /// answer.
+    #[tokio::test]
+    async fn a_request_refused_before_its_body_is_read_leaves_its_connection_to_the_next() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let served = Served::spawn("refused-body").await;
+        let address = served
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+        let body = vec![b'b'; 1 << 20];
+        for request in 0..2 {
+            let head = format!(
+                "PUT /volumes/nowhere/files/f HTTP/1.1\r\nhost: {address}\r\n\
+                 authorization: Bearer a-token\r\nvirtx-project: demo\r\n\
+                 content-length: {}\r\n\r\n",
+                body.len()
+            );
+            connection.write_all(head.as_bytes()).await.unwrap();
+            connection.write_all(&body).await.unwrap();
+            // The answer's head, then as much of its body as it says it has.
+            let mut read = Vec::new();
+            let mut more = async |read: &mut Vec<u8>| {
+                let mut chunk = [0; 4096];
+                let n = connection.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "request {request}: the connection was closed");
+                read.extend_from_slice(&chunk[..n]);
+            };
+            let end = loop {
+                more(&mut read).await;
+                if let Some(at) = read.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&read[..end]).to_lowercase();
+            assert!(
+                head.starts_with("http/1.1 404"),
+                "request {request}: {head}"
+            );
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .expect("a content-length")
+                .trim()
+                .parse()
+                .unwrap();
+            while read.len() < end + length {
+                more(&mut read).await;
+            }
         }
     }
 }

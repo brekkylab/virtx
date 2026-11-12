@@ -164,11 +164,18 @@ impl Store {
             Err(fs::TryLockError::Error(e)) => return Err(Error::io(format!("locking {name}"), e)),
         }
         // Its contents while it is held, so no machine mounts it half gone; then the rest, which
-        // a machine that takes the lock now finds no files in.
+        // a machine that takes the lock now finds no files in. The rest is moved out of the name
+        // first, under one no volume can have, so what is made in it meanwhile, as a conditional
+        // write's `writing` is, goes with it and leaves the name free.
         fs::remove_dir_all(&files)
             .map_err(|e| Error::io(format!("removing {}", files.display()), e))?;
         drop(lock);
-        fs::remove_dir_all(&dir).map_err(|e| Error::io(format!("removing {}", dir.display()), e))
+        let gone = dir.with_file_name(format!(
+            ".{name}.{}.removing",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::rename(&dir, &gone).map_err(|e| Error::io(format!("removing {}", dir.display()), e))?;
+        fs::remove_dir_all(&gone).map_err(|e| Error::io(format!("removing {}", gone.display()), e))
     }
 
     /// Volume `name`'s own directory, refused unless `name` [is one](crate::is_name).
@@ -183,7 +190,7 @@ impl Store {
 /// A volume, opened: its files' root, and the mounts in it.
 pub struct Volume {
     name: String,
-    /// Its own directory: `files/`, `mounts.json` and the lock.
+    /// Its own directory: `files/`, `mounts.json`, the lock and `writing`.
     dir: PathBuf,
     root: Dir,
     mounts: Vec<Mount>,

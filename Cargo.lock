@@ -3455,6 +3455,8 @@ dependencies = [
  "axum",
  "clap",
  "http",
+ "http-body",
+ "http-body-util",
  "reqwest",
  "serde",
  "serde_json",

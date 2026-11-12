@@ -109,7 +109,7 @@ impl Files {
         let _writing = match lock::conditional(&prefix, &request) {
             Some(path) => match self.writes.hold(format!("{id}\0{path}")) {
                 Some(held) => Some(held),
-                None => return under_way(request),
+                None => return under_way(&request).into_response(),
             },
             None => None,
         };
@@ -136,7 +136,7 @@ impl Files {
                 let _writing = match lock::conditional(&root.to_string(), &request) {
                     Some(path) => match lock::volume(volume.path(), &path) {
                         Ok(Some(held)) => Some(held),
-                        Ok(None) => return under_way(request),
+                        Ok(None) => return under_way(&request).into_response(),
                         Err(e) => {
                             let why = format!("holding {path} in {name} to write it: {e}");
                             return refused(StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
@@ -229,20 +229,15 @@ fn name(rest: &str) -> String {
 }
 
 /// `request`, a [conditional write](lock), refused with `409` while another to its path is
-/// under way: read the file again, and write again. Its body is read to its end and dropped
-/// after the answer, holding nothing: an HTTP/1 connection closed with a body unread is reset,
-/// and a client on Windows then loses the answer it had been sent.
-fn under_way(request: Request<Body>) -> Response {
-    let refusal = refused(
+/// under way: read the file again, and write again.
+fn under_way<B>(request: &Request<B>) -> Refusal {
+    refused(
         StatusCode::CONFLICT,
         format!(
             "another write to {} with a condition is under way: read it again and retry",
             request.uri().path()
         ),
-    );
-    let mut body = request.into_body();
-    tokio::spawn(async move { while let Some(Ok(_)) = body.frame().await {} });
-    refusal.into_response()
+    )
 }
 
 /// A request refused: the status, and a line saying why.

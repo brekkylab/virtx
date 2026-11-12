@@ -40,8 +40,10 @@ form_urlencoded = "1"
 # server mounts them.
 axum = { version = "0.8", default-features = false }
 dav-server = { version = "0.11", default-features = false }
-# Notion's page ids.
+# Notion's page ids, and the tokens a registry client passes its proxy as credentials.
 uuid = { version = "1", features = ["v4", "serde"] }
+# A registry client's credentials, as the `Proxy-Authorization` it sends them in.
+base64 = "0.22"
 # A volume's files, resolved under its root however a guest rearranges the tree under them.
 cap-std = "3"
 # The remote stores a volume mounts: HTTP for their APIs, `chrono` for their RFC 3339

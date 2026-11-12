@@ -1,4 +1,4 @@
-# A registry on localhost that holds only what this workflow packed of `@brekkylab`, so `npm
+# A registry on localhost that holds only what the `build` workflow packed of `@brekkylab`, so `npm
 # install @brekkylab/virtx` resolves its optional platform packages the way npmjs would. Its
 # other dependencies (koffi) come from npmjs.
 storage: ./verdaccio-storage

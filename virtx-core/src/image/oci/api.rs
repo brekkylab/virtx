@@ -46,8 +46,7 @@ impl<'a> Registry<'a> {
         )))
     }
 
-    /// As [`send`](Self::send), but `None` for a `404`: what was named is not there, or no
-    /// longer.
+    /// `send`, with `404` as `None`: for what the registry had a moment ago and may not any more.
     async fn send_found(
         &self,
         method: Method,
@@ -56,17 +55,19 @@ impl<'a> Registry<'a> {
         body: Body,
     ) -> Result<Option<Response<Body>>, Error> {
         let response = self.request(method.clone(), path, headers, body).await?;
-        match response.status() {
-            status if status.is_success() => Ok(Some(response)),
-            StatusCode::NOT_FOUND => Ok(None),
-            _ => Err(Error::Registry(format!(
-                "{method} {path}: {}",
-                failure(response).await
-            ))),
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
         }
+        if response.status().is_success() {
+            return Ok(Some(response));
+        }
+        Err(Error::Registry(format!(
+            "{method} {path}: {}",
+            failure(response).await
+        )))
     }
 
-    /// `method` sent to `path`, under `images/oci/v2/`, and the response, whatever its status.
+    /// Send `method` to `path`, under `images/oci/v2/`, and answer whatever came back.
     async fn request(
         &self,
         method: Method,
@@ -98,10 +99,12 @@ impl<'a> Registry<'a> {
                 .map(|page| page.repositories.unwrap_or_default())
         })
         .await
+        .map(Option::unwrap_or_default)
     }
 
-    /// Every tag in `name`: none once it is gone, as a repository goes with its last tag.
-    pub(crate) async fn tags(&self, name: &str) -> Result<Vec<String>, Error> {
+    /// Every tag in `name`, or `None` for a repository the registry does not have: one the
+    /// catalog named that lost its last tag since.
+    pub(crate) async fn tags(&self, name: &str) -> Result<Option<Vec<String>>, Error> {
         #[derive(Deserialize)]
         struct Tags {
             #[serde(default)]
@@ -114,12 +117,12 @@ impl<'a> Registry<'a> {
     }
 
     /// Each page of the listing at `path`, read by `read`, until one comes without a `Link` to
-    /// the next.
+    /// the next; `None` for a listing the registry does not have.
     async fn pages(
         &self,
         path: &str,
         read: impl Fn(&[u8]) -> serde_json::Result<Vec<String>>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Option<Vec<String>>, Error> {
         let mut all: Vec<String> = Vec::new();
         loop {
             let mut query = format!("{path}?n={PAGE}");
@@ -130,7 +133,7 @@ impl<'a> Registry<'a> {
                 .send_found(Method::GET, &query, &[], full(Bytes::new()))
                 .await?
             else {
-                return Ok(all);
+                return Ok(None);
             };
             let more = response.headers().contains_key(header::LINK);
             let page = read(&collect(response).await?)
@@ -138,7 +141,7 @@ impl<'a> Registry<'a> {
             let ended = page.is_empty();
             all.extend(page);
             if !more || ended {
-                return Ok(all);
+                return Ok(Some(all));
             }
         }
     }
@@ -156,8 +159,9 @@ impl<'a> Registry<'a> {
         }
     }
 
-    /// As [`manifest_digest`](Self::manifest_digest), but `None` once `target` is gone.
-    pub(crate) async fn manifest_digest_found(
+    /// `manifest_digest`, or `None` for a `target` the registry does not have: a tag it had a
+    /// moment ago and lost since.
+    pub(crate) async fn manifest_digest_if_there(
         &self,
         name: &str,
         target: &str,

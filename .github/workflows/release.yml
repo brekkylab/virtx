@@ -1,0 +1,62 @@
+# A version tag, `v<version>` of what every manifest says, is built, tested, and everything it
+# built attached to the tag's GitHub release as a draft. Publishing the draft is a person's
+# step, and runs `publish`.
+#
+# Attached to a draft only: a draft's assets are seen by the repository's writers alone, so a
+# release is never public with some of its files, and a published one is never changed. A
+# rerun replaces the draft's assets; a tag whose release is published fails here.
+#
+# A tag with a pre-release suffix (`v1.2.0-rc.1`) makes a pre-release, which is public once
+# published, the way to try the whole path before the version itself.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  test:
+    needs: build
+    uses: ./.github/workflows/test.yml
+    with:
+      version: ${{ needs.build.outputs.version }}
+
+  draft:
+    needs: [build, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/cache/restore@v6
+        with:
+          path: dist/release
+          key: bundle-${{ github.run_id }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Attach to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo none)" in
+            true) echo "$TAG's draft exists; replacing its assets" ;;
+            false) echo "::error::$TAG's release is published; a published release is not changed"; exit 1 ;;
+            *)
+              pre=""; case "$TAG" in *-*) pre=--prerelease ;; esac
+              gh release create "$TAG" --draft $pre --verify-tag --title "$TAG" --generate-notes ;;
+          esac
+          gh release upload "$TAG" --clobber dist/release/*
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

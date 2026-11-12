@@ -822,7 +822,7 @@ fn dist_platform() -> anyhow::Result<String> {
 }
 
 /// Archive the set `install` would put in `bin/`, as a release carries it:
-/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the dist workflow attaches to
+/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
 /// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
 /// which commit that was.
 fn archive(abin: bool) -> anyhow::Result<()> {

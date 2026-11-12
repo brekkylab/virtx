@@ -304,9 +304,10 @@ async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
 
 #[cfg(test)]
 mod tests {
-    //! The app, served on the loopback over a config of its own and called over HTTP as a
-    //! client would: each request to an endpoint with a token and a project -- by hand, and
-    //! through `virtx-core`'s client given both at connect.
+    //! The app, served on the loopback over a config of its own that authenticates no one, and
+    //! called over HTTP as a client would: each request to an endpoint in a project -- by
+    //! hand, and through `virtx-core`'s client given it at connect. Who reaches which project
+    //! is `virtx-rs`'s `tests/projects.rs`, against the fixture.
 
     use std::path::PathBuf;
 
@@ -319,7 +320,6 @@ mod tests {
     use virtx_uvm::{Entry, FsTree, ImageStore};
 
     use crate::config::Config;
-    use crate::oidc::tests::Provider;
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -331,31 +331,15 @@ mod tests {
         /// Its base URL, ending in `/`.
         url: String,
         home: PathBuf,
-        /// Who signs its users in, kept serving its keys, and a token of alice's, a member of
-        /// `demo`, and of bob's, a member of `other`: empty where no one is signed in.
-        _provider: Option<Provider>,
-        alice: String,
-        bob: String,
     }
 
     impl Served {
+        /// Of the projects `demo` and `other`.
         async fn spawn(name: &str) -> Served {
-            let provider = Provider::spawn().await;
-            let who = json!({
-                "oidc": { "issuer": provider.issuer, "client_id": "virtx" },
-                "projects": {
-                    "demo": { "members": ["alice@example.com"] },
-                    "other": { "members": ["bob@example.com"] },
-                },
-            });
-            let mut served = Served::spawn_with(name, who).await;
-            served.alice = provider.token(json!({ "email": "alice@example.com" }));
-            served.bob = provider.token(json!({ "email": "bob@example.com" }));
-            served._provider = Some(provider);
-            served
+            Served::spawn_with(name, json!({ "projects": { "demo": {}, "other": {} } })).await
         }
 
-        /// As [`spawn`](Self::spawn), with `who`'s members in the config for who is let in.
+        /// With `who` in the config, for who is let in and to which projects.
         async fn spawn_with(name: &str, who: Value) -> Served {
             let home =
                 std::env::temp_dir().join(format!("virtx-tcp-app-{name}-{}", std::process::id()));
@@ -377,22 +361,14 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener, router).await });
-            Served {
-                task,
-                url,
-                home,
-                _provider: None,
-                alice: String::new(),
-                bob: String::new(),
-            }
+            Served { task, url, home }
         }
 
-        /// `method` sent to `path` as `token` in `project`: the HTTP status, and the body.
+        /// `method` sent to `path` in `project`: the HTTP status, and the body.
         async fn send(
             &self,
             method: &str,
             path: &str,
-            token: Option<&str>,
             project: Option<&str>,
             body: &'static str,
         ) -> (StatusCode, String) {
@@ -400,9 +376,6 @@ mod tests {
             let mut request = reqwest::Client::new()
                 .request(method, format!("{}{path}", self.url))
                 .body(body);
-            if let Some(token) = token {
-                request = request.bearer_auth(token);
-            }
             if let Some(project) = project {
                 request = request.header("virtx-project", project);
             }
@@ -411,14 +384,11 @@ mod tests {
             (status, response.text().await.unwrap())
         }
 
-        /// A client of `token`'s, in `demo`.
-        fn connect(&self, token: &str) -> Client {
+        /// A client in `demo`.
+        fn connect(&self) -> Client {
             let mut headers = http::HeaderMap::new();
             headers.insert("virtx-project", "demo".parse().unwrap());
-            let auth = Auth::Bearer {
-                token: token.into(),
-            };
-            Client::connect(&self.url, auth, headers).unwrap()
+            Client::connect(&self.url, Auth::None, headers).unwrap()
         }
 
         /// File an empty image under `tag` in `demo`'s images.
@@ -479,9 +449,7 @@ mod tests {
     #[tokio::test]
     async fn a_server_says_where_to_sign_in_and_without_authentication_takes_any_request() {
         let asked = async |served: &Served| {
-            let (status, body) = served
-                .send("GET", ".well-known/virtx-auth", None, None, "")
-                .await;
+            let (status, body) = served.send("GET", ".well-known/virtx-auth", None, "").await;
             assert_eq!(status, StatusCode::OK);
             serde_json::from_str::<Value>(&body).unwrap()
         };
@@ -489,49 +457,26 @@ mod tests {
         let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
         let signed_in = Served::spawn_with("advertised", json!({ "oidc": oidc })).await;
         assert_eq!(asked(&signed_in).await, json!({ "oidc": oidc }));
-        let list = signed_in.send("GET", "volumes/", None, None, "").await;
+        let list = signed_in.send("GET", "volumes/", None, "").await;
         assert_eq!(list.0, StatusCode::UNAUTHORIZED);
 
         let open = Served::spawn_with("open", json!({})).await;
         assert_eq!(asked(&open).await, json!({}));
-        let list = open.send("GET", "volumes/", None, None, "").await;
+        let list = open.send("GET", "volumes/", None, "").await;
         assert_eq!((list.0, list.1.as_str()), (StatusCode::OK, "[]"));
     }
 
     #[tokio::test]
-    async fn a_request_reaches_only_a_member_s_project() {
-        let served = Served::spawn("access").await;
-        let list =
-            async |token, project| served.send("GET", "snapshots/", token, project, "").await;
-
-        let (status, body) = list(Some(served.alice.as_str()), Some("demo")).await;
-        assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
-
-        let (status, body) = list(None, Some("demo")).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let refusal: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(refusal["error"]["code"], "unauthorized");
-        assert_eq!(
-            list(Some("x"), Some("demo")).await.0,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            list(Some(served.alice.as_str()), None).await.0,
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            list(Some(served.bob.as_str()), Some("demo")).await.0,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            list(Some(served.alice.as_str()), Some("other")).await.0,
-            StatusCode::FORBIDDEN
-        );
+    async fn a_browser_is_let_in_from_the_config_s_origins_alone() {
+        let served = Served::spawn("origins").await;
+        let named = served.send("GET", "snapshots/", Some("demo"), "").await;
+        assert_eq!((named.0, named.1.as_str()), (StatusCode::OK, "[]"));
+        let unnamed = served.send("GET", "snapshots/", Some("nobody"), "").await;
+        assert_eq!(unnamed.0, StatusCode::FORBIDDEN);
 
         let from = async |origin| {
             reqwest::Client::new()
                 .get(format!("{}snapshots/", served.url))
-                .bearer_auth(&served.alice)
                 .header("virtx-project", "demo")
                 .header("origin", origin)
                 .send()
@@ -542,7 +487,7 @@ mod tests {
         assert_eq!(from("https://allowed.example").await, StatusCode::OK);
         assert_eq!(from("https://evil.example").await, StatusCode::FORBIDDEN);
 
-        // A browser's preflight, sent without the token, is answered for the WebDAV methods from
+        // A browser's preflight is answered for the WebDAV methods from
         // an origin let in, and left without its answer from any other.
         let files = format!("{}volumes/data/files/", served.url);
         let preflight = async |origin| {
@@ -591,14 +536,9 @@ mod tests {
         );
 
         // The request it clears carries the origin's answer too.
-        served
-            .connect(&served.alice)
-            .create_volume(Some("data"))
-            .await
-            .unwrap();
+        served.connect().create_volume(Some("data")).await.unwrap();
         let listed = reqwest::Client::new()
             .request(Method::from_bytes(b"PROPFIND").unwrap(), &files)
-            .bearer_auth(&served.alice)
             .header("virtx-project", "demo")
             .header("origin", "https://allowed.example")
             .header("depth", "1")
@@ -612,42 +552,29 @@ mod tests {
         );
     }
 
-    /// A project's images are an OCI registry at `/images/oci/v2/`, to its members alone.
+    /// A project's images are an OCI registry at `/images/oci/v2/`, and no other project's.
     #[tokio::test]
-    async fn a_project_s_images_are_a_registry_to_its_members() {
+    async fn a_project_s_images_are_a_registry() {
         let served = Served::spawn("registry").await;
         served.file_image("alpine:3.21");
         let base = format!("{}images/oci/v2", served.url);
-        let get = async |path: &str, token: Option<&str>, project: Option<&str>| {
-            let mut request = reqwest::Client::new().get(format!("{base}/{path}"));
-            if let Some(token) = token {
-                request = request.bearer_auth(token);
-            }
-            if let Some(project) = project {
-                request = request.header("virtx-project", project);
-            }
-            request.send().await.unwrap()
+        let get = async |path: &str, project: &str| {
+            reqwest::Client::new()
+                .get(format!("{base}/{path}"))
+                .header("virtx-project", project)
+                .send()
+                .await
+                .unwrap()
         };
-        let (alice, bob) = (Some(served.alice.as_str()), Some(served.bob.as_str()));
+        assert_eq!(get("", "demo").await.status(), StatusCode::OK);
 
-        assert_eq!(
-            get("", None, Some("demo")).await.status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(get("", alice, None).await.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            get("", bob, Some("demo")).await.status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(get("", alice, Some("demo")).await.status(), StatusCode::OK);
-
-        let manifest = get("alpine/manifests/3.21", alice, Some("demo")).await;
+        let manifest = get("alpine/manifests/3.21", "demo").await;
         assert_eq!(manifest.status(), StatusCode::OK);
         let manifest: Value = manifest.json().await.unwrap();
         let layer = &manifest["layers"][0];
         assert_eq!(layer["mediaType"], "application/vnd.erofs.layer.v1");
         let digest = layer["digest"].as_str().unwrap();
-        let blob = get(&format!("alpine/blobs/{digest}"), alice, Some("demo")).await;
+        let blob = get(&format!("alpine/blobs/{digest}"), "demo").await;
         assert_eq!(blob.status(), StatusCode::OK);
         assert_eq!(
             format!("sha256:{:x}", Sha256::digest(blob.bytes().await.unwrap())),
@@ -655,74 +582,19 @@ mod tests {
         );
 
         // Another project has none of them, by tag or by digest.
-        assert_eq!(get("", bob, Some("other")).await.status(), StatusCode::OK);
-        let theirs = get("alpine/manifests/3.21", bob, Some("other")).await;
+        assert_eq!(get("", "other").await.status(), StatusCode::OK);
+        let theirs = get("alpine/manifests/3.21", "other").await;
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
-        let theirs = get(&format!("alpine/blobs/{digest}"), bob, Some("other")).await;
+        let theirs = get(&format!("alpine/blobs/{digest}"), "other").await;
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
     }
 
-    #[tokio::test]
-    async fn the_files_endpoints_take_the_same_token_and_project() {
-        let served = Served::spawn("files").await;
-        served
-            .connect(&served.alice)
-            .create_volume(Some("data"))
-            .await
-            .unwrap();
-        let send = async |method, path, token, body| {
-            served.send(method, path, token, Some("demo"), body).await
-        };
-
-        let put = "volumes/data/files/a.txt";
-        assert_eq!(
-            send("PUT", put, None, "hello").await.0,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            send("PUT", put, Some(served.bob.as_str()), "hello").await.0,
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            send("PUT", put, Some(served.alice.as_str()), "hello")
-                .await
-                .0,
-            StatusCode::CREATED
-        );
-        assert_eq!(
-            std::fs::read(served.home.join("project/demo/volume/data/files/a.txt")).unwrap(),
-            b"hello"
-        );
-        let (status, body) = send("GET", put, Some(served.alice.as_str()), "").await;
-        assert_eq!((status, body.as_str()), (StatusCode::OK, "hello"));
-        let (status, body) = send(
-            "PROPFIND",
-            "volumes/data/files/",
-            Some(served.alice.as_str()),
-            "",
-        )
-        .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS);
-        assert!(body.contains("a.txt"), "{body}");
-        assert_eq!(
-            send(
-                "GET",
-                "volumes/nobody/files/a.txt",
-                Some(served.alice.as_str()),
-                ""
-            )
-            .await
-            .0,
-            StatusCode::NOT_FOUND
-        );
-    }
-
-    /// The files of a volume and a snapshot through `virtx-core`'s client, given the token and the
-    /// project at connect, as a program over the bindings reaches them.
+    /// The files of a volume and a snapshot through `virtx-core`'s client, given the project at
+    /// connect, as a program over the bindings reaches them.
     #[tokio::test]
     async fn the_client_reaches_a_project_with_the_headers_given_at_connect() {
         let served = Served::spawn("client").await;
-        let client = served.connect(&served.alice);
+        let client = served.connect();
         client.create_volume(Some("data")).await.unwrap();
         client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         let volume = FileRoot::Volume("data".into());
@@ -845,17 +717,12 @@ mod tests {
         drop(lock);
         let nobody = FileRoot::Snapshot("nobody".into());
         assert_eq!(status(client.read_dir(&nobody, "").await), 404);
-
-        // Not a member of the project: every request is refused, the resources and the files alike.
-        let bob = served.connect(&served.bob);
-        assert_eq!(status(bob.create_volume(None::<String>).await), 403);
-        assert_eq!(status(bob.stat_file(&volume, "c.txt").await), 403);
     }
 
     #[tokio::test]
     async fn a_project_keeps_its_snapshots_and_volumes() {
         let served = Served::spawn("project").await;
-        let client = served.connect(&served.alice);
+        let client = served.connect();
         let created = client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         assert_eq!(created.name, "work");
         assert!(
@@ -907,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn of_two_writes_over_one_etag_one_lands() {
         let served = Served::spawn("etag").await;
-        let (a, b) = (served.connect(&served.alice), served.connect(&served.alice));
+        let (a, b) = (served.connect(), served.connect());
         a.create_volume(Some("data")).await.unwrap();
         let root = FileRoot::Volume("data".into());
         let (from_a, from_b) = (vec![b'a'; 1 << 20], vec![b'b'; 1 << 20]);

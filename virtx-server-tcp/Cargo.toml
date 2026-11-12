@@ -36,10 +36,7 @@ virtx-uvm = { workspace = true }
 [dev-dependencies]
 # A blob's digest, as a registry's client computes it.
 sha2 = "0.10"
-# Signing a provider's tokens, as it would, from a key in PEM.
-jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# The wire, spoken by hand, and by virtx-core's client with the token and the project given
-# at connect.
+# The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["io-util"] }

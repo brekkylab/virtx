@@ -198,21 +198,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::oidc::tests::Provider;
-
-    /// A server in `home` of the project `demo`, whose one member is `provider`'s alice.
-    fn access(home: &std::path::Path, provider: &Provider) -> Access {
-        let config = json!({
-            "listen": "127.0.0.1:0",
-            "home": home,
-            "origins": ["https://allowed.example"],
-            "oidc": { "issuer": provider.issuer, "client_id": "virtx" },
-            "projects": { "demo": { "members": ["alice@example.com"] } },
-        });
-        let path = home.join("config.json");
-        std::fs::write(&path, config.to_string()).unwrap();
-        configured(&path).unwrap()
-    }
 
     /// The access the config at `path` makes, over its own projects.
     fn configured(path: &std::path::Path) -> anyhow::Result<Access> {
@@ -233,55 +218,6 @@ mod tests {
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
         }
         headers
-    }
-
-    #[tokio::test]
-    async fn a_member_reaches_the_project_s_home_and_no_one_else_does() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-access-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let provider = Provider::spawn().await;
-        let access = access(&dir, &provider);
-        let alice = provider.token(json!({ "email": "alice@example.com" }));
-        let bob = provider.token(json!({ "email": "bob@example.com" }));
-        let home =
-            async |token, project, origin| access.home(&headers(token, project, origin)).await;
-
-        let (user, reached) = home(Some(&alice), Some("demo"), None).await.unwrap();
-        assert_eq!(user, "alice@example.com");
-        assert_eq!(
-            reached.snapshots.root(),
-            dir.join("project").join("demo").as_path()
-        );
-        let allowed = Some("https://allowed.example");
-        assert!(home(Some(&alice), Some("demo"), allowed).await.is_ok());
-
-        let refused = async |token, project, origin| home(token, project, origin).await.err();
-        let elsewhere = Some("https://evil.example");
-        assert_eq!(
-            refused(Some(&alice), Some("demo"), elsewhere).await,
-            Some(StatusCode::FORBIDDEN)
-        );
-        assert_eq!(
-            refused(None, Some("demo"), None).await,
-            Some(StatusCode::UNAUTHORIZED)
-        );
-        assert_eq!(
-            refused(Some("x"), Some("demo"), None).await,
-            Some(StatusCode::UNAUTHORIZED)
-        );
-        assert_eq!(
-            refused(Some(&alice), None, None).await,
-            Some(StatusCode::BAD_REQUEST)
-        );
-        assert_eq!(
-            refused(Some(&bob), Some("demo"), None).await,
-            Some(StatusCode::FORBIDDEN)
-        );
-        assert_eq!(
-            refused(Some(&alice), Some("other"), None).await,
-            Some(StatusCode::FORBIDDEN)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

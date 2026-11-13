@@ -100,9 +100,10 @@ cargo xtask fixture -- <command>                  # any command, against the fix
 ```bash
 cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run
 cargo xtask check --client                        # the client's alone, without `init`
+cargo xtask clippy --gpu                          # clippy alone, the servers with `gpu`: this host's own `cfg`s, as a release builds them
 ```
 
-- Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
+- Run `cargo xtask check` before pushing. CI (`ci`) runs it on every pull request too, and lints each platform's own code with `cargo xtask clippy --gpu`, but a push that fails here only finds out later there. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - `cargo xtask check` runs no test that boots a VM. A change that reaches one runs `cargo xtask test`, or the suites it touches.
 
 ## Comments and docs

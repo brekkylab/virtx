@@ -8,7 +8,8 @@ pub enum Error {
     /// The server refused the request with this HTTP status, as `PROTOCOL.md` lists them: `404`
     /// for what does not exist, `409` for what is in use or has ended, and the like.
     Status(u16, String),
-    /// The library answered with an error of its own or the transport's.
+    /// The library answered with an error of its own or the transport's; or a job's log ended
+    /// with no `end` entry, the job removed while it was waited on.
     Call(String),
     /// What crosses the C ABI did not encode or read back.
     Json(String),

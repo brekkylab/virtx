@@ -194,6 +194,19 @@ describe('against virtx-stdio', () => {
     assert.deepEqual((await Array.fromAsync(job.log())).at(-1).end, { error: failed.message })
   })
 
+  test('a job removed while it is finished rejects', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const started = sandbox.exec(['sleep', '30'])
+    const job = await started
+    // Its rejection is handled from the start: it comes while `remove` is still awaited.
+    const waiting = assert.rejects(started.finished(), virtx.VirtxError)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await job.remove()
+    await waiting
+    await sandbox.remove()
+  })
+
   test('a started command finished is the job with its code', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)

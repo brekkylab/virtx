@@ -366,14 +366,16 @@ class StartedJob extends Promise {
 
   // The job once it has ended, its log read to its `end` entry: an image job with its `digest`,
   // or, for one that failed, rejected with its `error` as a `VirtxError`; a sandbox job with its
-  // exit `code`, which is not an error whatever it is. Its log is still read with its `log`.
+  // exit `code`, which is not an error whatever it is. A job removed while it is waited on
+  // rejects with a `VirtxError` too: its log ends with no `end` entry. Its log is still read with
+  // its `log`.
   async finished() {
     const job = await this
     for await (const entry of this._log(job)) {
       const ended = this._ended(job, entry)
       if (ended) return ended
     }
-    throw new VirtxError("the job's log ended before the job did")
+    throw new VirtxError("the job's log ended without its end entry: the job was removed, or the server closed its log")
   }
 }
 

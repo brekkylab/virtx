@@ -1,6 +1,7 @@
 """Images, snapshots, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
 against the fixture's ``virtx-stdio``."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,19 @@ async def test_a_started_pull_that_fails_raises_its_error_when_finished(client: 
     assert str(failed.value) == (await job.get()).error
     assert len(await client.list_image_job()) == before + 1
     assert [entry async for entry in job.log()][-1].entry == ImageJobEnd(error=str(failed.value))
+
+
+async def test_a_job_removed_while_it_is_finished_raises(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    started = sandbox.exec(["sleep", "30"])
+    job = await started
+    waiting = asyncio.create_task(started.finished())
+    await asyncio.sleep(0.5)
+    await job.remove()
+    with pytest.raises(VirtxError):
+        await waiting
+    await sandbox.remove()
 
 
 async def test_a_started_command_finished_is_the_job_with_its_code(client: Client) -> None:

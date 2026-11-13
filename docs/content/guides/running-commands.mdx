@@ -124,7 +124,7 @@ A log keeps a limit's worth of entries. Past it, one `truncated` entry stands fo
 
 ### Wait for a job to end
 
-With no use for the output, `finished()` waits for the job to end and answers it as it ended, with its exit `code`. A code that is not `0` is not an error: it is the job's `code`, to check like any other. The log is still there to read with the job's `log`.
+With no use for the output, `finished()` waits for the job to end and answers it as it ended, with its exit `code`. A code that is not `0` is not an error: it is the job's `code`, to check like any other. The log is still there to read with the job's `log`. A job removed while `finished()` waits on it, by its `remove` or its sandbox's, ends with an error instead: its log ends with no `end` entry.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

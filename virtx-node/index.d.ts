@@ -410,7 +410,9 @@ export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   /**
    * The job once it has ended, its log read to its `end` entry: an image job with its `digest`,
    * or, for one that failed, rejected with its `error` as a `VirtxError`; a sandbox job with its
-   * exit `code`, which is not an error whatever it is. Its log is still read with its `log`.
+   * exit `code`, which is not an error whatever it is. A job removed while it is waited on
+   * rejects with a `VirtxError` too: its log ends with no `end` entry. Its log is still read with
+   * its `log`.
    */
   finished(): Promise<J>
 }

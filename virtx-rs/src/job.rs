@@ -49,7 +49,9 @@ impl<J, E> StartedJob<J, E> {
 
 impl StartedJob<ImageJob, ImageJobEntry> {
     /// The job once it has ended, its log read to its `end` entry: with its digest, or, for one
-    /// that failed, its error as [`Error::Job`]. Its log is still read with
+    /// that failed, its error as [`Error::Job`]. A job removed while it is waited on is an
+    /// [`Error::Call`]: its log ends with no `end` entry. Either way the job is dropped with this;
+    /// to keep it, read [`log`](Self::log) and take [`JobLog::job`]. Its log is still read with
     /// [`ImageJob::log`].
     pub async fn finished(self) -> Result<ImageJob, Error> {
         finish(self.log(), ImageJob::ended).await
@@ -64,7 +66,8 @@ impl StartedJob<ImageJob, ImageJobEntry> {
 
 impl StartedJob<SandboxJob, SandboxJobEntry> {
     /// The job once its process has ended, its log read to its `end` entry: with its exit
-    /// code, which is not an error whatever it is. Its log is still read with
+    /// code, which is not an error whatever it is. A job removed while it is waited on is an
+    /// [`Error::Call`]: its log ends with no `end` entry. Its log is still read with
     /// [`SandboxJob::log`].
     pub async fn finished(self) -> Result<SandboxJob, Error> {
         finish(self.log(), SandboxJob::ended).await
@@ -115,9 +118,10 @@ fn end<J, E>(log: &JobLog<J, E>, entry: &E, ended: Ended<J, E>) -> Option<Result
     ended(job, entry)
 }
 
-/// A log that ended with no `end` entry: the connection did, with the job still running.
+/// A log that ended with no `end` entry: the job was removed while its log was read, so the
+/// server closed the log with no end to send.
 fn unended() -> Error {
-    Error::Call("the job's log ended before the job did".to_owned())
+    Error::Call("the job's log ended without its end entry: the job was removed, or the server closed its log".to_owned())
 }
 
 impl<J, E> Future for StartedJob<J, E> {

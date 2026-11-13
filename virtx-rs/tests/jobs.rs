@@ -1,6 +1,6 @@
 //! Images and their jobs, and processes in sandboxes, against the fixture's `virtx-stdio`.
 
-use std::{env, future, pin::Pin};
+use std::{env, future, pin::Pin, thread, time::Duration};
 
 use futures_core::Stream;
 use virtx::{
@@ -305,6 +305,30 @@ fn a_started_job_that_fails_is_its_error_when_finished() {
         };
         assert!(!why.is_empty());
     }
+}
+
+#[test]
+fn a_job_removed_while_it_is_waited_on_is_an_error() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    let exec = sandbox.exec(&SandboxExecArgs::new(["sleep", "30"]));
+    let removing = {
+        let sandbox = sandbox.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            let jobs = sandbox.jobs().wait().unwrap();
+            let job = jobs.iter().find(|job| job.info().running).unwrap();
+            job.remove().wait().unwrap();
+        })
+    };
+    let ended = exec.wait_finished().unwrap_err();
+    assert!(matches!(ended, Error::Call(_)), "{ended:?}");
+    removing.join().unwrap();
+    sandbox.remove().wait().unwrap();
 }
 
 #[test]

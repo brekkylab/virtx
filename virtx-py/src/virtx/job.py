@@ -68,8 +68,9 @@ class StartedJob(Generic[J, E]):
     async def finished(self) -> J:
         """The job once it has ended, its log read to its end entry: an image job with its
         ``digest``, or, for one that failed, its ``error`` raised as a ``VirtxError``; a sandbox
-        job with its exit ``code``, which is not an error whatever it is. Its log is still read
-        with the job's ``log``."""
+        job with its exit ``code``, which is not an error whatever it is. A job removed while it
+        is waited on raises a ``VirtxError`` too: its log ends with no end entry. Its log is still
+        read with the job's ``log``."""
         job = await self
         log = self._log(job)
         try:
@@ -80,4 +81,6 @@ class StartedJob(Generic[J, E]):
         finally:
             if isinstance(log, AsyncGenerator):
                 await log.aclose()
-        raise VirtxError("the job's log ended before the job did")
+        raise VirtxError(
+            "the job's log ended without its end entry: the job was removed, or the server closed its log"
+        )

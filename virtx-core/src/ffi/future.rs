@@ -5,15 +5,13 @@ use std::{
     future::Future,
     mem,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    thread,
 };
 
-use tokio::{
-    runtime::Handle,
-    task::{AbortHandle, JoinSet},
-};
+use tokio::{runtime::Handle, sync::oneshot, task};
 
 use super::{
-    VIRTX_PENDING,
+    VIRTX_OK, VIRTX_PENDING,
     bytes::{VirtxBytes, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
@@ -21,7 +19,17 @@ use super::{
 /// A request that answers once: polled until it answers, then freed.
 pub struct VirtxFuture {
     state: Arc<Mutex<State>>,
-    task: AbortHandle,
+    cancel: Cancel,
+}
+
+/// What freeing an unanswered future does to what answers it.
+enum Cancel {
+    /// Abort the task.
+    Abort(task::AbortHandle),
+    /// Signal the thread, which stops at its next await.
+    Signal(oneshot::Sender<()>),
+    /// Detach from it: it runs to its end.
+    Detach,
 }
 
 enum State {
@@ -73,7 +81,7 @@ impl Drop for Completion {
 /// in `tasks`, and hand C the future.
 pub(super) fn start(
     runtime: &Handle,
-    tasks: &Mutex<JoinSet<()>>,
+    tasks: &Mutex<task::JoinSet<()>>,
     future: impl Future<Output = (c_int, Vec<u8>)> + Send + 'static,
 ) -> *mut VirtxFuture {
     let state = Arc::new(Mutex::new(State::Pending(None)));
@@ -87,7 +95,65 @@ pub(super) fn start(
         },
         runtime,
     );
-    Box::into_raw(Box::new(VirtxFuture { state, task }))
+    Box::into_raw(Box::new(VirtxFuture {
+        state,
+        cancel: Cancel::Abort(task),
+    }))
+}
+
+/// Run `future` to its end on a thread of its own, with a runtime of its own, and hand C the
+/// future: for what runs before any client's runtime exists.
+pub(crate) fn start_on_thread(
+    future: impl Future<Output = (c_int, Vec<u8>)> + Send + 'static,
+) -> *mut VirtxFuture {
+    let (cancel, cancelled) = oneshot::channel();
+    answered_by(Cancel::Signal(cancel), move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        match runtime {
+            Ok(runtime) => runtime.block_on(async move {
+                tokio::select! {
+                    answer = future => Some(answer),
+                    _ = cancelled => None,
+                }
+            }),
+            Err(e) => Some(failure(e.to_string())),
+        }
+    })
+}
+
+/// Hand C a future that `answer`, run on a thread of its own, answers; or that is dropped
+/// unanswered, when `answer` gives `None`.
+fn answered_by(
+    cancel: Cancel,
+    answer: impl FnOnce() -> Option<(c_int, Vec<u8>)> + Send + 'static,
+) -> *mut VirtxFuture {
+    let state = Arc::new(Mutex::new(State::Pending(None)));
+    let completion = Completion(Arc::clone(&state));
+    thread::spawn(move || {
+        if let Some(answer) = answer() {
+            completion.finish(answer);
+        }
+    });
+    Box::into_raw(Box::new(VirtxFuture { state, cancel }))
+}
+
+/// Hand C a future that `run`, on a thread of its own, answers `VIRTX_OK` once it returns.
+/// Freeing the future does not stop it.
+pub(super) fn done_by(run: impl FnOnce() + Send + 'static) -> *mut VirtxFuture {
+    answered_by(Cancel::Detach, move || {
+        run();
+        Some((VIRTX_OK, b"null".to_vec()))
+    })
+}
+
+/// Hand C a future answered `VIRTX_OK` already.
+pub(crate) fn done() -> *mut VirtxFuture {
+    Box::into_raw(Box::new(VirtxFuture {
+        state: Arc::new(Mutex::new(State::Ready(VIRTX_OK, b"null".to_vec()))),
+        cancel: Cancel::Detach,
+    }))
 }
 
 /// Take `future`'s answer: `VIRTX_OK` or `VIRTX_ERROR`, with the output or the error written
@@ -146,10 +212,16 @@ pub unsafe extern "C" fn virtx_future_free(future: *mut VirtxFuture) {
     if future.is_null() {
         return;
     }
-    let future = unsafe { Box::from_raw(future) };
-    let kept = mem::replace(&mut *lock(&future.state), State::Taken);
+    let VirtxFuture { state, cancel } = *unsafe { Box::from_raw(future) };
+    let kept = mem::replace(&mut *lock(&state), State::Taken);
     drop(kept);
-    future.task.abort();
+    match cancel {
+        Cancel::Abort(task) => task.abort(),
+        Cancel::Signal(stop) => {
+            let _ = stop.send(());
+        }
+        Cancel::Detach => {}
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +229,7 @@ mod tests {
     use std::{thread, time::Duration};
 
     use serde_json::Value;
-    use tokio::{runtime::Runtime, sync::oneshot};
+    use tokio::{runtime::Runtime, sync::oneshot, task::JoinSet};
 
     use super::{
         super::{

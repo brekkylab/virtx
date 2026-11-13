@@ -66,7 +66,7 @@ const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
 // A request with a body of bytes beside its args.
 const WITH_DATA = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']]
 const SIGNATURES = {
-  virtx_ensure_virtx: ['int', [Out]],
+  virtx_ensure_virtx: ['uintptr_t', []],
   virtx_client_spawn: [
     'int',
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
@@ -86,7 +86,7 @@ const SIGNATURES = {
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
   virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
-  virtx_client_release: ['void', ['uintptr_t']],
+  virtx_client_release: ['uintptr_t', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
   virtx_client_pull_image: WITH_ARGS,
   virtx_client_push_image: WITH_ARGS,
@@ -143,6 +143,7 @@ const SIGNATURES = {
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
+  virtx_future_wait: ['int', ['uintptr_t', Out]],
   virtx_future_free: ['void', ['uintptr_t']],
   virtx_stream_poll_next: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_stream_free: ['void', ['uintptr_t']],
@@ -204,6 +205,18 @@ class Library {
     const out = {}
     const status = poll(handle, { data: key, wake, release }, out)
     return { status, out, woken }
+  }
+
+  // Block until the future `handle` answers, freeing it after, for a caller off the event
+  // loop. Its answer is as `answer`'s.
+  wait(handle, raw = false) {
+    try {
+      const out = {}
+      const status = this.virtx_future_wait(handle, out)
+      return this.take(status, out, raw)
+    } finally {
+      this.virtx_future_free(handle)
+    }
   }
 
   // Await the future `handle`, freeing it after. Its answer is JSON, or a `Buffer` as it is
@@ -363,31 +376,21 @@ class StartedJob extends Promise {
   }
 }
 
-// Each hold not let go of, released when its client is collected.
+// Each hold not let go of, released when its client is collected; the ending is not waited
+// for.
 const holds = new FinalizationRegistry(({ lib, raw }) => {
-  lib.virtx_client_release.async(raw, () => {})
+  lib.virtx_future_free(lib.virtx_client_release(raw))
 })
 
 // Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is not
-// there, and give its path: what `Client.spawn()` without a program starts. The fetch runs on a
-// worker thread, off the event loop.
+// there, and give its path: what `Client.spawn()` without a program starts.
 //
 // The server is kept one directory per version, so a library that is upgraded fetches its own.
 // `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 // `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
 function ensureVirtx() {
   const lib = library()
-  const out = {}
-  return new Promise((resolve, reject) => {
-    lib.virtx_ensure_virtx.async(out, (error, status) => {
-      if (error) return reject(error)
-      try {
-        resolve(lib.take(status, out))
-      } catch (e) {
-        reject(e)
-      }
-    })
-  })
+  return lib.answer(lib.virtx_ensure_virtx())
 }
 
 // `auth` as `virtx_client_connect` takes it: JSON, or nothing for none.
@@ -417,10 +420,11 @@ class Client {
 
   // Start `program` with `args` as the server, and talk to it over its stdin and stdout.
   // Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
-  // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+  // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, on the
   // event loop.
   static spawn(program = null, args = []) {
     const lib = library()
+    if (program === null) program = lib.wait(lib.virtx_ensure_virtx())
     const raw = [0]
     const error = {}
     const status = lib.virtx_client_spawn(program, args, args.length, raw, error)
@@ -500,13 +504,11 @@ class Client {
 
   // Let go of this hold; the last ends the session, which the promise waits for. Closing twice
   // does nothing.
-  close() {
+  async close() {
     const raw = this._raw
-    if (raw === null) return Promise.resolve()
+    if (raw === null) return
     this._forget()
-    return new Promise((resolve, reject) => {
-      this._lib.virtx_client_release.async(raw, (error) => (error ? reject(error) : resolve()))
-    })
+    await this._lib.answer(this._lib.virtx_client_release(raw))
   }
 
   _forget() {

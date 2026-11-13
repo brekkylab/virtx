@@ -114,7 +114,7 @@ _WITH_DATA = (
     _HANDLE,
 )
 _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
-    "virtx_ensure_virtx": ([_OUT], ctypes.c_int),
+    "virtx_ensure_virtx": ([], _HANDLE),
     "virtx_client_spawn": (
         [
             ctypes.c_char_p,
@@ -143,7 +143,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         ctypes.c_int,
     ),
     "virtx_client_retain": ([_HANDLE], None),
-    "virtx_client_release": ([_HANDLE], None),
+    "virtx_client_release": ([_HANDLE], _HANDLE),
     "virtx_client_build_image": _WITH_ARGS,
     "virtx_client_pull_image": _WITH_ARGS,
     "virtx_client_push_image": _WITH_ARGS,
@@ -200,6 +200,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_port_forwarder_free": ([_HANDLE], None),
     "virtx_bytes_free": ([_Bytes], None),
     "virtx_future_poll": ([_HANDLE, _Waker, _OUT], ctypes.c_int),
+    "virtx_future_wait": ([_HANDLE, _OUT], ctypes.c_int),
     "virtx_future_free": ([_HANDLE], None),
     "virtx_stream_poll_next": ([_HANDLE, _Waker, _OUT], ctypes.c_int),
     "virtx_stream_free": ([_HANDLE], None),
@@ -245,6 +246,16 @@ class Library:
         out = _Bytes()
         status = poll(handle, _Waker(key, _wake, _release), ctypes.byref(out))
         return status, out, future
+
+    def wait(self, handle: int, raw: bool = False) -> Any:
+        """Block until the future ``handle`` answers, freeing it after, for a caller off the
+        event loop. Its answer is as ``answer``'s."""
+        try:
+            out = _Bytes()
+            status = self.virtx_future_wait(handle, ctypes.byref(out))
+            return self.take(status, out, raw)
+        finally:
+            self.virtx_future_free(handle)
 
     async def answer(self, handle: int, raw: bool = False) -> Any:
         """Await the future ``handle``, freeing it after, or on cancelling, which cancels it.

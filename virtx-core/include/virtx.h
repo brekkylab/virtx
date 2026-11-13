@@ -79,14 +79,13 @@ extern "C" {
 int virtx_cli_main(const char *const *argv, size_t argc);
 
 // Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
-// the server of this library's version, fetched first if this host has none -- see
-// `virtx_ensure_virtx`, which does that fetch alone.
+// stdout, and write the client, held once, to `client`. `virtx_ensure_virtx` answers the
+// path of `virtx-stdio`, the server of this library's version.
 //
 // # Safety
 //
-// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
-// is. `client` is writable. `error` is null or writable.
+// `program` is NUL-terminated UTF-8, as each of the `args_len` pointers in `args` is.
+// `client` is writable. `error` is null or writable.
 int virtx_client_spawn(const char *program,
                        const char *const *args,
                        size_t args_len,
@@ -94,18 +93,13 @@ int virtx_client_spawn(const char *program,
                        struct VirtxBytes *error);
 
 // Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
-// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
-// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
-// why written to `out`.
+// is not there, and answer its path as a JSON string: what `virtx_client_spawn` is given
+// to start it. Answered off any client's runtime, so this is called before one is opened.
 //
 // The server is kept one directory per version, so a library that is upgraded fetches
 // its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
 // version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-//
-// # Safety
-//
-// `out` is writable.
-int virtx_ensure_virtx(struct VirtxBytes *out);
+struct VirtxFuture *virtx_ensure_virtx(void);
 
 // Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
@@ -166,15 +160,16 @@ int virtx_client_set_headers(struct VirtxClient *client,
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 void virtx_client_retain(struct VirtxClient *client);
 
-// Let go of `client`. The last holder's release answers every request not yet answered
-// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
-// polled and freed. Null does nothing.
+// Let go of `client`, and answer, with `VIRTX_OK` and nothing, once it is let go of. The
+// last holder's release answers every request not yet answered with `VIRTX_ERROR`, ends
+// the session, and frees it, answering once that is done; its futures and streams stay to
+// be polled and freed. Any other release answers at once. Freeing the future does not
+// stop the ending. Null is let go of at once.
 //
 // # Safety
 //
-// `client` is null, or held by the caller, who does not use it again. Not called from a
-// `wake`, which runs on the runtime this may stop.
-void virtx_client_release(struct VirtxClient *client);
+// `client` is null, or held by the caller, who does not use it again.
+struct VirtxFuture *virtx_client_release(struct VirtxClient *client);
 
 // Starts building `recipe`, to point `reference` (`name:tag`) at it, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
@@ -773,7 +768,7 @@ void virtx_stream_free(struct VirtxStream *stream);
 
 // Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
 // `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
-// `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
+// `{"address": "127.0.0.1:n"}`, or the error's message.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.
@@ -781,8 +776,7 @@ void virtx_stream_free(struct VirtxStream *stream);
 // # Safety
 //
 // `client` is as in `virtx_client_list_snapshot`, and `args` as in
-// `virtx_client_build_image`. `forwarder` and `out` are writable. Not called from a `wake`,
-// which runs on the runtime this blocks on.
+// `virtx_client_build_image`. `forwarder` and `out` are writable.
 int virtx_port_forwarder_open(struct VirtxClient *client,
                               const uint8_t *args,
                               size_t args_len,

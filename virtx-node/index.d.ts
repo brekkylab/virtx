@@ -417,7 +417,7 @@ export class Client {
   /**
    * Start `program` with `args` as the server, and talk to it over its stdin and stdout.
    * Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
-   * this host has none, blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+   * this host has none, blocking for the fetch; `ensureVirtx` does that fetch alone, on the
    * event loop.
    */
   static spawn(program?: string | null, args?: string[]): Client

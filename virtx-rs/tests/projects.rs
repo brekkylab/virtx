@@ -115,7 +115,7 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         assert_eq!(list(Some(token), Some("demo")), 401, "a token {why}");
     }
     // Where to sign in is told to anyone.
-    let (status, told) = served.send("GET", ".well-known/virtx-auth", None, None, "");
+    let (status, told) = served.send("GET", "auth", None, None, "");
     let told: Value = serde_json::from_str(&told).unwrap();
     assert_eq!((status, &told["oidc"]["client_id"]), (200, &json!(CLIENT)));
 
@@ -279,7 +279,7 @@ fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provide
 #[test]
 fn a_key_unknown_has_the_provider_s_keys_asked_for_again_once_not_for_each_token() {
     let served = Served::fixture();
-    let (_, told) = served.send("GET", ".well-known/virtx-auth", None, None, "");
+    let (_, told) = served.send("GET", "auth", None, None, "");
     let told: Value = serde_json::from_str(&told).unwrap();
     let issuer = told["oidc"]["issuer"].as_str().unwrap();
     let asked = || -> u64 {

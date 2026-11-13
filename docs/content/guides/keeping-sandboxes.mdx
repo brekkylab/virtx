@@ -1,0 +1,270 @@
+---
+title: "Keeping sandboxes"
+description: "Keep a sandbox's disk across stops, find it again by name, start it where it left off, and make an image of it."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A sandbox's root filesystem is its image below, read-only, and a disk of its own above, where everything it writes goes.
+That disk outlives the sandbox's VM.
+A sandbox **stops** when it is told to, or by itself once it has gone unused for a while: its processes end, and its disk is kept.
+It **starts** again under the same id, with its files as it left them, and is kept so until it is deleted.
+
+The example on this page follows an AI agent's task, with two directories in the sandbox:
+
+- `/attachments`: the files the user gave the agent.
+- `/artifacts`: the files the agent made.
+
+## Make a sandbox to keep
+
+`create_sandbox` makes a sandbox that is kept already; these options say how it is found again and how long it is kept:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `name` | none | A name to find it again by, with `find_sandbox`, instead of keeping its id. A name another sandbox has is refused with `409`, `exists`. |
+| `auto_stop_minutes` | 15 | How long it runs [unused](#what-keeps-it-running) before it stops. |
+| `auto_delete_days` | 30 | How long it is kept stopped and unused before it is deleted. `"never"` keeps it until it is removed. |
+| `ephemeral` | `False` | Deletes it when it stops, rather than keeping it. |
+
+The defaults are those `virtx-server-tcp` and the stdio server pick; another server may pick others.
+
+This makes a sandbox for task 42 and writes the user's input into `attachments`.
+`write_file` writes a whole file, and its parent directory must exist.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox(
+    "alpine:latest", name="task-42", auto_stop_minutes=10, auto_delete_days=7
+)
+await sandbox.create_dir_all("attachments")
+await sandbox.write_file("attachments/notes.txt", "ship the release on friday\n")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', {
+  name: 'task-42',
+  autoStopMinutes: 10,
+  autoDeleteDays: 7,
+})
+await sandbox.createDirAll('attachments')
+await sandbox.writeFile('attachments/notes.txt', 'ship the release on friday\n')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest")
+    .name("task-42")
+    .auto_stop_minutes(10)
+    .auto_delete_days(Some(7));
+let sandbox = client.create_sandbox(&args).await?;
+sandbox.create_dir_all("attachments").await?;
+sandbox
+    .write_file("attachments/notes.txt", "ship the release on friday\n", None)
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+A sandbox made for one block, with `async with` in Python or `await using` in Node.js, is deleted on leaving it: make one to keep without them.
+
+## Run it, and stop it
+
+The agent counts the words in the user's notes into `/artifacts`, and the sandbox is stopped.
+`stop` ends every job in it and closes every connection through its ports, puts what its processes wrote on its disk, and stops its VM.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"]
+async for _ in sandbox.exec(cmd):
+    pass
+await sandbox.stop()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const cmd = ['sh', '-c', 'mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt']
+for await (const _ of sandbox.exec(cmd)) {}
+await sandbox.stop()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let cmd = ["sh", "-c", "mkdir -p /artifacts && wc -w /attachments/notes.txt > /artifacts/report.txt"];
+let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
+while let Some(entry) = log.next().await {
+    entry?;
+}
+sandbox.stop().await?;
+```
+
+</TabItem>
+</Tabs>
+
+Without `stop`, it stops by itself after `auto_stop_minutes` unused, the same way.
+A stopped sandbox has no VM: what is kept of it is its disk.
+
+### What keeps it running
+
+A sandbox is used while a job runs in it, while a connection through one of its [ports](/docs/guides/networks-ports/) is open, and while a request to its [files](/docs/guides/reading-writing-files/) is answered; starting a job uses it too.
+Its `used_at` is the last time it was, and it stops `auto_stop_minutes` after that.
+Getting or listing it does not use it.
+
+## Find it again, and start it
+
+`find_sandbox` finds a sandbox by its name, running or stopped, and answers none when no sandbox has it: one never made, or deleted since.
+`start` boots its VM again over its disk, and answers it once it runs.
+
+A stopped sandbox's files are not reached: a request to them is refused with `409`, `stopped`, and does not start it.
+So start it before reading or writing them.
+A job started in a stopped sandbox starts it too, and runs once it has.
+
+Here the user adds a file to `attachments`, and the agent carries on with it:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.find_sandbox("task-42")
+if sandbox is None:
+    raise LookupError("task-42 was deleted")
+sandbox = await sandbox.start()
+
+await sandbox.write_file("attachments/todo.txt", "write the changelog\n")
+async for entry in sandbox.exec(["ls", "/attachments", "/artifacts"]):
+    print(entry.entry)
+print(await sandbox.read_text("artifacts/report.txt"))
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+let sandbox = await client.findSandbox('task-42')
+if (!sandbox) throw new Error('task-42 was deleted')
+sandbox = await sandbox.start()
+
+await sandbox.writeFile('attachments/todo.txt', 'write the changelog\n')
+for await (const entry of sandbox.exec(['ls', '/attachments', '/artifacts'])) console.log(entry)
+console.log(await sandbox.readText('artifacts/report.txt'))
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let Some(sandbox) = client.find_sandbox("task-42").await? else {
+    return Err("task-42 was deleted".into());
+};
+let sandbox = sandbox.start().await?;
+
+sandbox
+    .write_file("attachments/todo.txt", "write the changelog\n", None)
+    .await?;
+let mut log = sandbox.exec(&SandboxExecArgs::new(["ls", "/attachments", "/artifacts"])).log();
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry);
+}
+println!("{}", sandbox.read_text("artifacts/report.txt").await?);
+```
+
+</TabItem>
+</Tabs>
+
+A sandbox started again has its files as it left them, with anything it installed or changed, and boots the same image it was made from, even if that image's tag has moved since.
+Its processes are not kept: nothing that ran in it runs again until something starts it.
+Its volumes are mounted again and its ports opened again, at the same URLs where the server can and at others where it cannot; `start` answers where they are now.
+
+## Make an image of it
+
+`commit` makes an image of a sandbox, its image with what it wrote as one more layer, and tags it.
+Any number of sandboxes then boot that image, each with a disk of its own, while the sandbox it came from goes on as it was.
+A commit of a running sandbox is of its files as they are when the commit starts; of a stopped one, of its disk as it was left, without starting it.
+What its volumes hold is not in the image.
+
+A commit is an image job, as a [build](/docs/guides/images/#after-a-build) is: read its log through `end`, and check its `error` before booting from the tag.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+async for entry in sandbox.commit("task-42:done"):
+    # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
+    print(entry.entry)
+
+review = await client.create_sandbox("task-42:done")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+for await (const entry of sandbox.commit('task-42:done')) {
+  // { id, log } ..., then { id, end } with a digest or an error
+  console.log(entry)
+}
+
+const review = await client.createSandbox('task-42:done')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let mut log = sandbox.commit("task-42:done").log();
+while let Some(entry) = log.next().await {
+    // Log(line) ..., then End(ImageJobEnd { digest, error })
+    println!("{:?}", entry?.entry);
+}
+
+let review = client
+    .create_sandbox(&SandboxCreateArgs::new("task-42:done"))
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+`commit_image` does the same given a sandbox's id.
+
+## Remove it
+
+A sandbox is deleted by `remove`, when it stops if it is `ephemeral`, and after `auto_delete_days` stopped and unused, and in no other way.
+Deleting one stops it first if it runs, and removes its disk with everything it wrote; its volumes, and the images committed of it, stay.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await sandbox.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await sandbox.remove()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+sandbox.remove().await?;
+```
+
+</TabItem>
+</Tabs>

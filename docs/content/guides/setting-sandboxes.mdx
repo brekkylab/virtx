@@ -15,7 +15,9 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 | `memory_mib` | 4096 | Its memory, in MiB. |
 | `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
 | `ports` | none | TCP ports in it to reach from outside, even with `network` off; see [Networks and ports](/docs/guides/networks-ports/). |
-| `snapshot` | none | A snapshot for its root filesystem's writable layer; see [Keeping work in snapshots](/docs/guides/keeping-snapshots/). |
+| `name` | none | A name to find it again by, with `find_sandbox`; see [Keeping sandboxes](/docs/guides/keeping-sandboxes/). |
+| `auto_stop_minutes`, `auto_delete_days` | 15, 30 | How long it runs unused before it stops, and how long it is kept stopped and unused before it is deleted; see [Keeping sandboxes](/docs/guides/keeping-sandboxes/). |
+| `ephemeral` | `False` | `True` deletes it when it stops, rather than keeping it. |
 | `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/guides/mounting-volumes/). |
 | `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/guides/using-gpus/). |
 
@@ -57,16 +59,17 @@ let sandbox = client.create_sandbox(&args).await?;
 
 ## Find sandboxes
 
-`list_sandbox` lists every sandbox on the server, and `get_sandbox` finds one by its id. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `image`, the `snapshot` it stands on if any, and whether it is `running`. This is how to find one a program left behind.
+`list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` by the `name` it was made with, answering none when no sandbox has it. Each comes back, running or stopped, as a sandbox you can run commands in, start, stop or remove, with its `id`, its `name` if it has one, the digest of its `image`, and its `state`, `running` or `stopped`. This is how to find one a program left behind.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
 for sandbox in await client.list_sandbox():
-    print(sandbox.id, sandbox.image, sandbox.running)
+    print(sandbox.id, sandbox.name, sandbox.image, sandbox.state.value)
 
 sandbox = await client.get_sandbox("<sandbox id>")
+named = await client.find_sandbox("<sandbox name>")
 ```
 
 </TabItem>
@@ -74,10 +77,11 @@ sandbox = await client.get_sandbox("<sandbox id>")
 
 ```js
 for (const sandbox of await client.listSandbox()) {
-  console.log(sandbox.id, sandbox.image, sandbox.running)
+  console.log(sandbox.id, sandbox.name, sandbox.image, sandbox.state)
 }
 
 const sandbox = await client.getSandbox('<sandbox id>')
+const named = await client.findSandbox('<sandbox name>')
 ```
 
 </TabItem>
@@ -85,10 +89,12 @@ const sandbox = await client.getSandbox('<sandbox id>')
 
 ```rust
 for sandbox in client.list_sandbox().await? {
-    println!("{} {} {}", sandbox.id(), sandbox.info().image, sandbox.info().running);
+    let info = sandbox.info();
+    println!("{} {:?} {} {:?}", info.id, info.name, info.image, info.state);
 }
 
 let sandbox = client.get_sandbox("<sandbox id>").await?;
+let named = client.find_sandbox("<sandbox name>").await?;
 ```
 
 </TabItem>
@@ -96,7 +102,7 @@ let sandbox = client.get_sandbox("<sandbox id>").await?;
 
 ## Remove a sandbox
 
-`remove` stops a sandbox, ends its jobs, and deletes what it wrote over its image, unless it stood on a snapshot. Its snapshot and volumes stay, for the next sandbox to use.
+`remove` deletes a sandbox: it stops it if it runs, ending its jobs, and deletes its disk, what it wrote over its image. Its volumes stay, for the next sandbox to use. To keep a sandbox for later rather than delete it, `stop` it; see [Keeping sandboxes](/docs/guides/keeping-sandboxes/).
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

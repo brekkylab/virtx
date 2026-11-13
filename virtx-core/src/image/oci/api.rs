@@ -28,7 +28,8 @@ impl<'a> Registry<'a> {
         Registry { client }
     }
 
-    /// Send `method` to `path`, under `images/oci/v2/`, and answer its response if it is a success.
+    /// Send `method` to `path`, under `images/oci/v2/`, and answer its response if it is a success,
+    /// or [what it was refused with](refused).
     async fn send(
         &self,
         method: Method,
@@ -40,10 +41,7 @@ impl<'a> Registry<'a> {
         if response.status().is_success() {
             return Ok(response);
         }
-        Err(Error::Registry(format!(
-            "{method} {path}: {}",
-            failure(response).await
-        )))
+        Err(refused(&method, path, response).await)
     }
 
     /// `send`, with `404` as `None`: for what the registry had a moment ago and may not any more.
@@ -61,10 +59,7 @@ impl<'a> Registry<'a> {
         if response.status().is_success() {
             return Ok(Some(response));
         }
-        Err(Error::Registry(format!(
-            "{method} {path}: {}",
-            failure(response).await
-        )))
+        Err(refused(&method, path, response).await)
     }
 
     /// Send `method` to `path`, under `images/oci/v2/`, and answer whatever came back.
@@ -334,6 +329,19 @@ async fn collect(response: Response<Body>) -> Result<Bytes, Error> {
 }
 
 /// Why `response` failed: its status, and the codes and messages of its `{"errors": [...]}`.
+/// What `method` to `path` was refused with, `response`: a `404` as [`Error::Status`] with the
+/// code `not_found`, as the server's other endpoints refuse what they do not have, so a caller
+/// can tell it from any other failure; anything else as [`Error::Registry`]. Either names the
+/// request and what the registry said of it.
+async fn refused(method: &Method, path: &str, response: Response<Body>) -> Error {
+    let not_found = response.status() == StatusCode::NOT_FOUND;
+    let why = format!("{method} {path}: {}", failure(response).await);
+    match not_found {
+        true => Error::Status(404, format!("not_found: {why}")),
+        false => Error::Registry(why),
+    }
+}
+
 async fn failure(response: Response<Body>) -> String {
     #[derive(Deserialize)]
     struct Errors {

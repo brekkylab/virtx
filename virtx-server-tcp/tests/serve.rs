@@ -803,16 +803,19 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("put".into()));
 
-    // Stopped: neither read nor started for it.
+    // Stopped: neither read nor started for it -- nor used by it, so a stopped sandbox is not
+    // kept from its deletion by requests it refuses.
     client.stop_sandbox(&id).await.unwrap();
+    let used = client.get_sandbox(&id).await.unwrap().used_at;
+    // A later time than its stop's, were it used now.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let r = asked("GET", "/root/d/a.txt").send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CONFLICT);
     let said: Value = r.json().await.unwrap();
     assert_eq!(said["error"]["code"], "stopped");
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Stopped
-    );
+    let now = client.get_sandbox(&id).await.unwrap();
+    assert_eq!(now.state, SandboxState::Stopped);
+    assert_eq!(now.used_at, used, "not used by a request it refused");
     client.remove_sandbox(&id).await.unwrap();
 }
 

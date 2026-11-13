@@ -637,7 +637,11 @@ fn port(
 /// read from the port as binary messages, and the binary messages to the port. Closed at once
 /// when no machine runs, as a port nothing listens on is.
 async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
-    if let Ok(mut reached) = tunnel.connect().await {
+    let reached = tunnel.connect().await;
+    if reached.is_err() {
+        return tunnel.refused();
+    }
+    if let Ok(mut reached) = reached {
         let (mut from, mut to) = reached.split();
         let mut buffer = vec![0u8; CHUNK];
         loop {

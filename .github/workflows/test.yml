@@ -15,9 +15,7 @@
 #   What the runner has to have, for whoever builds it again (from the `virtx-windows-ci-*`
 #   AMI, which has all of it): WHP on (`HypervisorPlatform`, and nested virtualization on the
 #   instance); the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git with its `bin` on
-#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config; and zstd on PATH --
-#   without it `actions/cache` looks for a gzip archive of a key Linux saved with zstd, and
-#   misses.
+#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
 #   the wheel pip picks, each opening the library it carries; then the server that library
 #   fetches, from a release layout served on localhost, started and asked to answer.
@@ -188,15 +186,13 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: handoff
-          key: guest-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-x86_64
 
       - name: Put the kernel in place
         run: |
+          tar -xf handoff.tar
           mkdir -p build/krunfw
           cp -v handoff/kernel/libkrunfw.dll build/krunfw/
 

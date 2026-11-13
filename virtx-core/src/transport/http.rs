@@ -22,13 +22,30 @@ pub(crate) fn segment(segment: &str) -> String {
     utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
-/// `path`, `/`-separated, each segment percent-encoded, empty segments dropped.
+/// `path`, `/`-separated, each segment percent-encoded, [resolved](resolved) first.
 pub(crate) fn segments(path: &str) -> String {
-    path.split('/')
-        .filter(|s| !s.is_empty())
+    resolved(path)
+        .into_iter()
         .map(segment)
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The segments of `path`, `/`-separated, as a file's path is read: empty and `.` segments
+/// dropped, and each `..` taking the segment before it. A `..` above where `path` starts is
+/// kept, for [`TransportClient::send`](crate::transport::TransportClient) to refuse unsent.
+pub(crate) fn resolved(path: &str) -> Vec<&str> {
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if kept.last().is_some_and(|s| *s != "..") => {
+                kept.pop();
+            }
+            segment => kept.push(segment),
+        }
+    }
+    kept
 }
 
 /// `response`, a refusal, as the [`Error::Status`] or [`Error::Refusal`] it is: its body read
@@ -175,6 +192,22 @@ mod tests {
         assert_eq!(segments("/dir//a b.txt/"), "dir/a%20b.txt");
         assert_eq!(segments("한글/#?"), "%ED%95%9C%EA%B8%80/%23%3F");
         assert_eq!(segments(""), "");
+    }
+
+    #[test]
+    fn a_path_s_dot_segments_are_resolved_before_it_is_encoded() {
+        assert_eq!(segments("."), "");
+        assert_eq!(segments("./a/./b/."), "a/b");
+        assert_eq!(segments("a/.."), "");
+        assert_eq!(segments("a/b/../c"), "a/c");
+        assert_eq!(segments("a/../../b"), "../b");
+        assert_eq!(segments("../../a"), "../../a");
+        // A dot inside a segment is part of its name.
+        assert_eq!(segments("a.b/..c/.d/..."), "a.b/..c/.d/...");
+        // What a URL would read as a dot segment goes as a name: `%`, `\` and a newline encoded.
+        assert_eq!(segments("%2e/%2E%2e"), "%252e/%252E%252e");
+        assert_eq!(segments("..\\x/.\\"), "..%5Cx/.%5C");
+        assert_eq!(segments(".\n./.\t"), ".%0A./.%09");
     }
 
     #[tokio::test]

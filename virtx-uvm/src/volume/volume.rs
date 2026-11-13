@@ -707,8 +707,6 @@ fn named(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
-/// What is at `at`, or `None` for nothing there, once every directory on the way is one and
-/// not a link. A link at `at` itself is nothing there that can be made either: `NotFound`.
 /// A volume's files' root, opened as [`Dir`].
 ///
 /// cap-std opens a directory on Windows without `FILE_SHARE_DELETE`, so that it cannot be
@@ -740,6 +738,8 @@ fn open_root(at: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(at, cap_std::ambient_authority())
 }
 
+/// What is at `at`, or `None` for nothing there, once every directory on the way is one and
+/// not a link. A link at `at` itself is nothing there that can be made either: `NotFound`.
 fn target(root: &Dir, at: &Path) -> io::Result<Option<cap_std::fs::Metadata>> {
     let mut prefix = PathBuf::new();
     let mut parts = at.components().peekable();

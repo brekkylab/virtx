@@ -9,7 +9,7 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is iterated for its log or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A call that starts a job, marked **job** below, is iterated for its log, awaited for the job, or waited on to its end with `finished()`, which answers the job as it ended and raises the error of an image job that failed; see [Running commands](/docs/guides/running-commands/#follow-a-job).
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
 

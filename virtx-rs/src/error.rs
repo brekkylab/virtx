@@ -14,6 +14,9 @@ pub enum Error {
     Json(String),
     /// An argument cannot cross the C ABI: a string with a NUL in it.
     Argument(String),
+    /// A job ended with this error, as its log's `end` entry gave it: an image's build, pull or
+    /// push that failed, waited on with [`StartedJob::finished`](crate::StartedJob::finished).
+    Job(String),
 }
 
 impl Error {
@@ -33,7 +36,8 @@ impl fmt::Display for Error {
             | Error::Status(_, message)
             | Error::Call(message)
             | Error::Json(message)
-            | Error::Argument(message) => f.write_str(message),
+            | Error::Argument(message)
+            | Error::Job(message) => f.write_str(message),
         }
     }
 }

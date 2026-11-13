@@ -15,7 +15,7 @@ for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk a
 await client.close()
 ```
 
-A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
+A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Its `finished()` waits for the job to end and answers it as it ended, rejecting with the error of an image job that failed. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')

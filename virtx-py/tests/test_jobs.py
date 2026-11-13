@@ -193,6 +193,38 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(client: Client
     await client.remove_image(reference)
 
 
+async def test_a_started_build_finished_is_the_job_as_it_ended(client: Client) -> None:
+    await alpine(client)
+    reference = f"{unique('finished')}:latest"
+    build = client.build_image(Recipe(ALPINE).run(f"echo {reference} > /built"), reference)
+    job = await build.finished()
+    digest = (await tags(client))[reference]
+    assert isinstance(job, ImageJob)
+    assert (job.kind, job.reference, job.running) == (ImageJobKind.BUILD, reference, False)
+    assert (job.digest, job.error) == (digest, None)
+    assert job == await job.get()
+    assert [entry async for entry in job.log()][-1].entry == ImageJobEnd(digest=digest)
+    await client.remove_image(reference)
+
+
+async def test_a_started_pull_that_fails_raises_its_error_when_finished(client: Client) -> None:
+    with pytest.raises(VirtxError) as failed:
+        await client.pull_image("registry.invalid/missing:latest").finished()
+    assert failed.value.status is None
+    assert str(failed.value)
+
+
+async def test_a_started_command_finished_is_the_job_with_its_code(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    job = await sandbox.exec(["sh", "-c", "echo hi; exit 3"]).finished()
+    assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id
+    assert (job.running, job.code) == (False, 3)
+    assert job == await job.get()
+    assert [entry.entry async for entry in job.log()] == [Stdout("hi"), SandboxJobEnd(3)]
+    await sandbox.remove()
+
+
 async def test_an_image_is_tagged_downloaded_removed_and_uploaded_back(
     client: Client, tmp_path: Path
 ) -> None:

@@ -5,7 +5,7 @@ use virtx_core::{
     SandboxJobEntry,
 };
 
-use crate::{Call, Client, Events, StartedJob, files};
+use crate::{Call, Client, Error, Events, StartedJob, files};
 
 /// A sandbox the server holds, as making it or asking for it answered, and the client that
 /// reaches it: what is needed to run processes in it, and its files, through
@@ -151,6 +151,23 @@ impl SandboxJob {
     /// Cancel it if it runs, killing its process, and forget it.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox_job(&self.sandbox, &self.info.id)
+    }
+
+    /// It as `entry`, its log's `end` entry, says it ended: with its exit code. `None` for any
+    /// other entry.
+    pub(crate) fn ended(&self, entry: &SandboxJobEntry) -> Option<Result<SandboxJob, Error>> {
+        let SandboxJobEntry::End(end) = entry else {
+            return None;
+        };
+        Some(Ok(SandboxJob::new(
+            self.client.clone(),
+            self.sandbox.clone(),
+            SandboxJobInfo {
+                running: false,
+                code: Some(end.code),
+                ..self.info.clone()
+            },
+        )))
     }
 }
 

@@ -339,27 +339,41 @@ class Recipe {
   }
 }
 
-// A job as it starts: a promise of the job, and an async iterable of its log's entries, read once
-// the job has started, until its `end` entry. The job starts when it is made, once however it is
-// used; leaving the loop leaves the job running.
+// A job as it starts: a promise of the job, an async iterable of its log's entries, read once
+// the job has started, until its `end` entry, and `finished()`, the job once it has ended. The
+// job starts when it is made, once however it is used; leaving the loop leaves the job running.
 class StartedJob extends Promise {
   // `then` and the rest answer plain promises.
   static get [Symbol.species]() {
     return Promise
   }
 
-  constructor(executor, log) {
+  constructor(executor, log, ended) {
     super(executor)
     this._log = log
+    this._ended = ended
   }
 
-  // `started`, a promise of the job; `log`, its log by the job.
-  static of(started, log) {
-    return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
+  // `started`, a promise of the job; `log`, its log by the job; `ended`, the job as an entry of
+  // its log says it ended, or null for an entry that is not its end.
+  static of(started, log, ended) {
+    return new StartedJob((resolve, reject) => started.then(resolve, reject), log, ended)
   }
 
   async *[Symbol.asyncIterator]() {
     yield* this._log(await this)
+  }
+
+  // The job once it has ended, its log read to its `end` entry: an image job with its `digest`,
+  // or, for one that failed, rejected with its `error` as a `VirtxError`; a sandbox job with its
+  // exit `code`, which is not an error whatever it is. Its log is still read with its `log`.
+  async finished() {
+    const job = await this
+    for await (const entry of this._log(job)) {
+      const ended = this._ended(job, entry)
+      if (ended) return ended
+    }
+    throw new VirtxError("the job's log ended before the job did")
   }
 }
 
@@ -543,6 +557,7 @@ class Client {
     return StartedJob.of(
       this._call(name, args).then((info) => new ImageJob(this, info)),
       (job) => job.log(),
+      (job, entry) => job._ended(entry),
     )
   }
 
@@ -806,6 +821,14 @@ class ImageJob {
   async remove() {
     await this.client._call('virtx_client_remove_image_job', { id: this.id })
   }
+
+  // It as `entry`, its log's `end` entry, says it ended: with its digest, or its error thrown.
+  // Null for any other entry.
+  _ended(entry) {
+    if (!('end' in entry)) return null
+    if (entry.end.error != null) throw new VirtxError(entry.end.error)
+    return new ImageJob(this.client, { ...this, running: false, digest: entry.end.digest })
+  }
 }
 
 // A volume the server holds (`name`, `size`), and the client that reaches it: its files and the
@@ -881,6 +904,7 @@ class Sandbox extends Files {
         ._call('virtx_client_exec_sandbox', { ...options, sandbox: this.id, cmd })
         .then((info) => new SandboxJob(this.client, this.id, info)),
       (job) => job.log(),
+      (job, entry) => job._ended(entry),
     )
   }
 
@@ -938,6 +962,13 @@ class SandboxJob {
   // Cancels it if it runs, killing its process, and forgets it.
   async remove() {
     await this._call('virtx_client_remove_sandbox_job')
+  }
+
+  // It as `entry`, its log's `end` entry, says it ended: with its exit code. Null for any other
+  // entry.
+  _ended(entry) {
+    if (!('end' in entry)) return null
+    return new SandboxJob(this.client, this.sandboxId, { ...this, running: false, code: entry.end.code })
   }
 }
 

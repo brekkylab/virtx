@@ -4,7 +4,7 @@ and the processes run in one, each a job whose log is its output."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -92,7 +92,7 @@ class Sandbox(Files):
             output = await self.client._call("virtx_client_exec_sandbox", request)
             return SandboxJob.from_dict(self.client, self.id, output)
 
-        return StartedJob(start, lambda job: job.log())
+        return StartedJob(start, lambda job: job.log(), SandboxJob._ended)
 
     async def jobs(self) -> list[SandboxJob]:
         """Every job in it."""
@@ -189,6 +189,13 @@ class SandboxJob:
     async def remove(self) -> None:
         """Cancel it if it runs, killing its process, and forget it."""
         await self.client._call("virtx_client_remove_sandbox_job", self._args())
+
+    def _ended(self, entry: SandboxJobEntry) -> SandboxJob | None:
+        """It as ``entry``, its log's ``SandboxJobEnd``, says it ended: with its exit code.
+        ``None`` for any other entry."""
+        if not isinstance(entry, SandboxJobEnd):
+            return None
+        return replace(self, running=False, code=entry.code)
 
 
 @dataclass(frozen=True)

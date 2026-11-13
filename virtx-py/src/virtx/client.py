@@ -279,7 +279,7 @@ class Client:
         async def start() -> ImageJob:
             return ImageJob.from_dict(self, await self._call(name, args))
 
-        return StartedJob(start, lambda job: job.log())
+        return StartedJob(start, lambda job: job.log(), ImageJob._ended)
 
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str

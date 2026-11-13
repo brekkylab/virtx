@@ -9,9 +9,9 @@ use std::{
 
 use futures_core::Stream;
 use serde::de::DeserializeOwned;
-use virtx_core::LogEntry;
+use virtx_core::{ImageJobEntry, LogEntry, SandboxJobEntry};
 
-use crate::{Call, Error, Events};
+use crate::{Call, Error, Events, ImageJob, SandboxJob};
 
 /// What opens a job's log, given the job its start answered with.
 type Open<J, E> = Box<dyn Fn(&J) -> Events<LogEntry<E>> + Send + Sync>;
@@ -45,6 +45,79 @@ impl<J, E> StartedJob<J, E> {
             job: None,
         }
     }
+}
+
+impl StartedJob<ImageJob, ImageJobEntry> {
+    /// The job once it has ended, its log read to its `end` entry: with its digest, or, for one
+    /// that failed, its error as [`Error::Job`]. Its log is still read with
+    /// [`ImageJob::log`].
+    pub async fn finished(self) -> Result<ImageJob, Error> {
+        finish(self.log(), ImageJob::ended).await
+    }
+
+    /// [`finished`](Self::finished), blocking this thread, for a caller without an async
+    /// runtime.
+    pub fn wait_finished(self) -> Result<ImageJob, Error> {
+        wait_finish(self.log(), ImageJob::ended)
+    }
+}
+
+impl StartedJob<SandboxJob, SandboxJobEntry> {
+    /// The job once its process has ended, its log read to its `end` entry: with its exit
+    /// code, which is not an error whatever it is. Its log is still read with
+    /// [`SandboxJob::log`].
+    pub async fn finished(self) -> Result<SandboxJob, Error> {
+        finish(self.log(), SandboxJob::ended).await
+    }
+
+    /// [`finished`](Self::finished), blocking this thread, for a caller without an async
+    /// runtime.
+    pub fn wait_finished(self) -> Result<SandboxJob, Error> {
+        wait_finish(self.log(), SandboxJob::ended)
+    }
+}
+
+/// What a job is as an entry of its log says it ended, or `None` for an entry that is not its
+/// end.
+type Ended<J, E> = fn(&J, &E) -> Option<Result<J, Error>>;
+
+/// The job `log` is of, as its `end` entry says it ended.
+async fn finish<J, E: DeserializeOwned>(
+    mut log: JobLog<J, E>,
+    ended: Ended<J, E>,
+) -> Result<J, Error> {
+    while let Some(entry) = std::future::poll_fn(|cx| Pin::new(&mut log).poll_next(cx)).await {
+        if let Some(job) = end(&log, &entry?.entry, ended) {
+            return job;
+        }
+    }
+    Err(unended())
+}
+
+/// [`finish`], blocking this thread.
+fn wait_finish<J, E: DeserializeOwned>(
+    mut log: JobLog<J, E>,
+    ended: Ended<J, E>,
+) -> Result<J, Error> {
+    while let Some(entry) = log.wait_next() {
+        if let Some(job) = end(&log, &entry?.entry, ended) {
+            return job;
+        }
+    }
+    Err(unended())
+}
+
+/// The job as `entry` of `log` says it ended, if it is the end.
+fn end<J, E>(log: &JobLog<J, E>, entry: &E, ended: Ended<J, E>) -> Option<Result<J, Error>> {
+    let job = log
+        .job()
+        .expect("an entry is read only once the job has started");
+    ended(job, entry)
+}
+
+/// A log that ended with no `end` entry: the connection did, with the job still running.
+fn unended() -> Error {
+    Error::Call("the job's log ended before the job did".to_owned())
 }
 
 impl<J, E> Future for StartedJob<J, E> {

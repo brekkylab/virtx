@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ._library import args
+from ._library import VirtxError, args
 from .job import LogEntry, Truncated
 
 if TYPE_CHECKING:
@@ -178,6 +178,15 @@ class ImageJob:
     async def remove(self) -> None:
         """Cancel it if it runs, and forget it."""
         await self.client._call("virtx_client_remove_image_job", args(id=self.id))
+
+    def _ended(self, entry: ImageJobEntry) -> ImageJob | None:
+        """It as ``entry``, its log's ``ImageJobEnd``, says it ended: with its digest, or its
+        error raised. ``None`` for any other entry."""
+        if not isinstance(entry, ImageJobEnd):
+            return None
+        if entry.error is not None:
+            raise VirtxError(entry.error)
+        return replace(self, running=False, digest=entry.digest, error=None)
 
 
 @dataclass(frozen=True)

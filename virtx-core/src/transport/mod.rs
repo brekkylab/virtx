@@ -424,4 +424,154 @@ mod tests {
             "asked again once the rate allowed"
         );
     }
+
+    /// A `503` to a request that makes something is sent again only where it says nothing was
+    /// made -- `capacity`, no room found -- since any other may have come after the making began
+    /// (issue #164): a create the server answered `unavailable` once its node stopped answering
+    /// is not sent again to make a second sandbox. A read is sent again as before.
+    #[tokio::test]
+    async fn a_making_turned_away_is_sent_again_only_where_nothing_was_made() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        };
+        type Asked = axum::extract::State<Arc<[AtomicU32; 3]>>;
+        let asked: Arc<[AtomicU32; 3]> = Arc::default();
+        let turned_away = |code: &'static str| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(::http::header::RETRY_AFTER, "1")],
+                format!(r#"{{"error":{{"code":"{code}","message":"not now"}}}}"#),
+            )
+                .into_response()
+        };
+        let router = Router::new()
+            .route(
+                "/made",
+                axum::routing::post(async move |axum::extract::State(asked): Asked| {
+                    asked[0].fetch_add(1, Ordering::SeqCst);
+                    turned_away("unavailable")
+                }),
+            )
+            .route(
+                "/room",
+                axum::routing::post(async move |axum::extract::State(asked): Asked| {
+                    match asked[1].fetch_add(1, Ordering::SeqCst) {
+                        0 => turned_away("capacity"),
+                        _ => "\"made\"".into_response(),
+                    }
+                }),
+            )
+            .route(
+                "/read",
+                axum::routing::get(async move |axum::extract::State(asked): Asked| {
+                    match asked[2].fetch_add(1, Ordering::SeqCst) {
+                        0 => turned_away("unavailable"),
+                        _ => "\"read\"".into_response(),
+                    }
+                }),
+            )
+            .with_state(asked.clone());
+        let url = serve(router).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+
+        let error = http::post::<String>(&client, "/made", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert_eq!(asked[0].load(Ordering::SeqCst), 1, "made once at most");
+        assert_eq!(
+            http::post::<String>(&client, "/room", &serde_json::json!({}))
+                .await
+                .unwrap(),
+            "made"
+        );
+        assert_eq!(asked[1].load(Ordering::SeqCst), 2, "no room: asked again");
+        assert_eq!(http::get::<String>(&client, "/read").await.unwrap(), "read");
+        assert_eq!(asked[2].load(Ordering::SeqCst), 2, "a read: asked again");
+    }
+
+    /// A log whose connection breaks is read on after its last entry even where the first ask
+    /// again meets a proxy's own `502` page, not virtx's words -- a server gone for a moment, as
+    /// an empty `502` is (issue #162).
+    #[tokio::test]
+    async fn a_log_is_read_on_past_a_proxy_s_page_for_a_server_gone_for_a_moment() {
+        use futures_util::StreamExt as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        };
+        let asked = Arc::new(AtomicU32::new(0));
+        let router = Router::new()
+            .route(
+                "/log",
+                get(
+                    async |axum::extract::State(asked): axum::extract::State<Arc<AtomicU32>>,
+                           headers: HeaderMap| {
+                        let events = |lines: &[(u64, &str)]| -> String {
+                            lines
+                                .iter()
+                                .map(|(id, out)| {
+                                    format!("id: {id}\ndata: {{\"stdout\":\"{out}\"}}\n\n")
+                                })
+                                .collect()
+                        };
+                        match asked.fetch_add(1, Ordering::SeqCst) {
+                            // Two entries, then the connection broken.
+                            0 => {
+                                let first = bytes::Bytes::from(events(&[(1, "a"), (2, "b")]));
+                                // Cut a moment after: what was sent is read first.
+                                let body = futures_util::stream::iter([Ok(first)]).chain(
+                                    futures_util::stream::once(async {
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
+                                        Err(std::io::Error::other("cut"))
+                                    }),
+                                );
+                                (
+                                    [(::http::header::CONTENT_TYPE, "text/event-stream")],
+                                    axum::body::Body::from_stream(body),
+                                )
+                                    .into_response()
+                            }
+                            // A proxy in front of it, for the moment its server is gone.
+                            1 => (
+                                StatusCode::BAD_GATEWAY,
+                                [(::http::header::CONTENT_TYPE, "text/html")],
+                                "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                            )
+                                .into_response(),
+                            _ => {
+                                assert_eq!(
+                                    headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+                                    Some("2")
+                                );
+                                (
+                                    [(::http::header::CONTENT_TYPE, "text/event-stream")],
+                                    events(&[(3, "c")]),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    },
+                ),
+            )
+            .with_state(asked.clone());
+        let url = serve(router).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        let read: Vec<_> =
+            super::sse::client::log::<crate::SandboxJobEntry>(&client, "/log".into(), None)
+                .collect()
+                .await;
+        let read: Vec<_> = read.into_iter().map(|e| e.map(|e| e.id)).collect();
+        assert_eq!(
+            read.iter()
+                .filter_map(|e| e.as_ref().ok())
+                .collect::<Vec<_>>(),
+            [&1, &2, &3],
+            "{read:?}"
+        );
+        assert!(read.iter().all(Result::is_ok), "{read:?}");
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
 }

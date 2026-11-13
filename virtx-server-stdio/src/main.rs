@@ -762,4 +762,51 @@ mod tests {
             assert_eq!(client.read_text(&volume, path).await.unwrap(), "second");
         }
     }
+
+    /// A conditional write to a volume lands only once it holds the volume's `writing` file,
+    /// which another server over the home holds as its own lands: held from here, the write's
+    /// body is all in and it has not landed, nor been answered; let go, it lands.
+    #[tokio::test]
+    async fn a_conditional_write_lands_only_once_it_holds_its_volume() {
+        let server = Server::spawn("conditional-held");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        let dir = server.home.join("volume").join("data");
+        assert!(
+            dir.join("files").is_dir(),
+            "{} is not the volume",
+            dir.display()
+        );
+        let writing = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("writing"))
+            .unwrap();
+        writing.lock().unwrap();
+
+        let (app, _) = app(&server.home).unwrap();
+        let request = http::Request::put("/volumes/data/files/new")
+            .header(http::header::IF_NONE_MATCH, "*")
+            .body(axum::body::Body::from("held"))
+            .unwrap();
+        let put = tokio::spawn(async move {
+            let Ok(response) = app.oneshot(request).await;
+            response.status().as_u16()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !put.is_finished(),
+            "it was answered while the volume was held"
+        );
+        assert!(
+            !dir.join("files").join("new").exists(),
+            "it landed while the volume was held"
+        );
+
+        writing.unlock().unwrap();
+        assert_eq!(put.await.unwrap(), 201);
+        assert_eq!(client.read_text(&volume, "new").await.unwrap(), "held");
+    }
 }

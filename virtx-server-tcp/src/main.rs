@@ -839,8 +839,8 @@ mod tests {
         );
     }
 
-    /// Two clients writing over one etag at once: the first to write lands, and the other is
-    /// refused the etag it read, gone stale under it.
+    /// Two clients writing over one etag at once: the one whose body has all arrived first
+    /// lands, and the other is refused the etag it read, gone stale under it.
     #[tokio::test]
     async fn of_two_writes_over_one_etag_one_lands() {
         let served = Served::spawn("etag").await;

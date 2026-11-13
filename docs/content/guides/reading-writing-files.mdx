@@ -155,6 +155,8 @@ sandbox.remove_file("work", true).await?;
 
 Pass a file's `etag` from `stat_file` as `if_match` to `write_file`, and the write goes through only while the file still has that tag.
 If something changed it in between, the write is refused with `412`, and nothing is overwritten.
+Of two such writes sent at once with one tag, one goes through and the other is refused with `412`: read the file again and retry.
+The tag is checked once all of the content has arrived, so a large write over a stale tag is refused only after it is sent.
 
 ## Reading while the sandbox is stopped
 

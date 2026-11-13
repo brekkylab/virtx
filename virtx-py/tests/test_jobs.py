@@ -208,10 +208,15 @@ async def test_a_started_build_finished_is_the_job_as_it_ended(client: Client) -
 
 
 async def test_a_started_pull_that_fails_raises_its_error_when_finished(client: Client) -> None:
+    before = len(await client.list_image_job())
+    pull = client.pull_image("registry.invalid/missing:latest")
+    job = await pull
     with pytest.raises(VirtxError) as failed:
-        await client.pull_image("registry.invalid/missing:latest").finished()
+        await pull.finished()
     assert failed.value.status is None
-    assert str(failed.value)
+    assert str(failed.value) == (await job.get()).error
+    assert len(await client.list_image_job()) == before + 1
+    assert [entry async for entry in job.log()][-1].entry == ImageJobEnd(error=str(failed.value))
 
 
 async def test_a_started_command_finished_is_the_job_with_its_code(client: Client) -> None:

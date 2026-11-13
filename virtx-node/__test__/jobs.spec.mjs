@@ -180,12 +180,18 @@ describe('against virtx-stdio', () => {
   })
 
   test('a started pull that fails rejects with its error when finished', async () => {
-    await assert.rejects(client.pullImage('registry.invalid/missing:latest').finished(), (error) => {
-      assert.ok(error instanceof virtx.VirtxError)
-      assert.equal(error.status, null)
-      assert.ok(error.message)
-      return true
+    const before = (await client.listImageJob()).length
+    const pull = client.pullImage('registry.invalid/missing:latest')
+    const job = await pull
+    let failed
+    await assert.rejects(pull.finished(), (error) => {
+      failed = error
+      return error instanceof virtx.VirtxError
     })
+    assert.equal(failed.status, null)
+    assert.equal(failed.message, (await job.get()).error)
+    assert.equal((await client.listImageJob()).length, before + 1)
+    assert.deepEqual((await Array.fromAsync(job.log())).at(-1).end, { error: failed.message })
   })
 
   test('a started command finished is the job with its code', async () => {

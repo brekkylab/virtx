@@ -16,7 +16,8 @@ pub enum Error {
     /// An argument cannot cross the C ABI: a string with a NUL in it.
     Argument(String),
     /// A job ended with this error, as its log's `end` entry gave it: an image's build, pull or
-    /// push that failed, waited on with [`StartedJob::finished`](crate::StartedJob::finished).
+    /// push that failed, waited on with `finished` or `wait_finished` on a
+    /// [`StartedJob`](crate::StartedJob).
     Job(String),
 }
 

@@ -52,8 +52,7 @@ from virtx import Client, Stdout
 
 async def main() -> None:
     with Client.spawn() as client:
-        async for _ in client.pull_image("alpine:latest"):
-            pass
+        await client.pull_image("alpine:latest").finished()
 
         sandbox = await client.create_sandbox("alpine:latest")
         try:
@@ -77,7 +76,7 @@ const { Client } = require('@brekkylab/virtx')
 async function main() {
   const client = Client.spawn()
   try {
-    for await (const _ of client.pullImage('alpine:latest')) {}
+    await client.pullImage('alpine:latest').finished()
 
     const sandbox = await client.createSandbox('alpine:latest')
     try {
@@ -106,10 +105,7 @@ use virtx::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
 
-    let mut log = client.pull_image("alpine:latest", None).log();
-    while let Some(entry) = log.next().await {
-        entry?;
-    }
+    client.pull_image("alpine:latest", None).finished().await?;
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))

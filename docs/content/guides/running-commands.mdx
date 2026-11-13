@@ -56,7 +56,7 @@ A line longer than 64 KiB arrives as several entries.
 
 Each command runs as a **job**. The server runs it apart from the request that started it, so a job keeps going when a loop is left or a connection drops, and its output is kept in a log you can read again.
 
-The value `exec` returns is two things at once. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+The value `exec` returns is two things at once, and a third on asking. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

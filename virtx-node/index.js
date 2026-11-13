@@ -420,7 +420,8 @@ function opening(lib, status, raw, error) {
 // A client of one server, over stdio or HTTP, made by `libvirtx_core`.
 //
 // Each method returns a promise, or an async iterable for a request that streams: a job's log,
-// or a download's or upload's progress. One that starts a job returns a `StartedJob`, both.
+// or a download's or upload's progress. One that starts a job returns a `StartedJob`, both, and
+// `finished()`, the job once it has ended.
 // Holds of one session are counted: `clone` takes another, `close` lets this one go, and the
 // session ends with the last, which answers every request still waiting with an error.
 class Client {

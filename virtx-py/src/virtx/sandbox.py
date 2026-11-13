@@ -85,7 +85,7 @@ class Sandbox(Files):
     ) -> StartedJob[SandboxJob, SandboxJobEntry]:
         """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
         after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
-        ended, as ``SandboxJob.log``'s. Sent when first awaited or iterated."""
+        ended, as ``SandboxJob.log``'s. Sent when first awaited, iterated or finished."""
         request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:

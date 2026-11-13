@@ -16,9 +16,10 @@ use crate::{Call, Error, Events, ImageJob, SandboxJob};
 /// What opens a job's log, given the job its start answered with.
 type Open<J, E> = Box<dyn Fn(&J) -> Events<LogEntry<E>> + Send + Sync>;
 
-/// A job being started, which answers with the job `J`: awaited or waited on as a [`Call`], or
-/// read as its log of `E` entries with [`log`](Self::log). Dropping it before it answers cancels
-/// the start; once started, the job runs until it ends or is removed.
+/// A job being started, which answers with the job `J`: awaited or waited on as a [`Call`], read
+/// as its log of `E` entries with [`log`](Self::log), or waited on to its end with `finished` or
+/// `wait_finished`. Dropping it before it answers cancels the start; once started, the job runs
+/// until it ends or is removed.
 #[must_use = "a call dropped is cancelled"]
 pub struct StartedJob<J, E> {
     call: Call<J>,

@@ -34,7 +34,7 @@ and Docker, running Linux containers: Docker Desktop, or colima.
 
 | Dependency | Why |
 |---|---|
-| Docker | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in, as far as `kernel.c`, which the host then links: see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). Without it, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere and no container is started. The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
+| Docker | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in, as far as `kernel.c`, which the host then links: see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). Without it, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere and no container is started. The library the script produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build server-stdio` and `server-tcp`. |

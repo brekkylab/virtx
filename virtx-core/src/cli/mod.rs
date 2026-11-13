@@ -1,4 +1,5 @@
-//! `virtx`: build, list, tag, move and remove a virtx server's images from a shell.
+//! `virtx`: build, list, tag, move and remove a virtx server's images from a shell; and sign in
+//! to virtx cloud for the SDKs to use (`login`, `token`, `whoami`, `logout`, in `cloud.rs`).
 //!
 //! The spelling follows `docker`'s, in both of its forms: `virtx image <command>`, and the
 //! top-level `build`, `images`, `inspect`, `rmi`, `pull`, `push`, `tag`, `save` and `load`,
@@ -12,6 +13,7 @@
 //! names an image; each command's arguments and handler are in the file of its name.
 
 mod build;
+mod cloud;
 mod command;
 mod inspect;
 mod job;

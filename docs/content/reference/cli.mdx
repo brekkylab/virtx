@@ -37,3 +37,18 @@ virtx rmi jq:latest
 ## Which server
 
 Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Hello world](/docs/hello-world/#run-it) for the two servers.
+
+## virtx cloud
+
+The same command signs a person in to virtx cloud, for the SDKs to use. `--domain` (`$VIRTX_DOMAIN`, `virtx.sh` by default) names where virtx cloud is, before or after the command.
+
+| Command | What it does |
+| --- | --- |
+| `virtx login` | Signs in: it shows a code and a page of the console to approve it at, and opens the page in a browser where there is one. |
+| `virtx token` | Prints an access token, refreshed as needed; `--json` prints `{"token", "expires_in"}`, as the SDKs read it. |
+| `virtx whoami` | Says who is signed in. |
+| `virtx logout` | Signs out: the session is forgotten on this machine, and ended at virtx cloud. If virtx cloud cannot be reached, it says so and exits with an error; the session then ends as it expires. |
+
+The session is kept in `~/.config/virtx/<domain>.token` and `<domain>.access`, readable by their owner alone. An access token lasts 15 minutes.
+
+A client made by `Client.from_env()` authenticates with `$VIRTX_API_KEY` if it is set. Without one and with `$VIRTX_ORG` (an organization's ID) set, it authenticates as the person signed in, running `virtx token --json` for each token, so the `virtx` the package installs serves it with no other program.

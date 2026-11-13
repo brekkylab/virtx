@@ -761,4 +761,187 @@ mod tests {
         assert!(!store.contains_layer(&layer));
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
+
+    /// Two conditional writes to one file at once, from two apps over one home as two server
+    /// processes are, each with its own requests in memory: the second, sent while the first is
+    /// still sending its body, is not held up by it and lands, and the first, checked once its
+    /// body has arrived, is refused `412` over a file no longer the one its condition named. For
+    /// `If-None-Match: *` to a new file, and for one `If-Match` to a file there.
+    #[tokio::test]
+    async fn of_two_conditional_writes_to_one_file_from_two_servers_one_lands() {
+        use axum::body::{Body, Bytes};
+        use futures_util::stream;
+        use http::header;
+        use tokio::sync::oneshot;
+
+        let server = Server::spawn("conditional-writes");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        let etag = client
+            .stat_file(&volume, "there")
+            .await
+            .unwrap()
+            .etag
+            .unwrap();
+        let (one, _) = app(&server.home).unwrap();
+        let (two, _) = app(&server.home).unwrap();
+
+        for (path, condition, value) in [
+            ("new", header::IF_NONE_MATCH, "*".to_owned()),
+            ("there", header::IF_MATCH, etag),
+        ] {
+            let put = |app: axum::Router, body: Body| {
+                let request = http::Request::put(format!("/volumes/data/files/{path}"))
+                    .header(condition.clone(), &value)
+                    .body(body)
+                    .unwrap();
+                async move {
+                    let Ok(response) = app.oneshot(request).await;
+                    response.status().as_u16()
+                }
+            };
+            // The first's body: a part, then the rest once let go. Once its first part is
+            // read the first is still sending, and the second goes meanwhile.
+            let (sending, read) = oneshot::channel();
+            let (go, let_go) = oneshot::channel::<()>();
+            let slow = stream::unfold((Some(sending), Some(let_go)), |state| async move {
+                match state {
+                    (Some(sending), let_go) => {
+                        let _ = sending.send(());
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from("first, ")),
+                            (None, let_go),
+                        ))
+                    }
+                    (None, Some(let_go)) => {
+                        let _ = let_go.await;
+                        Some((Ok(Bytes::from("whole")), (None, None)))
+                    }
+                    (None, None) => None,
+                }
+            });
+            let first = tokio::spawn(put(one.clone(), Body::from_stream(slow)));
+            read.await.unwrap();
+            let second = put(two.clone(), Body::from("second")).await;
+            assert!(
+                matches!(second, 201 | 204),
+                "{path}: the second answered {second}"
+            );
+            go.send(()).unwrap();
+            assert_eq!(first.await.unwrap(), 412, "{path}");
+            assert_eq!(client.read_text(&volume, path).await.unwrap(), "second");
+        }
+    }
+
+    /// A conditional write to a volume lands only once it holds the volume's `writing` file,
+    /// which another server over the home holds as its own lands: held from here, the write's
+    /// body is all in and it has not landed, nor been answered; let go, it lands.
+    #[tokio::test]
+    async fn a_conditional_write_lands_only_once_it_holds_its_volume() {
+        let server = Server::spawn("conditional-held");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        let dir = server.home.join("volume").join("data");
+        assert!(
+            dir.join("files").is_dir(),
+            "{} is not the volume",
+            dir.display()
+        );
+        let writing = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("writing"))
+            .unwrap();
+        writing.lock().unwrap();
+
+        let (app, _) = app(&server.home).unwrap();
+        let request = http::Request::put("/volumes/data/files/new")
+            .header(http::header::IF_NONE_MATCH, "*")
+            .body(axum::body::Body::from("held"))
+            .unwrap();
+        let put = tokio::spawn(async move {
+            let Ok(response) = app.oneshot(request).await;
+            response.status().as_u16()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !put.is_finished(),
+            "it was answered while the volume was held"
+        );
+        assert!(
+            !dir.join("files").join("new").exists(),
+            "it landed while the volume was held"
+        );
+        assert_eq!(
+            saving(&dir.join("files")).len(),
+            1,
+            "its body is not beside the path while the volume is held"
+        );
+
+        writing.unlock().unwrap();
+        assert_eq!(put.await.unwrap(), 201);
+        assert_eq!(client.read_text(&volume, "new").await.unwrap(), "held");
+        assert_eq!(saving(&dir.join("files")), Vec::<String>::new());
+    }
+
+    /// A conditional write whose condition does not hold is refused `412`, as `dav-server`
+    /// refuses one, and leaves nothing behind: over a file whose etag has gone stale, over a
+    /// directory, and under a directory that is not there. One to a path with a `..` is refused
+    /// `400`, as any request is.
+    #[tokio::test]
+    async fn a_conditional_write_whose_condition_fails_is_refused_and_leaves_nothing() {
+        use http::header::{IF_MATCH, IF_NONE_MATCH};
+
+        let server = Server::spawn("conditional-refused");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        client.create_dir(&volume, "dir").await.unwrap();
+        let (app, _) = app(&server.home).unwrap();
+
+        for (path, condition, value) in [
+            ("there", IF_MATCH, "\"stale\""),
+            ("dir", IF_NONE_MATCH, "*"),
+            ("dir", IF_MATCH, "\"stale\""),
+            ("none/file", IF_MATCH, "*"),
+        ] {
+            let request = http::Request::put(format!("/volumes/data/files/{path}"))
+                .header(condition.clone(), value)
+                .body(axum::body::Body::from("written"))
+                .unwrap();
+            let Ok(response) = app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 412, "{path} with {condition}: {value}");
+        }
+        // A path with a `..` in it is refused before any of it is read, as any request's is.
+        let request = http::Request::put("/volumes/data/files/dir/../there")
+            .header(IF_MATCH, "*")
+            .body(axum::body::Body::from("written"))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(request).await;
+        assert_eq!(response.status(), 400);
+        assert_eq!(client.read_text(&volume, "there").await.unwrap(), "there");
+        let files = server.home.join("volume").join("data").join("files");
+        assert_eq!(saving(&files), Vec::<String>::new());
+        assert_eq!(saving(&files.join("dir")), Vec::<String>::new());
+    }
+
+    /// The names in `dir` of writes on their way, beside the paths they are going to.
+    fn saving(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".saving"))
+            .collect()
+    }
 }

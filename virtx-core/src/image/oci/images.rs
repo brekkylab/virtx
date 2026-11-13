@@ -35,10 +35,14 @@ pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutput
 /// Point the tag `target` at the image `source` names. Into another repository, everything
 /// the image names is mounted there from `source`'s first.
 pub(crate) async fn tag(client: &TransportClient, source: &str, target: &str) -> Result<(), Error> {
+    let named = source;
     let source = Reference::parse(source)?;
     let (name, tag) = Reference::parse_tag(target)?;
     let registry = Registry::new(client);
-    let manifest = registry.manifest(&source.name, source.target()).await?;
+    let manifest = held(
+        named,
+        registry.manifest(&source.name, source.target()).await,
+    )?;
     if name != source.name {
         copy(&registry, &source.name, &name, &manifest).await?;
     }
@@ -80,18 +84,37 @@ async fn copy(
 /// Remove the tag `reference`, leaving the image it points at.
 pub(crate) async fn untag(client: &TransportClient, reference: &str) -> Result<(), Error> {
     let (name, tag) = Reference::parse_tag(reference)?;
-    Registry::new(client).delete_manifest(&name, &tag).await
+    held(
+        reference,
+        Registry::new(client).delete_manifest(&name, &tag).await,
+    )
 }
 
 /// Remove the image `reference` names from its repository, and every tag there on it.
 pub(crate) async fn remove(client: &TransportClient, reference: &str) -> Result<(), Error> {
+    let named = reference;
     let reference = Reference::parse(reference)?;
     let registry = Registry::new(client);
     let digest = match &reference.target {
         Target::Digest(digest) => digest.clone(),
-        Target::Tag(tag) => registry.manifest_digest(&reference.name, tag).await?,
+        Target::Tag(tag) => held(named, registry.manifest_digest(&reference.name, tag).await)?,
     };
-    registry.delete_manifest(&reference.name, &digest).await
+    held(
+        named,
+        registry.delete_manifest(&reference.name, &digest).await,
+    )
+}
+
+/// `result`, of a request for the image `reference` names, with its `404` told as an image the
+/// server does not hold, as the CLI tells one, rather than as the registry request it was.
+fn held<T>(reference: &str, result: Result<T, Error>) -> Result<T, Error> {
+    result.map_err(|e| match e.status() {
+        Some(404) => Error::Status(
+            404,
+            format!("not_found: {reference} is not an image the server holds"),
+        ),
+        _ => e,
+    })
 }
 
 #[cfg(all(test, feature = "server"))]
@@ -104,7 +127,8 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::list;
+    use super::{list, remove, tag, untag};
+    use crate::Error;
     use crate::transport::testing::piped;
 
     #[tokio::test]
@@ -153,6 +177,56 @@ mod tests {
                 .map(|image| (image.reference.as_str(), image.digest.as_str()))
                 .collect::<Vec<_>>(),
             [("kept:latest", "sha256:ab12")]
+        );
+        client.close().await;
+    }
+
+    /// An image the server does not hold is refused `404`, `not_found`, by the reference it was
+    /// asked for, by each call that takes one: what to branch on, as for a sandbox or a volume.
+    #[tokio::test]
+    async fn an_image_the_server_does_not_hold_is_refused_404_by_its_reference() {
+        let unknown = || async {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"errors": [{"code": "MANIFEST_UNKNOWN", "message": "unknown"}]})),
+            )
+        };
+        let client = piped(Router::new().fallback(unknown));
+        let digest = format!("nope@sha256:{}", "0".repeat(64));
+        for (call, reference, result) in [
+            ("untag", "nope:1", untag(&client, "nope:1").await),
+            ("remove", "nope:1", remove(&client, "nope:1").await),
+            ("remove", digest.as_str(), remove(&client, &digest).await),
+            ("tag", "nope:1", tag(&client, "nope:1", "other:1").await),
+        ] {
+            let refused = result.unwrap_err();
+            assert_eq!(refused.status(), Some(404), "{call} {reference}: {refused}");
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "the server answered 404 Not Found: not_found: {reference} is not an image \
+                     the server holds"
+                ),
+                "{call}"
+            );
+        }
+        client.close().await;
+    }
+
+    /// A registry failure other than a `404` still names the request it answered, with no
+    /// status to branch on.
+    #[tokio::test]
+    async fn a_registry_failure_other_than_404_names_its_request() {
+        let failing = || async { (StatusCode::INTERNAL_SERVER_ERROR, "") };
+        let client = piped(Router::new().fallback(failing));
+        let refused = untag(&client, "app:1").await.unwrap_err();
+        assert!(matches!(refused, Error::Registry(_)), "{refused:?}");
+        assert_eq!(refused.status(), None);
+        assert!(
+            refused
+                .to_string()
+                .starts_with("DELETE app/manifests/1: 500 Internal Server Error"),
+            "{refused}"
         );
         client.close().await;
     }

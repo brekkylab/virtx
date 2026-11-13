@@ -22,7 +22,8 @@ pub enum Error {
     },
     /// The body did not encode, or the answer did not read as the type asked for.
     Json(String),
-    /// The server's image registry answered with an error, or with what is not an image.
+    /// The server's image registry answered with an error, or with what is not an image. What it
+    /// does not have, a `404`, is [`Error::Status`] instead, `not_found` as any endpoint's.
     Registry(String),
     /// A file on this machine could not be read or written, or a file is not what it should
     /// be: one read as text that is not UTF-8.

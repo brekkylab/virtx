@@ -24,7 +24,6 @@ use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use virtx_core::MountSource;
@@ -218,7 +217,7 @@ impl Volume {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let at = dir.join("files");
-        let root = Dir::open_ambient_dir(&at, ambient_authority()).map_err(|e| match e.kind() {
+        let root = open_root(&at).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::Unknown(name.clone()),
             _ => Error::io(format!("opening {}", at.display()), e),
         })?;
@@ -706,6 +705,37 @@ async fn read_from(store: &Remote, at: &Path, offset: u64, length: u64) -> io::R
 /// Whether a store's entry has a name a path in the volume can hold.
 fn named(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
+}
+
+/// A volume's files' root, opened as [`Dir`].
+///
+/// cap-std opens a directory on Windows without `FILE_SHARE_DELETE`, so that it cannot be
+/// renamed or removed while it is open -- which would keep [`Store::remove`] from removing a
+/// volume while any [`Volume`] of it is open, as Unix lets it. Here the root is opened sharing
+/// deletion too: removed under an open [`Volume`], its name goes, and what that `Volume` does
+/// next fails, as on Unix.
+fn open_root(at: &Path) -> io::Result<Dir> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(at)?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "not a directory",
+            ));
+        }
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(not(windows))]
+    Dir::open_ambient_dir(at, cap_std::ambient_authority())
 }
 
 /// What is at `at`, or `None` for nothing there, once every directory on the way is one and

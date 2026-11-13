@@ -651,7 +651,7 @@ impl Upper {
         let file = File::create_new(&upper.snapshot.path)
             .map_err(io(format!("creating {}", upper.snapshot.path.display())))?;
         FsTree::new()
-            .to_ext4(file, Snapshot::SIZE)
+            .to_ext4(Snapshot::sparse(file), Snapshot::SIZE)
             .map_err(SnapshotError::from)?;
         Ok(upper)
     }

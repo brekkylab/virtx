@@ -209,7 +209,7 @@ jobs:
           cp -R target/release/abin guest/abin
           tar -cf guest-${{ matrix.arch }}.tar guest
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}
           path: guest-${{ matrix.arch }}.tar
@@ -259,7 +259,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: guest-x86_64
 
@@ -269,7 +269,8 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.so.* build/krunfw/
 
-      - uses: astral-sh/setup-uv@v6
+      # A full version: setup-uv publishes no major tag to follow since v8.
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - uses: actions/setup-node@v7
         with:
@@ -336,7 +337,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: guest-x86_64
 
@@ -450,7 +451,7 @@ jobs:
           path: 3rdparty/MoltenVK/Package
           key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', 'xtask/scripts/build-deps.sh') }}
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}
 
@@ -527,7 +528,7 @@ jobs:
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -597,7 +598,7 @@ jobs:
       - name: Add the guest's musl target
         run: cargo xtask init
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.arch }}
 
@@ -635,7 +636,7 @@ jobs:
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz built/dist/release/
           cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.platform }}
           path: built/
@@ -661,7 +662,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: linux-${{ matrix.platform }}
 
@@ -671,7 +672,7 @@ jobs:
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: |

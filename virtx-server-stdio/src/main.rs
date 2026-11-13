@@ -93,6 +93,8 @@ mod tests {
     struct Server {
         client: Client,
         home: PathBuf,
+        /// The app the client is served, for a request no client sends.
+        app: axum::Router,
     }
 
     impl Server {
@@ -108,6 +110,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
             let (app, _) = app(&home).unwrap();
+            let served_app = app.clone();
             let after = Arc::new(after);
             let served = home.clone();
             let handle = move |request: http::Request<_>| {
@@ -127,6 +130,7 @@ mod tests {
             Server {
                 client: Client::over_stream(pipe),
                 home,
+                app: served_app,
             }
         }
 
@@ -316,14 +320,23 @@ mod tests {
             path: path.into(),
             readonly: false,
         };
+        // Each as the guest reads it: `.` and repeated `/` resolve, so the root and one path
+        // spelled another way are what they are spelled as.
         for volumes in [
             vec![at("/data"), at("/data/")],
+            vec![at("/data"), at("//data")],
             vec![at("data")],
             vec![at("/")],
+            vec![at("/.")],
+            vec![at("/./")],
+            vec![at("/..")],
+            vec![at("/data"), at("/data/.")],
+            vec![at("/data/../etc")],
         ] {
+            let spelled: Vec<_> = volumes.iter().map(|v| v.path.clone()).collect();
             let mut args = here();
             args.volumes = volumes;
-            assert_eq!(refused(args).await, 400);
+            assert_eq!(refused(args).await, 400, "{spelled:?}");
         }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);
@@ -418,6 +431,23 @@ mod tests {
         let nobody = FileRoot::Volume("nobody".into());
         assert_eq!(status(client.stat_file(&nobody, "").await), 404);
 
+        // `mkdir -p` of a path with a dot segment creates the parents of the path it resolves
+        // to, and no others.
+        client
+            .create_dir_all(&volume, "discard/../parent/child")
+            .await
+            .unwrap();
+        assert!(
+            client
+                .stat_file(&volume, "parent/child")
+                .await
+                .unwrap()
+                .is_dir
+        );
+        let mut top = names(client.read_dir(&volume, "").await.unwrap());
+        top.sort();
+        assert_eq!(top, ["b.txt", "c.txt", "copied", "parent"]);
+
         // The root is removed through its resource, and a request that would take it, or what is in
         // it, is refused before anything goes.
         client
@@ -430,6 +460,51 @@ mod tests {
             403
         );
         assert_eq!(client.read_text(&volume, "kept.txt").await.unwrap(), "kept");
+        // A client resolves a dot segment before it sends a path, as the SDK does, so the root
+        // has one spelling; one that arrives with a dot segment, or out of the volume, is refused
+        // before anything goes.
+        assert_eq!(status(client.remove_file(&volume, ".", false).await), 403);
+        assert_eq!(
+            status(client.remove_file(&volume, "copied/..", false).await),
+            403
+        );
+        let raw = async |method: &str, path: &str, to: Option<&str>| {
+            let mut request = http::Request::builder().method(method).uri(path);
+            if let Some(to) = to {
+                request = request.header("Destination", to);
+            }
+            let request = request.body(axum::body::Body::empty()).unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            response.status().as_u16()
+        };
+        for dotted in [
+            "/volumes/data/files/.",
+            "/volumes/data/files/%2e",
+            "/volumes/data/files/copied/..",
+        ] {
+            assert_eq!(raw("DELETE", dotted, None).await, 400, "DELETE {dotted}");
+            let copied = "/volumes/data/files/copied";
+            assert_eq!(
+                raw("MOVE", copied, Some(dotted)).await,
+                400,
+                "MOVE onto {dotted}"
+            );
+        }
+        assert_eq!(
+            raw("PROPFIND", "/volumes/data/files/../../nobody/files", None).await,
+            400
+        );
+        assert_eq!(
+            raw(
+                "COPY",
+                "/volumes/data/files/kept.txt",
+                Some("/volumes/nobody/files/x")
+            )
+            .await,
+            400
+        );
+        assert_eq!(client.read_text(&volume, "kept.txt").await.unwrap(), "kept");
+        assert!(client.stat_file(&volume, "copied").await.unwrap().is_dir);
 
         // A link in the volume, which a machine may have made, points at nothing here.
         #[cfg(unix)]

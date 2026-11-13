@@ -57,6 +57,30 @@ pub fn is_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// `at`, where a volume is mounted in the guest, spelled one way: repeated and trailing `/`
+/// dropped. Refused, saying why, unless it is absolute, has no `.` or `..` segment, and is
+/// not the guest's root, so that two spellings of one path are one here too. Only the text:
+/// a symlink in the guest's tree, which the guest follows when it mounts, is not seen here.
+/// Asked of the text rather than of `Path`, which answers by this host's rules: on Windows
+/// `/data` is not absolute.
+pub(crate) fn mount_point(at: &str) -> std::result::Result<String, &'static str> {
+    if !at.starts_with('/') {
+        return Err("a path in the guest is absolute");
+    }
+    let mut spelled = String::new();
+    for segment in at.split('/').filter(|segment| !segment.is_empty()) {
+        if matches!(segment, "." | "..") {
+            return Err("a path in the guest has no . or .. segment");
+        }
+        spelled.push('/');
+        spelled.push_str(segment);
+    }
+    match spelled.is_empty() {
+        true => Err("/ is the guest's root"),
+        false => Ok(spelled),
+    }
+}
+
 /// Where virtx keeps what it keeps on this host: `$VIRTX_HOME`, or a `virtx` directory in the
 /// platform's cache directory.
 pub fn cache_root() -> std::path::PathBuf {
@@ -87,4 +111,35 @@ pub fn cache_root() -> std::path::PathBuf {
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache")
         })
         .join("virtx");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mount_point_is_spelled_one_way_and_refused_where_the_guest_reads_it_otherwise() {
+        for (at, spelled) in [
+            ("/data", "/data"),
+            ("/data/", "/data"),
+            ("//data", "/data"),
+            ("/a//b/", "/a/b"),
+            ("/a.b/..c/.d", "/a.b/..c/.d"),
+        ] {
+            assert_eq!(mount_point(at).as_deref(), Ok(spelled), "{at}");
+        }
+        for (at, why) in [
+            ("data", "a path in the guest is absolute"),
+            ("", "a path in the guest is absolute"),
+            ("/", "/ is the guest's root"),
+            ("//", "/ is the guest's root"),
+            ("/.", "a path in the guest has no . or .. segment"),
+            ("/./", "a path in the guest has no . or .. segment"),
+            ("/..", "a path in the guest has no . or .. segment"),
+            ("/data/.", "a path in the guest has no . or .. segment"),
+            ("/data/../etc", "a path in the guest has no . or .. segment"),
+        ] {
+            assert_eq!(mount_point(at), Err(why), "{at}");
+        }
+    }
 }

@@ -335,7 +335,7 @@ export class Sandbox extends Files implements SandboxInfo {
   closePort(port: number): Promise<void>
   /** The inbound rules of its port `port`, and its public address if it has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port is refused `409`, `not_public`; one not open, `404`. */
   inbound(port: number): Promise<PortInbound>
-  /** Make the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one -- answered as the server keeps them. A source that is not an address or a CIDR is refused `400`, `invalid`. */
+  /** Make the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one -- answered as the server keeps them, its public `address` kept on the port in `ports` too. A source that is not an address or a CIDR is refused `400`, `invalid`. */
   setInbound(port: number, rules: InboundRule[]): Promise<PortInbound>
   /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>

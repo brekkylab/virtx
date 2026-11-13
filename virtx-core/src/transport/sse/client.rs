@@ -92,9 +92,11 @@ pub(crate) fn resumed<'a, E: DeserializeOwned + Send + 'a>(
                         Some(e) => e,
                     }
                 }
-                // A server not reached, or one gone for a moment: as a break.
+                // A server not reached, or one gone for a moment: as a break -- whatever a proxy
+                // in front of it answered for it, a page of its own among it.
                 Err(e @ Error::Transport(_)) => e,
                 Err(Error::Status(status @ (502..=504), why)) => Error::Status(status, why),
+                Err(e @ Error::Refusal { status: 502..=504, .. }) => e,
                 Err(e) => Err(e)?,
             };
             if broken == RESUMES {

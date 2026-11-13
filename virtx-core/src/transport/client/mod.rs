@@ -29,7 +29,8 @@ pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
 /// The most a request's body may be to be kept, to send it again ([`TransportClient::send`]).
 const REPLAYABLE: u64 = 1 << 20;
 
-/// The longest a request is held back from the server, all told, while it turns it away.
+/// The longest a request is held back from the server, all told -- its answers' time and the
+/// waits between them -- while it turns it away.
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The wait `response` asks for, in seconds (`Retry-After`; never a date, from these servers).
@@ -56,6 +57,22 @@ async fn past_a_quota(response: http::Response<Body>) -> (http::Response<Body>, 
     let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
     let quota = said["error"]["code"] == "quota" && said["error"]["reason"] != "requests";
     (http::Response::from_parts(parts, full(bytes)), quota)
+}
+
+/// `response`, a `503` to a request that makes something, and whether it says nothing was made:
+/// `{"error": {"code": "capacity"}}`, the room for it not found -- as virtx's servers and virtx
+/// cloud's gateway answer one turned away before anything is made. Any other may have come
+/// after the making began. Its body read, and given back whole.
+async fn nothing_made(response: http::Response<Body>) -> (http::Response<Body>, bool) {
+    let (parts, body) = response.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|b| b.to_bytes())
+        .unwrap_or_default();
+    let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let nothing = said["error"]["code"] == "capacity";
+    (http::Response::from_parts(parts, full(bytes)), nothing)
 }
 
 /// How a client reaches the server's endpoints.
@@ -139,9 +156,12 @@ impl TransportClient {
     ///
     /// A request whose body is known and small ([`REPLAYABLE`]) -- every resource's, and a
     /// registry's reads -- is sent again when the server turns it away for now: a `429` or a
-    /// `503`, after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most;
-    /// and a `401`, at once and once, when the token is a command's, which prints a new one.
-    /// The server did nothing with a request it turned away, so sending it again is safe.
+    /// `503`, after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most, its
+    /// answers' time counted with the waits; and a `401`, at once and once, when the token is a
+    /// command's, which prints a new one. The server did nothing with a request it turned away,
+    /// so sending it again is safe -- but a `503` to one that makes something (a `POST` or a
+    /// `PATCH`) may have come after the making began: sent again only where it says nothing was
+    /// made ([`nothing_made`]), so a retry never makes a second of what the first made.
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
@@ -158,7 +178,8 @@ impl TransportClient {
             .await
             .map_err(|e| Error::Transport(e.to_string()))?
             .to_bytes();
-        let mut waited = Duration::ZERO;
+        let started = tokio::time::Instant::now();
+        let makes = matches!(parts.method, http::Method::POST | http::Method::PATCH);
         let mut backoff = Duration::from_millis(500);
         let mut renewed = false;
         loop {
@@ -186,12 +207,18 @@ impl TransportClient {
             if quota {
                 return Ok(response);
             }
+            let response = match status == StatusCode::SERVICE_UNAVAILABLE && makes {
+                true => match nothing_made(response).await {
+                    (response, true) => response,
+                    (response, false) => return Ok(response),
+                },
+                false => response,
+            };
             let wait = retry_after(&response).unwrap_or(backoff).min(PATIENCE);
-            if waited + wait > PATIENCE {
+            if started.elapsed() + wait > PATIENCE {
                 return Ok(response);
             }
             tokio::time::sleep(wait).await;
-            waited += wait;
             backoff *= 2;
         }
     }

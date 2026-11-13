@@ -185,6 +185,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.arch }}-unknown-linux-musl
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -330,6 +331,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
 
       - uses: actions/download-artifact@v5
         with:
@@ -389,6 +391,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -543,6 +546,13 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      # Apart from builds on the runner itself, whose newer glibc C would carry into this one.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.release }}-manylinux_2_28
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # AlmaLinux's packages and the image's own Python, for meson and virglrenderer's
       # generators. The image sets PKG_CONFIG_PATH, which `.cargo/config.toml`'s [env] does not
@@ -554,12 +564,6 @@ jobs:
           "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako
           echo "$py" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
-
-      # Apart from builds on the runner itself, whose newer glibc C would carry into this one.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: linux-${{ matrix.release }}-manylinux_2_28
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Add the guest's musl target
         run: cargo xtask init

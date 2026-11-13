@@ -25,7 +25,9 @@ mod volume;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
@@ -118,7 +120,10 @@ impl Files {
                 let serial = self.serial(format!("sandbox:{id}"));
                 if request.method() == Method::PUT {
                     let hold = async move { Ok(serial.lock_owned().await) };
-                    return put(&fs, &prefix, request, hold).await;
+                    return lingering(request, |request| {
+                        put(&fs, &prefix, request.map(Body::new), hold)
+                    })
+                    .await;
                 }
                 let request = match gathered(request).await {
                     Ok(request) => request,
@@ -128,7 +133,8 @@ impl Files {
             }
         };
         let handler = handler.filesystem(Box::new(fs)).build_handler();
-        handler.handle(request).await.map(|body| {
+        let response = lingering(request, |request| handler.handle(request)).await;
+        response.map(|body| {
             Body::new(body.map_frame(move |frame| {
                 let _ = &activity;
                 frame
@@ -200,7 +206,11 @@ impl Files {
                 let (request, _writing) = match conditional(&request) {
                     false => (request, None),
                     true if request.method() == Method::PUT => {
-                        return put(&fs, &root.to_string(), request, hold).await;
+                        let prefix = root.to_string();
+                        return lingering(request, |request| {
+                            put(&fs, &prefix, request.map(Body::new), hold)
+                        })
+                        .await;
                     }
                     true => {
                         let request = match gathered(request).await {
@@ -214,7 +224,9 @@ impl Files {
                     }
                 };
                 let handler = handler.filesystem(Box::new(fs)).build_handler();
-                handler.handle(request).await.map(Body::new)
+                lingering(request, |request| handler.handle(request))
+                    .await
+                    .map(Body::new)
             }
             Root::Snapshot(name) => {
                 let image = match self.load(name, held).await {
@@ -222,7 +234,7 @@ impl Files {
                     Err(refusal) => return refusal.into_response(),
                 };
                 let handler = handler.filesystem(Box::new(image.fs())).build_handler();
-                let response = handler.handle(request).await;
+                let response = lingering(request, |request| handler.handle(request)).await;
                 match image.save().await {
                     Ok(()) => response.map(Body::new),
                     Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -255,6 +267,53 @@ impl Files {
         snapshot::Image::load(snapshot, serial)
             .await
             .map_err(|e| refused(snapshot_status(&e), e))
+    }
+}
+
+/// `answer` to `request`, once what `answer` left unread of its body has been read.
+///
+/// An answer made before the body is read -- a `PUT` refused under a directory that is not
+/// there -- would otherwise go out while the body is still arriving, and the connection, with it
+/// unread, is closed: Windows resets it, and a client still sending sees the reset and never the
+/// answer. Read to its end, the body leaves the connection as one whose request was whole.
+async fn lingering<B, F>(
+    request: Request<Body>,
+    answer: impl FnOnce(Request<Shared>) -> F,
+) -> http::Response<B>
+where
+    F: Future<Output = http::Response<B>>,
+{
+    let (parts, body) = request.into_parts();
+    let body = Shared(Arc::new(Mutex::new(Some(body))));
+    let response = answer(Request::from_parts(parts, body.clone())).await;
+    let mut rest = body;
+    while let Some(Ok(_)) = rest.frame().await {}
+    response
+}
+
+/// A request's body, which [`lingering`] reads the rest of after the handler it was given to:
+/// once it has ended it is not read again, so a handler that read it to its end leaves
+/// [`lingering`] nothing, whatever the body is.
+#[derive(Clone)]
+struct Shared(Arc<Mutex<Option<Body>>>);
+
+impl http_body::Body for Shared {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let mut body = self.0.lock().unwrap();
+        let Some(rest) = body.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let polled = Pin::new(rest).poll_frame(cx);
+        if let Poll::Ready(None) = polled {
+            *body = None;
+        }
+        polled
     }
 }
 

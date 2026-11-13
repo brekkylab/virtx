@@ -2,7 +2,7 @@
 
 use virtx_core::{ImageJob as ImageJobInfo, ImageJobEntry, LogEntry};
 
-use crate::{Call, Client, Events};
+use crate::{Call, Client, Error, Events};
 
 /// A build, pull or push the server runs, as starting it or asking for it answered, and the
 /// client that reaches it: what reads its log.
@@ -49,6 +49,26 @@ impl ImageJob {
     /// Cancel it if it runs, and forget it.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_image_job(&self.info.id)
+    }
+
+    /// It as `entry`, its log's `end` entry, says it ended: with its digest, or the error it
+    /// failed with as [`Error::Job`]. `None` for any other entry.
+    pub(crate) fn ended(&self, entry: &ImageJobEntry) -> Option<Result<ImageJob, Error>> {
+        let ImageJobEntry::End(end) = entry else {
+            return None;
+        };
+        Some(match &end.error {
+            Some(error) => Err(Error::Job(error.clone())),
+            None => Ok(ImageJob::new(
+                self.client.clone(),
+                ImageJobInfo {
+                    running: false,
+                    digest: end.digest.clone(),
+                    error: None,
+                    ..self.info.clone()
+                },
+            )),
+        })
     }
 }
 

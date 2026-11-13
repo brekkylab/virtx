@@ -163,6 +163,66 @@ describe('against virtx-stdio', () => {
     await client.removeImage(reference)
   })
 
+  test('a started build finished is the job as it ended', async () => {
+    await alpine(client)
+    const reference = `${unique('finished')}:latest`
+    const build = client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference)
+    const job = await build.finished()
+    const digest = (await tags(client))[reference]
+    assert.ok(job instanceof virtx.ImageJob)
+    assert.equal(job.client, client)
+    assert.equal(job.kind, 'build')
+    assert.equal(job.running, false)
+    assert.equal(job.digest, digest)
+    assert.deepEqual(job, await job.get())
+    assert.deepEqual((await Array.fromAsync(job.log())).at(-1).end, { digest })
+    await client.removeImage(reference)
+  })
+
+  test('a started pull that fails rejects with its error when finished', async () => {
+    const before = (await client.listImageJob()).length
+    const pull = client.pullImage('registry.invalid/missing:latest')
+    const job = await pull
+    let failed
+    await assert.rejects(pull.finished(), (error) => {
+      failed = error
+      return error instanceof virtx.VirtxError
+    })
+    assert.equal(failed.status, null)
+    assert.equal(failed.message, (await job.get()).error)
+    assert.equal((await client.listImageJob()).length, before + 1)
+    assert.deepEqual((await Array.fromAsync(job.log())).at(-1).end, { error: failed.message })
+  })
+
+  test('a job removed while it is finished rejects', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const started = sandbox.exec(['sleep', '30'])
+    const job = await started
+    // Its rejection is handled from the start: it comes while `remove` is still awaited.
+    const waiting = assert.rejects(started.finished(), virtx.VirtxError)
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await job.remove()
+    await waiting
+    await sandbox.remove()
+  })
+
+  test('a started command finished is the job with its code', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const job = await sandbox.exec(['sh', '-c', 'echo hi; exit 3']).finished()
+    assert.ok(job instanceof virtx.SandboxJob)
+    assert.equal(job.sandboxId, sandbox.id)
+    assert.equal(job.running, false)
+    assert.equal(job.code, 3)
+    assert.deepEqual(job, await job.get())
+    assert.deepEqual(
+      (await Array.fromAsync(job.log())).map(({ id, ...entry }) => entry),
+      [{ stdout: 'hi' }, { end: { code: 3 } }],
+    )
+    await sandbox.remove()
+  })
+
   test('an image is tagged, downloaded, removed and uploaded back', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'virtx-node-'))
     try {

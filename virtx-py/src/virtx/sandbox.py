@@ -3,8 +3,9 @@ and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -85,14 +86,14 @@ class Sandbox(Files):
     ) -> StartedJob[SandboxJob, SandboxJobEntry]:
         """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
         after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
-        ended, as ``SandboxJob.log``'s. Sent when first awaited or iterated."""
+        ended, as ``SandboxJob.log``'s. Sent when first awaited, iterated or finished."""
         request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:
             output = await self.client._call("virtx_client_exec_sandbox", request)
             return SandboxJob.from_dict(self.client, self.id, output)
 
-        return StartedJob(start, lambda job: job.log())
+        return StartedJob(start, lambda job: job.log(), SandboxJob._ended)
 
     async def jobs(self) -> list[SandboxJob]:
         """Every job in it."""
@@ -181,14 +182,22 @@ class SandboxJob:
     async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
         """Its log, its process's output, from its start or after its ``after``th entry, until
         its ``SandboxJobEnd``. Closing it leaves the job as it is."""
-        async for item in self.client._items(
-            "virtx_client_sandbox_job_log", self._args(after=after)
-        ):
-            yield sandbox_job_entry(item)
+        async with contextlib.aclosing(
+            self.client._items("virtx_client_sandbox_job_log", self._args(after=after))
+        ) as items:
+            async for item in items:
+                yield sandbox_job_entry(item)
 
     async def remove(self) -> None:
         """Cancel it if it runs, killing its process, and forget it."""
         await self.client._call("virtx_client_remove_sandbox_job", self._args())
+
+    def _ended(self, entry: SandboxJobEntry) -> SandboxJob | None:
+        """It as ``entry``, its log's ``SandboxJobEnd``, says it ended: with its exit code.
+        ``None`` for any other entry."""
+        if not isinstance(entry, SandboxJobEnd):
+            return None
+        return replace(self, running=False, code=entry.code)
 
 
 @dataclass(frozen=True)

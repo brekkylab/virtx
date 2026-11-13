@@ -63,6 +63,38 @@ while let Some(entry) = log.next().await {
 </TabItem>
 </Tabs>
 
+In place of reading the log, `finished()` waits for the build to end and answers the job with the `digest` it built. A build that fails raises its error there, so the next line runs only on a built image:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+job = await client.build_image(recipe, "jq:latest").finished()
+print(job.digest)
+sandbox = await client.create_sandbox("jq:latest")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const job = await client.buildImage(recipe, 'jq:latest').finished()
+console.log(job.digest)
+const sandbox = await client.createSandbox('jq:latest')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let job = client.build_image(recipe, "jq:latest").finished().await?;
+println!("{:?}", job.info().digest);
+let sandbox = client.create_sandbox(&SandboxCreateArgs::new("jq:latest")).await?;
+```
+
+</TabItem>
+</Tabs>
+
 ### From a Dockerfile
 
 A Dockerfile is read as a recipe: one stage, with only `FROM`, `RUN`, `ENV`, and `WORKDIR`. Any other instruction is refused at its line.

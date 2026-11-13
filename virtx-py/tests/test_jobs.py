@@ -1,6 +1,7 @@
 """Images, snapshots, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
 against the fixture's ``virtx-stdio``."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,56 @@ async def test_a_started_job_awaited_then_iterated_starts_it_once(client: Client
     assert (await client.get_image_job(job.id)).digest == digest
     assert len(await client.list_image_job()) == before + 1
     await client.remove_image(reference)
+
+
+async def test_a_started_build_finished_is_the_job_as_it_ended(client: Client) -> None:
+    await alpine(client)
+    reference = f"{unique('finished')}:latest"
+    build = client.build_image(Recipe(ALPINE).run(f"echo {reference} > /built"), reference)
+    job = await build.finished()
+    digest = (await tags(client))[reference]
+    assert isinstance(job, ImageJob)
+    assert (job.kind, job.reference, job.running) == (ImageJobKind.BUILD, reference, False)
+    assert (job.digest, job.error) == (digest, None)
+    assert job == await job.get()
+    assert [entry async for entry in job.log()][-1].entry == ImageJobEnd(digest=digest)
+    await client.remove_image(reference)
+
+
+async def test_a_started_pull_that_fails_raises_its_error_when_finished(client: Client) -> None:
+    before = len(await client.list_image_job())
+    pull = client.pull_image("registry.invalid/missing:latest")
+    job = await pull
+    with pytest.raises(VirtxError) as failed:
+        await pull.finished()
+    assert failed.value.status is None
+    assert str(failed.value) == (await job.get()).error
+    assert len(await client.list_image_job()) == before + 1
+    assert [entry async for entry in job.log()][-1].entry == ImageJobEnd(error=str(failed.value))
+
+
+async def test_a_job_removed_while_it_is_finished_raises(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    started = sandbox.exec(["sleep", "30"])
+    job = await started
+    waiting = asyncio.create_task(started.finished())
+    await asyncio.sleep(0.5)
+    await job.remove()
+    with pytest.raises(VirtxError):
+        await waiting
+    await sandbox.remove()
+
+
+async def test_a_started_command_finished_is_the_job_with_its_code(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    job = await sandbox.exec(["sh", "-c", "echo hi; exit 3"]).finished()
+    assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id
+    assert (job.running, job.code) == (False, 3)
+    assert job == await job.get()
+    assert [entry.entry async for entry in job.log()] == [Stdout("hi"), SandboxJobEnd(3)]
+    await sandbox.remove()
 
 
 async def test_an_image_is_tagged_downloaded_removed_and_uploaded_back(

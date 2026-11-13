@@ -56,7 +56,7 @@ A line longer than 64 KiB arrives as several entries.
 
 Each command runs as a **job**. The server runs it apart from the request that started it, so a job keeps going when a loop is left or a connection drops, and its output is kept in a log you can read again.
 
-The value `exec` returns is two things at once. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+The value `exec` returns is two things at once, and a third on asking. Iterated, as above, it is the job's log. Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`. `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -122,8 +122,39 @@ False 0
 
 A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes last.
 
+### Wait for a job to end
+
+With no use for the output, `finished()` waits for the job to end and answers it as it ended, with its exit `code`. A code that is not `0` is not an error: it is the job's `code`, to check like any other. The log is still there to read with the job's `log`. A job removed while `finished()` waits on it, by its `remove` or its sandbox's, ends with an error instead: its log ends with no `end` entry.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+job = await sandbox.exec(["sh", "-c", "make test"]).finished()
+print(job.code)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const job = await sandbox.exec(['sh', '-c', 'make test']).finished()
+console.log(job.code)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let job = sandbox.exec(&SandboxExecArgs::new(["sh", "-c", "make test"])).finished().await?;
+println!("{:?}", job.info().code);
+```
+
+</TabItem>
+</Tabs>
+
 <Aside type="tip">
-Building, pulling, and pushing an image are jobs too, read the same way: iterate `build_image`, `pull_image`, or `push_image` for the log, or await it for the job. See [Working with images](/docs/guides/images/).
+Building, pulling, and pushing an image are jobs too, read the same way: iterate `build_image`, `pull_image`, or `push_image` for the log, await it for the job, or wait for it with `finished()`. See [Working with images](/docs/guides/images/).
 </Aside>
 
 ## Run several commands at once

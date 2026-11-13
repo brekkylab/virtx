@@ -1,19 +1,26 @@
 use std::fmt;
 
-/// Why a call, or opening a client, failed.
+/// Why a call, or opening a client, failed. More kinds may come, so a `match` on it has a
+/// wildcard arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// `libvirtx_core` did not open, or lacks a function this crate calls.
     Library(String),
     /// The server refused the request with this HTTP status, as `PROTOCOL.md` lists them: `404`
     /// for what does not exist, `409` for what is in use or has ended, and the like.
     Status(u16, String),
-    /// The library answered with an error of its own or the transport's.
+    /// The library answered with an error of its own or the transport's; or a job's log ended
+    /// with no `end` entry, the job removed while it was waited on.
     Call(String),
     /// What crosses the C ABI did not encode or read back.
     Json(String),
     /// An argument cannot cross the C ABI: a string with a NUL in it.
     Argument(String),
+    /// A job ended with this error, as its log's `end` entry gave it: an image's build, pull or
+    /// push that failed, waited on with `finished` or `wait_finished` on a
+    /// [`StartedJob`](crate::StartedJob).
+    Job(String),
 }
 
 impl Error {
@@ -33,7 +40,8 @@ impl fmt::Display for Error {
             | Error::Status(_, message)
             | Error::Call(message)
             | Error::Json(message)
-            | Error::Argument(message) => f.write_str(message),
+            | Error::Argument(message)
+            | Error::Job(message) => f.write_str(message),
         }
     }
 }

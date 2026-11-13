@@ -399,13 +399,22 @@ export type SandboxJobEntry = { id: number } & (
 )
 
 /**
- * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
- * read until its `end` entry. The job starts at the call, as a promise's work does, and once
- * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
- * leaving one leaves the job running, which the job's `remove` cancels.
+ * A job as it starts: a promise of the job `J`, an async iterable of its log's entries `E`,
+ * read until its `end` entry, and `finished()`, the job once it has ended. The job starts at the
+ * call, as a promise's work does, and once however the value is used: awaited, iterated,
+ * finished, or more than one. Each loop reads the log from its start; leaving one leaves the job
+ * running, which the job's `remove` cancels.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   [Symbol.asyncIterator](): AsyncGenerator<E>
+  /**
+   * The job once it has ended, its log read to its `end` entry: an image job with its `digest`,
+   * or, for one that failed, rejected with its `error` as a `VirtxError`; a sandbox job with its
+   * exit `code`, which is not an error whatever it is. A job removed while it is waited on
+   * rejects with a `VirtxError` too: its log ends with no `end` entry. Its log is still read with
+   * its `log`.
+   */
+  finished(): Promise<J>
 }
 
 /**

@@ -1,10 +1,10 @@
 //! Images and their jobs, and processes in sandboxes, against the fixture's `virtx-stdio`.
 
-use std::{env, future, pin::Pin};
+use std::{env, future, pin::Pin, thread, time::Duration};
 
 use futures_core::Stream;
 use virtx::{
-    ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
+    Error, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
     SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Step,
 };
 
@@ -219,6 +219,115 @@ fn a_started_job_is_read_as_its_log() {
     assert_eq!(refused.status(), Some(422), "{refused}");
     assert!(log.wait_next().is_none());
     assert!(log.job().is_none());
+    sandbox.remove().wait().unwrap();
+}
+
+#[test]
+fn a_started_build_finished_is_the_job_as_it_ended() {
+    let client = common::client();
+    common::alpine(&client);
+    // Each way to wait, on a build of its own.
+    for blocking in [false, true] {
+        let reference = format!("{}:latest", common::unique("finished"));
+        let build = client.build_image(
+            Recipe::new(ALPINE).step(Step::run(format!("echo {reference} > /built"))),
+            &reference,
+        );
+        let job = match blocking {
+            false => common::block_on(build.finished()),
+            true => build.wait_finished(),
+        }
+        .unwrap();
+        let digest = common::tagged(&client, &reference).unwrap();
+        assert_eq!(job.info().kind, ImageJobKind::Build);
+        assert!(!job.info().running, "{job:?}");
+        assert_eq!(job.info().digest.as_ref(), Some(&digest));
+        assert_eq!(job.info(), job.get().wait().unwrap().info());
+        assert_eq!(
+            common::entries(job.log(None)).pop().unwrap().entry,
+            ImageJobEntry::End(ImageJobEnd {
+                digest: Some(digest),
+                error: None,
+            })
+        );
+        client.remove_image(&reference).wait().unwrap();
+    }
+}
+
+#[test]
+fn a_started_command_finished_is_the_job_with_its_code() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    // Each way to wait, on a command of its own; a code that is not 0 is not an error.
+    for blocking in [false, true] {
+        let exec = sandbox.exec(&SandboxExecArgs::new(["sh", "-c", "echo hi; exit 3"]));
+        let job = match blocking {
+            false => common::block_on(exec.finished()),
+            true => exec.wait_finished(),
+        }
+        .unwrap();
+        assert_eq!(job.sandbox_id(), sandbox.id());
+        assert!(!job.info().running, "{job:?}");
+        assert_eq!(job.info().code, Some(3));
+        assert_eq!(job.info(), job.get().wait().unwrap().info());
+        let read: Vec<_> = common::entries(job.log(None))
+            .into_iter()
+            .map(|entry| entry.entry)
+            .collect();
+        assert_eq!(
+            read,
+            [
+                SandboxJobEntry::Stdout("hi".into()),
+                SandboxJobEntry::End(SandboxJobEnd { code: 3 })
+            ]
+        );
+    }
+    sandbox.remove().wait().unwrap();
+}
+
+#[test]
+fn a_started_job_that_fails_is_its_error_when_finished() {
+    let client = common::client();
+    let missing = "registry.invalid/missing:latest";
+    for blocking in [false, true] {
+        let pull = client.pull_image(missing, None);
+        let failed = match blocking {
+            false => common::block_on(pull.finished()),
+            true => pull.wait_finished(),
+        }
+        .unwrap_err();
+        let Error::Job(why) = &failed else {
+            panic!("{failed:?}")
+        };
+        assert!(!why.is_empty());
+    }
+}
+
+#[test]
+fn a_job_removed_while_it_is_waited_on_is_an_error() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    let exec = sandbox.exec(&SandboxExecArgs::new(["sleep", "30"]));
+    let removing = {
+        let sandbox = sandbox.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            let jobs = sandbox.jobs().wait().unwrap();
+            let job = jobs.iter().find(|job| job.info().running).unwrap();
+            job.remove().wait().unwrap();
+        })
+    };
+    let ended = exec.wait_finished().unwrap_err();
+    assert!(matches!(ended, Error::Call(_)), "{ended:?}");
+    removing.join().unwrap();
     sandbox.remove().wait().unwrap();
 }
 

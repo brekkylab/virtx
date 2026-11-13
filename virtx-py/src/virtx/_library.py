@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -258,7 +258,7 @@ class Library:
         finally:
             self.virtx_future_free(handle)
 
-    async def items(self, handle: int) -> AsyncIterator[Any]:
+    async def items(self, handle: int) -> AsyncGenerator[Any, None]:
         """Each item of the stream ``handle``, freeing it after, or on closing, which cancels
         it."""
         try:

@@ -8,7 +8,7 @@ import ctypes
 import json
 import os
 import weakref
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -112,7 +112,7 @@ class Client:
 
     Each method is a coroutine, or an async iterator for a request that streams: a job's log,
     or the progress of a download or upload. One that starts a job answers a ``StartedJob``,
-    both.
+    both, and ``finished()``, the job once it has ended.
     Holds of one session are counted: ``clone`` takes another, ``close`` lets this one go, and
     the session ends with the last, which answers every request still waiting with an error.
     """
@@ -265,7 +265,7 @@ class Client:
         handle = start(held) if args is None else start(held, args, len(args))
         return await self._lib.answer(handle, raw)
 
-    def _items(self, name: str, args: bytes) -> AsyncIterator[Any]:
+    def _items(self, name: str, args: bytes) -> AsyncGenerator[Any, None]:
         handle = getattr(self._lib, name)(self._held(), args, len(args))
         return self._lib.items(handle)
 
@@ -279,13 +279,13 @@ class Client:
         async def start() -> ImageJob:
             return ImageJob.from_dict(self, await self._call(name, args))
 
-        return StartedJob(start, lambda job: job.log())
+        return StartedJob(start, lambda job: job.log(), ImageJob._ended)
 
     def build_image(
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Build ``recipe``, to point ``reference`` at what it builds: awaited, the job;
-        iterated, its log, as ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        iterated, its log, as ``ImageJob.log``'s. Sent when first awaited, iterated or finished."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
@@ -296,7 +296,7 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
         the server pulls anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s. Sent when first awaited, iterated or finished."""
         return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -306,7 +306,7 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Push the image ``reference`` points at to the registry ``reference`` names; without
         ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s. Sent when first awaited, iterated or finished."""
         return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )

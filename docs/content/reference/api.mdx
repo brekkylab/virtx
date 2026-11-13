@@ -10,6 +10,7 @@ What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
 A call that starts a job, marked **job** below, is iterated for its log or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+Its `finished()` waits for the job to end and answers it as it ended, raising the error of an image job that failed; see [Wait for a job to end](/docs/guides/running-commands/#wait-for-a-job-to-end).
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
 

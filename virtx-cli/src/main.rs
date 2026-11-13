@@ -106,7 +106,34 @@ fn now() -> u64 {
 struct Cloud {
     api: String,
     domain: String,
+    /// Where the session is kept beside the keychain: `~/.config/virtx`.
+    config: PathBuf,
     http: reqwest::blocking::Client,
+}
+
+/// The client virtx cloud is asked with. It follows no redirect: the refresh token travels in a
+/// request's body, which a `307` or `308` would carry on to wherever it pointed -- to another
+/// host, or over plain HTTP (issue #170). A redirect is answered as the error it is
+/// ([`checked`]).
+fn http() -> anyhow::Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent(concat!("virtx-cli/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?)
+}
+
+/// `answer`, virtx cloud's, if it is a success: a redirect, which is not followed ([`http`]),
+/// and any other status are errors.
+fn checked(answer: reqwest::blocking::Response) -> anyhow::Result<reqwest::blocking::Response> {
+    if answer.status().is_redirection() {
+        bail!(
+            "{} answered {}, a redirect, which is not followed",
+            answer.url(),
+            answer.status()
+        );
+    }
+    Ok(answer.error_for_status()?)
 }
 
 /// The commands of virtx cloud's, as the first argument names them; any other is
@@ -131,13 +158,12 @@ fn main() -> std::process::ExitCode {
 
 fn cloud_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let home = std::env::var_os("HOME").context("no HOME to keep the session under")?;
     let cloud = Cloud {
         api: format!("https://api.{}", cli.domain),
         domain: cli.domain,
-        http: reqwest::blocking::Client::builder()
-            .user_agent(concat!("virtx-cli/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()?,
+        config: PathBuf::from(home).join(".config/virtx"),
+        http: http()?,
     };
     match cli.command {
         Command::Login => cloud.login(),
@@ -165,13 +191,13 @@ fn cloud_main() -> anyhow::Result<()> {
 
 impl Cloud {
     fn login(&self) -> anyhow::Result<()> {
-        let codes: Codes = self
-            .http
-            .post(format!("{}/auth/device", self.api))
-            .json(&json!({}))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let codes: Codes = checked(
+            self.http
+                .post(format!("{}/auth/device", self.api))
+                .json(&json!({}))
+                .send()?,
+        )?
+        .json()?;
         eprintln!(
             "To sign in, open this page and approve the code {}:",
             codes.user_code
@@ -234,18 +260,12 @@ impl Cloud {
             }
         }
         let refresh = self.kept()?.context("not signed in; run virtx login")?;
-        let answer = self
-            .http
-            .post(format!("{}/auth/token", self.api))
-            .json(&json!({ "refresh_token": refresh }))
-            .send()?;
-        if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let Some(tokens) = self.refreshed(&refresh)? else {
             // Kept as it is: under the lock no other run of this replaced it, so the session
             // has ended, and `virtx login` puts a new one in its place.
             let _ = self.forget_access();
             bail!("the session has ended; run virtx login");
-        }
-        let tokens: Tokens = answer.error_for_status()?.json()?;
+        };
         if let Some(refresh) = &tokens.refresh_token {
             self.keep(refresh)?;
         }
@@ -253,38 +273,65 @@ impl Cloud {
         Ok(tokens)
     }
 
-    fn me(&self, access: &str) -> anyhow::Result<Value> {
-        Ok(self
+    /// The tokens `refresh` is replaced with -- or none, `401`, for a session that has ended.
+    fn refreshed(&self, refresh: &str) -> anyhow::Result<Option<Tokens>> {
+        let answer = self
             .http
-            .get(format!("{}/v1/me", self.api))
-            .bearer_auth(access)
-            .send()?
-            .error_for_status()?
-            .json()?)
+            .post(format!("{}/auth/token", self.api))
+            .json(&json!({ "refresh_token": refresh }))
+            .send()?;
+        if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(None);
+        }
+        Ok(Some(checked(answer)?.json()?))
     }
 
-    fn logout(&self) -> anyhow::Result<()> {
-        if let Some(refresh) = self.kept()? {
+    fn me(&self, access: &str) -> anyhow::Result<Value> {
+        Ok(checked(
             self.http
+                .get(format!("{}/v1/me", self.api))
+                .bearer_auth(access)
+                .send()?,
+        )?
+        .json()?)
+    }
+
+    /// Signed out: the session ended at virtx cloud, and forgotten here -- here whatever virtx
+    /// cloud answers, so a machine signed out of is signed out of even offline (issue #163).
+    /// One virtx cloud did not end is said, and is an error: a copy of its token taken
+    /// before stays usable until it expires.
+    fn logout(&self) -> anyhow::Result<()> {
+        let _lock = self.lock()?;
+        let revoked = match self.kept()? {
+            Some(refresh) => self
+                .http
                 .post(format!("{}/auth/token/revoke", self.api))
                 .json(&json!({ "refresh_token": refresh }))
-                .send()?
-                .error_for_status()?;
-        }
+                .send()
+                .map_err(anyhow::Error::from)
+                .and_then(checked)
+                .map(drop),
+            None => Ok(()),
+        };
         self.forget()?;
         self.forget_access()?;
-        eprintln!("Signed out.");
-        Ok(())
+        match revoked {
+            Ok(()) => {
+                eprintln!("Signed out.");
+                Ok(())
+            }
+            Err(e) => Err(e.context(
+                "signed out here, but virtx cloud could not be told to end the session: it \
+                 ends as it expires",
+            )),
+        }
     }
 
     // ---- Where the refresh token is kept ----
 
     /// `~/.config/virtx/<domain>.<extension>`.
     fn config(&self, extension: &str) -> anyhow::Result<PathBuf> {
-        let home = std::env::var_os("HOME").context("no HOME to keep the session under")?;
-        Ok(PathBuf::from(home)
-            .join(".config/virtx")
-            .join(format!("{}.{extension}", self.domain)))
+        Ok(self.config.join(format!("{}.{extension}", self.domain)))
     }
 
     /// Held until dropped: no other run of `virtx token` reads or replaces the session meanwhile.
@@ -368,15 +415,27 @@ impl Cloud {
     }
 }
 
-/// Write `bytes` to `path`, readable by its owner alone.
+/// Write `bytes` to `path`, readable by its owner alone -- however a file there was left: written
+/// to a new file beside it, made so, and put in its place (issue #170). On Windows the file has
+/// its directory's permissions, the user's profile's.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path.parent().expect("a directory"))?;
+    let dir = path.parent().expect("a directory");
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().expect("a file").to_string_lossy();
+    let fresh = dir.join(format!(".{name}.{}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    std::io::Write::write_all(&mut options.open(path)?, bytes)
-        .with_context(|| format!("writing {}", path.display()))
+    let _ = std::fs::remove_file(&fresh);
+    let written = options
+        .open(&fresh)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, bytes))
+        .and_then(|()| std::fs::rename(&fresh, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&fresh);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Open `url` in the person's browser, if there is one to open it in: the page is printed
@@ -394,4 +453,127 @@ fn open(url: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// A directory of its own under the system's temporary one, empty.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("virtx-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// virtx cloud at `api`, its session kept under `config` -- for a domain no keychain has.
+    fn cloud(api: &str, config: PathBuf) -> Cloud {
+        Cloud {
+            api: api.to_owned(),
+            domain: format!("qa-{}.invalid", std::process::id()),
+            config,
+            http: http().unwrap(),
+        }
+    }
+
+    /// One HTTP request taken on `listener` and answered `answer`; whether one came, and its
+    /// request line.
+    fn answer_once(listener: TcpListener, answer: &'static str) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if let Some(n) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse().unwrap();
+                }
+                if header == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            stream.write_all(answer.as_bytes()).unwrap();
+            line
+        })
+    }
+
+    /// A token file left readable by others is its owner's alone once written again (issue #170).
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_is_its_owner_s_alone_however_it_was_left() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("mode");
+        let path = dir.join("qa.token");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing left beside it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refresh answered with a redirect is an error, and the refresh token is carried nowhere
+    /// it points (issue #170).
+    #[test]
+    fn a_refresh_token_is_never_carried_where_a_redirect_points() {
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        let there = elsewhere.local_addr().unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let api = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = format!("http://{}", api.local_addr().unwrap());
+        let redirect: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{there}/elsewhere\r\n\
+                 content-length: 0\r\nconnection: close\r\n\r\n"
+            )
+            .into_boxed_str(),
+        );
+        let asked = answer_once(api, redirect);
+        let refreshed = cloud(&at, scratch("redirect")).refreshed("made-up-refresh-token");
+        assert!(refreshed.is_err(), "{:?}", refreshed.map(|t| t.is_some()));
+        assert!(asked.join().unwrap().starts_with("POST /auth/token "));
+        assert!(
+            elsewhere.accept().is_err(),
+            "nothing reached where the redirect pointed"
+        );
+    }
+
+    /// Signing out forgets the session here whatever virtx cloud answers -- here, nothing, its
+    /// address refusing connections -- and says it was not ended there (issue #163).
+    #[test]
+    fn signing_out_forgets_the_session_even_where_virtx_cloud_is_not_reached() {
+        let dir = scratch("logout");
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = format!("http://{}", gone.local_addr().unwrap());
+        drop(gone);
+        let cloud = cloud(&at, dir.clone());
+        write_private(&cloud.file().unwrap(), b"made-up-refresh-token").unwrap();
+        write_private(&cloud.config("access").unwrap(), b"{}").unwrap();
+        let out = cloud.logout();
+        assert!(out.is_err(), "the session not ended at virtx cloud is said");
+        assert!(
+            !cloud.file().unwrap().exists(),
+            "its refresh token forgotten"
+        );
+        assert!(
+            !cloud.config("access").unwrap().exists(),
+            "its access token forgotten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

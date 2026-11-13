@@ -27,12 +27,14 @@ x86_64 Windows over the Windows Hypervisor Platform, which has its own setup —
 [Windows (WHP)](#windows-whp). The rest of this section is macOS.
 
 ```sh
-brew install lld meson ninja krunvm
+brew install lld meson ninja
 ```
+
+and Docker, running Linux containers: Docker Desktop, or colima.
 
 | Dependency | Why |
 |---|---|
-| `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
+| Docker | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in, as far as `kernel.c`, which the host then links: see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). Without it, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere and no container is started. The library the script produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build server-stdio` and `server-tcp`. |
@@ -574,9 +576,12 @@ build is only about controlling what is in the guest.
 **Where the kernel is built** depends on what the host can offer a Linux toolchain.
 Linux and Windows both build in a throwaway `ubuntu:24.04` container — Windows because
 it has no such toolchain at all, Linux so that it gets the same one rather than whatever
-the distribution has. macOS cannot: the output is a `.dylib` that has to be linked on
-macOS while the kernel inside it has to be built on Linux, which libkrunfw resolves with
-`krunvm`, and which the script defers to. `brew install krunvm` if it is missing.
+the distribution has. macOS splits it: the output is a `.dylib` that has to be linked on
+macOS while the kernel inside it has to be built on Linux, so the same container builds
+the kernel as far as `kernel.c`, the C bundle libkrunfw wraps it in, and the host links
+that. libkrunfw's own `krunvm` path does the same with a microVM in place of the
+container. A Mac without Docker can give a `kernel.c` built elsewhere, on an arm64 Linux
+machine with `LIBKRUNFW_TARGET=macos`, as `LIBKRUNFW_KERNEL_C=<path>`.
 
 Windows has a second reason to build rather than install, which is that there is nothing
 to install: libkrunfw gained a Windows target in

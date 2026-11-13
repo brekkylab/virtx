@@ -264,7 +264,7 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
     if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE) {
         return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
     }
-    if takes_root(&prefix, request) {
+    if takes_root(&prefix, request)? {
         return Err(refused(
             StatusCode::FORBIDDEN,
             "the root is removed through its resource",
@@ -279,15 +279,89 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
 /// Whether `request` would take the root at `prefix` away or write over it: a `DELETE` or `MOVE`
 /// of it, or a `MOVE` or `COPY` onto it. `dav-server` does either a member at a time, so a
 /// filesystem refusing the root itself refuses it only once all in it has gone.
-fn takes_root(prefix: &str, request: &Request<Body>) -> bool {
-    let is_root = |path: &str| path.trim_end_matches('/') == prefix;
+///
+/// A path or a `Destination` with a `.` or `..` segment, plain or percent-encoded, is refused
+/// with `400`: a client resolves them before it sends a path, as RFC 3986 has it, and the root
+/// has one spelling. A `\` separates segments here too, as it does in an `http` URL. Past that,
+/// each is read as `dav-server` reads it, and one that is not under `prefix` so read is refused
+/// with `400` too: what a URL drops before it resolves, such as a tab, is caught there.
+fn takes_root(prefix: &str, request: &Request<Body>) -> Result<bool, Refusal> {
     let method = request.method().as_str();
-    let destination = request
-        .headers()
-        .get("Destination")
-        .and_then(|to| to.to_str().ok()?.parse::<http::Uri>().ok());
-    (matches!(method, "DELETE" | "MOVE") && is_root(request.uri().path()))
-        || (matches!(method, "MOVE" | "COPY") && destination.is_some_and(|to| is_root(to.path())))
+    // A `Destination` up to its query or fragment, which `dav-server` drops.
+    let to = match matches!(method, "MOVE" | "COPY") {
+        true => request
+            .headers()
+            .get("Destination")
+            .and_then(|to| to.to_str().ok()?.split(['?', '#']).next()),
+        false => None,
+    };
+    if let Some(dotted) = [Some(request.uri().path()), to]
+        .into_iter()
+        .flatten()
+        .find(|path| path.split(['/', '\\']).any(is_dot))
+    {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!("{dotted:?} has a \".\" or \"..\" segment, which a client resolves"),
+        ));
+    }
+    let at = place(prefix, request.uri().path())
+        .ok_or_else(|| refused(StatusCode::BAD_REQUEST, format!("not a path in {prefix}")))?;
+    let onto = match matches!(method, "MOVE" | "COPY") {
+        true => match destination(request) {
+            Some(to) => Some(place(prefix, &to).ok_or_else(|| {
+                refused(
+                    StatusCode::BAD_REQUEST,
+                    format!("the destination is not a path in {prefix}"),
+                )
+            })?),
+            None => None,
+        },
+        false => None,
+    };
+    Ok((matches!(method, "DELETE" | "MOVE") && at == Place::Root) || onto == Some(Place::Root))
+}
+
+/// Whether `segment`, percent-encoded, is `.` or `..`.
+fn is_dot(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().replace("%2e", ".").as_str(),
+        "." | ".."
+    )
+}
+
+/// Where a path is in the root at `prefix`.
+#[derive(Debug, PartialEq, Eq)]
+enum Place {
+    Root,
+    Under,
+}
+
+/// Where `path`, percent-encoded, is in the root at `prefix` once `dav-server` has decoded it and
+/// resolved its `.` and `..`; `None` for one it cannot read, or one not in the root. A path the
+/// prefix only begins, such as `{prefix}x`, is not in it, though `dav-server` takes it as one.
+fn place(prefix: &str, path: &str) -> Option<Place> {
+    let path = DavPath::new(path).ok()?;
+    match path
+        .with_prefix()
+        .as_bytes()
+        .strip_prefix(prefix.as_bytes())?
+    {
+        b"" | b"/" => Some(Place::Root),
+        rest if rest.starts_with(b"/") => Some(Place::Under),
+        _ => None,
+    }
+}
+
+/// The path of `request`'s `Destination`, as `dav-server` takes it: the header as it is when it
+/// is a path, or the path of the URL it is. `None` for none, or one `dav-server` cannot read,
+/// which it refuses itself.
+fn destination(request: &Request<Body>) -> Option<String> {
+    let to = request.headers().get("Destination")?.to_str().ok()?;
+    match to.starts_with('/') {
+        true => Some(to.to_owned()),
+        false => Some(to.parse::<url::Url>().ok()?.path().to_owned()),
+    }
 }
 
 /// Whether `request` is a conditional write: one that may change what is at its path, with
@@ -327,9 +401,6 @@ where
         Ok(path)
     }) {
         Ok(path) => path,
-        Err(e @ dav_server::davpath::ParseError::ForbiddenPath) => {
-            return refused(StatusCode::FORBIDDEN, format!("{e:?}")).into_response();
-        }
         Err(e) => return refused(StatusCode::BAD_REQUEST, format!("{e:?}")).into_response(),
     };
     let condition = Condition::of(&parts.headers);
@@ -590,6 +661,170 @@ fn snapshot_status(e: &SnapshotError) -> StatusCode {
         SnapshotError::InUse(_) => StatusCode::LOCKED,
         SnapshotError::AlreadyExists(_) | SnapshotError::Fstree(_) | SnapshotError::Io { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PREFIX: &str = "/volumes/v/files";
+
+    /// `takes_root` of a `method` request to `path`, with `destination` if given: whether it
+    /// does, or the status it is refused with.
+    fn takes(method: &str, path: &str, destination: Option<&str>) -> Result<bool, StatusCode> {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(to) = destination {
+            request = request.header("Destination", to);
+        }
+        takes_root(PREFIX, &request.body(Body::empty()).unwrap()).map_err(|refusal| refusal.0)
+    }
+
+    #[test]
+    fn the_root_is_taken_by_a_delete_or_move_of_it_or_onto_it() {
+        for root in [
+            "/volumes/v/files",
+            "/volumes/v/files/",
+            "/volumes/v/files//",
+        ] {
+            assert_eq!(takes("DELETE", root, None), Ok(true), "DELETE {root}");
+            assert_eq!(
+                takes("MOVE", root, Some("/volumes/v/files/b")),
+                Ok(true),
+                "MOVE {root}"
+            );
+            assert_eq!(takes("GET", root, None), Ok(false), "GET {root}");
+            assert_eq!(
+                takes("COPY", root, Some("/volumes/v/files/b")),
+                Ok(false),
+                "COPY {root}"
+            );
+            assert_eq!(
+                takes("COPY", "/volumes/v/files/a", Some(root)),
+                Ok(true),
+                "COPY onto {root}"
+            );
+            let url = format!("http://virtx{root}");
+            assert_eq!(
+                takes("MOVE", "/volumes/v/files/a", Some(&url)),
+                Ok(true),
+                "MOVE onto {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_in_the_root_is_not_the_root() {
+        for path in [
+            "/volumes/v/files/a",
+            "/volumes/v/files/a/b/",
+            "/volumes/v/files/a.b/..c/.d",
+        ] {
+            assert_eq!(takes("DELETE", path, None), Ok(false), "DELETE {path}");
+            assert_eq!(
+                takes("MOVE", "/volumes/v/files/c", Some(path)),
+                Ok(false),
+                "MOVE onto {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dot_segment_is_a_bad_request() {
+        for dotted in [
+            "/volumes/v/files/.",
+            "/volumes/v/files/./",
+            "/volumes/v/files/%2e",
+            "/volumes/v/files/%2E/",
+            "/volumes/v/files/a/..",
+            "/volumes/v/files/a/%2e%2E/",
+            "/volumes/v/files/..",
+            "/volumes/v/files/../../w/files/a",
+        ] {
+            for method in ["GET", "DELETE", "MOVE", "COPY"] {
+                assert_eq!(
+                    takes(method, dotted, Some("/volumes/v/files/b")),
+                    Err(StatusCode::BAD_REQUEST),
+                    "{method} {dotted}"
+                );
+            }
+            let url = format!("http://virtx{dotted}");
+            for to in [dotted, url.as_str()] {
+                assert_eq!(
+                    takes("MOVE", "/volumes/v/files/a", Some(to)),
+                    Err(StatusCode::BAD_REQUEST),
+                    "MOVE onto {to}"
+                );
+            }
+        }
+        // A `Destination` is read up to its query, as `dav-server` reads it.
+        assert_eq!(
+            takes(
+                "MOVE",
+                "/volumes/v/files/c",
+                Some("/volumes/v/files/a/b/..?")
+            ),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            takes(
+                "MOVE",
+                "/volumes/v/files/c",
+                Some("/volumes/v/files/a?q=/..")
+            ),
+            Ok(false)
+        );
+        // Only a `MOVE` or a `COPY` reads its `Destination`.
+        assert_eq!(
+            takes("DELETE", "/volumes/v/files/a", Some("/volumes/v/files/.")),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn what_a_url_reads_as_a_dot_segment_is_refused_before_anything_goes() {
+        let from = "/volumes/v/files/a";
+        // An `http` URL takes `\` for `/`: a dot segment like any other.
+        for to in [
+            "http://virtx/volumes/v/files/a\\..",
+            "http://virtx/volumes/v/files\\.",
+        ] {
+            assert_eq!(
+                takes("MOVE", from, Some(to)),
+                Err(StatusCode::BAD_REQUEST),
+                "MOVE onto {to:?}"
+            );
+        }
+        // It drops a tab before it resolves: what that leaves is read as `dav-server` reads it.
+        assert_eq!(
+            takes("MOVE", from, Some("http://virtx/volumes/v/files/.\t.")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            takes("MOVE", from, Some("http://virtx/volumes/v/files/a/.\t.")),
+            Ok(true)
+        );
+        // What only looks like a dot is a name: encoded twice, or a full-width one.
+        for name in ["%252e", "%252e%252e", "%EF%BC%8E", "%EF%BC%8E%EF%BC%8E"] {
+            let path = format!("/volumes/v/files/{name}");
+            assert_eq!(takes("DELETE", &path, None), Ok(false), "DELETE {path}");
+        }
+    }
+
+    #[test]
+    fn a_path_out_of_the_root_is_a_bad_request() {
+        for out in ["/volumes/v/filesx", "/volumes/w/files/a", "/volumes/v"] {
+            assert_eq!(
+                takes("GET", out, None),
+                Err(StatusCode::BAD_REQUEST),
+                "GET {out}"
+            );
+            assert_eq!(
+                takes("MOVE", "/volumes/v/files/a", Some(out)),
+                Err(StatusCode::BAD_REQUEST),
+                "MOVE onto {out}"
+            );
         }
     }
 }

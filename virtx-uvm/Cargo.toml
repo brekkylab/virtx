@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [features]
 # Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus support --
-# `cargo xtask build host` builds it first.
+# `cargo xtask build server-stdio` or `server-tcp` builds it first.
 gpu = ["krun/gpu", "dep:krun_display"]
 
 [dependencies]
@@ -40,6 +40,8 @@ form_urlencoded = "1"
 # server mounts them.
 axum = { version = "0.8", default-features = false }
 dav-server = { version = "0.11", default-features = false }
+# A `Destination` that is a URL, read as `dav-server` reads it.
+url = "2"
 # Notion's page ids.
 uuid = { version = "1", features = ["v4", "serde"] }
 # A volume's files, resolved under its root however a guest rearranges the tree under them.

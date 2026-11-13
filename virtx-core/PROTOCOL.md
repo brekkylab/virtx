@@ -257,7 +257,7 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 - `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
-- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path that is not absolute, `/`, and two at one path are refused.
+- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
@@ -366,6 +366,8 @@ A request that fails is answered with the specification's error codes, in its `{
 
 The files in a volume are reached at `/volumes/{name}/files/`, those in a snapshot at `/snapshots/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
 The path after the root is the file's path in the volume, snapshot or sandbox, each segment percent-encoded.
+A client resolves a path's `.` and `..` segments before it sends it, as a file's path is read: empty segments are dropped, and each `..` takes the segment before it, so `a/../b` and `a//../b` are both sent as `b`; a path that goes above the root is not sent.
+The server refuses with `400 Bad Request` a path, or the `Destination` of a `MOVE` or `COPY` up to its `?` or `#`, with a `.` or `..` segment, plain or percent-encoded, `/` and `\` both separating segments; and one that is not in the root (of a URL, its path alone, with consecutive slashes taken as one). It does so before anything in the volume, snapshot or sandbox is touched.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -384,8 +386,8 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read. One with `If-None-Match: *` is refused with `412` when anything is at the path: how a client creates a file only if no other did.
 - A `PUT` with `If-Match` or `If-None-Match` to a volume or a sandbox is checked once all of its body has arrived, against the file as it is then, and lands in the same step, so no other write with a condition lands between the two: none from another client of the server, and, to a volume, none from another server over one home. Of two sent at once to one file, one lands, and the other is checked against what it wrote and refused `412` if its condition no longer holds: read the file again, and retry. On one server, the one whose body has all arrived first is checked first. One whose condition does not hold when it comes is refused only once its body has arrived. A `DELETE`, `MOVE` or `COPY` with either condition is held the same way while it is answered, but one of a directory that fails on a member, answered `207`, may go on with the rest after. A snapshot's requests go one at a time. A sandbox's processes write its files without asking, and a write without a condition is not held, so either may land between the check and the write.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume, snapshot or sandbox is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `502 Bad Gateway`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume, snapshot or sandbox is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `400 Bad Request`.
 - A request naming a volume, snapshot or sandbox that does not exist is answered `404 Not Found`.
 
 ### A sandbox's files

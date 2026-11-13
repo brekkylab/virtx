@@ -8,6 +8,7 @@
 #   suites (linux-x86_64)             guest-parts      the crates' and packages' suites, on KVM
 #   suites (windows-x86_64)           guest-parts      the machine-booting suites, on WHP
 #   native (macOS, Windows)           guest-parts      server, library, packages, smoke: one job
+#                                                      (a pull request's Windows on our own runner)
 #   linux (x86_64, aarch64)           guest-parts      server and library, in manylinux_2_28
 #   linux-packages                    linux            packages and smoke, on ubuntu-22.04
 #
@@ -26,7 +27,8 @@
 # | server         | client          | built on                            | tried on         |
 # |----------------|-----------------|-------------------------------------|------------------|
 # | macos-aarch64  | darwin-arm64    | macos-15                            | the same job     |
-# | windows-x86_64 | win32-x64-msvc  | windows-2025                        | the same job     |
+# | windows-x86_64 | win32-x64-msvc  | virtx-windows-ci; windows-2025 for  | the same job     |
+# |                |                 | a release                           |                  |
 # | linux-x86_64   | linux-x64-gnu   | ubuntu-24.04, in manylinux_2_28     | ubuntu-22.04     |
 # | linux-aarch64  | linux-arm64-gnu | ubuntu-24.04-arm, in manylinux_2_28 | ubuntu-22.04-arm |
 #
@@ -42,7 +44,8 @@
 # # The Windows runner
 #
 # No GitHub runner has a hypervisor on Windows, so `suites-windows` runs on `virtx-windows-ci`,
-# an EC2 instance of our own with nested virtualization, registered to this repository:
+# an EC2 instance of our own with nested virtualization, registered to this repository; a pull
+# request's Windows build does too, for what its disk keeps from one build to the next.
 # `windows-runner` starts it, and it stops itself once no job has run on it for 20 minutes. A
 # fork's pull request has no AWS role to start it with, and does not ask; that a fork's
 # workflow cannot reach the runner while it is up is the repository's fork approval setting's
@@ -350,9 +353,21 @@ jobs:
 
   # macOS and Windows: `virtx-stdio`, archived with the kernel and abin; `libvirtx_core`; and
   # the platform's packages packed from them and tried, all on one runner.
+  #
+  # Windows builds a pull request's (and `main`'s) on `virtx-windows-ci`, over what the runner's
+  # own disk kept from the last build: its target directory (one of its own, apart from
+  # `suites-windows`', which builds without `gpu`) and the checkout's `build/`, virglrenderer's,
+  # which the checkout is told not to clean. A release is built on a hosted runner, a VM no
+  # earlier run has touched: a pull request runs its code on the self-hosted one, and what it
+  # leaves there -- in the toolchain, the crates' sources, the runner -- is no place to build
+  # what is published from. A fork's pull request, or a run whose runner did not start, gets
+  # the hosted one too.
   native:
     name: ${{ matrix.release }} (${{ matrix.platform }})
-    needs: [resolve, guest-parts]
+    needs: [resolve, guest-parts, windows-runner]
+    # `windows-runner` is skipped for a fork's pull request; that only sends Windows to a
+    # hosted runner, and stops nothing.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.guest-parts.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -360,20 +375,24 @@ jobs:
           - release: macos-aarch64
             platform: darwin-arm64
             runner: macos-15
+            runner_kind: hosted
             arch: aarch64
             target: aarch64-apple-darwin
             file: libvirtx_core.dylib
           - release: windows-x86_64
             platform: win32-x64-msvc
             runner: windows-2025
+            runner_kind: ${{ (!inputs.release && needs.windows-runner.result == 'success') && 'self-hosted' || 'hosted' }}
             arch: x86_64
             target: x86_64-pc-windows-msvc
             file: virtx_core.dll
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner_kind == 'self-hosted' && fromJSON('["self-hosted", "virtx-windows-ci"]') || matrix.runner }}
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ matrix.runner_kind == 'self-hosted' && 'C:/virtx-ci/target-build' || format('{0}/target', github.workspace) }}
     steps:
       # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
       # shell scripts written against LF.
@@ -383,6 +402,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+          clean: ${{ matrix.runner_kind != 'self-hosted' }}
+
+      # What the last run on this runner packed, and the guest parts it was handed, are not
+      # this run's.
+      - name: Nothing of the last run's packages
+        if: matrix.runner_kind == 'self-hosted'
+        run: rm -rf dist guest guest-*.tar
 
       - id: toolchain
         run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
@@ -393,7 +419,9 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      # The self-hosted runner's disk is its cache.
+      - if: matrix.runner_kind != 'self-hosted'
+        uses: Swatinem/rust-cache@v2
         with:
           key: native-${{ matrix.release }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -403,11 +431,11 @@ jobs:
         run: brew install lld llvm meson ninja
 
       # pkg-config.exe for build-deps.ps1, which PowerShell runs (Git Bash's is not an .exe),
-      # and libclang for bindgen.
+      # and libclang for bindgen. The self-hosted runner's image has pkg-config already.
       - name: Toolchain (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
           where.exe pkg-config.exe
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
@@ -430,13 +458,14 @@ jobs:
       - name: Put the kernel and abin in place
         run: |
           tar -xf guest-${{ matrix.arch }}.tar
-          mkdir -p build/krunfw target/release
+          mkdir -p build/krunfw "$CARGO_TARGET_DIR/release"
           case "${{ matrix.release }}" in
             macos-*)   LIBKRUNFW_KERNEL_C="$PWD/guest/kernel/kernel.c" cargo xtask build kernel ;;
             windows-*) cp -v guest/kernel/libkrunfw.dll build/krunfw/ ;;
           esac
-          cp -R guest/abin target/release/
-          ls -la build/krunfw target/release/abin
+          rm -rf "$CARGO_TARGET_DIR/release/abin"
+          cp -R guest/abin "$CARGO_TARGET_DIR/release/"
+          ls -la build/krunfw "$CARGO_TARGET_DIR/release/abin"
 
       - name: Server
         run: cargo xtask build server-stdio --locked
@@ -456,7 +485,7 @@ jobs:
       - name: Server's DLL imports (Windows)
         if: runner.os == 'Windows'
         run: |
-          f=target/release/virtx-stdio.exe
+          f="$CARGO_TARGET_DIR/release/virtx-stdio.exe"
           "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
             | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
             | sort -u | tee "$RUNNER_TEMP/imports.txt"
@@ -468,7 +497,7 @@ jobs:
         run: |
           cargo xtask archive --with-abin
           mkdir -p dist/release
-          cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz dist/release/
+          cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" dist/release/
 
       - name: libvirtx_core
         env:
@@ -477,7 +506,7 @@ jobs:
         run: |
           cargo xtask build client --locked --target ${{ matrix.target }}
           mkdir -p dist/lib/${{ matrix.platform }}
-          cp target/${{ matrix.target }}/release/${{ matrix.file }} dist/lib/${{ matrix.platform }}/
+          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/${{ matrix.file }}" dist/lib/${{ matrix.platform }}/
           ls -la dist/lib/${{ matrix.platform }}
 
       # No DLL Windows does not ship: the C runtime is linked in (`.cargo/config.toml`).

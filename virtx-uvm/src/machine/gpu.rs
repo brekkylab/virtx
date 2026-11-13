@@ -86,6 +86,8 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
     // SAFETY: nothing else runs yet -- libkrun starts its threads, and virglrenderer its
     // render server, only once the machine is built from this device.
     unsafe { std::env::set_var("VKR_HEAP_SIZE_MAX", window.to_string()) };
+    #[cfg(windows)]
+    crt_setenv("VKR_HEAP_SIZE_MAX", &window.to_string());
 
     let vtable = <Headless as IntoDisplayBackend<()>>::into_display_backend(None);
 
@@ -111,6 +113,31 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
     let flags = flags | VirglRendererFlags::RENDER_SERVER;
 
     Ok(GpuDevice::new(flags, backend).shm_size(window as usize))
+}
+
+/// `name=value` in the C runtime's own environment, which is where virglrenderer's `getenv`
+/// reads.
+///
+/// On Windows that is not the process's. `std::env::set_var` sets the Win32 environment
+/// block (`SetEnvironmentVariableW`), and the UCRT keeps a copy of its own, taken when it
+/// started and changed only by its own `_putenv`; its `getenv` reads the copy. So the window
+/// went to libkrun and never reached venus, and the guest's device reported the host's whole
+/// heap -- 32 GiB on a 5090, for a 2 GiB window -- until a mapping past the window failed.
+/// virglrenderer's DLL and this binary share the one UCRT (`/MD`, and Rust's msvc default),
+/// so setting it here is setting it there.
+#[cfg(windows)]
+fn crt_setenv(name: &str, value: &str) {
+    use std::ffi::{CString, c_char, c_int};
+    unsafe extern "C" {
+        fn _putenv_s(name: *const c_char, value: *const c_char) -> c_int;
+    }
+    let (name, value) = (CString::new(name).unwrap(), CString::new(value).unwrap());
+    // SAFETY: both are NUL-terminated and live through the call, which copies them; nothing
+    // else runs yet, as for `set_var` above.
+    let failed = unsafe { _putenv_s(name.as_ptr(), value.as_ptr()) };
+    if failed != 0 {
+        log::warn!("the C runtime refused {name:?}: errno {failed}");
+    }
 }
 
 /// A display backend that exists so the device can come up, and does nothing else. See

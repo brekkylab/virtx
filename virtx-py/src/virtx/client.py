@@ -8,7 +8,7 @@ import ctypes
 import json
 import os
 import weakref
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -265,7 +265,7 @@ class Client:
         handle = start(held) if args is None else start(held, args, len(args))
         return await self._lib.answer(handle, raw)
 
-    def _items(self, name: str, args: bytes) -> AsyncIterator[Any]:
+    def _items(self, name: str, args: bytes) -> AsyncGenerator[Any, None]:
         handle = getattr(self._lib, name)(self._held(), args, len(args))
         return self._lib.items(handle)
 

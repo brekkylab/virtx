@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -170,10 +171,11 @@ class ImageJob:
     async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[ImageJobEntry]]:
         """Its log, from its start or after its ``after``th entry, until its ``ImageJobEnd``.
         Closing it leaves the job as it is."""
-        async for item in self.client._items(
-            "virtx_client_image_job_log", args(id=self.id, after=after)
-        ):
-            yield image_job_entry(item)
+        async with contextlib.aclosing(
+            self.client._items("virtx_client_image_job_log", args(id=self.id, after=after))
+        ) as items:
+            async for item in items:
+                yield image_job_entry(item)
 
     async def remove(self) -> None:
         """Cancel it if it runs, and forget it."""

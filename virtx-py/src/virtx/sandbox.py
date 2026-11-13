@@ -3,6 +3,7 @@ and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -181,10 +182,11 @@ class SandboxJob:
     async def log(self, after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]:
         """Its log, its process's output, from its start or after its ``after``th entry, until
         its ``SandboxJobEnd``. Closing it leaves the job as it is."""
-        async for item in self.client._items(
-            "virtx_client_sandbox_job_log", self._args(after=after)
-        ):
-            yield sandbox_job_entry(item)
+        async with contextlib.aclosing(
+            self.client._items("virtx_client_sandbox_job_log", self._args(after=after))
+        ) as items:
+            async for item in items:
+                yield sandbox_job_entry(item)
 
     async def remove(self) -> None:
         """Cancel it if it runs, killing its process, and forget it."""

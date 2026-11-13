@@ -484,6 +484,23 @@ mod tests {
         let nobody = FileRoot::Volume("nobody".into());
         assert_eq!(status(client.stat_file(&nobody, "").await), 404);
 
+        // `mkdir -p` of a path with a dot segment creates the parents of the path it resolves
+        // to, and no others.
+        client
+            .create_dir_all(&volume, "discard/../parent/child")
+            .await
+            .unwrap();
+        assert!(
+            client
+                .stat_file(&volume, "parent/child")
+                .await
+                .unwrap()
+                .is_dir
+        );
+        let mut top = names(client.read_dir(&volume, "").await.unwrap());
+        top.sort();
+        assert_eq!(top, ["b.txt", "c.txt", "copied", "parent"]);
+
         // The root is removed through its resource, and a request that would take it, or what is in
         // it, is refused before anything goes.
         client

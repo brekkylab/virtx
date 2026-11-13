@@ -915,7 +915,10 @@ impl Sandbox {
     /// to its files: it is in use until it drops.
     pub fn activity(self: &Arc<Self>) -> Activity {
         self.active.fetch_add(1, Ordering::Relaxed);
-        Activity(Arc::clone(self))
+        Activity {
+            sandbox: Arc::clone(self),
+            used: true,
+        }
     }
 
     /// Whether it is in use now: an [`Activity`] under way, or a job running that is not on a
@@ -1267,19 +1270,31 @@ pub(super) fn label_fits(label: Option<&str>) -> bool {
 }
 
 /// Something done with a sandbox from outside, counted until it drops: a sandbox with one is
-/// in use, whatever its jobs do.
-pub struct Activity(Arc<Sandbox>);
+/// in use, whatever its jobs do -- and, as it drops, used then, unless it came to nothing
+/// ([`Activity::unused`]).
+pub struct Activity {
+    sandbox: Arc<Sandbox>,
+    used: bool,
+}
 
 impl Activity {
     pub fn sandbox(&self) -> &Arc<Sandbox> {
-        &self.0
+        &self.sandbox
+    }
+
+    /// Ended as nothing done: refused, the sandbox stopped. It is not used by it, so a request
+    /// it refused keeps a stopped sandbox no longer from its deletion.
+    pub fn unused(mut self) {
+        self.used = false;
     }
 }
 
 impl Drop for Activity {
     fn drop(&mut self) {
-        self.0.used();
-        self.0.active.fetch_sub(1, Ordering::Relaxed);
+        if self.used {
+            self.sandbox.used();
+        }
+        self.sandbox.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

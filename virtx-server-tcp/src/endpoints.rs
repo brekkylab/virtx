@@ -827,6 +827,14 @@ impl Tunnel {
     pub async fn connect(&self) -> io::Result<TcpStream> {
         self.activity.sandbox().connect(self.port).await
     }
+
+    /// Ended as nothing done, where its sandbox is stopped: not a use of it
+    /// ([`Activity::unused`]).
+    pub fn refused(self) {
+        if !self.activity.sandbox().is_running() {
+            self.activity.unused();
+        }
+    }
 }
 
 /// What a home plugs into its sandboxes: their disks and volumes kept past this server by its
@@ -1612,9 +1620,16 @@ async fn sandbox_files(
 ) -> Answer {
     let id = &segments["id"];
     let sandbox = home.sandbox(id)?;
-    // In use from here until the answer has been sent.
+    // In use from here until the answer has been sent -- taken first, so that it is not stopped
+    // unused in between. Refused, it is not used: a stopped sandbox is not kept longer for it.
     let activity = sandbox.activity();
-    let machine = sandbox.running_machine()?;
+    let machine = match sandbox.running_machine() {
+        Ok(machine) => machine,
+        Err(e) => {
+            activity.unused();
+            return Err(e.into());
+        }
+    };
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 

@@ -276,7 +276,7 @@ So the server keeps that image while the sandbox exists, as [Images](#images) sa
 #### Use
 
 A sandbox is used while a [job](#sandbox-jobs) runs in it, a connection through one of its [ports](#ports) is open, or a request to its [files](#a-sandboxs-files) is answered, and when a job is started in it.
-`used_at` is the last of these; a `GET` and a listing do not use it.
+`used_at` is the last of these; a `GET`, a listing, and a request it refuses because it is stopped do not use it.
 
 #### Stopping
 

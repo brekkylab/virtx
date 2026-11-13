@@ -132,10 +132,15 @@ impl Hooks for Loopback {
                     };
                     let activity = sandbox.activity();
                     tokio::spawn(async move {
-                        // Closed at once when no machine runs, as a port nothing listens on is.
-                        if let Ok(mut reached) = activity.sandbox().connect(port).await {
-                            let _ =
-                                tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
+                        // Closed at once when no machine runs, as a port nothing listens on is --
+                        // and then not a use of it.
+                        match activity.sandbox().connect(port).await {
+                            Ok(mut reached) => {
+                                let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached)
+                                    .await;
+                            }
+                            Err(_) if !activity.sandbox().is_running() => activity.unused(),
+                            Err(_) => {}
                         }
                     });
                 }

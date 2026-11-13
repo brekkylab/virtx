@@ -1,0 +1,648 @@
+# Everything a ref is built into, and tested, platform by platform; `ci` and `release` call it.
+#
+# Each job waits for what it uses and nothing else, so a platform's tests answer as soon as
+# that platform is built, whatever another platform's runner is still queued behind:
+#
+#   resolve, check                    nothing
+#   guest-parts (x86_64, aarch64)     nothing          the guest kernel and abin
+#   suites (linux-x86_64)             guest-parts      the crates' and packages' suites, on KVM
+#   suites (windows-x86_64)           guest-parts      the machine-booting suites, on WHP
+#   native (macOS, Windows)           guest-parts      server, library, packages, smoke: one job
+#   linux (x86_64, aarch64)           guest-parts      server and library, in manylinux_2_28
+#   linux-packages                    linux            packages and smoke, on ubuntu-22.04
+#
+# What a job builds it tests in the same job where it can. Two things cross between jobs, as
+# artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
+# Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
+# containers, can run, and abin's C is cross-compiled by a shell script), and a Linux
+# platform's build, which is made in a container and tried on the runner below its glibc. A
+# cache only ever saves time here: a miss builds the thing again.
+#
+# For a release (`release: true`) each platform's job also hands on what it packed and tried
+# -- its server archive, its npm package and its wheel -- for `release` to attach.
+#
+# # Platforms
+#
+# | server         | client          | built on                            | tried on         |
+# |----------------|-----------------|-------------------------------------|------------------|
+# | macos-aarch64  | darwin-arm64    | macos-15                            | the same job     |
+# | windows-x86_64 | win32-x64-msvc  | windows-2025                        | the same job     |
+# | linux-x86_64   | linux-x64-gnu   | ubuntu-24.04, in manylinux_2_28     | ubuntu-22.04     |
+# | linux-aarch64  | linux-arm64-gnu | ubuntu-24.04-arm, in manylinux_2_28 | ubuntu-22.04-arm |
+#
+# # The glibc floor
+#
+# What is built for Linux runs on glibc 2.28 and later (RHEL 8, Debian 10, Ubuntu 20.04): it is
+# built in a manylinux_2_28 container, because a binary needs the glibc of the headers it was
+# compiled against. It links that glibc and nothing else a distribution ships at its own
+# version: no OpenSSL (rustls on Linux), no libdrm, and Vulkan only opened at run time. Each
+# Linux build checks it, and its packages are tried on ubuntu-22.04, below the build runners'
+# glibc, so a build that needs more than its floor fails to open there.
+#
+# # The Windows runner
+#
+# No GitHub runner has a hypervisor on Windows, so `suites-windows` runs on `virtx-windows-ci`,
+# an EC2 instance of our own with nested virtualization, registered to this repository:
+# `windows-runner` starts it, and it stops itself once no job has run on it for 20 minutes. A
+# fork's pull request has no AWS role to start it with, and does not ask; that a fork's
+# workflow cannot reach the runner while it is up is the repository's fork approval setting's
+# to say, not this file's. What the runner has to have, for whoever builds it again (from the
+# `virtx-windows-ci-*` AMI, which has all of it): WHP on (`HypervisorPlatform`, and nested
+# virtualization on the instance); the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git
+# with its `bin` on PATH (`shell: bash`, and actions written as bash), rustup and pkg-config.
+#
+# # Rust's caches
+#
+# Saved from `main` alone, and read by every other ref: a pull request's caches are its own and
+# no other's, so saving them only crowded `main`'s out of the repository's 10 GB.
+name: pipeline
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Hand on what each platform packed, for a release to attach
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: The version every manifest says
+        value: ${{ jobs.resolve.outputs.version }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The version the manifests say, which all of them say alike, and which a tag names.
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: resolve
+        name: Every manifest is one version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          toml() { sed -n 's/^version = "\(.*\)"$/\1/p' "$1" | head -1; }
+          version=$(jq -r .version virtx-node/package.json)
+          wrong=""
+          for f in virtx-core/Cargo.toml virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
+            [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
+          done
+          [ -z "$wrong" ] || { echo "::error::virtx-node/package.json says $version, but:$wrong"; exit 1; }
+          if [ "$REF_TYPE" = tag ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG, but the manifests say $version"; exit 1
+          fi
+          echo "virtx $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # `cargo xtask check`: the format, clippy of the client and the servers, and the tests that
+  # boot nothing. It compiles the servers but runs none, so it answers first.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The guest init's cross-linker: clippy of the servers builds `virtx-uvm`, whose build
+      # script builds the guest agent for musl.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask check
+
+  # The guest kernel for every platform of the architecture, and abin. Tarred before it is
+  # handed on: an artifact keeps no file modes, and abin's programs have to stay executable.
+  guest-parts:
+    name: guest parts (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            targets: linux windows
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            targets: linux macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      # A kernel is only its tag, its config and this script, which pins both.
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: build/krunfw
+          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
+
+      - name: Kernel
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          for target in ${{ matrix.targets }}; do
+            echo "::group::libkrunfw for $target"
+            LIBKRUNFW_TARGET=$target sh xtask/scripts/build-libkrunfw.sh
+            echo "::endgroup::"
+          done
+
+      - run: ls -la build/krunfw
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: abin-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: abin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm
+          cargo xtask build abin
+          ls -la target/release/abin
+
+      - name: Hand the kernel and abin on
+        run: |
+          mkdir -p guest/kernel
+          cp -v build/krunfw/* guest/kernel/
+          cp -R target/release/abin guest/abin
+          tar -cf guest-${{ matrix.arch }}.tar guest
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: guest-${{ matrix.arch }}
+          path: guest-${{ matrix.arch }}.tar
+          retention-days: 1
+
+  # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
+  # against the fixture, each booting machines. Linux x86_64, the one runner GitHub gives a
+  # hypervisor on.
+  suites:
+    name: suites (linux-x86_64)
+    needs: guest-parts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: suites
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # What building the servers takes on this host: the guest init's cross-linker, bindgen's
+      # libclang, and meson with Vulkan's headers for virglrenderer.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      # The runner has KVM, but /dev/kvm is root's until a rule says otherwise.
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: guest-x86_64
+
+      - name: Put the kernel in place
+        run: |
+          tar -xf guest-x86_64.tar
+          mkdir -p build/krunfw
+          cp -v guest/kernel/libkrunfw.so.* build/krunfw/
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - run: cargo xtask test
+
+  # Starts `virtx-windows-ci`, whose runner then takes `suites-windows`. Starting a running
+  # instance does nothing, so runs that overlap share it; one that finds it stopping waits for
+  # it to stop first, which is the only state it cannot be started from.
+  windows-runner:
+    name: start the Windows runner
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.WINDOWS_CI_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Start it
+        run: |
+          read -r id state < <(aws ec2 describe-instances \
+            --filters Name=tag:Name,Values=virtx-windows-ci \
+                      Name=instance-state-name,Values=pending,running,stopping,stopped \
+            --query 'Reservations[0].Instances[0].[InstanceId,State.Name]' --output text)
+          echo "virtx-windows-ci: $id, $state"
+          if [ "$state" = stopping ]; then aws ec2 wait instance-stopped --instance-ids "$id"; fi
+          aws ec2 start-instances --instance-ids "$id" --output text
+          aws ec2 wait instance-running --instance-ids "$id"
+
+  # The machine-booting crates' tests on Windows, over WHP. The target directory is outside
+  # the checkout, so it outlives the run on the instance's own disk: the next run builds what
+  # changed and not the world. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`):
+  # nested, the faults a guest takes as it first touches its memory are most of a boot.
+  suites-windows:
+    name: suites (windows-x86_64)
+    needs: [windows-runner, guest-parts]
+    runs-on: [self-hosted, virtx-windows-ci]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: C:\virtx-ci\target
+      VIRTX_PREFAULT_MEMORY: "1"
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: guest-x86_64
+
+      - name: Put the kernel in place
+        run: |
+          tar -xf guest-x86_64.tar
+          mkdir -p build/krunfw
+          cp -v guest/kernel/libkrunfw.dll build/krunfw/
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored --test-threads 1
+
+  # macOS and Windows: `virtx-stdio`, archived with the kernel and abin; `libvirtx_core`; and
+  # the platform's packages packed from them and tried, all on one runner.
+  native:
+    name: ${{ matrix.release }} (${{ matrix.platform }})
+    needs: [resolve, guest-parts]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: macos-aarch64
+            platform: darwin-arm64
+            runner: macos-15
+            arch: aarch64
+            target: aarch64-apple-darwin
+            file: libvirtx_core.dylib
+          - release: windows-x86_64
+            platform: win32-x64-msvc
+            runner: windows-2025
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            file: virtx_core.dll
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
+      # shell scripts written against LF.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.release }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install lld llvm meson ninja
+
+      # pkg-config.exe for build-deps.ps1, which PowerShell runs (Git Bash's is not an .exe),
+      # and libclang for bindgen.
+      - name: Toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      # MoltenVK takes most of a macOS build, and changes only with its submodule.
+      - name: MoltenVK cache
+        if: runner.os == 'macOS'
+        uses: actions/cache@v6
+        with:
+          path: 3rdparty/MoltenVK/Package
+          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', 'xtask/scripts/build-deps.sh') }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: guest-${{ matrix.arch }}
+
+      # macOS links the kernel.c the Linux job built; Windows takes the library as it is.
+      - name: Put the kernel and abin in place
+        run: |
+          tar -xf guest-${{ matrix.arch }}.tar
+          mkdir -p build/krunfw target/release
+          case "${{ matrix.release }}" in
+            macos-*)   LIBKRUNFW_KERNEL_C="$PWD/guest/kernel/kernel.c" cargo xtask build kernel ;;
+            windows-*) cp -v guest/kernel/libkrunfw.dll build/krunfw/ ;;
+          esac
+          cp -R guest/abin target/release/
+          ls -la build/krunfw target/release/abin
+
+      - name: Server
+        run: cargo xtask build server-stdio --locked
+
+      - name: virglrenderer's log (Windows, on failure)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          log=build/virglrenderer-build.log
+          [ -f "$log" ] || { echo "no $log"; exit 0; }
+          # Windows PowerShell writes a redirect as UTF-16.
+          iconv -f UTF-16 -t UTF-8 "$log" > "$log.txt" 2>/dev/null || tr -d '\000' < "$log" > "$log.txt"
+          grep -nE -B3 -A6 "^FAILED|error( [A-Z]+[0-9]+)?:" "$log.txt" | head -100
+          tail -30 build/virglrenderer-build/meson-logs/meson-log.txt 2>/dev/null || true
+
+      # Nothing Windows may lack is loaded at start-up: the C++ runtime is linked in and the rest
+      # delay-loaded, so a host without them runs virtx-stdio far enough to say what to install.
+      - name: Server's DLL imports (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          f=target/release/virtx-stdio.exe
+          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+            | sort -u | tee "$RUNNER_TEMP/imports.txt"
+          if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
+            echo "::error::$f needs the DLLs above to start"; exit 1
+          fi
+
+      - name: Archive
+        run: |
+          cargo xtask archive --with-abin
+          mkdir -p dist/release
+          cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz dist/release/
+
+      - name: libvirtx_core
+        env:
+          # The oldest macOS the wheel's tag says it runs on.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          cargo xtask build client --locked --target ${{ matrix.target }}
+          mkdir -p dist/lib/${{ matrix.platform }}
+          cp target/${{ matrix.target }}/release/${{ matrix.file }} dist/lib/${{ matrix.platform }}/
+          ls -la dist/lib/${{ matrix.platform }}
+
+      # No DLL Windows does not ship: the C runtime is linked in (`.cargo/config.toml`).
+      - name: Library's DLL imports (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          f=dist/lib/${{ matrix.platform }}/${{ matrix.file }}
+          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+            | sort -u | tee "$RUNNER_TEMP/imports.txt"
+          if grep -iE "load: (vcruntime|msvcp)" "$RUNNER_TEMP/imports.txt"; then
+            echo "::error::$f needs the DLLs above to load"; exit 1
+          fi
+
+      - uses: ./.github/actions/packages
+        with:
+          version: ${{ needs.resolve.outputs.version }}
+          platform: ${{ matrix.platform }}
+
+      - if: inputs.release
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
+            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
+            dist/release/*.whl
+          retention-days: 1
+
+  # Linux: `virtx-stdio` and `libvirtx_core`, built in manylinux_2_28 and handed to
+  # `linux-packages` to be packed and tried below the build runners' glibc.
+  linux:
+    name: ${{ matrix.release }} build
+    needs: guest-parts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: linux-x86_64
+            platform: linux-x64-gnu
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - release: linux-aarch64
+            platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
+
+      # AlmaLinux's packages and the image's own Python, for meson and virglrenderer's
+      # generators. The image sets PKG_CONFIG_PATH, which `.cargo/config.toml`'s [env] does not
+      # override, so virglrenderer's goes in front of it here. zstd: the cache compresses with it.
+      - name: Toolchain
+        run: |
+          dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
+          py=/opt/python/cp312-cp312/bin
+          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako
+          echo "$py" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
+      # Apart from builds on the runner itself, whose newer glibc C would carry into this one.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.release }}-manylinux_2_28
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: guest-${{ matrix.arch }}
+
+      - name: Put the kernel and abin in place
+        run: |
+          tar -xf guest-${{ matrix.arch }}.tar
+          mkdir -p build/krunfw target/release
+          cp -v guest/kernel/libkrunfw.so.* build/krunfw/
+          cp -R guest/abin target/release/
+          ls -la build/krunfw target/release/abin
+
+      - name: Server
+        run: cargo xtask build server-stdio --locked
+
+      - name: libvirtx_core
+        run: cargo xtask build client --locked --target ${{ matrix.target }}
+
+      # `__isoc23_*` is glibc 2.38's and comes in unversioned, so the version alone would not show it.
+      - name: The glibc floor
+        run: |
+          for f in target/release/virtx-stdio target/${{ matrix.target }}/release/libvirtx_core.so; do
+            need=$(objdump -T "$f" | grep -oE 'GLIBC_2\.[0-9]+' | sort -t. -k2 -n -u | tail -1)
+            libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
+            echo "$f needs $need; links $libs"
+            [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
+            if objdump -T "$f" | grep -q __isoc23_; then echo "::error::$f references __isoc23_*"; fail=1; fi
+            if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
+          done
+          exit ${fail:-0}
+
+      - name: Hand the build on
+        run: |
+          cargo xtask archive --with-abin
+          mkdir -p built/dist/release built/dist/lib/${{ matrix.platform }}
+          cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz built/dist/release/
+          cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux-${{ matrix.platform }}
+          path: built/
+          retention-days: 1
+
+  # A Linux platform's packages, packed from what `linux` built and tried on ubuntu-22.04,
+  # below the build runners' glibc.
+  linux-packages:
+    name: ${{ matrix.release }} (${{ matrix.platform }})
+    needs: [resolve, linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: linux-x86_64
+            platform: linux-x64-gnu
+            runner: ubuntu-22.04
+          - release: linux-aarch64
+            platform: linux-arm64-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux-${{ matrix.platform }}
+
+      - uses: ./.github/actions/packages
+        with:
+          version: ${{ needs.resolve.outputs.version }}
+          platform: ${{ matrix.platform }}
+
+      - if: inputs.release
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
+            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
+            dist/release/*.whl
+          retention-days: 1

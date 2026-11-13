@@ -112,15 +112,19 @@ impl Files {
             Err(refusal) => return refusal.into_response(),
         };
         let fs = sandbox::Fs(machine);
-        let _writing = match conditional(&request) {
-            false => None,
+        let (request, _writing) = match conditional(&request) {
+            false => (request, None),
             true => {
                 let serial = self.serial(format!("sandbox:{id}"));
                 if request.method() == Method::PUT {
                     let hold = async move { Ok(serial.lock_owned().await) };
                     return put(&fs, &prefix, request, hold).await;
                 }
-                Some(serial.lock_owned().await)
+                let request = match gathered(request).await {
+                    Ok(request) => request,
+                    Err(refusal) => return refusal.into_response(),
+                };
+                (request, Some(serial.lock_owned().await))
             }
         };
         let handler = handler.filesystem(Box::new(fs)).build_handler();
@@ -142,11 +146,12 @@ impl Files {
     /// process, then its `writing` file, locked, which the system lets go of with a process that
     /// ends. The file is tried, not waited on, so a write waiting holds no thread, and one whose
     /// client is gone stops waiting. A [`put`] holds it only once its body has all been written.
+    /// The file is let go of before this process's hold, so the next here finds it free.
     async fn writing(
         &self,
         name: &str,
         dir: &std::path::Path,
-    ) -> io::Result<(tokio::sync::OwnedMutexGuard<()>, std::fs::File)> {
+    ) -> io::Result<(std::fs::File, tokio::sync::OwnedMutexGuard<()>)> {
         let held = self.serial(format!("volume:{name}")).lock_owned().await;
         let file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -159,7 +164,7 @@ impl Files {
         let mut wait = std::time::Duration::from_millis(2);
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok((held, file)),
+                Ok(()) => return Ok((file, held)),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(std::time::Duration::from_millis(100));
@@ -192,15 +197,21 @@ impl Files {
                         refused(StatusCode::INTERNAL_SERVER_ERROR, why).into_response()
                     })
                 };
-                let _writing = match conditional(&request) {
-                    false => None,
+                let (request, _writing) = match conditional(&request) {
+                    false => (request, None),
                     true if request.method() == Method::PUT => {
                         return put(&fs, &root.to_string(), request, hold).await;
                     }
-                    true => match hold.await {
-                        Ok(held) => Some(held),
-                        Err(refusal) => return refusal,
-                    },
+                    true => {
+                        let request = match gathered(request).await {
+                            Ok(request) => request,
+                            Err(refusal) => return refusal.into_response(),
+                        };
+                        match hold.await {
+                            Ok(held) => (request, Some(held)),
+                            Err(refusal) => return refusal,
+                        }
+                    }
                 };
                 let handler = handler.filesystem(Box::new(fs)).build_handler();
                 handler.handle(request).await.map(Body::new)
@@ -307,7 +318,8 @@ async fn put<F, G>(
     hold: impl Future<Output = Result<G, Response>>,
 ) -> Response
 where
-    F: DavFileSystem,
+    F: DavFileSystem + Clone + Send + Sync + 'static,
+    G: Send + 'static,
 {
     let (parts, mut body) = request.into_parts();
     let path = match DavPath::new(parts.uri.path()).and_then(|mut path| {
@@ -315,6 +327,9 @@ where
         Ok(path)
     }) {
         Ok(path) => path,
+        Err(e @ dav_server::davpath::ParseError::ForbiddenPath) => {
+            return refused(StatusCode::FORBIDDEN, format!("{e:?}")).into_response();
+        }
         Err(e) => return refused(StatusCode::BAD_REQUEST, format!("{e:?}")).into_response(),
     };
     let condition = Condition::of(&parts.headers);
@@ -336,6 +351,9 @@ where
     };
     let mut file = match fs.open(&path, options).await {
         Ok(file) => file,
+        // A condition that does not hold is told first, as `dav-server` tells it: over a
+        // directory, or under one that is not there.
+        Err(_) if !condition.holds(fs.metadata(&path).await.ok().as_deref()) => return stale(),
         Err(FsError::NotFound) => {
             return refused(StatusCode::CONFLICT, "its directory is not there").into_response();
         }
@@ -353,6 +371,10 @@ where
         };
         if let Ok(data) = frame.into_data() {
             total += data.len() as u64;
+            if size.is_some_and(|size| total > size) {
+                let why = format!("the body is longer than the {size:?} bytes it said");
+                return refused(StatusCode::BAD_REQUEST, why).into_response();
+            }
             pending.extend_from_slice(&data);
             if pending.len() >= PIECE
                 && let Err(e) = file.write_bytes(pending.split().freeze()).await
@@ -371,41 +393,81 @@ where
         return refused(StatusCode::BAD_REQUEST, why).into_response();
     }
 
-    let _held = match hold.await {
+    let held = match hold.await {
         Ok(held) => held,
         Err(refusal) => return refusal,
     };
-    let there = match fs.metadata(&path).await {
-        Ok(meta) => Some(meta),
-        Err(FsError::NotFound) => None,
-        Err(e) => return failed(e),
-    };
-    if !condition.holds(there.as_deref()) {
-        return refused(
-            StatusCode::PRECONDITION_FAILED,
-            "the file is not the one its condition named",
-        )
-        .into_response();
-    }
-    if let Err(e) = file.flush().await {
-        return failed(e);
-    }
-
-    let mut answer = Response::builder().status(match there {
-        Some(_) => StatusCode::NO_CONTENT,
-        None => StatusCode::CREATED,
+    // Checked and moved over the path in a task of its own, which keeps the hold until it has
+    // done either: a client gone now, dropping this, would otherwise let go of the hold while a
+    // move to a sandbox's guest is still on its way.
+    let fs = fs.clone();
+    let landing = tokio::spawn(async move {
+        let _held = held;
+        let there = match fs.metadata(&path).await {
+            Ok(meta) => Some(meta),
+            Err(FsError::NotFound) => None,
+            Err(e) => return failed(e),
+        };
+        if !condition.holds(there.as_deref()) {
+            return stale();
+        }
+        if let Err(e) = file.flush().await {
+            return failed(e);
+        }
+        let mut answer = Response::builder().status(match there {
+            Some(_) => StatusCode::NO_CONTENT,
+            None => StatusCode::CREATED,
+        });
+        if there.is_none() {
+            answer = answer.header(header::CONTENT_LENGTH, 0);
+        }
+        if let Some(etag) = fs.metadata(&path).await.ok().and_then(|meta| meta.etag()) {
+            answer = answer.header(header::ETAG, format!("\"{etag}\""));
+        }
+        answer.body(Body::empty()).unwrap()
     });
-    if there.is_none() {
-        answer = answer.header(header::CONTENT_LENGTH, 0);
+    landing
+        .await
+        .unwrap_or_else(|e| refused(StatusCode::INTERNAL_SERVER_ERROR, e).into_response())
+}
+
+/// A conditional write refused over a file not the one its condition named.
+fn stale() -> Response {
+    refused(
+        StatusCode::PRECONDITION_FAILED,
+        "the file is not the one its condition named",
+    )
+    .into_response()
+}
+
+/// The most of the body of a conditional request other than a `PUT` that is read before its
+/// root is held: what `dav-server` itself reads of one.
+const GATHERED: usize = 64 << 10;
+
+/// `request`, a conditional write other than a `PUT`, with its body read to its end first, up to
+/// [`GATHERED`], so a sender that stalls holds up no other writer while its root is held. A
+/// conditional `PATCH`, a write of part of a file, is refused, as a `PUT` of part of one is.
+async fn gathered(request: Request<Body>) -> Result<Request<Body>, Refusal> {
+    if request.method() == Method::PATCH {
+        return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
     }
-    if let Some(etag) = fs.metadata(&path).await.ok().and_then(|meta| meta.etag()) {
-        answer = answer.header(header::ETAG, format!("\"{etag}\""));
+    let (parts, body) = request.into_parts();
+    match http_body_util::Limited::new(body, GATHERED).collect().await {
+        Ok(body) => Ok(Request::from_parts(parts, Body::from(body.to_bytes()))),
+        Err(e) if e.is::<http_body_util::LengthLimitError>() => {
+            Err(refused(StatusCode::PAYLOAD_TOO_LARGE, e))
+        }
+        Err(e) => Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!("the body broke off: {e}"),
+        )),
     }
-    answer.body(Body::empty()).unwrap()
 }
 
 /// A request's `If-Match` and `If-None-Match`, as `dav-server` reads them: each a list of tags or
 /// `*`, a tag that is not one never matching, nor a weak one, since every tag given is strong.
+/// A line that is not text names nothing, where `dav-server` would take the header as absent: an
+/// `If-Match` of one is refused, not let through.
 struct Condition {
     matching: Option<Tags>,
     none_matching: Option<Tags>,

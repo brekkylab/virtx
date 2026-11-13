@@ -804,9 +804,61 @@ mod tests {
             !dir.join("files").join("new").exists(),
             "it landed while the volume was held"
         );
+        assert_eq!(
+            saving(&dir.join("files")).len(),
+            1,
+            "its body is not beside the path while the volume is held"
+        );
 
         writing.unlock().unwrap();
         assert_eq!(put.await.unwrap(), 201);
         assert_eq!(client.read_text(&volume, "new").await.unwrap(), "held");
+        assert_eq!(saving(&dir.join("files")), Vec::<String>::new());
+    }
+
+    /// A conditional write whose condition does not hold is refused `412`, as `dav-server`
+    /// refuses one, and leaves nothing behind: over a file whose etag has gone stale, over a
+    /// directory, and under a directory that is not there.
+    #[tokio::test]
+    async fn a_conditional_write_whose_condition_fails_is_refused_and_leaves_nothing() {
+        use http::header::{IF_MATCH, IF_NONE_MATCH};
+
+        let server = Server::spawn("conditional-refused");
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        client.create_dir(&volume, "dir").await.unwrap();
+        let (app, _) = app(&server.home).unwrap();
+
+        for (path, condition, value) in [
+            ("there", IF_MATCH, "\"stale\""),
+            ("dir", IF_NONE_MATCH, "*"),
+            ("dir", IF_MATCH, "\"stale\""),
+            ("none/file", IF_MATCH, "*"),
+        ] {
+            let request = http::Request::put(format!("/volumes/data/files/{path}"))
+                .header(condition.clone(), value)
+                .body(axum::body::Body::from("written"))
+                .unwrap();
+            let Ok(response) = app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 412, "{path} with {condition}: {value}");
+        }
+        assert_eq!(client.read_text(&volume, "there").await.unwrap(), "there");
+        let files = server.home.join("volume").join("data").join("files");
+        assert_eq!(saving(&files), Vec::<String>::new());
+        assert_eq!(saving(&files.join("dir")), Vec::<String>::new());
+    }
+
+    /// The names in `dir` of writes on their way, beside the paths they are going to.
+    fn saving(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".saving"))
+            .collect()
     }
 }

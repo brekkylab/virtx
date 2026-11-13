@@ -490,10 +490,12 @@ fn clippy_servers(gpu: bool) -> anyhow::Result<()> {
 }
 
 /// The Python and the JavaScript beside the crates: `virtx-py`, `virtx-node` and the packages'
-/// scripts under `scripts/packages`. ruff lints and checks the format of the Python (`ruff.toml`),
-/// biome the JavaScript (`biome.json`), and tsc type-checks `virtx-node/index.d.ts`, the
-/// declarations written by hand beside `index.js`. Each tool is the version its lockfile pins:
-/// ruff `virtx-py`'s dev group, biome and tsc `virtx-node`'s devDependencies.
+/// scripts under `scripts/packages`. ruff lints and checks the format of the Python (`ruff.toml`);
+/// biome the JavaScript (`biome.json`), handed the two directories it lints, since from the root
+/// it would walk the submodules too and warn of MoltenVK's broken links; and tsc type-checks
+/// `virtx-node/index.d.ts`, the declarations written by hand beside `index.js`. Each tool is the
+/// version its lockfile pins: ruff `virtx-py`'s dev group, biome and tsc `virtx-node`'s
+/// devDependencies.
 ///
 /// Left out, saying so, where uv or npm is not on PATH -- except under CI, where that is a
 /// runner without what it needs.
@@ -560,7 +562,17 @@ fn lint_bindings() -> anyhow::Result<()> {
     let exec = ["exec", "--prefix", "virtx-node", "--"];
     tool(
         npm,
-        &[&exec[..], &["biome", "ci", "--error-on-warnings", "."]].concat(),
+        &[
+            &exec[..],
+            &[
+                "biome",
+                "ci",
+                "--error-on-warnings",
+                "virtx-node",
+                "scripts/packages",
+            ],
+        ]
+        .concat(),
         "biome of the JavaScript",
     )?;
     tool(

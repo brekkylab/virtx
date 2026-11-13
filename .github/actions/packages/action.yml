@@ -68,12 +68,18 @@ runs:
 
     # Published with an explicit --registry and a config of its own: the packages'
     # publishConfig names npmjs, and nothing here may reach it. Verdaccio is installed on its
-    # own first: on Windows the install alone can outlast the wait for it to answer.
+    # own first: on Windows the install alone can outlast the wait for it to answer. It runs
+    # from a copy of its config under the job's temp directory, where it keeps its storage and
+    # its users: in the checkout they would outlive the job on a runner whose checkout is kept,
+    # and the next run's user and versions would already be there.
     - name: Install from a local registry
       shell: bash
       run: |
         npm install --global --silent verdaccio@6
-        cd scripts/packages
+        registry="$RUNNER_TEMP/verdaccio"
+        mkdir -p "$registry"
+        cp scripts/packages/verdaccio.yaml "$registry/"
+        cd "$registry"
         verdaccio --config ./verdaccio.yaml --listen 4873 > "$RUNNER_TEMP/verdaccio.log" 2>&1 &
         for _ in $(seq 120); do curl -sf http://localhost:4873/-/ping >/dev/null && break; sleep 1; done
         curl -sf http://localhost:4873/-/ping >/dev/null || { echo "::error::the local registry did not start"; exit 1; }

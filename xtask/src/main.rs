@@ -13,6 +13,7 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
+       cargo xtask clippy   [--gpu]
        cargo xtask archive  [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
@@ -25,6 +26,10 @@ usage: cargo xtask init     [--force]
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
+  clippy    check's clippy alone: the client's, and the servers' once `init` has run. With
+            --gpu, the servers' with the `gpu` feature a release builds them with, the GPU
+            libraries built first as `build` builds them; for this host's own code, the
+            `cfg`s a Linux check never sees
   archive   archives the stdio server and the guest kernel, for this platform, as a release
             carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
@@ -56,6 +61,7 @@ components:
                       built for this host and its guest only
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
+  --gpu           (clippy) the servers with their `gpu` feature, the GPU libraries built first
   --with-abin     (archive) puts the abin that was built in the archive too; without it
                   the archive has no abin, and sessions from the release no /abin";
 
@@ -166,6 +172,15 @@ fn main() -> anyhow::Result<()> {
                 "check takes only --client\n\n{USAGE}"
             );
             check(client_only)
+        }
+        Some("clippy") => {
+            let gpu = match args.next() {
+                None => false,
+                Some(arg) if arg == "--gpu" => true,
+                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+            };
+            ensure!(args.next().is_none(), "clippy takes only --gpu\n\n{USAGE}");
+            clippy(gpu)
         }
         Some("archive") => {
             let abin = match args.next() {
@@ -405,25 +420,8 @@ fn servers_unready() -> anyhow::Result<Option<String>> {
 /// servers' own tests boot machines, which takes a kernel and a signed binary: they are
 /// `cargo xtask test -p <server>`, run when a change reaches them.
 fn check(client_only: bool) -> anyhow::Result<()> {
-    let cargo_in_root = |args: &[&str], what: &str| -> anyhow::Result<()> {
-        eprintln!("xtask: {what}");
-        let mut command = cargo();
-        command.current_dir(root_path()).args(args);
-        let status = command.status().context("running cargo")?;
-        ensure!(status.success(), "{what} failed");
-        Ok(())
-    };
-    let packages = |list: &[&'static str]| -> Vec<&'static str> {
-        list.iter().flat_map(|p| ["-p", *p]).collect()
-    };
-
     cargo_in_root(&["fmt", "--check"], "the format")?;
-
-    let client = packages(CLIENT_PACKAGES);
-    let mut clippy = vec!["clippy"];
-    clippy.extend(&client);
-    clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    cargo_in_root(&clippy, "clippy of the client")?;
+    clippy_client()?;
     cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
 
     if client_only {
@@ -434,16 +432,68 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
         return Ok(());
     }
-    let servers = packages(SERVER_PACKAGES);
-    let mut clippy = vec!["clippy"];
-    clippy.extend(&servers);
-    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
-    cargo_in_root(&clippy, "clippy of the servers")?;
+    clippy_servers(false)?;
     cargo_in_root(
         &["test", "-p", "virtx-uvm", "--lib"],
         "the unit tests of virtx-uvm",
     )?;
     eprintln!("xtask: checked");
+    Ok(())
+}
+
+/// `check`'s clippy, alone: the client's, and the servers' once `init` has run -- with `gpu`,
+/// as a release builds them, the GPU libraries built first. Run on each host, it is the lint of
+/// that host's own `cfg`s, which a check on Linux never compiles.
+fn clippy(gpu: bool) -> anyhow::Result<()> {
+    clippy_client()?;
+    if let Some(why) = servers_unready()? {
+        ensure!(!gpu, "--gpu, but {why} -- `cargo xtask init` readies it");
+        eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
+        return Ok(());
+    }
+    if gpu {
+        build_gpu_deps()?;
+    }
+    clippy_servers(gpu)
+}
+
+fn clippy_client() -> anyhow::Result<()> {
+    let mut clippy = vec!["clippy"];
+    clippy.extend(CLIENT_PACKAGES.iter().flat_map(|p| ["-p", *p]));
+    clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    cargo_in_root(&clippy, "clippy of the client")
+}
+
+/// The servers' clippy; with `gpu`, each with its `gpu` feature -- the only feature they have,
+/// and the one a release builds them with -- which takes the GPU libraries built.
+fn clippy_servers(gpu: bool) -> anyhow::Result<()> {
+    let features: Vec<String> = SERVER_PACKAGES
+        .iter()
+        .filter(|p| gpu && **p != "xtask")
+        .map(|p| format!("{p}/gpu"))
+        .collect();
+    let features = features.join(",");
+    let mut clippy = vec!["clippy"];
+    clippy.extend(SERVER_PACKAGES.iter().flat_map(|p| ["-p", *p]));
+    if gpu {
+        clippy.extend(["--features", features.as_str()]);
+    }
+    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
+    let what = if gpu {
+        "clippy of the servers, with gpu"
+    } else {
+        "clippy of the servers"
+    };
+    cargo_in_root(&clippy, what)
+}
+
+/// `cargo <args>` at the root, said first as `what`, which it fails as.
+fn cargo_in_root(args: &[&str], what: &str) -> anyhow::Result<()> {
+    eprintln!("xtask: {what}");
+    let mut command = cargo();
+    command.current_dir(root_path()).args(args);
+    let status = command.status().context("running cargo")?;
+    ensure!(status.success(), "{what} failed");
     Ok(())
 }
 
@@ -496,11 +546,9 @@ fn build_client(options: &Options) -> anyhow::Result<()> {
     run(cargo, "the client")
 }
 
-/// The servers named, in one cargo run, each signed. Always with the GPU. A host without a
-/// Vulkan loader still runs the build -- the boot opens the loader at run time and reports
-/// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
-/// is no second one to keep working.
-fn build_servers(options: &Options) -> anyhow::Result<()> {
+/// The GPU libraries the servers' `gpu` feature links, built under `build/` by this host's
+/// script; each script builds only what is not built yet.
+fn build_gpu_deps() -> anyhow::Result<()> {
     let scripts = root_path().join("xtask/scripts");
     let mut deps = if cfg!(windows) {
         let mut ps = Command::new("powershell");
@@ -514,6 +562,15 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
     };
     let status = deps.status().context("running build-deps")?;
     ensure!(status.success(), "building the GPU libraries failed");
+    Ok(())
+}
+
+/// The servers named, in one cargo run, each signed. Always with the GPU. A host without a
+/// Vulkan loader still runs the build -- the boot opens the loader at run time and reports
+/// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
+/// is no second one to keep working.
+fn build_servers(options: &Options) -> anyhow::Result<()> {
+    build_gpu_deps()?;
 
     let mut cargo = cargo();
     cargo.current_dir(root_path()).arg("build");

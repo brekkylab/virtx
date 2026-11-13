@@ -7,9 +7,9 @@
 #   guest-parts (x86_64, aarch64)     nothing          the guest kernel and abin
 #   suites (linux-x86_64)             guest-parts      the crates' and packages' suites, on KVM
 #   suites (windows-x86_64)           guest-parts      the machine-booting suites, on WHP
-#   native (macOS, Windows)           guest-parts      server, library, packages, smoke: one job
+#   native (macOS, Windows)           guest-parts      server, clippy, library, packages, smoke: one job
 #                                                      (a pull request's Windows on our own runner)
-#   linux (x86_64, aarch64)           guest-parts      server and library, in manylinux_2_28
+#   linux (x86_64, aarch64)           guest-parts      server, clippy and library, in manylinux_2_28
 #   linux-packages                    linux            packages and smoke, on ubuntu-22.04
 #
 # What a job builds it tests in the same job where it can. Two things cross between jobs, as
@@ -108,7 +108,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # `cargo xtask check`: the format, clippy of the client and the servers, and the tests that
-  # boot nothing. It compiles the servers but runs none, so it answers first.
+  # boot nothing. It compiles the servers but runs none, so it answers first. Its clippy is
+  # Linux's without `gpu`; each platform's build job lints its own host's code with `gpu`.
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -471,6 +472,12 @@ jobs:
       - name: Server
         run: cargo xtask build server-stdio --locked
 
+      # This host's lint: the client's, and the servers' with `gpu`, as a release builds them --
+      # the `cfg`s `check`, on Linux and without `gpu`, never compiles. The GPU libraries are
+      # the server build's, already there.
+      - name: Clippy, with gpu
+        run: cargo xtask clippy --gpu
+
       - name: virglrenderer's log (Windows, on failure)
         if: failure() && runner.os == 'Windows'
         run: |
@@ -612,6 +619,12 @@ jobs:
 
       - name: Server
         run: cargo xtask build server-stdio --locked
+
+      # This host's lint: the client's, and the servers' with `gpu`, as a release builds them --
+      # the `cfg`s `check`, on Linux and without `gpu`, never compiles. The GPU libraries are
+      # the server build's, already there.
+      - name: Clippy, with gpu
+        run: cargo xtask clippy --gpu
 
       - name: libvirtx_core
         run: cargo xtask build client --locked --target ${{ matrix.target }}

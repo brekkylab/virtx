@@ -18,7 +18,7 @@ for await (const entry of client.buildImage(
 await client.close()
 ```
 
-A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
+A build, pull, push or commit of an image is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
@@ -53,7 +53,7 @@ A sandbox is kept, stopped, once unused, until it is deleted. One the client ans
 ```js
 {
   await using sandbox = await client.createSandbox('alpine:3.20')
-  await client.execSandbox(sandbox.id, ['echo', 'hi'])
+  await sandbox.exec(['echo', 'hi'])
 }
 ```
 

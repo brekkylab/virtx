@@ -62,7 +62,7 @@ A sandbox is kept, stopped, once unused, until it is deleted. One the client ans
 
 ```python
 async with await client.create_sandbox("alpine:3.20") as sandbox:
-    await client.exec_sandbox(sandbox.id, ["echo", "hi"])
+    await sandbox.exec(["echo", "hi"])
 ```
 
 A sandbox's port is reached through a `PortForwarder`, opened over the client with the port `create_sandbox` answered, or `open_port` for one opened after, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. `PortForwarder.open` returns at once: opening it asks nothing of the server. A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- is closed, and `forwarder.last_error` says why, a `VirtxError` naming the port, also logged as a warning by the `virtx` logger.

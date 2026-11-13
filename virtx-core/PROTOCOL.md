@@ -275,7 +275,7 @@ So the server keeps that image while the sandbox exists, as [Images](#images) sa
 
 #### Use
 
-A sandbox is used while a [job](#sandbox-jobs) runs in it or a connection through one of its [ports](#ports) is open, and when a job is started in it.
+A sandbox is used while a [job](#sandbox-jobs) runs in it, a connection through one of its [ports](#ports) is open, or a request to its [files](#a-sandboxs-files) is answered, and when a job is started in it.
 `used_at` is the last of these; a `GET` and a listing do not use it.
 
 #### Stopping
@@ -304,10 +304,6 @@ A `GET`, a listing, and a connection to one of its ports do not start it.
 A sandbox is deleted by its `DELETE`, when it stops if it is ephemeral, and after `auto_delete_days` stopped and unused.
 The server deletes one in no other way.
 Deleting one stops it first if it runs, and then removes its disk; its volumes stay, and every request naming it is answered `404`, `not_found`.
-
-A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
-Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
-A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
 
 #### Ports
 

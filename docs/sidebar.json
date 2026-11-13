@@ -14,7 +14,7 @@
       { "slug": "guides/running-commands" },
       { "slug": "guides/reading-writing-files" },
       { "slug": "guides/networks-ports" },
-      { "slug": "guides/keeping-snapshots" },
+      { "slug": "guides/keeping-sandboxes" },
       { "slug": "guides/mounting-volumes" },
       { "slug": "guides/using-gpus" },
       { "slug": "guides/coding-agents" }

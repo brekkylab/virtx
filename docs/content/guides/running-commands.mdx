@@ -185,7 +185,7 @@ Stdout(line='tick 4')
 SandboxJobEnd(code=0)
 ```
 
-A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
+A job left in the background runs until it ends or is removed; stopping or removing the sandbox ends every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
 
 ## Set a timeout
 

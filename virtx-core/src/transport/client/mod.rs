@@ -101,11 +101,19 @@ impl TransportClient {
 
     /// Send `request` to whichever endpoint its URI, a path under the server's base such as
     /// `/snapshots/`, names. An `Err` says why no response came, or that the server refused the
-    /// headers with a `401` or a `403`, which every endpoint's are alike.
+    /// headers with a `401` or a `403`, which every endpoint's are alike. A path, or a
+    /// `Destination`, with a `.` or `..` segment still in it, a file's path that goes above its
+    /// root or a name that is one, is refused unsent: over HTTP it would be resolved before it
+    /// went, to another endpoint's path even, and the server refuses one that arrives.
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
     ) -> Result<http::Response<Body>, Error> {
+        if let Some(path) = dot_segment(&request) {
+            return Err(Error::Path(format!(
+                "{path:?}: a path cannot go above its root, nor a name be \".\" or \"..\""
+            )));
+        }
         let response = self
             .connection
             .send(request)
@@ -125,4 +133,23 @@ impl TransportClient {
             stdio.close().await;
         }
     }
+}
+
+/// The path of `request`, or its `Destination`, if either has a `.` or `..` segment, plain or
+/// percent-encoded, with `\` separating segments too, as an `http` URL reads one.
+fn dot_segment(request: &http::Request<Body>) -> Option<&str> {
+    let is_dot = |segment: &str| {
+        matches!(
+            segment.to_ascii_lowercase().replace("%2e", ".").as_str(),
+            "." | ".."
+        )
+    };
+    let destination = request
+        .headers()
+        .get("Destination")
+        .and_then(|to| to.to_str().ok());
+    [Some(request.uri().path()), destination]
+        .into_iter()
+        .flatten()
+        .find(|path| path.split(['/', '\\']).any(is_dot))
 }

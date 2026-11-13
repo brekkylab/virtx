@@ -1,15 +1,24 @@
-# A published release's npm packages and wheels, to npm and PyPI: the files `release` attached,
-# checked against its SHA256SUMS, and nothing built again. The release goes public first, so
-# a client installed from a registry always finds its server.
+# A published release, to the registries: its npm packages and wheels, the files `release`
+# attached and checked against its SHA256SUMS, to npm and PyPI, nothing built again; and the
+# crates, from the tag's source, to crates.io. The release goes public first, so a client
+# installed from a registry always finds its server.
 #
-# One job per registry, so one that fails leaves the other published and is rerun alone. Each
-# skips what its registry already holds at this version, which makes a rerun safe. A dispatch
-# names the tag, for a release whose publishing failed.
+# `verify` first, over every package of the release at once: the npm packages and wheels are
+# the tag's version and name and pass their registry's dry run, and the crates package against
+# a registry of their own. One that is wrong publishes nothing, since a registry does not take a
+# version back.
+#
+# Then one job per registry, so one that fails leaves the others published and is rerun alone.
+# Each skips what its registry already holds at this version, which makes a rerun safe. A
+# dispatch names the tag, for a release whose publishing failed.
+#
+# npm is given a tarball as `./dist/name.tgz`: a bare `dist/name.tgz` reads as a GitHub
+# `user/repo`.
 #
 # A release published with GITHUB_TOKEN runs no workflow, so a person publishes it.
 #
-# Secrets: `NPM_TOKEN` (may publish `@brekkylab/virtx` and `@brekkylab/virtx-*`) and
-# `PYPI_TOKEN` (for `virtx`).
+# Secrets: `NPM_TOKEN` (may publish `@brekkylab/virtx` and `@brekkylab/virtx-*`), `PYPI_TOKEN`
+# (for `virtx`) and `CARGO_REGISTRY_TOKEN` (may publish `virtx-core` and `virtx`).
 name: publish
 
 on:
@@ -34,7 +43,90 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      # Every package SHA256SUMS lists, not only those that came down.
+      - name: The release's packages
+        run: |
+          gh release download "$TAG" --dir dist --pattern '*.tgz' --pattern '*.whl' --pattern SHA256SUMS
+          cd dist && grep -E '\.(tgz|whl)$' SHA256SUMS | sha256sum --check
+
+      # Each package is the root's name or one of its platform packages, at the tag's version;
+      # every optional dependency the root names is among them; and each passes npm's dry run.
+      - name: npm packages
+        run: |
+          version=${TAG#v}
+          name=$(jq -r .name virtx-node/package.json)
+          root="./dist/brekkylab-virtx-$version.tgz"
+          [ -f "$root" ] || { echo "::error::$root is not among the release's packages"; exit 1; }
+          packed=""
+          for tgz in ./dist/*.tgz; do
+            manifest=$(tar -xzOf "$tgz" package/package.json)
+            pkg=$(jq -r '"\(.name)@\(.version)"' <<< "$manifest")
+            case "$pkg" in
+              "$name@$version" | "$name-"*"@$version") ;;
+              *) echo "::error::$tgz is $pkg, not $name or a platform package of it at $version"; exit 1 ;;
+            esac
+            [ "$tgz" != "$root" ] || [ "$pkg" = "$name@$version" ] || { echo "::error::$root is $pkg"; exit 1; }
+            packed="$packed $pkg"
+            npm publish "$tgz" --access public --dry-run
+          done
+          for dep in $(tar -xzOf "$root" package/package.json | jq -r '.optionalDependencies | to_entries[] | "\(.key)@\(.value)"'); do
+            case " $packed " in
+              *" $dep "*) ;;
+              *) echo "::error::$name names $dep, which is not among the release's packages"; exit 1 ;;
+            esac
+          done
+          echo "npm:$packed"
+
+      # Each wheel is the project's name at the tag's version, in its file name and its
+      # metadata, and passes twine's check, which is all PyPI has before an upload.
+      - name: Wheels
+        run: |
+          version=${TAG#v}
+          name=$(sed -n 's/^name = "\(.*\)"$/\1/p' virtx-py/pyproject.toml)
+          ls dist/*.whl >/dev/null
+          for whl in dist/*.whl; do
+            case "$(basename "$whl")" in
+              "$name-$version-"*) ;;
+              *) echo "::error::$whl is not a wheel of $name $version"; exit 1 ;;
+            esac
+            meta=$(unzip -p "$whl" '*.dist-info/METADATA')
+            got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta")"
+            [ "$got" = "$name $version" ] || { echo "::error::$whl's metadata says $got"; exit 1; }
+          done
+          pipx run twine check --strict dist/*.whl
+
+      # Both crates are the tag's version, and package: `cargo package` builds each from what
+      # it packed, `virtx` against the `virtx-core` packed beside it.
+      - name: Crates
+        run: |
+          version=${TAG#v}
+          for crate in virtx-core virtx; do
+            got=$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            [ "$got" = "$version" ] || { echo "::error::$crate is $got, not $version"; exit 1; }
+          done
+          cargo package -p virtx-core -p virtx --locked
+
   npm:
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -55,7 +147,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           version=${TAG#v}
-          root="dist/brekkylab-virtx-$version.tgz"
+          root="./dist/brekkylab-virtx-$version.tgz"
           [ -f "$root" ] || { echo "::error::$root is not among the release's packages"; exit 1; }
           tag=latest; case "$version" in *-*) tag=next ;; esac
           publish() {
@@ -66,12 +158,13 @@ jobs:
             npm publish "$1" --access public --tag "$tag"
             echo "published $name@$version"
           }
-          for tgz in dist/*.tgz; do
+          for tgz in ./dist/*.tgz; do
             [ "$tgz" = "$root" ] || publish "$tgz"
           done
           publish "$root"
 
   pypi:
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -92,3 +185,34 @@ jobs:
             esac
           done
           pipx run twine upload --non-interactive --skip-existing dist/*.whl
+
+  crates:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      # `virtx-core` first: `virtx` depends on it by version, and `cargo publish` waits for what
+      # it published to be in the index before returning.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=${TAG#v}
+          for crate in virtx-core virtx; do
+            if curl -fsS -o /dev/null "https://crates.io/api/v1/crates/$crate/$version"; then
+              echo "$crate $version is on crates.io already"; continue
+            fi
+            cargo publish -p "$crate"
+            echo "published $crate $version"
+          done

@@ -20,7 +20,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
-- `.github/workflows/` — `build` builds the server and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which puts its npm packages and wheels on npm and PyPI. `docs` builds `docs/` and checks its links on a pull request that touches it.
+- `.github/workflows/` — `build` builds the server and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
 
 ## Building from source
 
@@ -43,7 +43,7 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 
 ### Clients
 
-Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, so build it first and point the package at it:
 
 ```bash
 cargo xtask build client
@@ -55,7 +55,7 @@ Then, in your own project, install the package for your language from the clone:
 
 - **Python:** `pip install path/to/virtx/virtx-py`
 - **Node:** `npm install path/to/virtx/virtx-node`
-- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
 
 - A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
 

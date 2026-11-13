@@ -1,15 +1,13 @@
-//! What every test file stands on, as Python's `conftest.py` is: `libvirtx_core`, opened once,
-//! and the servers `cargo xtask fixture` serves, as it names them in the environment; and the
-//! steps tests share. Each file uses what it needs of it.
+//! What every test file stands on, as Python's `conftest.py` is: the library, opened once when
+//! it is not this crate's, and the servers `cargo xtask fixture` serves, as it names them in
+//! the environment; and the steps tests share. Each file uses what it needs of it.
 
 #![allow(dead_code)]
 
 use std::{
     env,
     future::Future,
-    path::PathBuf,
     pin::pin,
-    process::Command,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
@@ -26,9 +24,19 @@ use virtx::{
 /// The image every test that boots a sandbox pulls first.
 pub const ALPINE: &str = "alpine:3.20";
 
+/// Make the library the clients are made by ready: nothing with `embedded`, or else
+/// [`library`] opened.
+pub fn open() {
+    #[cfg(not(feature = "embedded"))]
+    virtx::load(library()).unwrap();
+}
+
 /// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
 /// one in `deps`: that is the dependency's, built without the C ABI.
-pub fn library() -> PathBuf {
+#[cfg(not(feature = "embedded"))]
+pub fn library() -> std::path::PathBuf {
+    use std::{path::PathBuf, process::Command};
+
     static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
@@ -80,14 +88,14 @@ pub fn fixture() -> &'static Fixture {
 
 /// A client of a `virtx-stdio` of its own, the library opened first.
 pub fn client() -> Client {
-    virtx::load(library()).unwrap();
+    open();
     Client::spawn(&fixture().stdio, [] as [&str; 0]).unwrap()
 }
 
 /// A client of the fixture's `virtx-server-tcp`, with its token and project, the library
 /// opened first.
 pub fn tcp_client() -> Client {
-    virtx::load(library()).unwrap();
+    open();
     let Fixture {
         url,
         token,

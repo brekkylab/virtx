@@ -8,6 +8,10 @@ fn main() {
         return;
     }
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    // A packaged crate ships the header as written, and its source is not written to.
+    if crate_dir.join(".cargo_vcs_info.json").exists() {
+        return;
+    }
     let config = cbindgen::Config::from_file(crate_dir.join("cbindgen.toml"))
         .expect("reading cbindgen.toml");
     cbindgen::generate_with_config(&crate_dir, config)

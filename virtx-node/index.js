@@ -1061,13 +1061,21 @@ class Sandbox extends Files {
   }
 
   // Makes the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one --
-  // answered as the server keeps them.
-  setInbound(port, rules) {
-    return this.client._call('virtx_client_set_sandbox_port_inbound', {
+  // answered as the server keeps them: its public `address` kept on the port in `ports` too.
+  async setInbound(port, rules) {
+    const inbound = await this.client._call('virtx_client_set_sandbox_port_inbound', {
       id: this.id,
       port,
       rules,
     })
+    if (this.ports) {
+      this.ports = this.ports.map((known) => {
+        if (known.port !== port) return known
+        const { address: _, ...rest } = known
+        return inbound.address == null ? rest : { ...rest, address: inbound.address }
+      })
+    }
+    return inbound
   }
 
   // Starts making an image of it, to point `reference` at: the job, and its log as the job's

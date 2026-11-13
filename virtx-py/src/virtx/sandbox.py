@@ -5,7 +5,7 @@ same id, until it is deleted; and the processes run in one, each a job whose log
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -200,7 +200,8 @@ class Sandbox(Files):
 
     ports: list[SandboxPort] = field(default_factory=list)
     """Its opened ports: answered by ``create_sandbox`` and ``start`` only, each ``open_port``
-    adding one and ``close_port`` dropping it."""
+    adding one and ``close_port`` dropping it, and ``set_inbound`` giving one the public address
+    its rules gave it, or taking it away."""
 
     @property
     def running(self) -> bool:
@@ -274,8 +275,13 @@ class Sandbox(Files):
         self, port: int, rules: Iterable[InboundRule | Mapping[str, Any]]
     ) -> PortInbound:
         """Make the inbound rules of its port ``port`` ``rules``, all of them, as
-        ``Client.set_sandbox_port_inbound`` does."""
-        return await self.client.set_sandbox_port_inbound(self.id, port, rules)
+        ``Client.set_sandbox_port_inbound`` does: its public ``address`` as answered kept on the
+        port in ``ports`` too."""
+        inbound = await self.client.set_sandbox_port_inbound(self.id, port, rules)
+        for at, known in enumerate(self.ports):
+            if known.port == port:
+                self.ports[at] = replace(known, address=inbound.address)
+        return inbound
 
     def commit(self, reference: str) -> StartedJob[ImageJob, ImageJobEntry]:
         """Make an image of it, as ``Client.commit_image`` does, to point ``reference`` at."""

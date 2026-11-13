@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use virtx_uvm::{Digest, Reference, SnapshotStore, VolumeStore};
+use virtx_uvm::{Digest, PublicImages, Reference, SnapshotStore, VolumeStore};
 
 use crate::endpoints::Home;
 
@@ -192,6 +192,13 @@ pub trait Keeping: Send + Sync {
 
     /// The tags kept and not here yet, for the registry to list beside its own.
     fn listed_too(&self) -> Box<dyn Fn() -> Vec<Reference> + Send + Sync>;
+
+    /// Where the project's anonymous pulls -- a build's base among them -- are shared with
+    /// other projects' ([`RegistryClient::with_public`](virtx_uvm::RegistryClient::with_public)):
+    /// nowhere, unless the keeping says.
+    fn public(&self) -> Option<Arc<dyn PublicImages>> {
+        None
+    }
 }
 
 /// What makes a home's [`Keeping`], given its snapshots and volumes.

@@ -45,9 +45,9 @@ use virtx_core::{
 use virtx_uvm::sandbox::{Activity, Given, Held, Hooks, Sandbox, Wanted, Written};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    RegistryError, RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore,
-    VolumeError, VolumeStore, build_step, signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, PublicImages, Reference,
+    RegistryClient, RegistryError, RegistryServer, SandboxError, Sandboxes, SnapshotError,
+    SnapshotStore, VolumeError, VolumeStore, build_step, signal_number,
 };
 
 use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
@@ -135,13 +135,16 @@ pub fn set_public_registries_only() {
 }
 
 /// A registry client for this server's pulls and pushes: anonymous pulls from Docker Hub's
-/// mirror, if one was set, and held to public registries, if this server is.
+/// mirror, if one was set, and shared through `public`, given one; held to public registries,
+/// if this server is.
 fn registry(
     images: ImageStore,
     auth: Option<virtx_core::RegistryAuth>,
+    public: Option<Arc<dyn PublicImages>>,
 ) -> Result<RegistryClient, RegistryError> {
-    let client =
-        RegistryClient::new(images, auth).with_mirror(REGISTRY_MIRROR.get().map(String::as_str));
+    let client = RegistryClient::new(images, auth)
+        .with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
+        .with_public(public);
     if PUBLIC_REGISTRIES_ONLY.load(Ordering::Relaxed) {
         return client.public_only();
     }
@@ -313,6 +316,12 @@ impl Home {
         if let Some(keeping) = &self.keeping {
             keeping.requested(self, token).await;
         }
+    }
+
+    /// Where the project's anonymous pulls are shared, if its keeping shares them
+    /// ([`Keeping::public`]).
+    fn public(&self) -> Option<Arc<dyn PublicImages>> {
+        self.keeping.as_ref().and_then(|keeping| keeping.public())
     }
 
     /// Tag `reference` brought up to its storage home's index before it is used, if the image
@@ -1236,13 +1245,13 @@ where
 async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let images = home.images.clone();
+    let (images, public) = (home.images.clone(), home.public());
     Ok(image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = registry(images.clone(), args.auth)?;
+            let registry = registry(images.clone(), args.auth, public)?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -1260,7 +1269,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = registry(images, args.auth)?;
+            let registry = registry(images, args.auth, None)?;
             Ok(registry.push(&reference, report).await?)
         },
     ))
@@ -1294,7 +1303,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
     if args.recipe.base != "scratch" {
         self::reference(&args.recipe.base)?;
     }
-    let (images, vm) = (home.images.clone(), home.vm.clone());
+    let (images, vm, public) = (home.images.clone(), home.vm.clone(), home.public());
     let recipe = args.recipe;
     let room = build_room(&recipe)?;
     Ok(image_job(
@@ -1304,7 +1313,8 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
         move |mut report| async move {
             // Held until the build ends, or is cancelled: its future dropped.
             let _room = room;
-            let (mut image, mut layers, _base) = base(&images, &recipe.base, &mut report).await?;
+            let (mut image, mut layers, _base) =
+                base(&images, public, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -1339,6 +1349,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
 /// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
 async fn base(
     images: &ImageStore,
+    public: Option<Arc<dyn PublicImages>>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -1351,7 +1362,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            registry(images.clone(), None)?
+            registry(images.clone(), None, public)?
                 .pull(&reference, report)
                 .await?
                 .1

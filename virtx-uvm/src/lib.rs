@@ -19,7 +19,7 @@ pub use image::{
         Error as BuildError, RECIPE_LABEL, build_step, history_kept, recipe_forgotten, recipe_kept,
         written_layer,
     },
-    registry_client::{Error as RegistryError, Reference, RegistryClient},
+    registry_client::{Error as RegistryError, PublicImages, Reference, RegistryClient},
     registry_server::{Body as RegistryBody, RegistryServer},
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };

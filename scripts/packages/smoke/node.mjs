@@ -14,7 +14,10 @@ const check = (ok, what) => {
 }
 
 const virtx = require('@brekkylab/virtx')
-check(typeof virtx.Client === 'function', `the package loads from ${path.dirname(require.resolve('@brekkylab/virtx'))}`)
+check(
+  typeof virtx.Client === 'function',
+  `the package loads from ${path.dirname(require.resolve('@brekkylab/virtx'))}`,
+)
 
 // Opening the library is the first call that needs it; a server that cannot start is the one
 // answer that needs no server.
@@ -22,15 +25,18 @@ try {
   virtx.Client.spawn(path.join(process.cwd(), 'no-such-virtx-server'))
   check(false, 'spawning a missing server throws')
 } catch (e) {
-  check(e instanceof virtx.VirtxError && /starting the server/.test(e.message), `spawning a missing server throws: ${e.message}`)
+  check(
+    e instanceof virtx.VirtxError && /starting the server/.test(e.message),
+    `spawning a missing server throws: ${e.message}`,
+  )
 }
 const opened = virtx.libraryPath()
 check(
-  opened !== null && opened.includes(`${path.sep}@brekkylab${path.sep}virtx-`),
+  opened?.includes(`${path.sep}@brekkylab${path.sep}virtx-`),
   `the library is the platform package's: ${opened}`,
 )
 
-const digest = 'sha256:' + '0'.repeat(64)
+const digest = `sha256:${'0'.repeat(64)}`
 check(virtx.imageName(digest).type === 'digest', 'an image name reads as a digest')
 
 if (failures.length) {

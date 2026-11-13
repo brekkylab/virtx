@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from conftest import ALPINE, alpine, tags, unique
-
 from virtx import (
     BearerAuth,
     Client,
@@ -163,7 +162,12 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Cl
 async def test_a_build_iterated_yields_its_log_to_its_end(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('iterated')}:latest"
-    log = [entry async for entry in client.build_image(Recipe(ALPINE).run(f"echo {reference} > /built"), reference)]
+    log = [
+        entry
+        async for entry in client.build_image(
+            Recipe(ALPINE).run(f"echo {reference} > /built"), reference
+        )
+    ]
     built = (await tags(client))[reference]
     assert log[-1].entry == ImageJobEnd(built)
     await client.remove_image(reference)

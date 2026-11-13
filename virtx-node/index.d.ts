@@ -455,7 +455,10 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */

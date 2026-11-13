@@ -31,7 +31,10 @@ export function fixture() {
     ['token', 'VIRTX_TEST_TOKEN'],
     ['project', 'VIRTX_TEST_PROJECT'],
   ]) {
-    assert.ok(process.env[name], `${name} is not set: run these with \`npm test\`, under \`cargo xtask fixture\``)
+    assert.ok(
+      process.env[name],
+      `${name} is not set: run these with \`npm test\`, under \`cargo xtask fixture\``,
+    )
     named[key] = process.env[name]
   }
   return named
@@ -57,7 +60,9 @@ export function familiar(reference) {
 
 // Every tag on the server's images, as the tests name it, with the digest it points at.
 export async function tags(client) {
-  return Object.fromEntries((await client.listImage()).map((image) => [familiar(image.reference), image.digest]))
+  return Object.fromEntries(
+    (await client.listImage()).map((image) => [familiar(image.reference), image.digest]),
+  )
 }
 
 // `ALPINE` on the server, pulled unless it is there already, and its digest. Docker Hub limits

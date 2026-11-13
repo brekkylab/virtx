@@ -12,7 +12,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
 import virtx
 from virtx import BearerAuth, Client
 

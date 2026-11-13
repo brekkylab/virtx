@@ -1,8 +1,6 @@
 import pytest
-
-from conftest import fixture, unique
-
 import virtx
+from conftest import fixture, unique
 from virtx import Client, VirtxError
 
 

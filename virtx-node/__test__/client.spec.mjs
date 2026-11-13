@@ -15,7 +15,7 @@ test('a second library is refused', () => {
 })
 
 test('an image is named by its spelling', () => {
-  const digest = 'sha256:' + '0'.repeat(64)
+  const digest = `sha256:${'0'.repeat(64)}`
   assert.deepEqual(virtx.imageName(digest), { type: 'digest', digest })
   assert.deepEqual(virtx.imageName('sha256:0'), { type: 'tag', tag: 'sha256:0' })
 })

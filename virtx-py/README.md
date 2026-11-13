@@ -10,6 +10,7 @@ A build, pull or push of an image, and a process in a sandbox, is a job the serv
 import asyncio
 from virtx import Client, ImageJobEnd, Log, Recipe
 
+
 async def main():
     with Client.spawn() as client:
         recipe = Recipe("alpine:3.20").run("apk add jq")
@@ -21,6 +22,7 @@ async def main():
                     print("built", digest)
                 case ImageJobEnd(error=error):
                     print("failed", error)
+
 
 asyncio.run(main())
 ```

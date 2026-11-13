@@ -1211,16 +1211,12 @@ fn kill(run: &Run, job: &Job) {
 pub(super) fn spec_of(args: &SandboxCreateArgs) -> Result<MachineSpec, Error> {
     let mut at = std::collections::HashSet::new();
     for volume in &args.volumes {
-        // Asked of the text rather than of `Path`, which answers by this host's rules.
-        let path = volume.path.trim_end_matches('/');
-        let why = if !volume.path.starts_with('/') {
-            "a path in the guest is absolute"
-        } else if path.is_empty() {
-            "/ is the guest's root"
-        } else if !at.insert(path) {
-            "another volume is there"
-        } else {
-            continue;
+        let why = match crate::mount_point(&volume.path) {
+            Err(why) => why,
+            Ok(path) => match at.insert(path) {
+                false => "another volume is there",
+                true => continue,
+            },
         };
         return Err(Error::Invalid(format!(
             "volumes: {} at {}: {why}",

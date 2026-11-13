@@ -27,6 +27,10 @@ pub enum Error {
     /// A file on this machine could not be read or written, or a file is not what it should
     /// be: one read as text that is not UTF-8.
     File(String),
+    /// A path given goes above its root, once its `.` and `..` are resolved, or names the root
+    /// where that is not a path; or a name given is `.` or `..`. Sent, it would name another
+    /// path than the one written, another resource's even, so nothing was sent.
+    Path(String),
 }
 
 impl Error {
@@ -53,6 +57,7 @@ impl fmt::Display for Error {
             Error::Json(reason) => f.write_str(reason),
             Error::Registry(reason) => f.write_str(reason),
             Error::File(reason) => f.write_str(reason),
+            Error::Path(reason) => f.write_str(reason),
             Error::Status(status, body) => {
                 let reason = http::StatusCode::from_u16(*status)
                     .ok()

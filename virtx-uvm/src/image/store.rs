@@ -227,12 +227,18 @@ impl Store {
     /// the same filesystem, and a copy where it is not. Linked, one file serves every store
     /// that links it, and a store's removal of the layer removes its own link alone. `from` must
     /// be the EROFS image `layer` names -- one another store filed -- which is not read again
-    /// here. A layer already here is renewed.
+    /// here.
+    ///
+    /// A layer already here is renewed; on Unix, one here as a file of its own -- written here
+    /// rather than linked -- is replaced by the link, as the same bytes, so one file serves both
+    /// after all. What has it open reads on from the file it opened.
     pub fn link_layer(&self, from: &Path, layer: &Digest) -> Result<()> {
         static LINKS: AtomicU64 = AtomicU64::new(0);
         let path = self.layer_path(layer);
         let _change = self.change()?;
-        if renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))? {
+        let here =
+            renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))?;
+        if here && !other_file(&path, from) {
             return Ok(());
         }
         let part = path.with_extension(format!(
@@ -241,6 +247,10 @@ impl Store {
             LINKS.fetch_add(1, Ordering::Relaxed)
         ));
         if fs::hard_link(from, &part).is_err() {
+            // A copy in place of what is here already gains nothing.
+            if here {
+                return Ok(());
+            }
             fs::copy(from, &part)
                 .map_err(|e| Error::io(format!("copying {}", from.display()), e))?;
         }
@@ -968,6 +978,24 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
 }
 
 /// Make what is filed at `path` young again, or answer `false` when nothing is.
+/// Whether `path` and `from` are two files, not two links to one: never said so where links
+/// cannot be told apart.
+fn other_file(path: &Path, from: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (fs::metadata(path), fs::metadata(from)) {
+            (Ok(here), Ok(there)) => (here.dev(), here.ino()) != (there.dev(), there.ino()),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, from);
+        false
+    }
+}
+
 fn renew(path: &Path) -> io::Result<bool> {
     match File::options().write(true).open(path) {
         Ok(file) => file.set_modified(SystemTime::now()).map(|()| true),
@@ -1030,6 +1058,19 @@ mod tests {
         }
         // Linked again: renewed, and still one file.
         two.0.link_layer(&one.0.layer_path(&layer), &layer).unwrap();
+        // A store that wrote the layer itself: its file replaced by the link, one file after all.
+        let three = Scratch::new("link-three");
+        assert_eq!(three.0.insert_layer(&tree(b"shared")).unwrap(), layer);
+        three
+            .0
+            .link_layer(&one.0.layer_path(&layer), &layer)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let inode = |store: &Store| fs::metadata(store.layer_path(&layer)).unwrap().ino();
+            assert_eq!(inode(&one.0), inode(&three.0));
+        }
         assert!(one.0.remove_layer(&layer).unwrap());
         assert!(two.0.contains_layer(&layer));
         // From nowhere: refused, and nothing left half done.

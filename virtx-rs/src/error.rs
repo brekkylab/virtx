@@ -1,7 +1,9 @@
 use std::fmt;
 
-/// Why a call, or opening a client, failed.
+/// Why a call, or opening a client, failed. More kinds may come, so a `match` on it has a
+/// wildcard arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// `libvirtx_core` did not open, or lacks a function this crate calls.
     Library(String),

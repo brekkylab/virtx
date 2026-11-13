@@ -66,7 +66,7 @@ The client starts the server as a child process, and the server's stdin and stdo
 Over [TCP](#tcp), a server reachable from other machines SHOULD require credentials on every request, to every endpoint.
 A server on the local machine MAY take none, and a server over [stdio](#stdio) takes none.
 The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bearer <token>`.
-How the client obtains the token is outside this protocol, but a server MAY say where: `GET /.well-known/virtx-auth` is answered without credentials, `200` with a JSON object.
+How the client obtains the token is outside this protocol, but a server MAY say where: `GET /auth` is answered without credentials, `200` with a JSON object.
 
 - `oidc`, if the tokens are an OpenID Connect provider's, is `{"issuer": "...", "client_id": "..."}`: the provider, and the public client to sign in to it as. The token is then the ID token the provider issues that client.
 - Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.

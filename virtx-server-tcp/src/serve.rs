@@ -37,9 +37,6 @@ pub const MACHINE_SUBCOMMAND: &str = "vm";
 /// How often images are pruned.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// Where a client asks how to sign in (`PROTOCOL.md`, Authentication).
-const AUTH_PATH: &str = "/.well-known/virtx-auth";
-
 /// This process become a machine, never to come back, if it was spawned to be one: called
 /// before any runtime is made.
 pub fn become_machine_if_spawned() {
@@ -71,7 +68,7 @@ pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>
         advertised.to_string(),
     );
     let own = axum::Router::new().route(
-        AUTH_PATH,
+        "/auth",
         axum::routing::get(move || async move { advertised }),
     );
     let access = Arc::new(Access::new(config.origins.clone(), tenants));
@@ -449,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn a_server_says_where_to_sign_in_and_without_authentication_takes_any_request() {
         let asked = async |served: &Served| {
-            let (status, body) = served.send("GET", ".well-known/virtx-auth", None, "").await;
+            let (status, body) = served.send("GET", "auth", None, "").await;
             assert_eq!(status, StatusCode::OK);
             serde_json::from_str::<Value>(&body).unwrap()
         };

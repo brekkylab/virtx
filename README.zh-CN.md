@@ -175,6 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
+每个[版本](https://github.com/brekkylab/virtx/releases)都附带服务器 `virtx-server-tcp-<os>-<arch>.tar.gz`（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。其中包含 `virtx-server-tcp`、客户机内核和 `abin/`。解压到单独的目录后，`virtx-server-tcp` 会在自身旁边找到客户机内核，因此无需设置 `PATH` 或库路径即可直接运行。
+
 在服务器上生成一个令牌，再写一份 `server.json`，允许该令牌对应的用户访问某个项目：
 
 ```sh

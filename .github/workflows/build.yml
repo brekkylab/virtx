@@ -71,6 +71,10 @@ jobs:
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
           [ -z "$wrong" ] || { echo "::error::virtx-node/package.json says $version, but:$wrong"; exit 1; }
+          # Only these pre-releases have a PEP 440 form `publish` matches the wheels by.
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || {
+            echo "::error::version $version is not X.Y.Z, X.Y.Z-alpha.N, X.Y.Z-beta.N or X.Y.Z-rc.N"; exit 1
+          }
           if [ "$REF_TYPE" = tag ] && [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG, but the manifests say $version"; exit 1
           fi

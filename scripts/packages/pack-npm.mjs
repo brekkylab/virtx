@@ -83,5 +83,7 @@ for (const [platform, { os, cpu, libc, file }] of Object.entries(PLATFORMS)) {
 }
 
 const files = Object.fromEntries(root.files.map((file) => [file, path.join(node, file)]))
-pack({ ...root, ...common, optionalDependencies: optional }, { ...files, 'README.md': path.join(node, 'README.md') })
+// Without what only this repository uses: the tools that lint it, and the script that tests it.
+const { devDependencies, scripts, ...published } = root
+pack({ ...published, ...common, optionalDependencies: optional }, { ...files, 'README.md': path.join(node, 'README.md') })
 console.log(`packed ${packed + 1} packages into ${out}`)

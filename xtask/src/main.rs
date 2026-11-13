@@ -25,7 +25,8 @@ usage: cargo xtask init     [--force]
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
-            of the client always and of the servers once `init` has run
+            of the client always and of the servers once `init` has run; and the bindings'
+            lint -- ruff, biome and tsc -- where uv and npm are on PATH
   clippy    check's clippy alone: the client's, and the servers' once `init` has run. With
             --gpu, the servers' with the `gpu` feature a release builds them with, the GPU
             libraries built first as `build` builds them; for this host's own code, the
@@ -423,6 +424,7 @@ fn check(client_only: bool) -> anyhow::Result<()> {
     cargo_in_root(&["fmt", "--check"], "the format")?;
     clippy_client()?;
     cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
+    lint_bindings()?;
 
     if client_only {
         eprintln!("xtask: the servers left out (--client)");
@@ -485,6 +487,87 @@ fn clippy_servers(gpu: bool) -> anyhow::Result<()> {
         "clippy of the servers"
     };
     cargo_in_root(&clippy, what)
+}
+
+/// The Python and the JavaScript beside the crates: `virtx-py`, `virtx-node` and the packages'
+/// scripts under `scripts/packages`. ruff lints and checks the format of the Python (`ruff.toml`),
+/// biome the JavaScript (`biome.json`), and tsc type-checks `virtx-node/index.d.ts`, the
+/// declarations written by hand beside `index.js`. Each tool is the version its lockfile pins:
+/// ruff `virtx-py`'s dev group, biome and tsc `virtx-node`'s devDependencies.
+///
+/// Left out, saying so, where uv or npm is not on PATH -- except under CI, where that is a
+/// runner without what it needs.
+fn lint_bindings() -> anyhow::Result<()> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let missing: Vec<&str> = ["uv", npm]
+        .into_iter()
+        .filter(|tool| {
+            Command::new(tool)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_err()
+        })
+        .collect();
+    if !missing.is_empty() {
+        let why = format!("no {} on PATH", missing.join(" or "));
+        ensure!(env::var_os("CI").is_none(), "the bindings' lint: {why}");
+        eprintln!("xtask: the bindings' lint left out: {why}");
+        return Ok(());
+    }
+    let tool = |program: &str, args: &[&str], what: &str| -> anyhow::Result<()> {
+        eprintln!("xtask: {what}");
+        let status = Command::new(program)
+            .current_dir(root_path())
+            .args(args)
+            .status()
+            .with_context(|| format!("running {program}"))?;
+        ensure!(status.success(), "{what} failed");
+        Ok(())
+    };
+    let ruff = [
+        "run",
+        "--project",
+        "virtx-py",
+        "--only-group",
+        "dev",
+        "ruff",
+    ];
+    let python = ["virtx-py", "scripts/packages"];
+    tool(
+        "uv",
+        &[&ruff[..], &["check"], &python].concat(),
+        "ruff of the Python",
+    )?;
+    tool(
+        "uv",
+        &[&ruff[..], &["format", "--check"], &python].concat(),
+        "the format of the Python",
+    )?;
+    tool(
+        npm,
+        &[
+            "install",
+            "--prefix",
+            "virtx-node",
+            "--no-audit",
+            "--no-fund",
+            "--silent",
+        ],
+        "virtx-node's tools",
+    )?;
+    let exec = ["exec", "--prefix", "virtx-node", "--"];
+    tool(
+        npm,
+        &[&exec[..], &["biome", "ci", "--error-on-warnings", "."]].concat(),
+        "biome of the JavaScript",
+    )?;
+    tool(
+        npm,
+        &[&exec[..], &["tsc", "-p", "virtx-node/tsconfig.json"]].concat(),
+        "tsc of index.d.ts",
+    )
 }
 
 /// `cargo <args>` at the root, said first as `what`, which it fails as.

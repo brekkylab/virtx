@@ -1,0 +1,5 @@
+# The Python here: `virtx-py`, and the packages' smoke scripts under `scripts/packages`.
+line-length = 100
+# `virtx-py`'s `requires-python`, which ruff reads only from a pyproject.toml of its own.
+target-version = "py310"
+extend-exclude = ["3rdparty", "build", "target", "docs"]

@@ -107,9 +107,10 @@ jobs:
           echo "virtx $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # `cargo xtask check`: the format, clippy of the client and the servers, and the tests that
-  # boot nothing. It compiles the servers but runs none, so it answers first. Its clippy is
-  # Linux's without `gpu`; each platform's build job lints its own host's code with `gpu`.
+  # `cargo xtask check`: the format, clippy of the client and the servers, the tests that boot
+  # nothing, and the bindings' lint -- ruff, biome and tsc. It compiles the servers but runs
+  # none, so it answers first. Its clippy is Linux's without `gpu`; each platform's build job
+  # lints its own host's code with `gpu`.
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -140,6 +141,14 @@ jobs:
 
       - name: Add the guest's musl target
         run: cargo xtask init
+
+      # The bindings' lint: ruff through uv, biome and tsc through npm.
+      # A full version: setup-uv publishes no major tag to follow since v8.
+      - uses: astral-sh/setup-uv@v10.3.3
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
 
       - run: cargo xtask check
 

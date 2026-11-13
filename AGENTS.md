@@ -98,7 +98,7 @@ cargo xtask fixture -- <command>                  # any command, against the fix
 ## Lint and the gate
 
 ```bash
-cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run
+cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run; and the bindings' lint (ruff, biome, tsc) where uv and npm are on PATH
 cargo xtask check --client                        # the client's alone, without `init`
 cargo xtask clippy --gpu                          # clippy alone, the servers with `gpu`: this host's own `cfg`s, as a release builds them
 ```

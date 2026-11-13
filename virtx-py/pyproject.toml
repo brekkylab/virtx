@@ -19,7 +19,7 @@ dependencies = []
 virtx = "virtx._cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1"]
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff==0.17.5"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/virtx"]
@@ -29,5 +29,3 @@ artifacts = ["src/virtx/libvirtx_core.*", "src/virtx/virtx_core.dll"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
-[tool.ruff]
-line-length = 100

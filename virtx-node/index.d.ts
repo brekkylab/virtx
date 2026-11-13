@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // A virtx client over the C ABI of `libvirtx_core`. Field names are the wire's, camelCased.
 
 /** The variable naming the library to open when `load` was not called first. */

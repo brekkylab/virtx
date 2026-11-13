@@ -519,8 +519,8 @@ pub(crate) mod ffi {
     use crate::{
         Auth,
         ffi::{
-            Failure, Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure,
-            json, release, retain, share, write,
+            Failure, Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, done, encode,
+            failure, json, release, retain, share, start_on_thread, write,
         },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
@@ -595,14 +595,13 @@ pub(crate) mod ffi {
     pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
-    /// the server of this library's version, fetched first if this host has none -- see
-    /// `virtx_ensure_virtx`, which does that fetch alone.
+    /// stdout, and write the client, held once, to `client`. `virtx_ensure_virtx` answers the
+    /// path of `virtx-stdio`, the server of this library's version.
     ///
     /// # Safety
     ///
-    /// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
-    /// is. `client` is writable. `error` is null or writable.
+    /// `program` is NUL-terminated UTF-8, as each of the `args_len` pointers in `args` is.
+    /// `client` is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_spawn(
         program: *const c_char,
@@ -612,29 +611,12 @@ pub(crate) mod ffi {
         error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
-            let utf8 = |ptr| {
-                unsafe { CStr::from_ptr(ptr) }
-                    .to_str()
-                    .map_err(|e| e.to_string())
-            };
-            let program = if program.is_null() {
-                None
-            } else {
-                Some(utf8(program)?.to_string())
-            };
+            let program = unsafe { utf8(program) }?.to_string();
             let args = (0..args_len)
-                .map(|i| utf8(unsafe { *args.add(i) }).map(str::to_string))
+                .map(|i| unsafe { utf8(*args.add(i)) }.map(str::to_string))
                 .collect::<Result<Vec<_>, _>>()?;
             Runtime::open(|| {
-                let mut command = match program {
-                    Some(program) => Command::new(program),
-                    // On the runtime being opened, which this thread is not a worker of.
-                    None => Command::new(
-                        tokio::runtime::Handle::current()
-                            .block_on(crate::ensure_virtx())
-                            .map_err(|e| format!("fetching the server: {e:#}"))?,
-                    ),
-                };
+                let mut command = Command::new(program);
                 command.args(args);
                 Client::spawn(command).map_err(|e| format!("starting the server: {e}"))
             })
@@ -643,32 +625,22 @@ pub(crate) mod ffi {
     }
 
     /// Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
-    /// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
-    /// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
-    /// why written to `out`.
+    /// is not there, and answer its path as a JSON string: what `virtx_client_spawn` is given
+    /// to start it. Answered off any client's runtime, so this is called before one is opened.
     ///
     /// The server is kept one directory per version, so a library that is upgraded fetches
     /// its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
     /// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-    ///
-    /// # Safety
-    ///
-    /// `out` is writable.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_ensure_virtx(out: *mut VirtxBytes) -> c_int {
-        let fetched = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())
-            .and_then(|runtime| {
-                runtime
-                    .block_on(crate::ensure_virtx())
-                    .map_err(|e| format!("{e:#}"))
-            })
-            .map(|path| path.to_string_lossy().into_owned());
-        let (status, bytes) = encode(fetched);
-        unsafe { write(out, bytes) };
-        status
+    pub extern "C" fn virtx_ensure_virtx() -> *mut VirtxFuture {
+        start_on_thread(async {
+            encode(
+                crate::ensure_virtx()
+                    .await
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(|e| format!("{e:#}")),
+            )
+        })
     }
 
     /// `ptr` as a `&str`.
@@ -823,18 +795,20 @@ pub(crate) mod ffi {
         unsafe { retain(client) };
     }
 
-    /// Let go of `client`. The last holder's release answers every request not yet answered
-    /// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
-    /// polled and freed. Null does nothing.
+    /// Let go of `client`, and answer, with `VIRTX_OK` and nothing, once it is let go of. The
+    /// last holder's release answers every request not yet answered with `VIRTX_ERROR`, ends
+    /// the session, and frees it, answering once that is done; its futures and streams stay to
+    /// be polled and freed. Any other release answers at once. Freeing the future does not
+    /// stop the ending. Null is let go of at once.
     ///
     /// # Safety
     ///
-    /// `client` is null, or held by the caller, who does not use it again. Not called from a
-    /// `wake`, which runs on the runtime this may stop.
+    /// `client` is null, or held by the caller, who does not use it again.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) {
-        if let Some(VirtxClient(runtime)) = unsafe { release(client) } {
-            runtime.close(Client::close);
+    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) -> *mut VirtxFuture {
+        match unsafe { release(client) } {
+            Some(VirtxClient(runtime)) => runtime.close(Client::close),
+            None => done(),
         }
     }
 

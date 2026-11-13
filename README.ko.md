@@ -144,7 +144,7 @@ use virtx::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     let mut log = client.build_image(recipe, "jq:latest").log();

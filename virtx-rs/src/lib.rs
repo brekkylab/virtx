@@ -32,7 +32,7 @@ mod snapshot;
 mod volume;
 
 pub use call::{Call, Events};
-pub use client::{Client, ensure_virtx};
+pub use client::{Client, Opening, ensure_virtx};
 pub use error::Error;
 pub use files::Files;
 pub use image::ImageJob;

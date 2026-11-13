@@ -12,6 +12,15 @@ fn a_second_library_is_refused() {
     virtx::load(common::library()).unwrap();
 }
 
+// Opening and closing a client wait on nothing of the caller's runtime: a program inside one
+// awaits them as any request.
+#[tokio::test]
+async fn a_client_is_opened_and_closed_inside_a_runtime() {
+    let client = common::client();
+    client.list_image().await.unwrap();
+    client.close().await.unwrap();
+}
+
 #[test]
 fn a_client_over_http_sends_its_token_and_project() {
     virtx::load(common::library()).unwrap();

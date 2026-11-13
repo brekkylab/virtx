@@ -32,6 +32,7 @@ pub use bytes::VirtxBytes;
 pub(crate) use bytes::virtx_bytes_free;
 pub(crate) use bytes::{Failure, encode, failure, json, write};
 pub use future::*;
+pub(crate) use future::{done, start_on_thread};
 pub(crate) use runtime::{Runtime, release, retain, share};
 pub use stream::*;
 

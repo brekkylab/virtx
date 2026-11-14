@@ -212,7 +212,7 @@ Its files are reached at [`/volumes/{name}/files/`](#files).
 
 Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
 `size` is the bytes the volume's files take on the server.
-`DELETE` deletes everything in it, and refuses a volume a running sandbox mounts with `409`, `in_use`.
+`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`.
 
 #### Mounts
 

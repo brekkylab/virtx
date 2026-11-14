@@ -49,6 +49,13 @@ async fn run(config: Config) -> anyhow::Result<()> {
     if let Some(secs) = config.minute_secs {
         endpoints::set_minute(std::time::Duration::from_secs(secs.max(1)));
     }
+    if let Some(mirror) = config
+        .registry_mirror
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+    {
+        endpoints::set_registry_mirror(mirror);
+    }
     let access = Arc::new(Access::new(&config)?);
     let router = serve::router(Arc::clone(&access), &config.origins, axum::Router::new());
     serve::spawn_loops(&access);
@@ -368,15 +375,60 @@ mod tests {
         );
     }
 
-    /// A server held to public registries, as virtx cloud's nodes are: a pull from a registry on
-    /// the host's loopback fails saying so, and nothing there is connected to.
+    /// A stand-in for an embedder's registry proxy, which refuses whatever it is asked, saying so.
+    struct Refusing {
+        url: String,
+    }
+
+    struct RefusingPass {
+        url: String,
+        refused: std::sync::Mutex<bool>,
+    }
+
+    impl virtx_uvm::RegistryProxy for Refusing {
+        fn pass(&self) -> Box<dyn virtx_uvm::ProxyPass> {
+            Box::new(RefusingPass {
+                url: self.url.clone(),
+                refused: std::sync::Mutex::new(false),
+            })
+        }
+    }
+
+    impl virtx_uvm::ProxyPass for RefusingPass {
+        fn url(&self) -> &str {
+            &self.url
+        }
+
+        fn refused(&self) -> Option<virtx_uvm::ProxyRefusal> {
+            let mut refused = self.refused.lock().unwrap();
+            (!std::mem::replace(&mut *refused, true)).then(|| virtx_uvm::ProxyRefusal {
+                host: "the registry".into(),
+                why: "it is not let through".into(),
+            })
+        }
+    }
+
+    /// A server given a registry proxy, as virtx cloud's nodes are: a pull goes through it --
+    /// what it refuses fails saying so -- and connects to the registry itself not at all.
     #[tokio::test]
-    async fn a_server_held_to_public_registries_pulls_from_none_on_the_loopback() {
+    async fn a_server_s_pulls_go_through_its_registry_proxy() {
         use futures_util::StreamExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use virtx_core::ImageJobEntry;
 
-        let served = Served::spawn("public-registries").await;
-        virtx_server_tcp::endpoints::set_public_registries_only();
+        let served = Served::spawn("registry-proxy").await;
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", proxy.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = proxy.accept().await {
+                let mut head = [0; 1024];
+                let _ = stream.read(&mut head).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        virtx_server_tcp::endpoints::set_registry_proxy(Arc::new(Refusing { url }));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -399,8 +451,8 @@ mod tests {
             end.error.as_deref(),
             Some(
                 format!(
-                    "{reference}: 127.0.0.1:{port} is not reachable from virtx cloud: \
-                     it is at 127.0.0.1, which is not a public address"
+                    "{reference}: the registry is not reachable from this server: \
+                     it is not let through"
                 )
                 .as_str()
             )

@@ -21,7 +21,6 @@ use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -46,8 +45,8 @@ use virtx_uvm::sandbox::{Activity, Given, Held, Hooks, Sandbox, Wanted, Written}
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, PublicImages, Reference,
-    RegistryClient, RegistryError, RegistryServer, SandboxError, Sandboxes, SnapshotError,
-    SnapshotStore, VolumeError, VolumeStore, build_step, signal_number,
+    RegistryClient, RegistryError, RegistryProxy, RegistryServer, SandboxError, Sandboxes,
+    SnapshotError, SnapshotStore, VolumeError, VolumeStore, build_step, signal_number,
 };
 
 use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
@@ -80,9 +79,8 @@ fn admit(admission: Option<&dyn Admission>, spec: &MachineSpec) -> Result<Option
     }
 }
 
-/// Docker Hub's mirror, which this server's anonymous pulls of its images go to first, as an
-/// embedder sets it (virtx cloud's nodes do): none, unless set. See
-/// [`RegistryClient::with_mirror`].
+/// Docker Hub's mirror, which this server's anonymous pulls of its images go to first, as its
+/// config's `registry_mirror` says: none, unless set. See [`RegistryClient::with_mirror`].
 static REGISTRY_MIRROR: OnceLock<String> = OnceLock::new();
 
 /// Pull Docker Hub's images from its mirror at `mirror` first, from now on.
@@ -90,33 +88,29 @@ pub fn set_registry_mirror(mirror: &str) {
     let _ = REGISTRY_MIRROR.set(mirror.to_owned());
 }
 
-/// Whether this server's pulls, pushes and builds reach registries on public addresses only,
-/// as an embedder sets it (virtx cloud's nodes do): any registry, the host's own and its
-/// network's among them, unless set. See [`RegistryClient::public_only`].
-static PUBLIC_REGISTRIES_ONLY: AtomicBool = AtomicBool::new(false);
+/// The proxy this server's pulls, pushes and builds connect through, as an embedder sets it --
+/// virtx cloud's nodes hold them to registries on public addresses so: none, unless set, and any
+/// registry is reached, the host's own and its network's among them. See
+/// [`RegistryClient::through`].
+static REGISTRY_PROXY: OnceLock<Arc<dyn RegistryProxy>> = OnceLock::new();
 
-/// Reach registries on public addresses only, from now on: no registry, token realm, redirect or
-/// layer URL on the host's loopback, a private network, a link-local address (the cloud's
-/// metadata address among them) or carrier-grade NAT, and no plain `http://`.
-pub fn set_public_registries_only() {
-    PUBLIC_REGISTRIES_ONLY.store(true, Ordering::Relaxed);
+/// Connect to registries through `proxy`, from now on: said once, before any is reached.
+pub fn set_registry_proxy(proxy: Arc<dyn RegistryProxy>) {
+    let _ = REGISTRY_PROXY.set(proxy);
 }
 
 /// A registry client for this server's pulls and pushes: anonymous pulls from Docker Hub's
-/// mirror, if one was set, and shared through `public`, given one; held to public registries,
-/// if this server is.
+/// mirror, if one was set, and shared through `public`, given one; through the registry proxy,
+/// if one was set.
 fn registry(
     images: ImageStore,
     auth: Option<virtx_core::RegistryAuth>,
     public: Option<Arc<dyn PublicImages>>,
 ) -> Result<RegistryClient, RegistryError> {
-    let client = RegistryClient::new(images, auth)
+    RegistryClient::new(images, auth)
         .with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
-        .with_public(public);
-    if PUBLIC_REGISTRIES_ONLY.load(Ordering::Relaxed) {
-        return client.public_only();
-    }
-    Ok(client)
+        .with_public(public)
+        .through(REGISTRY_PROXY.get().map(|proxy| proxy.as_ref()))
 }
 
 /// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;

@@ -25,7 +25,6 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWrite;
 use virtx_core::RegistryAuth;
 
-use super::registry_proxy::{Pass, Proxy, Refusal};
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
 
@@ -65,10 +64,9 @@ pub enum Error {
         source: Box<OciDistributionError>,
     },
 
-    /// A host a client held to public registries ([`RegistryClient::public_only`]) did not
-    /// connect to: the registry `reference` names, or one it sent the client to, on an address
-    /// that is not public, or a plain `http://` URL.
-    #[error("{reference}: {host} is not reachable from virtx cloud: {why}")]
+    /// A host the proxy a client goes through ([`RegistryClient::through`]) did not let it
+    /// connect to: the registry `reference` names, or one it sent the client to.
+    #[error("{reference}: {host} is not reachable from this server: {why}")]
     Unreachable {
         reference: String,
         host: String,
@@ -141,6 +139,30 @@ fn mirrored(reference: &Reference, mirror: &str) -> Option<Reference> {
         .ok()
 }
 
+/// An HTTP CONNECT proxy a client's every connection goes through ([`RegistryClient::through`]),
+/// as an embedder runs it: what holds its server's pulls, pushes and builds to the registries it
+/// may reach.
+pub trait RegistryProxy: Send + Sync {
+    /// A client's way through it, until it drops.
+    fn pass(&self) -> Box<dyn ProxyPass>;
+}
+
+/// A client's way through a [`RegistryProxy`].
+pub trait ProxyPass: Send + Sync {
+    /// The proxy's URL, as the client names it: its credentials in it, if it takes any.
+    fn url(&self) -> &str;
+
+    /// The first connection the proxy refused this client since this was last asked, if any.
+    fn refused(&self) -> Option<ProxyRefusal>;
+}
+
+/// A connection a [`RegistryProxy`] refused: the host and port asked for, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyRefusal {
+    pub host: String,
+    pub why: String,
+}
+
 /// Where an embedder shares what anonymous pulls bring, between stores that would each pull it
 /// from its registry: virtx cloud's nodes, between organizations (virtx-cloud's
 /// docs/public-image-cache.md). Only an anonymous pull asks it or tells it anything
@@ -176,9 +198,9 @@ pub struct RegistryClient {
     auth: oci_client::secrets::RegistryAuth,
     /// Docker Hub's mirror, for anonymous pulls ([`RegistryClient::with_mirror`]).
     mirror: Option<String>,
-    /// The proxy every connection goes through, for a client held to public registries
-    /// ([`RegistryClient::public_only`]).
-    pass: Option<Pass>,
+    /// Its way through the proxy every connection goes through, if one does
+    /// ([`RegistryClient::through`]).
+    pass: Option<Box<dyn ProxyPass>>,
     /// Where anonymous pulls are shared ([`RegistryClient::with_public`]).
     public: Option<Arc<dyn PublicImages>>,
 }
@@ -215,23 +237,15 @@ impl RegistryClient {
         }
     }
 
-    /// As [`RegistryClient::new`], held to registries on public addresses: every connection it
-    /// makes -- to the registry, its token realm, a redirect, a layer's URL -- goes through a
-    /// proxy in this process that resolves the host itself and connects only to an address of
-    /// it on the internet, never the host's own, a private network's, a link's (the cloud's
-    /// metadata address among them) or carrier-grade NAT's. A plain `http://` URL is refused
-    /// whatever it names. What it refuses fails as [`Error::Unreachable`]. A client is not held
-    /// so by default, and reaches a registry on the host or its network as any other.
-    pub fn public_only(self) -> Result<Self> {
-        let proxy = Proxy::shared().map_err(|source| Error::Io {
-            context: "starting the registry proxy".into(),
-            source,
-        })?;
-        self.through(&proxy)
-    }
-
-    /// As [`RegistryClient::public_only`], through `proxy`.
-    fn through(mut self, proxy: &Arc<Proxy>) -> Result<Self> {
+    /// As [`RegistryClient::new`], every connection it makes -- to the registry, its token
+    /// realm, a redirect, a layer's URL -- through `proxy`, an HTTP CONNECT proxy, which may
+    /// refuse any: what it refuses fails as [`Error::Unreachable`]. None is no proxy, as a
+    /// client has by default. An embedder holds its server's clients to the registries it may
+    /// reach so (virtx cloud's nodes, to public addresses).
+    pub fn through(mut self, proxy: Option<&dyn RegistryProxy>) -> Result<Self> {
+        let Some(proxy) = proxy else {
+            return Ok(self);
+        };
         let pass = proxy.pass();
         let config = ClientConfig {
             https_proxy: Some(pass.url().to_owned()),
@@ -250,8 +264,8 @@ impl RegistryClient {
     /// `source`, as an error at `reference`: what the proxy refused this client, if it did,
     /// and else as [`Error::registry`] tells it.
     fn failed(&self, reference: &Reference, source: OciDistributionError) -> Error {
-        match self.pass.as_ref().and_then(Pass::refused) {
-            Some(Refusal { host, why }) => Error::Unreachable {
+        match self.pass.as_ref().and_then(|pass| pass.refused()) {
+            Some(ProxyRefusal { host, why }) => Error::Unreachable {
                 reference: reference.to_string(),
                 host,
                 why,
@@ -914,42 +928,96 @@ mod tests {
         (listener, port)
     }
 
+    /// A stand-in for an embedder's proxy, at `url`, that says it refused `refusal`, if anything.
+    struct StandIn {
+        url: String,
+        refusal: Option<ProxyRefusal>,
+    }
+
+    impl RegistryProxy for StandIn {
+        fn pass(&self) -> Box<dyn ProxyPass> {
+            Box::new(StandInPass {
+                url: self.url.clone(),
+                refusal: std::sync::Mutex::new(self.refusal.clone()),
+            })
+        }
+    }
+
+    struct StandInPass {
+        url: String,
+        refusal: std::sync::Mutex<Option<ProxyRefusal>>,
+    }
+
+    impl ProxyPass for StandInPass {
+        fn url(&self) -> &str {
+            &self.url
+        }
+
+        fn refused(&self) -> Option<ProxyRefusal> {
+            self.refusal.lock().unwrap().take()
+        }
+    }
+
     #[tokio::test]
-    async fn a_client_held_to_public_registries_connects_to_none_on_the_loopback() {
-        let scratch = Scratch::new("public-only");
-        let (listener, port) = listener();
-        let registry = RegistryClient::new(scratch.0.clone(), None)
-            .public_only()
-            .unwrap();
-
-        // A guard against a hang, not a measure of anything.
-        let pulled = async |reference: &Reference| {
-            let pull = registry.pull(reference, |_| {});
-            tokio::time::timeout(std::time::Duration::from_secs(60), pull)
-                .await
-                .expect("the pull went on")
-                .unwrap_err()
+    async fn a_client_through_a_proxy_connects_to_it_alone() {
+        let scratch = Scratch::new("through");
+        let (registry_listener, port) = listener();
+        let (proxy_listener, proxy_port) = listener();
+        let proxy = StandIn {
+            url: format!("http://127.0.0.1:{proxy_port}"),
+            refusal: None,
         };
-
+        let registry = RegistryClient::new(scratch.0.clone(), None)
+            .through(Some(&proxy))
+            .unwrap();
         let reference: Reference = format!("127.0.0.1:{port}/team/app:1").parse().unwrap();
-        let e = pulled(&reference).await;
+        let first = first_bytes(&registry, proxy_listener, &reference).await;
+        assert_eq!(first, b"CONNE");
         assert_eq!(
-            e.to_string(),
-            format!(
-                "127.0.0.1:{port}/team/app:1: 127.0.0.1:{port} is not reachable from virtx cloud: \
-                 it is at 127.0.0.1, which is not a public address"
-            )
-        );
-        let reference: Reference = format!("localhost:{port}/team/app:1").parse().unwrap();
-        let e = pulled(&reference).await;
-        assert!(
-            matches!(&e, Error::Unreachable { host, .. } if *host == format!("localhost:{port}")),
-            "{e}"
-        );
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
+            registry_listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
             "the registry was connected to"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_the_proxy_refused_a_client_is_its_error() {
+        let scratch = Scratch::new("refused");
+        let (_registry_listener, port) = listener();
+        // A proxy that refuses whatever it is asked.
+        let (proxy_listener, proxy_port) = listener();
+        let proxy_listener = tokio::net::TcpListener::from_std(proxy_listener).unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            while let Ok((mut stream, _)) = proxy_listener.accept().await {
+                let mut head = [0; 1024];
+                let _ = stream.read(&mut head).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let host = format!("127.0.0.1:{port}");
+        let proxy = StandIn {
+            url: format!("http://127.0.0.1:{proxy_port}"),
+            refusal: Some(ProxyRefusal {
+                host: host.clone(),
+                why: "it is not let through".into(),
+            }),
+        };
+        let registry = RegistryClient::new(scratch.0.clone(), None)
+            .through(Some(&proxy))
+            .unwrap();
+        let reference: Reference = format!("{host}/team/app:1").parse().unwrap();
+        // A guard against a hang, not a measure of anything.
+        let pull = registry.pull(&reference, |_| {});
+        let e = tokio::time::timeout(std::time::Duration::from_secs(60), pull)
+            .await
+            .expect("the pull went on")
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            format!("{reference}: {host} is not reachable from this server: it is not let through")
         );
     }
 
@@ -991,22 +1059,6 @@ mod tests {
         assert_eq!(first[0], 0x16, "{first:?}");
     }
 
-    #[tokio::test]
-    async fn a_client_held_to_public_registries_reaches_an_allowed_one_through_the_proxy() {
-        let scratch = Scratch::new("through");
-        let (listener, port) = listener();
-        // A proxy that lets the loopback through, as the process's lets a public address.
-        let proxy = Proxy::start(|_| true).unwrap();
-        let registry = RegistryClient::new(scratch.0.clone(), None)
-            .through(&proxy)
-            .unwrap();
-        let reference: Reference = format!("127.0.0.1:{port}/team/app:1").parse().unwrap();
-        let first = first_bytes(&registry, listener, &reference).await;
-        // The client's TLS handshake, carried through the tunnel the proxy opened for it.
-        assert_eq!(first[0], 0x16, "{first:?}");
-        assert_eq!(registry.pass.as_ref().unwrap().refused(), None);
-    }
-
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
     /// mirror, with Docker Hub named: the same digest, tagged by Docker Hub's name.
     #[tokio::test]
@@ -1028,31 +1080,6 @@ mod tests {
         // One the mirror has not: from Docker Hub after all -- here, a name no one has, refused.
         let none: Reference = "virtx-no-such-image-anywhere:0".parse().unwrap();
         assert!(registry.pull(&none, |_| {}).await.is_err());
-    }
-
-    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
-    /// mirror, held to public registries: the mirror, its token realm and wherever it sends a
-    /// blob are on public addresses.
-    #[tokio::test]
-    #[ignore]
-    async fn docker_hub_s_image_comes_from_its_mirror_held_to_public_registries() {
-        let scratch = Scratch::new("mirror-public");
-        let registry = RegistryClient::new(scratch.0.clone(), None)
-            .with_mirror(Some("mirror.gcr.io"))
-            .public_only()
-            .unwrap();
-        let reference: Reference = "alpine:3.21".parse().unwrap();
-        let mut said = Vec::new();
-        registry
-            .pull(&reference, |line| said.push(line))
-            .await
-            .unwrap();
-        assert!(
-            !said
-                .iter()
-                .any(|line| line.starts_with("not from the mirror")),
-            "{said:?}"
-        );
     }
 
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.

@@ -47,6 +47,11 @@ pub struct Config {
     /// once a minute so measured, every 60 seconds at most.
     #[serde(default)]
     pub minute_secs: Option<u64>,
+    /// Docker Hub's mirror, which anonymous pulls of its images go to first (`mirror.gcr.io`,
+    /// say): Docker Hub refuses anonymous pulls past a few an hour from one address, which a
+    /// server pulling for many reaches. None, unless set.
+    #[serde(default)]
+    pub registry_mirror: Option<String>,
 }
 
 #[derive(Deserialize)]

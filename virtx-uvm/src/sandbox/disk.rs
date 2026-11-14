@@ -65,9 +65,10 @@ impl Sandbox {
             let _paused = run.machine.pause()?;
             copy_sparse(&path, &to)
                 .map_err(|e| Error::Failed(format!("copying {}: {e}", path.display())))?;
-            // A lazy disk's copy lazy as it is: which chunks are present, as of this pause.
-            crate::lazy::copy_beside(&path, &to)
-                .map_err(|e| Error::Failed(format!("copying {}'s sidecar: {e}", path.display())))?;
+            // What is beside it copied as of this pause.
+            crate::disks::disks().copied(&path, &to).map_err(|e| {
+                Error::Failed(format!("copying what is beside {}: {e}", path.display()))
+            })?;
             Ok::<_, Error>(())
         })
         .await??;
@@ -75,17 +76,15 @@ impl Sandbox {
     }
 
     /// What the copy of its disk made at `mark` ([`copy_disk`](Self::copy_disk)) was kept as,
-    /// `kept`, made its disk's base while its machine runs: what its next save reads is only
-    /// what was written since the mark. Whether it was: not if its machine is down now -- its
-    /// next save reads what it would have -- or another mark came since.
+    /// made what its disk is while its machine runs, as the server's disks have it
+    /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)) -- what it was kept as
+    /// beside the disk already, as they keep it. Whether it was: not if its machine is down
+    /// now, or another mark came since.
     #[cfg(unix)]
-    pub async fn rebase(&self, mark: u64, kept: &crate::lazy::Sidecar) -> Result<bool, Error> {
+    pub async fn rebase(&self, mark: u64) -> Result<bool, Error> {
         let Some(run) = self.run() else {
             return Ok(false);
         };
-        let path = self.shared.snapshots.open(&self.record.id)?.path;
-        crate::lazy::stage_base(&path, kept)
-            .map_err(|e| Error::Failed(format!("staging {}'s base: {e}", path.display())))?;
         let (told, rebased) = oneshot::channel();
         *run.rebased.lock().unwrap() = Some((mark, told));
         run.machine.rebase(mark)?;
@@ -141,7 +140,7 @@ impl Sandbox {
                             "sandbox {id} stopped as it was committed"
                         )));
                     }
-                    // A lazy disk's copy is lazy: made whole, to be read.
+                    // Made all here, to be read, as the server's disks have it.
                     shared.hooks.materialize(id, &copy).await?;
                 }
                 #[cfg(not(unix))]

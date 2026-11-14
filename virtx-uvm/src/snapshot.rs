@@ -102,16 +102,19 @@ impl Snapshot {
         let _ = fs::remove_file(&part);
         let written = File::create_new(&part)
             .map_err(|e| Error::io(format!("creating {}", part.display()), e))
-            .and_then(|file| tree.to_ext4(Snapshot::sparse(file), size).map_err(Error::from))
+            .and_then(|file| {
+                tree.to_ext4(Snapshot::sparse(file), size)
+                    .map_err(Error::from)
+            })
             .and_then(|()| {
                 fs::rename(&part, &self.path)
                     .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
             });
-        // Written again whole: no base says what it is now.
-        #[cfg(unix)]
+        // Written again whole: nothing beside it says what it is now.
         if written.is_ok() {
-            crate::lazy::forget(&self.path)
-                .map_err(|e| Error::io(format!("forgetting {}'s base", self.path.display()), e))?;
+            crate::disks::disks().forget(&self.path).map_err(|e| {
+                Error::io(format!("forgetting what {} was", self.path.display()), e)
+            })?;
         }
         if written.is_err() {
             let _ = fs::remove_file(&part);
@@ -315,8 +318,7 @@ impl Store {
         let lock = snapshot.lock()?;
         fs::remove_file(&snapshot.path)
             .map_err(|e| Error::io(format!("removing {}", snapshot.path.display()), e))?;
-        #[cfg(unix)]
-        let _ = crate::lazy::forget(&snapshot.path);
+        let _ = crate::disks::disks().forget(&snapshot.path);
         drop(lock);
         let _ = fs::remove_file(snapshot.lock_path());
         Ok(())
@@ -333,10 +335,15 @@ impl Store {
         let lock = snapshot.lock()?;
         fs::rename(disk, &snapshot.path)
             .map_err(|e| Error::io(format!("moving {} into place", snapshot.path.display()), e))?;
-        // A lazy disk's sidecar with it; and none left of the disk it replaced.
-        #[cfg(unix)]
-        crate::lazy::move_beside(disk, &snapshot.path)
-            .map_err(|e| Error::io(format!("moving {}'s sidecar", snapshot.path.display()), e))?;
+        // What is beside it with it; and none left of the disk it replaced.
+        crate::disks::disks()
+            .moved(disk, &snapshot.path)
+            .map_err(|e| {
+                Error::io(
+                    format!("moving what is beside {}", snapshot.path.display()),
+                    e,
+                )
+            })?;
         drop(lock);
         Ok(snapshot)
     }

@@ -72,9 +72,6 @@ log = "0.4"
 #     krun-display = { path = "../libkrun/src/display" }
 krun = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "libkrun", features = ["blk"] }
 krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "krun-init-blob", features = ["direct"] }
-# A disk restored lazily (`lazy`): a storage libkrun's block device reads through, imago's as
-# libkrun's own is, synchronous.
-imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
 krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "krun-display", optional = true }
 

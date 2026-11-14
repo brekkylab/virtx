@@ -164,9 +164,6 @@ pub struct HomeInner {
     /// What a files request is writing now, and how many write each: neither let go nor kept
     /// meanwhile ([`Home::serve_files`]).
     writing: Arc<Mutex<HashMap<(Kind, String), usize>>>,
-    /// The lazy snapshots being filled ahead of their machine ([`Home::fill_ahead`]), each
-    /// with what stops it.
-    filling: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
     /// Every sandbox, running or stopped, until it is deleted.
@@ -219,7 +216,6 @@ impl Home {
             images,
             files: Files::new(snapshots.clone(), volumes.clone()),
             writing: Arc::default(),
-            filling: Arc::default(),
             snapshots,
             volumes,
             vm,
@@ -470,148 +466,6 @@ impl Home {
         }
     }
 
-    /// Snapshot `name`, lazy, fetched whole in the background, held meanwhile: as a disk made
-    /// ready ahead of its start is. A start, a removal, or a reader that wants it whole stops
-    /// or waits on it ([`settle`](Self::settle)); a machine fetches what is left as it reads.
-    pub fn fill_ahead(&self, name: &str) {
-        #[cfg(unix)]
-        {
-            let Some(keeping) = self.keeping.clone() else {
-                return;
-            };
-            let Ok(snapshot) = self.snapshots.open(name) else {
-                return;
-            };
-            if !virtx_uvm::lazy::is_lazy(&snapshot.path) {
-                return;
-            }
-            let stop = Arc::new(AtomicBool::new(false));
-            {
-                let mut filling = self.filling.lock().unwrap();
-                if filling.contains_key(name) {
-                    return;
-                }
-                filling.insert(name.to_owned(), Arc::clone(&stop));
-            }
-            let source = Arc::new(KeptChunks {
-                keeping,
-                kind: Kind::Snapshot,
-                name: name.to_owned(),
-                runtime: tokio::runtime::Handle::current(),
-            });
-            let (filling, name) = (Arc::clone(&self.filling), name.to_owned());
-            tokio::task::spawn_blocking(move || {
-                let filled = match snapshot.lock() {
-                    Ok(held) => {
-                        let filled =
-                            virtx_uvm::lazy::materialize_until(&snapshot.path, source, &stop);
-                        drop(held);
-                        filled.map(|_| ())
-                    }
-                    // A machine on it already, which fetches it as it reads.
-                    Err(_) => Ok(()),
-                };
-                filling.lock().unwrap().remove(&name);
-                if let Err(e) = filled {
-                    eprintln!("snapshot {name} not filled ahead: {e}");
-                }
-            });
-        }
-        #[cfg(not(unix))]
-        let _ = name;
-    }
-
-    /// Snapshot `name`'s fill ahead, if one is going, stopped -- what it fetched kept -- and
-    /// waited for until it has let go of the disk.
-    pub async fn settle(&self, name: &str) {
-        let stop = self.filling.lock().unwrap().get(name).cloned();
-        let Some(stop) = stop else {
-            return;
-        };
-        stop.store(true, Ordering::Release);
-        while self.filling.lock().unwrap().contains_key(name) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    /// `kind` `name`'s disk at `path` -- its own, or a copy of it -- made whole if it is lazy:
-    /// every chunk not here fetched from where it is kept. For a reader of the disk other than
-    /// its machine. Its own, held meanwhile; one a machine runs on is left to the machine,
-    /// which fills it.
-    pub async fn materialize(&self, kind: Kind, name: &str, path: &Path) -> Result<(), Refused> {
-        #[cfg(unix)]
-        if let Some(keeping) = &self.keeping
-            && virtx_uvm::lazy::is_lazy(path)
-        {
-            // Filled ahead now: let that make it whole, rather than find it held.
-            while self.filling.lock().unwrap().contains_key(name) {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            let own = self
-                .snapshots
-                .open(name)
-                .ok()
-                .filter(|own| own.path == path);
-            let held = match own.map(|own| own.lock()).transpose() {
-                Ok(held) => held,
-                Err(SnapshotError::InUse(_)) => return Ok(()),
-                Err(e) => return Err(e.into()),
-            };
-            let source = Arc::new(KeptChunks {
-                keeping: Arc::clone(keeping),
-                kind,
-                name: name.to_owned(),
-                runtime: tokio::runtime::Handle::current(),
-            });
-            let path = path.to_owned();
-            tokio::task::spawn_blocking(move || {
-                let _held = held;
-                virtx_uvm::lazy::materialize(&path, source)
-            })
-            .await?
-            .map_err(|e| {
-                Refusal::Failed(anyhow::anyhow!(
-                    "fetching {} {name} whole: {e}",
-                    kind.as_str()
-                ))
-            })?;
-        }
-        #[cfg(not(unix))]
-        let _ = (kind, name, path);
-        Ok(())
-    }
-
-    /// `kind` `name`'s chunks answered on a socket of its own, its disk at `path` being lazy:
-    /// until what this answers drops. `None` for a disk that is not.
-    fn serve_chunks(
-        &self,
-        kind: Kind,
-        name: &str,
-        path: &Path,
-    ) -> Result<Option<ChunksServed>, Refused> {
-        #[cfg(unix)]
-        if let Some(keeping) = &self.keeping
-            && virtx_uvm::lazy::is_lazy(path)
-        {
-            let socket = virtx_uvm::lazy::chunks_socket(name);
-            let _ = std::fs::remove_file(&socket);
-            let listener = tokio::net::UnixListener::bind(&socket).map_err(|e| {
-                Refusal::Failed(anyhow::anyhow!("listening at {}: {e}", socket.display()))
-            })?;
-            let (keeping, name) = (Arc::clone(keeping), name.to_owned());
-            let task = tokio::spawn(async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    let (keeping, name) = (Arc::clone(&keeping), name.clone());
-                    tokio::spawn(answer_chunk(stream, keeping, kind, name));
-                }
-            });
-            return Ok(Some(ChunksServed { socket, task }));
-        }
-        #[cfg(not(unix))]
-        let _ = (kind, name, path);
-        Ok(None)
-    }
-
     /// `kind` `name` brought up to what is kept, only to be read.
     async fn bring_up(&self, kind: Kind, name: &str) -> Result<(), Refused> {
         match &self.keeping {
@@ -718,21 +572,16 @@ impl Home {
         }
     }
 
-    /// What the copy of snapshot `name` made at `mark` ([`copy_snapshot_marked`]) was kept as,
-    /// `kept`, made its disk's base while its machine runs: what its next save reads is only
-    /// what was written since the mark. Whether it was: not if its machine is down now -- its
-    /// next save reads what it would have -- or another mark came since.
+    /// What the copy of snapshot `name` made at `mark` ([`copy_snapshot_marked`]) was kept as
+    /// made what its disk is while its machine runs, as the server's disks have it -- what it
+    /// was kept as beside the disk already ([`Sandbox::rebase`]). Whether it was: not if its
+    /// machine is down now, or another mark came since.
     ///
     /// [`copy_snapshot_marked`]: Self::copy_snapshot_marked
     #[cfg(unix)]
-    pub async fn rebase(
-        &self,
-        name: &str,
-        mark: u64,
-        kept: &virtx_uvm::lazy::Sidecar,
-    ) -> Result<bool, Refused> {
+    pub async fn rebase(&self, name: &str, mark: u64) -> Result<bool, Refused> {
         match self.sandboxes.running_on(name) {
-            Some(sandbox) => Ok(sandbox.rebase(mark, kept).await?),
+            Some(sandbox) => Ok(sandbox.rebase(mark).await?),
             None => Ok(false),
         }
     }
@@ -874,8 +723,8 @@ impl Hooks for HomeHooks {
     }
 
     fn readied(&self, id: &str) {
-        if let Ok(home) = self.home() {
-            home.fill_ahead(id);
+        if let (Some(keeping), Ok(home)) = (&self.keeping, self.home()) {
+            keeping.fill_ahead(&home, id);
         }
     }
 
@@ -901,7 +750,9 @@ impl Hooks for HomeHooks {
                 }
                 .map_err(hooked)?;
             }
-            home.settle(id).await;
+            if let Some(keeping) = &self.keeping {
+                keeping.settle(id).await;
+            }
             Ok(taken.into_iter().collect())
         })
     }
@@ -915,11 +766,10 @@ impl Hooks for HomeHooks {
     }
 
     fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, SandboxError> {
-        let served = self
-            .home()?
-            .serve_chunks(Kind::Snapshot, id, disk)
-            .map_err(hooked)?;
-        Ok(served.map(|served| (served.socket.clone(), Box::new(served) as Held)))
+        match &self.keeping {
+            Some(keeping) => keeping.chunks(Kind::Snapshot, id, disk).map_err(hooked),
+            None => Ok(None),
+        }
     }
 
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
@@ -940,8 +790,12 @@ impl Hooks for HomeHooks {
         disk: &'a Path,
     ) -> BoxFuture<'a, Result<(), SandboxError>> {
         Box::pin(async move {
-            self.home()?
-                .materialize(Kind::Snapshot, id, disk)
+            let Some(keeping) = &self.keeping else {
+                return Ok(());
+            };
+            let home = self.home()?;
+            keeping
+                .materialize(&home, Kind::Snapshot, id, disk)
                 .await
                 .map_err(hooked)
         })
@@ -966,8 +820,8 @@ impl Hooks for HomeHooks {
                     Ok(()) | Err(Refusal::Unknown { .. }) => {}
                     Err(e) => return Err(hooked(e)),
                 }
+                keeping.settle(id).await;
             }
-            home.settle(id).await;
             Ok(())
         })
     }
@@ -1764,64 +1618,6 @@ async fn sandbox_job_events(
     headers: HeaderMap,
 ) -> Answer {
     Ok(events(home.sandbox(&id)?.job(&job)?.log(), &headers))
-}
-
-/// A lazy disk's chunks answered to its machine ([`Home::serve_chunks`]): the socket, and what
-/// answers on it, stopped and gone once this drops.
-struct ChunksServed {
-    socket: PathBuf,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for ChunksServed {
-    fn drop(&mut self) {
-        self.task.abort();
-        let _ = std::fs::remove_file(&self.socket);
-    }
-}
-
-/// The chunk asked for on `stream` answered, from where `kind` `name` is kept.
-#[cfg(unix)]
-async fn answer_chunk(
-    mut stream: tokio::net::UnixStream,
-    keeping: Arc<dyn Keeping>,
-    kind: Kind,
-    name: String,
-) {
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-    let mut asked = String::new();
-    let mut reading = tokio::io::BufReader::new(&mut stream);
-    if reading.read_line(&mut asked).await.is_err() {
-        return;
-    }
-    let chunk = asked.trim_end();
-    let answer = match keeping.chunk(kind, &name, chunk).await {
-        Ok(bytes) => virtx_uvm::lazy::answer(Ok(&bytes)),
-        Err(e) => {
-            eprintln!("chunk {chunk} of {} {name}: {e:#}", kind.as_str());
-            virtx_uvm::lazy::answer(Err(&format!("{e:#}")))
-        }
-    };
-    let _ = stream.write_all(&answer).await;
-}
-
-/// Chunks of `kind` `name` fetched from where they are kept, from a thread of its own: what
-/// [`Home::materialize`] fetches with.
-#[cfg(unix)]
-struct KeptChunks {
-    keeping: Arc<dyn Keeping>,
-    kind: Kind,
-    name: String,
-    runtime: tokio::runtime::Handle,
-}
-
-#[cfg(unix)]
-impl virtx_uvm::lazy::ChunkSource for KeptChunks {
-    fn fetch(&self, chunk: &str) -> io::Result<Vec<u8>> {
-        self.runtime
-            .block_on(self.keeping.chunk(self.kind, &self.name, chunk))
-            .map_err(|e| io::Error::other(format!("{e:#}")))
-    }
 }
 
 /// What a sandbox's machine logged: a warning or an error, or everything with

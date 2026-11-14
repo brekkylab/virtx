@@ -391,49 +391,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     lower.set_read_only(true);
 
     let upper_path = utf8(&upper)?;
-    // A snapshot with a base: read and written through it, what is written told apart for
-    // its next save; and, lazy, its chunks fetched over the host's socket as they are first
-    // read, and the rest in the background until it is whole.
-    #[cfg(unix)]
-    let lazy = match &machine.snapshot {
-        Some(_) if crate::lazy::has_base(&upper) => {
-            let source: Arc<dyn crate::lazy::ChunkSource> = match &machine.chunks {
-                Some(socket) => Arc::new(crate::lazy::SocketSource::new(socket.clone())),
-                None => Arc::new(crate::lazy::NoChunks),
-            };
-            Some(
-                crate::lazy::LazyDisk::open(&upper, source)
-                    .map_err(|e| Error::io(format!("opening {upper_path} by its base"), e))?,
-            )
-        }
-        // One with no base, new: its boot set noted, for its first lazy boot elsewhere.
-        Some(_) => Some(
-            crate::lazy::LazyDisk::open_unbased(&upper)
-                .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
-        ),
-        _ => None,
+    // A snapshot's disk as the server's disks have it opened ([`crate::disks`]): read and
+    // written through what they make of it, if anything, rather than as the file is.
+    let opened = match &machine.snapshot {
+        Some(_) => crate::disks::disks()
+            .open(&upper, machine.chunks.as_deref())
+            .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+        None => None,
     };
-    #[cfg(not(unix))]
-    let lazy: Option<std::convert::Infallible> = None;
-    let upper_device = match &lazy {
-        #[cfg(unix)]
-        Some(disk) => {
-            BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, Box::new(disk.clone()))
-        }
-        #[cfg(not(unix))]
-        Some(never) => match *never {},
+    let upper_device = match &opened {
+        Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
     .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
-    // Told its machine has booted, as its agent says it is ready: its boot set ends there.
-    #[cfg(unix)]
-    let booting = lazy.clone();
-    // Marked and rebased as the host keeps it while it runs.
-    #[cfg(unix)]
-    let kept = lazy.clone();
-    #[cfg(unix)]
-    if let Some(disk) = lazy.filter(|disk| !disk.whole()) {
-        std::thread::spawn(move || fill(disk));
+    // Told its machine has booted, as its agent says it is ready; marked and rebased as the
+    // host keeps it while it runs.
+    let booting = opened.clone();
+    let kept = opened.clone();
+    if let Some(disk) = opened {
+        std::thread::spawn(move || disk.background());
     }
 
     let mut devices = MmioDeviceManager::new();
@@ -503,24 +479,18 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
             match message {
                 CtrlReq::Mark { mark } => {
-                    #[cfg(unix)]
                     let marked = match &kept {
-                        Some(disk) => disk.mark(mark).map(|()| true).map_err(|e| e.to_string()),
+                        Some(disk) => disk.mark(mark).map_err(|e| e.to_string()),
                         None => Ok(false),
                     };
-                    #[cfg(not(unix))]
-                    let marked = Ok(false);
                     let _ = send(&CtrlResp::Marked { mark, marked });
                     continue;
                 }
                 CtrlReq::Rebase { mark } => {
-                    #[cfg(unix)]
                     let rebased = match &kept {
                         Some(disk) => disk.rebase(mark).map_err(|e| e.to_string()),
                         None => Ok(false),
                     };
-                    #[cfg(not(unix))]
-                    let rebased = Ok(false);
                     let _ = send(&CtrlResp::Rebased { mark, rebased });
                     continue;
                 }
@@ -546,7 +516,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
             let _ = send(&match message {
                 CtrlResp::Ready(_) => {
-                    #[cfg(unix)]
                     if let Some(disk) = &booting {
                         disk.booted();
                     }
@@ -740,18 +709,6 @@ fn env(config: &Config, abin: bool) -> Vec<String> {
         };
     }
     env
-}
-
-/// `disk` fetched whole, in the background of its machine: tried again a while after a chunk
-/// could not be, until it is.
-#[cfg(unix)]
-fn fill(disk: crate::lazy::LazyDisk) {
-    // What its last boot touched first, ahead of the guest asking for it; then the rest.
-    disk.fetch_boot_set(crate::lazy::BOOT_AT_ONCE);
-    while let Err(e) = disk.fill(crate::lazy::FILL_AT_ONCE) {
-        log::warn!("filling {disk}: {e}; again in 5 s");
-        std::thread::sleep(std::time::Duration::from_secs(5));
-    }
 }
 
 #[cfg(test)]

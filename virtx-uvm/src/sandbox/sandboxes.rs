@@ -212,10 +212,9 @@ impl Sandboxes {
                     .parse()
                     .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
                 shared.hooks.want(Wanted::Tag(tag)).await?;
-                shared
-                    .images
-                    .get_tag(&reference)?
-                    .ok_or_else(|| Error::NotFound(format!("no image here is tagged {tag}: pull it first")))?
+                shared.images.get_tag(&reference)?.ok_or_else(|| {
+                    Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
+                })?
             }
             ImageName::Digest { digest } => {
                 let digest = digest

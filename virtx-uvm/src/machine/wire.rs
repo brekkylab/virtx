@@ -95,11 +95,12 @@ pub enum CtrlReq {
     /// command a shell runs -- answered with [`Foreground`](CtrlResp::Foreground).
     Foreground { id: u32 },
     /// Mark its disk `mark`, as it is about to be copied: what is written from now on noted
-    /// apart ([`crate::lazy::Lazy::mark`]). Answered with [`Marked`](CtrlResp::Marked).
+    /// apart ([`MachineDisk::mark`](crate::disks::MachineDisk::mark)). Answered with
+    /// [`Marked`](CtrlResp::Marked).
     /// The machine's process does it; the guest never hears of it.
     Mark { mark: u64 },
-    /// Make what the copy made at mark `mark` was kept as -- staged beside the disk
-    /// ([`crate::lazy::stage_base`]) -- its disk's base ([`crate::lazy::Lazy::rebase`]).
+    /// Make what the copy made at mark `mark` was kept as what its disk is
+    /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)).
     /// Answered with [`Rebased`](CtrlResp::Rebased).
     Rebase { mark: u64 },
 }

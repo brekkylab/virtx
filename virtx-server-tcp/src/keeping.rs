@@ -2,10 +2,12 @@
 //! [`Keeping`] given to its [`Home`] as it is made. A server on its own has none, and each hook
 //! is then nothing. virtx cloud's node keeps them in each organization's storage home.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use virtx_uvm::sandbox::Held;
 use virtx_uvm::{Digest, PublicImages, Reference, SnapshotStore, VolumeStore};
 
 use crate::endpoints::Home;
@@ -84,7 +86,7 @@ pub trait Keeping: Send + Sync {
     ) -> BoxFuture<'a, Result<(), Refusal>>;
 
     /// As [`take`](Self::take), to boot a machine on: lazily, if the keeping can -- the disk's
-    /// data left where it is kept, fetched as the machine reads it ([`chunk`](Self::chunk)).
+    /// data left where it is kept, fetched as the machine reads it ([`chunks`](Self::chunks)).
     fn take_to_boot<'a>(
         &'a self,
         home: &'a Home,
@@ -94,15 +96,45 @@ pub trait Keeping: Send + Sync {
         self.take(home, kind, name)
     }
 
-    /// The chunk named `chunk` of `kind` `name`, a lazy disk's, as it is kept: its bytes.
-    fn chunk<'a>(
+    /// What the machine on `kind` `name`'s disk, at `path`, fetches the disk from while it
+    /// runs, where it was [taken to boot](Self::take_to_boot) lazily: a socket, and what answers
+    /// on it until it drops ([`Hooks::chunks`](virtx_uvm::sandbox::Hooks::chunks)). `None`
+    /// for a disk all here.
+    fn chunks(
+        &self,
+        kind: Kind,
+        name: &str,
+        path: &Path,
+    ) -> Result<Option<(PathBuf, Held)>, Refusal> {
+        let _ = (kind, name, path);
+        Ok(None)
+    }
+
+    /// Snapshot `name`, a sandbox's disk made ready here ahead of its start
+    /// ([`Hooks::readied`](virtx_uvm::sandbox::Hooks::readied)): what is not here of it
+    /// fetched meanwhile, if anything, until it is [settled](Self::settle).
+    fn fill_ahead(&self, home: &Home, name: &str) {
+        let _ = (home, name);
+    }
+
+    /// Snapshot `name`'s fill ahead, if one is going, stopped -- what it fetched kept -- and
+    /// waited for until it has let go of the disk: as its machine boots, or it is deleted.
+    fn settle<'a>(&'a self, name: &'a str) -> BoxFuture<'a, ()> {
+        let _ = name;
+        Box::pin(async {})
+    }
+
+    /// `kind` `name`'s disk at `path` -- its own, or a copy of it -- made all here: for a
+    /// reader of it other than its machine.
+    fn materialize<'a>(
         &'a self,
+        home: &'a Home,
         kind: Kind,
         name: &'a str,
-        chunk: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<Vec<u8>>> {
-        let _ = chunk;
-        Box::pin(async move { anyhow::bail!("{} {name} has no chunks kept", kind.as_str()) })
+        path: &'a Path,
+    ) -> BoxFuture<'a, Result<(), Refusal>> {
+        let _ = (home, kind, name, path);
+        Box::pin(async { Ok(()) })
     }
 
     /// `kind` `name` brought up to what is kept, only to be read.

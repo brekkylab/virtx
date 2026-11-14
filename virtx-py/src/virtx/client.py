@@ -482,7 +482,10 @@ class Client:
         ``PortSpec`` (or its ``{port, label?, protocol?, inbound?}``) to say what it is for,
         whether it is HTTP and whom it lets in -- each answered here and by ``Sandbox.start``
         with the ``url`` it is reached by.
-        Whatever is left out the server picks."""
+        Whatever is left out the server picks.
+
+        ``image`` has to be on the server already, pulled or built: this does not pull it, and a
+        tag the server has no image by is refused with ``404``."""
         args = json.loads(
             _args(
                 image=image_name(image).to_dict(),

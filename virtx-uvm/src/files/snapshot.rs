@@ -134,7 +134,10 @@ impl Image {
                     context: format!("creating {}", part.display()),
                     source: e,
                 })
-                .and_then(|file| tree.to_ext4(file, size).map_err(Error::from))
+                .and_then(|file| {
+                    let file = Snapshot::sparse(file);
+                    tree.to_ext4(file, size).map_err(Error::from)
+                })
                 .and_then(|()| {
                     fs::rename(&part, &path).map_err(|e| Error::Io {
                         context: format!("moving {} into place", path.display()),

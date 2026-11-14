@@ -3,8 +3,19 @@
 # - `check`: `cargo xtask check`: the format, clippy of the client and the servers, and the
 #   tests that boot nothing. It compiles the servers but runs none, so it answers first.
 # - `suites`: `cargo xtask test` with the servers built here: the crates' own tests, then the
-#   packages' against the fixture, each booting machines. Linux x86_64 only, the one runner
-#   GitHub gives a hypervisor on; the guest kernel is the one `build` made.
+#   packages' against the fixture, each booting machines. Linux x86_64, the one runner GitHub
+#   gives a hypervisor on; the guest kernel is the one `build` made.
+# - `suites-windows`: the machine-booting crates' tests on Windows, over WHP, which no GitHub
+#   runner has. They run on `virtx-windows-ci`, an EC2 instance of our own with nested
+#   virtualization, registered to this repository: `windows-runner` starts it, and it stops
+#   itself once no job has run on it for 20 minutes. A fork's pull request has no AWS role to
+#   start it with, and does not ask; that a fork's workflow cannot reach the runner while it is
+#   up is the repository's fork approval setting's to say, not this file's.
+#
+#   What the runner has to have, for whoever builds it again (from the `virtx-windows-ci-*`
+#   AMI, which has all of it): WHP on (`HypervisorPlatform`, and nested virtualization on the
+#   instance); the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git with its `bin` on
+#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
 #   the wheel pip picks, each opening the library it carries; then the server that library
 #   fetches, from a release layout served on localhost, started and asked to answer.
@@ -99,15 +110,13 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: handoff
-          key: guest-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-x86_64
 
       - name: Put the kernel in place
         run: |
+          tar -xf handoff.tar
           mkdir -p build/krunfw
           cp -v handoff/kernel/libkrunfw.so.* build/krunfw/
 
@@ -118,6 +127,79 @@ jobs:
           node-version: 22
 
       - run: cargo xtask test
+
+  # Starts `virtx-windows-ci`, whose runner then takes `suites-windows`. Starting a running
+  # instance does nothing, so runs that overlap share it; one that finds it stopping waits for
+  # it to stop first, which is the only state it cannot be started from.
+  windows-runner:
+    name: start the Windows runner
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.WINDOWS_CI_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Start it
+        run: |
+          read -r id state < <(aws ec2 describe-instances \
+            --filters Name=tag:Name,Values=virtx-windows-ci \
+                      Name=instance-state-name,Values=pending,running,stopping,stopped \
+            --query 'Reservations[0].Instances[0].[InstanceId,State.Name]' --output text)
+          echo "virtx-windows-ci: $id, $state"
+          if [ "$state" = stopping ]; then aws ec2 wait instance-stopped --instance-ids "$id"; fi
+          aws ec2 start-instances --instance-ids "$id" --output text
+          aws ec2 wait instance-running --instance-ids "$id"
+
+  # The guest kernel is `build`'s, as for `suites`. The target directory is outside the
+  # checkout, so it outlives the run on the instance's own disk: the next run builds what
+  # changed and not the world. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`):
+  # nested, the faults a guest takes as it first touches its memory are most of a boot.
+  suites-windows:
+    name: suites (windows-x86_64)
+    needs: windows-runner
+    runs-on: [self-hosted, virtx-windows-ci]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: C:\virtx-ci\target
+      VIRTX_PREFAULT_MEMORY: "1"
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-x86_64
+
+      - name: Put the kernel in place
+        run: |
+          tar -xf handoff.tar
+          mkdir -p build/krunfw
+          cp -v handoff/kernel/libkrunfw.dll build/krunfw/
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored --test-threads 1
 
   packages:
     name: packages (${{ matrix.platform }})
@@ -153,12 +235,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
+          name: bundle
           path: dist/release
-          key: bundle-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
 
       # Published with an explicit --registry and a config of its own: the packages'
       # publishConfig names npmjs, and nothing here may reach it. Verdaccio is installed on its

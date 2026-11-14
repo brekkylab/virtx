@@ -6,8 +6,9 @@
 # release is never public with some of its files, and a published one is never changed. A
 # rerun replaces the draft's assets; a tag whose release is published fails here.
 #
-# A tag with a pre-release suffix (`v1.2.0-rc.1`) makes a pre-release, which is public once
-# published, the way to try the whole path before the version itself.
+# A tag with a pre-release suffix (`v1.2.0-rc.1`, the manifests saying `1.2.0-rc.1`) makes a
+# pre-release, which is public once published, the way to try the whole path before the version
+# itself. Its wheels carry the PEP 440 form, `1.2.0rc1`.
 name: release
 
 on:
@@ -28,6 +29,10 @@ jobs:
   test:
     needs: build
     uses: ./.github/workflows/test.yml
+    # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
+    permissions:
+      contents: read
+      id-token: write
     with:
       version: ${{ needs.build.outputs.version }}
 
@@ -38,12 +43,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
+          name: bundle
           path: dist/release
-          key: bundle-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
 
       - name: Attach to the draft
         env:

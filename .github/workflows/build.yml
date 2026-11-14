@@ -1,14 +1,14 @@
 # Everything a release carries, built from the ref the caller runs on: the stdio server and the
 # client's packages, for every platform. `ci` and `release` call it, and take what it built
-# from the cache, as `dist/release/` under `bundle-<run id>`:
+# from the run's `bundle` artifact, `dist/release/`:
 #
 #   virtx-stdio-<os>-<arch>.tar.gz   the server, the guest kernel and abin
 #   brekkylab-virtx-*.tgz            the npm packages
 #   virtx-*.whl                      the wheels
 #   SHA256SUMS                       over all of them
 #
-# Jobs hand on through the cache. Every key ends in the run id, which a called workflow
-# shares with its caller.
+# Jobs hand on as artifacts of the run, which a called workflow shares with its caller, and
+# a rerun uploads over. They are kept a day, the least allowed: long enough to rerun a job.
 #
 # # Platforms
 #
@@ -48,7 +48,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The version the manifests say, which all of them say alike, and which a tag names.
+  # The version the manifests say, which all of them say alike, and which a tag names. Every
+  # build waits for it, so a tag the manifests do not match builds nothing.
   resolve:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -70,6 +71,10 @@ jobs:
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
           [ -z "$wrong" ] || { echo "::error::virtx-node/package.json says $version, but:$wrong"; exit 1; }
+          # Only these pre-releases have a PEP 440 form `publish` matches the wheels by.
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || {
+            echo "::error::version $version is not X.Y.Z, X.Y.Z-alpha.N, X.Y.Z-beta.N or X.Y.Z-rc.N"; exit 1
+          }
           if [ "$REF_TYPE" = tag ] && [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG, but the manifests say $version"; exit 1
           fi
@@ -89,6 +94,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
             targets: linux macos
+    needs: resolve
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -133,17 +139,20 @@ jobs:
           cargo xtask build abin
           ls -la target/release/abin
 
+      # As a tar: an artifact keeps no file modes, and abin must stay executable.
       - name: Hand the kernel and abin on
         run: |
           mkdir -p handoff/kernel
           cp -v build/krunfw/* handoff/kernel/
           cp -R target/release/abin handoff/abin
+          tar -cf handoff.tar handoff
 
-      - uses: actions/cache/save@v6
+      - uses: actions/upload-artifact@v7
         with:
-          path: handoff
-          key: guest-${{ matrix.arch }}-${{ github.run_id }}
-          enableCrossOsArchive: true
+          name: guest-${{ matrix.arch }}
+          path: handoff.tar
+          overwrite: true
+          retention-days: 1
 
   # `virtx-stdio`, archived with the kernel and abin.
   server:
@@ -232,16 +241,14 @@ jobs:
           path: 3rdparty/MoltenVK/Package
           key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', 'xtask/scripts/build-deps.sh') }}
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: handoff
-          key: guest-${{ matrix.arch }}-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-${{ matrix.arch }}
 
       # macOS links the kernel.c the Linux job built; the others take the library as it is.
       - name: Put the kernel and abin in place
         run: |
+          tar -xf handoff.tar
           mkdir -p build/krunfw target/release
           case "${{ matrix.release }}" in
             macos-*)   LIBKRUNFW_KERNEL_C="$PWD/handoff/kernel/kernel.c" cargo xtask build kernel ;;
@@ -269,11 +276,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           f=target/release/virtx-stdio
-          need=$(objdump -T "$f" | grep -oE 'GLIBC_2\.[0-9]+' | sort -t. -k2 -n -u | tail -1)
+          syms=$(objdump -T "$f")
+          need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
           libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
           echo "$f needs $need; links $libs"
           [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
-          if objdump -T "$f" | grep -q __isoc23_; then echo "::error::$f references __isoc23_*"; fail=1; fi
+          if grep -q __isoc23_ <<<"$syms"; then echo "::error::$f references __isoc23_*"; fail=1; fi
           if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
           exit ${fail:-0}
 
@@ -293,11 +301,12 @@ jobs:
       - name: Archive
         run: cargo xtask archive --with-abin
 
-      - uses: actions/cache/save@v6
+      - uses: actions/upload-artifact@v7
         with:
+          name: server-${{ matrix.release }}
           path: target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz
-          key: server-${{ matrix.release }}-${{ github.run_id }}
-          enableCrossOsArchive: true
+          overwrite: true
+          retention-days: 1
 
   # `libvirtx_core`, which every package of the platform carries.
   client:
@@ -324,6 +333,7 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             file: virtx_core.dll
+    needs: resolve
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 60
@@ -363,10 +373,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           f=dist/lib/${{ matrix.platform }}/${{ matrix.file }}
-          need=$(objdump -T "$f" | grep -oE 'GLIBC_2\.[0-9]+' | sort -t. -k2 -n -u | tail -1)
+          syms=$(objdump -T "$f")
+          need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
           echo "$f needs $need"
           [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
-          if objdump -T "$f" | grep -q __isoc23_; then echo "::error::$f references __isoc23_*"; fail=1; fi
+          if grep -q __isoc23_ <<<"$syms"; then echo "::error::$f references __isoc23_*"; fail=1; fi
           exit ${fail:-0}
 
       # No DLL Windows does not ship: the C runtime is linked in (`.cargo/config.toml`).
@@ -381,11 +392,12 @@ jobs:
             echo "::error::$f needs the DLLs above to load"; exit 1
           fi
 
-      - uses: actions/cache/save@v6
+      - uses: actions/upload-artifact@v7
         with:
+          name: client-${{ matrix.platform }}
           path: dist/lib/${{ matrix.platform }}/${{ matrix.file }}
-          key: client-${{ matrix.platform }}-${{ github.run_id }}
-          enableCrossOsArchive: true
+          overwrite: true
+          retention-days: 1
 
   # Every platform's server and library, packed into what a release carries. Nothing here
   # compiles, so it all happens on one runner.
@@ -404,55 +416,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: target/release/dist/virtx-stdio-macos-aarch64.tar.gz
-          key: server-macos-aarch64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: target/release/dist/virtx-stdio-linux-x86_64.tar.gz
-          key: server-linux-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: target/release/dist/virtx-stdio-linux-aarch64.tar.gz
-          key: server-linux-aarch64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: target/release/dist/virtx-stdio-windows-x86_64.tar.gz
-          key: server-windows-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          pattern: server-*
+          merge-multiple: true
+          path: target/release/dist
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: dist/lib/darwin-arm64/libvirtx_core.dylib
-          key: client-darwin-arm64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
+          name: client-darwin-arm64
+          path: dist/lib/darwin-arm64
+      - uses: actions/download-artifact@v8
         with:
-          path: dist/lib/linux-x64-gnu/libvirtx_core.so
-          key: client-linux-x64-gnu-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
+          name: client-linux-x64-gnu
+          path: dist/lib/linux-x64-gnu
+      - uses: actions/download-artifact@v8
         with:
-          path: dist/lib/linux-arm64-gnu/libvirtx_core.so
-          key: client-linux-arm64-gnu-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
+          name: client-linux-arm64-gnu
+          path: dist/lib/linux-arm64-gnu
+      - uses: actions/download-artifact@v8
         with:
-          path: dist/lib/win32-x64-msvc/virtx_core.dll
-          key: client-win32-x64-msvc-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: client-win32-x64-msvc
+          path: dist/lib/win32-x64-msvc
 
       - name: Server archives
         run: |
@@ -476,8 +461,9 @@ jobs:
           sha256sum -- * | tee SHA256SUMS
           ls -la
 
-      - uses: actions/cache/save@v6
+      - uses: actions/upload-artifact@v7
         with:
+          name: bundle
           path: dist/release
-          key: bundle-${{ github.run_id }}
-          enableCrossOsArchive: true
+          overwrite: true
+          retention-days: 1

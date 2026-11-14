@@ -74,7 +74,7 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 Everything but images and files is made, read and removed with the requests below.
 A request body is JSON, sent with `Content-Type: application/json`, and so is every response body but an [event stream](#events).
-A client ignores a member of a response body it does not know, so a server can add one without breaking a client already released; a server refuses one in a request body with `400`.
+A client ignores a member of a response body it does not know, so a server can add one without breaking a client already released.
 `{name}`, `{id}` and `{job}` are each one path segment, percent-encoded.
 
 A `POST` or `PUT` that makes something answers `201 Created` with it, and with its path in `Location`.

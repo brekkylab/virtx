@@ -29,10 +29,10 @@ use virtx_core::{
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
-    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
-    RegistryClient, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    MachineSpec, Network, Os, Reference, RegistryClient, Sandbox, SandboxError, Snapshot,
+    SnapshotError, SnapshotStore, VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -860,12 +860,20 @@ impl IntoResponse for Refused {
     }
 }
 
+/// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead.
+fn io_failure(e: &std::io::Error, message: impl Display) -> String {
+    eprintln!("{message}");
+    format!("the server's files: {}", e.kind())
+}
+
 /// The refusal an operation on the host's files that failed with `e` is.
 fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
+    let said = io_failure(e, message);
     match e.kind() {
-        std::io::ErrorKind::NotFound => not_found(message),
-        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", message),
-        _ => internal(message),
+        std::io::ErrorKind::NotFound => not_found(said),
+        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", said),
+        _ => internal(said),
     }
 }
 
@@ -877,6 +885,9 @@ impl From<SnapshotError> for Refused {
             SnapshotError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SnapshotError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
             SnapshotError::Io { source, .. } => io_refused(source, &e),
+            SnapshotError::Fstree(FstreeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
+            }
             SnapshotError::Fstree(_) => internal(e),
         }
     }
@@ -906,6 +917,9 @@ impl From<ImageStoreError> for Refused {
             ImageStoreError::Missing(_) => not_found(e),
             ImageStoreError::InUse(..) => refused(StatusCode::CONFLICT, "in_use", e),
             ImageStoreError::Io { source, .. } => io_refused(source, &e),
+            ImageStoreError::Fstree(FstreeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
+            }
             ImageStoreError::Fstree(_) | ImageStoreError::Malformed(_) => internal(e),
         }
     }
@@ -950,5 +964,67 @@ impl From<SandboxError> for Refused {
 impl From<tokio::task::JoinError> for Refused {
     fn from(e: tokio::task::JoinError) -> Refused {
         internal(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {
+        const CONTEXT: &str = "making /home/virtx/project/a/volume/v";
+        let kinds = [
+            (io::ErrorKind::NotFound, StatusCode::NOT_FOUND, "not_found"),
+            (io::ErrorKind::AlreadyExists, StatusCode::CONFLICT, "exists"),
+            (
+                io::ErrorKind::PermissionDenied,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+            ),
+        ];
+        for (kind, status, code) in kinds {
+            let tree = || FstreeError::Io {
+                context: CONTEXT.into(),
+                source: kind.into(),
+            };
+            let in_a_tree: [Refused; 2] = [
+                SnapshotError::Fstree(tree()).into(),
+                ImageStoreError::Fstree(tree()).into(),
+            ];
+            let by_kind: [Refused; 3] = [
+                VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+                SnapshotError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+                ImageStoreError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+            ];
+            let answers = by_kind.into_iter().map(|r| (r, status, code)).chain(
+                in_a_tree
+                    .into_iter()
+                    .map(|r| (r, StatusCode::INTERNAL_SERVER_ERROR, "internal")),
+            );
+            for (refusal, status, code) in answers {
+                let response = refusal.into_response();
+                assert_eq!(response.status(), status);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], code);
+                let message = body["error"]["message"].as_str().unwrap();
+                assert_eq!(message, format!("the server's files: {kind}"));
+            }
+        }
     }
 }

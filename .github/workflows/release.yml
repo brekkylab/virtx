@@ -6,8 +6,9 @@
 # release is never public with some of its files, and a published one is never changed. A
 # rerun replaces the draft's assets; a tag whose release is published fails here.
 #
-# A tag with a pre-release suffix (`v1.2.0-rc.1`) makes a pre-release, which is public once
-# published, the way to try the whole path before the version itself.
+# A tag with a pre-release suffix (`v1.2.0-rc.1`, the manifests saying `1.2.0-rc.1`) makes a
+# pre-release, which is public once published, the way to try the whole path before the version
+# itself. Its wheels carry the PEP 440 form, `1.2.0rc1`.
 name: release
 
 on:

@@ -16,8 +16,8 @@ use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, FsTree, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec,
-    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeMount,
-    VolumeStore,
+    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeHold,
+    VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -115,6 +115,9 @@ pub struct Sandbox {
     /// Its snapshot's lock, held for each of its machines and between them, until it is
     /// closed.
     snapshot_lock: Mutex<Option<SnapshotLock>>,
+    /// Its volumes, held against removal for each of its machines and between them, until it
+    /// is closed.
+    volume_holds: Mutex<Vec<VolumeHold>>,
     /// What each of its machines boots, and the process each runs as.
     config: MachineConfig,
     vm: Vec<OsString>,
@@ -205,9 +208,9 @@ impl Sandbox {
                 let reference: Reference = tag
                     .parse()
                     .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
-                images
-                    .get_tag(&reference)?
-                    .ok_or_else(|| Error::NotFound(format!("no image here is tagged {tag}")))?
+                images.get_tag(&reference)?.ok_or_else(|| {
+                    Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
+                })?
             }
             ImageName::Digest { digest } => {
                 let digest = digest
@@ -237,12 +240,15 @@ impl Sandbox {
         // Held from here until the sandbox is closed, whether its machine runs or not, against
         // every other sandbox, removal and request to its files, in this process or another.
         let snapshot_lock = snapshot.as_ref().map(Snapshot::lock).transpose()?;
+        let mut volume_holds = Vec::new();
         let volumes = args
             .volumes
             .iter()
             .map(|asked| {
+                let volume = volumes.open(&asked.volume)?;
+                volume_holds.push(volume.hold()?);
                 Ok(VolumeMount {
-                    path: volumes.open(&asked.volume)?.path().to_owned(),
+                    path: volume.path().to_owned(),
                     at: asked.path.clone(),
                     read_only: asked.readonly,
                 })
@@ -286,6 +292,7 @@ impl Sandbox {
             snapshot: args.snapshot.clone(),
             upper: Mutex::new(upper),
             snapshot_lock: Mutex::new(Some(snapshot_lock)),
+            volume_holds: Mutex::new(volume_holds),
             config,
             vm,
             state: Mutex::new(State::Parked),
@@ -434,6 +441,7 @@ impl Sandbox {
             machine.stop();
         }
         drop(self.snapshot_lock.lock().unwrap().take());
+        self.volume_holds.lock().unwrap().clear();
         drop(self.upper.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);

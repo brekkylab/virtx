@@ -2,11 +2,10 @@
 //! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
 //! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client.
 
+pub mod disks;
 mod files;
 mod fstree;
 mod image;
-#[cfg(unix)]
-pub mod lazy;
 mod machine;
 pub mod sandbox;
 mod snapshot;

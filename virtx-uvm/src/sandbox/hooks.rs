@@ -103,15 +103,16 @@ pub trait Hooks: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Where the chunks of sandbox `id`'s disk, at `disk`, are fetched from while its machine
-    /// runs, the disk being lazy ([`lazy`](crate::lazy)): a socket, and what answers on it
-    /// until it drops. `None` for a disk that is not.
+    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, where the
+    /// server's disks fetch it as it is read ([`Disks::open`](crate::disks::Disks::open)): a
+    /// socket, and what answers on it until it drops. `None` for a disk that is all here.
     fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, Error> {
         let _ = (id, disk);
         Ok(None)
     }
 
-    /// Sandbox `id`'s machine booted, in `took`, on a lazy disk if `lazily`.
+    /// Sandbox `id`'s machine booted, in `took`, its disk fetched as it is read if `lazily`
+    /// ([`chunks`](Hooks::chunks)).
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
         let _ = (id, took, lazily);
     }
@@ -121,8 +122,8 @@ pub trait Hooks: Send + Sync + 'static {
         let _ = (id, level, line);
     }
 
-    /// Sandbox `id`'s disk of `disk`'s path, its own or a copy of it, made whole if it is
-    /// lazy: for a reader other than its machine.
+    /// Sandbox `id`'s disk of `disk`'s path, its own or a copy of it, made all here if part of
+    /// it is fetched as it is read: for a reader other than its machine.
     fn materialize<'a>(&'a self, id: &'a str, disk: &'a Path) -> BoxFuture<'a, Result<(), Error>> {
         let _ = (id, disk);
         Box::pin(async { Ok(()) })

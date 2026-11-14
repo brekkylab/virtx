@@ -64,9 +64,8 @@ pub struct MachineConfig {
     #[serde(default)]
     pub ports: Vec<u16>,
 
-    /// Where its snapshot's chunks are fetched from, its disk being lazy
-    /// ([`lazy`](crate::lazy)): a socket the host answers them on
-    /// ([`chunks_socket`](crate::lazy::chunks_socket)). `None`, or a disk that is not lazy, and
+    /// What its snapshot's disk is fetched from, where the server's disks fetch it as it is read
+    /// ([`Disks::open`](crate::disks::Disks::open)): a socket the host answers on. `None`, and
     /// the disk is its file alone.
     #[serde(default)]
     pub chunks: Option<std::path::PathBuf>,

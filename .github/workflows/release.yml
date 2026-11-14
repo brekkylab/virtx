@@ -23,30 +23,67 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-
-  test:
-    needs: build
-    uses: ./.github/workflows/test.yml
+  pipeline:
+    # The checks are named `release / <job>`.
+    name: release
+    uses: ./.github/workflows/pipeline.yml
+    with:
+      full: true
+      release: true
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read
       id-token: write
-    with:
-      version: ${{ needs.build.outputs.version }}
 
+  # What each platform packed and tried, and `@brekkylab/virtx`, packed once here for all of
+  # them: it names every platform's package and carries no library of its own. Every
+  # platform's files are counted in, so a platform that handed nothing on fails here rather
+  # than leaving the release without it.
   draft:
-    needs: [build, test]
+    needs: pipeline
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.pipeline.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
       - uses: actions/download-artifact@v8
         with:
-          name: bundle
+          pattern: release-*
           path: dist/release
+          merge-multiple: true
+
+      - name: "@brekkylab/virtx"
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-libs"
+          node scripts/packages/pack-npm.mjs "$RUNNER_TEMP/no-libs" dist/release --allow-missing
+          tar -xzOf "dist/release/brekkylab-virtx-$VERSION.tgz" package/package.json
+
+      - name: Every platform's files
+        working-directory: dist/release
+        run: |
+          for platform in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc; do
+            [ -f "brekkylab-virtx-$platform-$VERSION.tgz" ] || { echo "::error::no $platform npm package"; fail=1; }
+          done
+          for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            [ -f "virtx-stdio-$release.tar.gz" ] || { echo "::error::no $release server"; fail=1; }
+          done
+          [ "$(ls *.whl | wc -l)" = 4 ] || { echo "::error::not four wheels"; fail=1; }
+          pipx run twine check --strict *.whl || fail=1
+          exit ${fail:-0}
+
+      - name: SHA256SUMS
+        working-directory: dist/release
+        run: |
+          sha256sum -- * | tee SHA256SUMS
+          ls -la
 
       - name: Attach to the draft
         env:

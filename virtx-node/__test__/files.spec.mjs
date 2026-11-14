@@ -103,7 +103,10 @@ describe('against virtx-stdio', () => {
     await volume.copyFile('in/b.txt', 'c.txt')
     assert.equal(await (await client.getVolume(name)).readText('c.txt'), 'hello')
     assert.equal(await volume.isDir('in/dir'), true)
-    assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), ['b.txt', 'dir'])
+    assert.deepEqual((await volume.readDir('in')).map((entry) => entry.name).sort(), [
+      'b.txt',
+      'dir',
+    ])
 
     const mount = await volume.mount('notion', { type: 'notion', apiKey: 'k' })
     assert.deepEqual(mount, { path: 'notion', mountType: 'notion' })

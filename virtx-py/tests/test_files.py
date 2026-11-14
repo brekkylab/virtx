@@ -2,7 +2,6 @@
 
 import pytest
 from conftest import ALPINE, alpine, unique
-
 from virtx import (
     Client,
     DirEntry,

@@ -306,9 +306,7 @@ const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/
 // string a tag. An object is taken as already named.
 function imageName(image) {
   if (typeof image !== 'string') return image
-  return DIGEST.test(image)
-    ? { type: 'digest', digest: image }
-    : { type: 'tag', tag: image }
+  return DIGEST.test(image) ? { type: 'digest', digest: image } : { type: 'tag', tag: image }
 }
 
 // A base and the steps over it, which the server builds: `new Recipe('alpine:3.20').run('apk add
@@ -468,7 +466,12 @@ class Client {
   setHeaders(headers) {
     const strings = Object.entries(headers).flat()
     const error = {}
-    const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
+    const status = this._lib.virtx_client_set_headers(
+      this._held(),
+      strings,
+      strings.length / 2,
+      error,
+    )
     if (status !== OK) this._lib.take(status, error)
   }
 
@@ -635,7 +638,9 @@ class Client {
       ...options,
       image: imageName(image),
       snapshot: snapshot instanceof Snapshot ? snapshot.name : snapshot,
-      volumes: volumes?.map((v) => (v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v)),
+      volumes: volumes?.map((v) =>
+        v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
+      ),
     })
     return new Sandbox(this, info)
   }
@@ -754,7 +759,9 @@ class Files {
     const { _lib: lib } = this.client
     const bytes = encode({ ...this._root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    await lib.answer(lib.virtx_client_write_file(this.client._held(), bytes, bytes.length, data, data.length))
+    await lib.answer(
+      lib.virtx_client_write_file(this.client._held(), bytes, bytes.length, data, data.length),
+    )
   }
 
   async createDir(at) {
@@ -793,7 +800,10 @@ class ImageJob {
 
   // It as the server has it now.
   async get() {
-    return new ImageJob(this.client, await this.client._call('virtx_client_get_image_job', { id: this.id }))
+    return new ImageJob(
+      this.client,
+      await this.client._call('virtx_client_get_image_job', { id: this.id }),
+    )
   }
 
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
@@ -827,7 +837,11 @@ class Volume extends Files {
 
   // Mounts `source` at `at` in it, a directory the mount creates.
   mount(at, source) {
-    return this.client._call('virtx_client_create_volume_mount', { volume: this.name, path: at, source })
+    return this.client._call('virtx_client_create_volume_mount', {
+      volume: this.name,
+      path: at,
+      source,
+    })
   }
 
   // Takes away the mount at `at`, leaving its source as it is.
@@ -892,7 +906,10 @@ class Sandbox extends Files {
 
   // The job `id` in it.
   async job(id) {
-    const info = await this.client._call('virtx_client_get_sandbox_job', { sandbox: this.id, job: id })
+    const info = await this.client._call('virtx_client_get_sandbox_job', {
+      sandbox: this.id,
+      job: id,
+    })
     return new SandboxJob(this.client, this.id, info)
   }
 
@@ -916,7 +933,11 @@ class SandboxJob {
 
   // It as the server has it now.
   async get() {
-    return new SandboxJob(this.client, this.sandboxId, await this._call('virtx_client_get_sandbox_job'))
+    return new SandboxJob(
+      this.client,
+      this.sandboxId,
+      await this._call('virtx_client_get_sandbox_job'),
+    )
   }
 
   // Sends `signal`, a name such as `'SIGTERM'`, to its process and every one it started.
@@ -932,7 +953,11 @@ class SandboxJob {
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
   // entry.
   log(after) {
-    return this.client._items('virtx_client_sandbox_job_log', { sandbox: this.sandboxId, job: this.id, after })
+    return this.client._items('virtx_client_sandbox_job_log', {
+      sandbox: this.sandboxId,
+      job: this.id,
+      after,
+    })
   }
 
   // Cancels it if it runs, killing its process, and forgets it.

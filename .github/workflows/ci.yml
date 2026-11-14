@@ -1,5 +1,7 @@
-# A pull request is built as a release would be, and tested; nothing is published. The docs
-# are `docs`'s.
+# A pull request is linted and tested platform by platform; nothing is published. `main` is
+# too, after each merge, and in full: built, packed and tried as a release would be (see
+# `pipeline`), and that run is what saves the Rust caches every other ref reads. A run started
+# by hand is in full too. The docs are `docs`'s.
 name: ci
 
 on:
@@ -7,26 +9,30 @@ on:
     paths-ignore:
       - "**/*.md"
       - docs/**
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - docs/**
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot.
+# A newer push to the pull request makes an older run moot. `main`'s runs are not cut short:
+# a merge after a merge would otherwise leave no run to save the caches.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-
-  test:
-    needs: build
-    uses: ./.github/workflows/test.yml
+  pipeline:
+    # The checks are named `ci / <job>`.
+    name: ci
+    uses: ./.github/workflows/pipeline.yml
+    with:
+      full: ${{ github.event_name != 'pull_request' }}
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read
       id-token: write
-    with:
-      version: ${{ needs.build.outputs.version }}

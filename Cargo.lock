@@ -1622,7 +1622,7 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 [[package]]
 name = "krun-arch"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "acpi_tables",
  "krun-arch-gen",
@@ -1642,12 +1642,12 @@ dependencies = [
 [[package]]
 name = "krun-arch-gen"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 
 [[package]]
 name = "krun-cpuid"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -1657,7 +1657,7 @@ dependencies = [
 [[package]]
 name = "krun-devices"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "bitflags 1.3.2",
  "caps",
@@ -1690,7 +1690,7 @@ dependencies = [
 [[package]]
 name = "krun-display"
 version = "0.1.0"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",
@@ -1702,7 +1702,7 @@ dependencies = [
 [[package]]
 name = "krun-hvf"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "crossbeam-channel",
  "krun-arch",
@@ -1713,7 +1713,7 @@ dependencies = [
 [[package]]
 name = "krun-init-blob"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "ffier",
  "libkrun",
@@ -1725,7 +1725,7 @@ dependencies = [
 [[package]]
 name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "krun-utils",
  "vm-memory",
@@ -1734,7 +1734,7 @@ dependencies = [
 [[package]]
 name = "krun-polly"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "krun-utils",
  "libc",
@@ -1743,7 +1743,7 @@ dependencies = [
 [[package]]
 name = "krun-smbios"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "vm-memory",
 ]
@@ -1751,7 +1751,7 @@ dependencies = [
 [[package]]
 name = "krun-utils"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -1766,7 +1766,7 @@ dependencies = [
 [[package]]
 name = "krun-whp"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "log",
  "windows-sys 0.61.2",
@@ -1802,7 +1802,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libkrun"
 version = "2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=3a559787#3a5597878e5ea244b7566a9d10cb64c79ed3ef81"
+source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
 dependencies = [
  "bitflags 2.13.1",
  "bzip2",

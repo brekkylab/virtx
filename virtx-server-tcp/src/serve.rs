@@ -15,9 +15,6 @@
 //! A shell in a sandbox, on a terminal, is at `/terminal/{sandbox}`: a WebSocket of the
 //! subprotocol `virtx.terminal` ([`terminal`]), for the same callers as the endpoints, kept
 //! across connections ([`crate::terminals`]).
-//!
-//! A server draining ([`Access::drain`]) answers `503` to every request but its own routes', and a
-//! sandbox's stop or delete.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,7 +59,7 @@ const CHUNK: usize = 64 << 10;
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// The routes, for `access`, a browser at one of `origins` let in, with `own` beside them:
-/// a server built on this one's, which take no home and are not refused while it drains.
+/// a server built on this one's, which take no home.
 pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axum::Router {
     let checked = Arc::clone(&access);
     let reaching = Arc::clone(&access);
@@ -72,9 +69,6 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
     let images = move |request: axum::extract::Request| {
         let access = Arc::clone(&reading);
         async move {
-            if access.draining() {
-                return draining();
-            }
             match access.registry(request.headers()).await {
                 Ok((registry, home)) => {
                     // A tag named to be pulled is brought up to the storage home's index first:
@@ -131,12 +125,6 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
             move |mut request: axum::extract::Request, next: Next| {
                 let access = Arc::clone(&checked);
                 async move {
-                    // Let go by the gateway: what it sends here now goes elsewhere once this
-                    // node's projects are kept -- but a sandbox still running here is stopped
-                    // or deleted here, which lets the node go the sooner.
-                    if access.draining() && !lets_go(request.method(), request.uri().path()) {
-                        return draining();
-                    }
                     match access.home(request.headers()).await {
                         Ok((_, home)) => {
                             request.extensions_mut().insert(home);
@@ -297,9 +285,6 @@ async fn terminal(
     headers: &HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    if access.draining() {
-        return draining();
-    }
     let home = match access.home(headers).await {
         Ok((_, home)) => home,
         Err(status) => return refusal(status),
@@ -434,29 +419,6 @@ fn refusal(status: StatusCode) -> Response {
         ),
     };
     endpoints::refused(status, code, message).into_response()
-}
-
-/// Whether `method` `path` stops or deletes a sandbox: what a draining server still takes, as
-/// it ends what keeps the server from being let go.
-fn lets_go(method: &Method, path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/sandboxes/") else {
-        return false;
-    };
-    match rest.split_once('/') {
-        Some((id, "stop")) => *method == Method::POST && !id.is_empty(),
-        None => *method == Method::DELETE && !rest.is_empty(),
-        _ => false,
-    }
-}
-
-/// What a draining server answers.
-fn draining() -> Response {
-    endpoints::refused(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "draining",
-        "this server takes no more requests",
-    )
-    .into_response()
 }
 
 /// The tag a registry request names a manifest by, as `name:tag`: what a storage home may
@@ -678,12 +640,6 @@ mod tests {
 
     #[test]
     fn a_registry_request_names_a_manifest_by_its_tag() {
-        assert!(lets_go(&Method::POST, "/sandboxes/sbx_1/stop"));
-        assert!(lets_go(&Method::DELETE, "/sandboxes/sbx_1"));
-        assert!(!lets_go(&Method::POST, "/sandboxes/sbx_1/start"));
-        assert!(!lets_go(&Method::GET, "/sandboxes/sbx_1"));
-        assert!(!lets_go(&Method::POST, "/sandboxes/"));
-        assert!(!lets_go(&Method::DELETE, "/sandboxes/sbx_1/jobs/j"));
         let digest = "sha256:".to_owned() + &"ab".repeat(32);
         assert_eq!(
             digest_named(&format!("/images/oci/v2/team/app/manifests/{digest}")),

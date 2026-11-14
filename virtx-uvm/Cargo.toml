@@ -70,13 +70,13 @@ log = "0.4"
 #     libkrun = { path = "../libkrun/src/libkrun" }
 #     krun-init-blob = { path = "../libkrun/init/init-blob" }
 #     krun-display = { path = "../libkrun/src/display" }
-krun = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "libkrun", features = ["blk"] }
-krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "krun-init-blob", features = ["direct"] }
+krun = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "libkrun", features = ["blk"] }
+krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "krun-init-blob", features = ["direct"] }
 # A disk restored lazily (`lazy`): a storage libkrun's block device reads through, imago's as
 # libkrun's own is, synchronous.
 imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "3a559787", package = "krun-display", optional = true }
+krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "bebba160", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic
@@ -98,6 +98,11 @@ windows-sys = { version = "0.61.2", features = [
     # `GetAdaptersAddresses` and the adapter it walks are behind this one too: an adapter's
     # shape is NDIS's, and windows-sys gates the whole call on it.
     "Win32_NetworkManagement_Ndis",
+    # `FSCTL_SET_SPARSE`, which keeps a snapshot's disk sparse on NTFS.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    # A volume's root opened sharing deletion.
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]

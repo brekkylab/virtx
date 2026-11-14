@@ -102,7 +102,7 @@ impl Snapshot {
         let _ = fs::remove_file(&part);
         let written = File::create_new(&part)
             .map_err(|e| Error::io(format!("creating {}", part.display()), e))
-            .and_then(|file| tree.to_ext4(file, size).map_err(Error::from))
+            .and_then(|file| tree.to_ext4(Snapshot::sparse(file), size).map_err(Error::from))
             .and_then(|()| {
                 fs::rename(&part, &self.path)
                     .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
@@ -117,6 +117,36 @@ impl Snapshot {
             let _ = fs::remove_file(&part);
         }
         written
+    }
+
+    /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not
+    /// an allocation.
+    ///
+    /// Unix keeps every file so. NTFS keeps one so only once it is marked: unmarked, a write
+    /// past the end fills the gap with zeros first, which is seconds for each GiB, so formatting
+    /// a 2 GiB disk -- whose last group's bitmaps are at its end -- writes it whole. A volume
+    /// that cannot mark it (FAT) still takes the disk, at that cost.
+    pub(crate) fn sparse(file: File) -> File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            // SAFETY: the handle is `file`'s, open for the call, and nothing goes in or out.
+            unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_SET_SPARSE,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        file
     }
 
     /// Hold it, refused while anything else does.
@@ -211,7 +241,7 @@ impl Store {
         }
         let part = path.with_extension("ext4.part");
         let file = match File::create_new(&part) {
-            Ok(file) => file,
+            Ok(file) => Snapshot::sparse(file),
             // Another create of this name, under way.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(Error::AlreadyExists(name.to_owned()));

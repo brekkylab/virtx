@@ -10,8 +10,8 @@
 //! client that sends neither does not see.
 //!
 //! A home's sandboxes are [`virtx_uvm::Sandboxes`], their disks snapshots of its store named
-//! by their ids; what the home adds to them -- its keeping, its capacity, its ports'
-//! capabilities -- it plugs in as their [`Hooks`].
+//! by their ids; what the home adds to them -- its keeping, room for their machines
+//! ([`Admission`]), its ports' capabilities -- it plugs in as their [`Hooks`].
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -54,62 +54,30 @@ use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
 
 pub use virtx_uvm::sandbox::{AUTO_DELETE_DAYS, AUTO_STOP_MINUTES, Terminal, cloned};
 
-/// What this server lets its machines take at once, every project's together: past it, a
-/// sandbox is refused with `capacity` rather than boot a machine the host has no room for.
-/// Memory is committed only as a guest touches it, so the host's is overcommitted twice;
-/// vCPUs four times, since most sandboxes wait more than they compute.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Capacity {
-    pub vcpus: u64,
-    pub memory_mib: u64,
+/// What decides whether a machine may boot now, every project's together, as an embedder sets
+/// it ([`set_admission`]): virtx cloud's nodes hold their machines to the room their host has.
+/// Without one, every machine boots.
+pub trait Admission: Send + Sync {
+    /// Room for a machine of `spec` -- a sandbox's, or a build's `RUN` step's -- held until
+    /// what this answers drops: refused, as the request that asked for it is answered, where
+    /// there is none.
+    fn admit(&self, spec: &MachineSpec) -> Result<Held, Refused>;
 }
 
-impl Capacity {
-    /// Four vCPUs for each of the host's, and twice its memory.
-    pub fn of_host() -> Capacity {
-        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
-        Capacity {
-            vcpus: cpus * 4,
-            memory_mib: host_memory_mib() * 2,
-        }
+static ADMISSION: OnceLock<Arc<dyn Admission>> = OnceLock::new();
+
+/// Ask `admission` for room for every machine this server boots, from now on.
+pub fn set_admission(admission: Arc<dyn Admission>) {
+    let _ = ADMISSION.set(admission);
+}
+
+/// Room for a machine of `spec`, as `admission` says, else as the one set says: none asked
+/// for, where neither is.
+fn admit(admission: Option<&dyn Admission>, spec: &MachineSpec) -> Result<Option<Held>, Refused> {
+    match admission.or_else(|| ADMISSION.get().map(|set| set.as_ref())) {
+        Some(admission) => admission.admit(spec).map(Some),
+        None => Ok(None),
     }
-}
-
-/// The host's memory, in MiB.
-#[cfg(unix)]
-fn host_memory_mib() -> u64 {
-    // SAFETY: sysconf reads a constant of the system's, and has no other effect.
-    let (pages, page) = unsafe {
-        (
-            libc::sysconf(libc::_SC_PHYS_PAGES),
-            libc::sysconf(libc::_SC_PAGESIZE),
-        )
-    };
-    (pages.max(0) as u64 * page.max(0) as u64) >> 20
-}
-
-/// The host's memory, in MiB, where it is not asked for: as much as a machine is by default,
-/// four times over.
-#[cfg(not(unix))]
-fn host_memory_mib() -> u64 {
-    4 * u64::from(DEFAULT_MEMORY_MIB)
-}
-
-static HELD_TO: OnceLock<Capacity> = OnceLock::new();
-/// The vCPUs and memory the machines up now take.
-static TAKEN: Mutex<(u64, u64)> = Mutex::new((0, 0));
-
-/// What this server's machines are held to, and what those up take now: what the gateway
-/// places sandboxes by.
-pub fn capacity_and_taken() -> (Capacity, Capacity) {
-    let capacity = *HELD_TO.get_or_init(Capacity::of_host);
-    let (vcpus, memory_mib) = *TAKEN.lock().unwrap();
-    (capacity, Capacity { vcpus, memory_mib })
-}
-
-/// Hold this server's machines to `capacity`, from now on; [`Capacity::of_host`] without.
-pub fn set_capacity(capacity: Capacity) {
-    let _ = HELD_TO.set(capacity);
 }
 
 /// Docker Hub's mirror, which this server's anonymous pulls of its images go to first, as an
@@ -159,39 +127,6 @@ pub fn set_minute(minute: Duration) {
 
 pub(crate) fn minute() -> Duration {
     virtx_uvm::sandbox::minute()
-}
-
-/// What a machine up takes of the capacity, until this drops.
-struct Taken(u64, u64);
-
-impl Taken {
-    fn of(spec: &MachineSpec) -> Result<Taken, Refused> {
-        let capacity = *HELD_TO.get_or_init(Capacity::of_host);
-        let (vcpus, memory_mib) = (u64::from(spec.vcpus), u64::from(spec.ram_mib));
-        let mut taken = TAKEN.lock().unwrap();
-        if taken.0 + vcpus > capacity.vcpus || taken.1 + memory_mib > capacity.memory_mib {
-            return Err(refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "capacity",
-                format!(
-                    "this server has no room for a machine of {vcpus} vCPUs and {memory_mib} \
-                     MiB now: its machines take {} of {} vCPUs and {} of {} MiB",
-                    taken.0, capacity.vcpus, taken.1, capacity.memory_mib
-                ),
-            ));
-        }
-        taken.0 += vcpus;
-        taken.1 += memory_mib;
-        Ok(Taken(vcpus, memory_mib))
-    }
-}
-
-impl Drop for Taken {
-    fn drop(&mut self) {
-        let mut taken = TAKEN.lock().unwrap();
-        taken.0 -= self.0;
-        taken.1 -= self.1;
-    }
 }
 
 /// How old what nothing needs has to be before a prune takes it: a pull, push or build in
@@ -953,7 +888,7 @@ impl Hooks for HomeHooks {
         spec: &'a MachineSpec,
     ) -> BoxFuture<'a, Result<Vec<Held>, SandboxError>> {
         Box::pin(async move {
-            let taken = Taken::of(spec).map_err(hooked)?;
+            let taken = admit(None, spec).map_err(hooked)?;
             let home = self.home()?;
             let id = sandbox.id();
             home.take_to_boot(Kind::Snapshot, id)
@@ -967,7 +902,7 @@ impl Hooks for HomeHooks {
                 .map_err(hooked)?;
             }
             home.settle(id).await;
-            Ok(vec![Box::new(taken) as Held])
+            Ok(taken.into_iter().collect())
         })
     }
 
@@ -1284,17 +1219,22 @@ const BUILD_MACHINE: MachineSpec = MachineSpec {
     network: Network::Public,
 };
 
-/// The room a build of `recipe` takes of the capacity, as it is asked for (issue #151): one
-/// [`BUILD_MACHINE`]'s, if a step of it boots one -- its steps boot one at a time -- refused
-/// `503` `capacity`, as a sandbox's boot is, where there is none; none for a recipe that boots
-/// nothing. So a build's machine counts in what this server's machines take, and builds at
-/// once are held to the room there is.
-fn build_room(recipe: &virtx_core::Recipe) -> Result<Option<Taken>, Refused> {
+/// The room a build of `recipe` takes, asked of `admission` (else the one set) as the build is
+/// asked for (issue #151): one [`BUILD_MACHINE`]'s, if a step of it boots one -- its steps boot
+/// one at a time -- refused as a sandbox's boot is where there is none; none for a recipe that
+/// boots nothing. So a build's machine counts in what this server's machines take.
+fn build_room(
+    admission: Option<&dyn Admission>,
+    recipe: &virtx_core::Recipe,
+) -> Result<Option<Held>, Refused> {
     let boots = recipe
         .steps
         .iter()
         .any(|step| matches!(step, virtx_core::Step::Run(_)));
-    boots.then(|| Taken::of(&BUILD_MACHINE)).transpose()
+    match boots {
+        true => admit(admission, &BUILD_MACHINE),
+        false => Ok(None),
+    }
 }
 
 async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
@@ -1305,7 +1245,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
     }
     let (images, vm, public) = (home.images.clone(), home.vm.clone(), home.public());
     let recipe = args.recipe;
-    let room = build_room(&recipe)?;
+    let room = build_room(None, &recipe)?;
     Ok(image_job(
         &home,
         ImageJobKind::Build,
@@ -2210,47 +2150,36 @@ impl From<SandboxError> for Refused {
 mod tests {
     use super::*;
 
-    /// What the capacity's tests hold while each takes and gives back room: they share it, as
-    /// they share the one capacity.
-    static ROOM: Mutex<()> = Mutex::new(());
-
-    /// The capacity every test of it holds this server's machines to: set once.
-    fn held_to_eight_vcpus() {
-        set_capacity(Capacity {
-            vcpus: 8,
-            memory_mib: 8192,
-        });
+    /// Room for so many machines, each asked for counted.
+    struct Room {
+        left: Mutex<u32>,
+        asked: Mutex<Vec<MachineSpec>>,
     }
 
+    impl Admission for Room {
+        fn admit(&self, spec: &MachineSpec) -> Result<Held, Refused> {
+            self.asked.lock().unwrap().push(spec.clone());
+            let mut left = self.left.lock().unwrap();
+            if *left == 0 {
+                return Err(refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "capacity",
+                    "no room",
+                ));
+            }
+            *left -= 1;
+            Ok(Box::new(()))
+        }
+    }
+
+    /// A build that boots a machine asks room for it as it is asked for, refused as there is
+    /// none; one that boots nothing asks none (issue #151).
     #[test]
-    fn machines_past_the_capacity_are_refused_until_one_ends() {
-        let _room = ROOM.lock().unwrap_or_else(|e| e.into_inner());
-        held_to_eight_vcpus();
-        let spec = MachineSpec {
-            vcpus: 4,
-            ram_mib: 4096,
-            gpu: false,
-            gpu_memory_mib: None,
-            network: Network::None,
+    fn a_build_asks_room_for_its_machine_and_is_refused_where_there_is_none() {
+        let room = Room {
+            left: Mutex::new(1),
+            asked: Mutex::default(),
         };
-        let one = Taken::of(&spec).ok().expect("room for one");
-        let _two = Taken::of(&spec).ok().expect("room for two");
-        let refused = Taken::of(&spec).err().expect("no room for a third");
-        assert_eq!(
-            (refused.0, refused.1),
-            (StatusCode::SERVICE_UNAVAILABLE, "capacity")
-        );
-        drop(one);
-        assert!(Taken::of(&spec).is_ok());
-    }
-
-    /// A build that boots a machine takes its room as it is asked for -- counted in what the
-    /// machines take, refused `capacity` where there is none -- and gives it back as it ends;
-    /// one that boots nothing takes none (issue #151).
-    #[test]
-    fn a_build_takes_its_machine_s_room_and_is_refused_past_the_capacity() {
-        let _room = ROOM.lock().unwrap_or_else(|e| e.into_inner());
-        held_to_eight_vcpus();
         let recipe = |steps: Vec<virtx_core::Step>| {
             let mut recipe = virtx_core::Recipe::new("scratch");
             recipe.steps = steps;
@@ -2264,28 +2193,25 @@ mod tests {
             virtx_core::Step::Run("true".into()),
         ]);
         let sets = recipe(vec![virtx_core::Step::Workdir("/w".into())]);
-        let before = capacity_and_taken().1;
-        let one = build_room(&runs)
-            .ok()
-            .flatten()
-            .expect("room for one build");
-        assert_eq!(
-            capacity_and_taken().1,
-            Capacity {
-                vcpus: before.vcpus + u64::from(DEFAULT_VCPUS),
-                memory_mib: before.memory_mib + u64::from(DEFAULT_MEMORY_MIB),
-            },
-            "counted in what the machines take"
+        assert!(
+            matches!(build_room(Some(&room), &sets), Ok(None)),
+            "one booting nothing"
         );
-        let _two = build_room(&runs).ok().flatten().expect("room for two");
-        let refused = build_room(&runs).err().expect("no room for a third");
+        assert!(room.asked.lock().unwrap().is_empty());
+        assert!(matches!(build_room(Some(&room), &runs), Ok(Some(_))));
+        let refused = build_room(Some(&room), &runs)
+            .err()
+            .expect("no room for a second");
         assert_eq!(
             (refused.0, refused.1),
             (StatusCode::SERVICE_UNAVAILABLE, "capacity")
         );
-        assert!(matches!(build_room(&sets), Ok(None)), "one booting nothing");
-        drop(one);
-        assert!(matches!(build_room(&runs), Ok(Some(_))));
+        let asked = room.asked.lock().unwrap();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(
+            (asked[0].vcpus, asked[0].ram_mib),
+            (DEFAULT_VCPUS, DEFAULT_MEMORY_MIB)
+        );
     }
 
     #[test]

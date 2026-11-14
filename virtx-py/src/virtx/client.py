@@ -484,7 +484,10 @@ class Client:
         whether it is HTTP and whom it lets in -- each answered here and by ``Sandbox.start``
         with the ``url`` it is reached by. ``abins`` names virtx's programs it gets at ``/abin``,
         each with its ``SKILL.md`` at ``/abin/skills/{name}/``.
-        Whatever is left out the server picks."""
+        Whatever is left out the server picks.
+
+        ``image`` has to be on the server already, pulled or built: this does not pull it, and a
+        tag the server has no image by is refused with ``404``."""
         args = json.loads(
             _args(
                 image=image_name(image).to_dict(),

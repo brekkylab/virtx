@@ -371,6 +371,29 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
+/// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
+/// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
+/// nothing, not by `1`.
+fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
+    const VALUED: [&str; 7] = [
+        "--test-threads",
+        "--skip",
+        "--color",
+        "--format",
+        "--logfile",
+        "--shuffle-seed",
+        "-Z",
+    ];
+    while let Some(arg) = args.next() {
+        if VALUED.contains(&arg.as_str()) {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
 fn main() -> ExitCode {
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
@@ -414,14 +437,7 @@ fn main() -> ExitCode {
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
     ];
-    // libtest's flags, which a run over every crate passes, are passed over: `--test-threads`
-    // with its value.
-    let args: Vec<String> = env::args().skip(1).collect();
-    let filter = args
-        .iter()
-        .enumerate()
-        .find(|(i, arg)| !arg.starts_with('-') && (*i == 0 || args[i - 1] != "--test-threads"))
-        .map(|(_, arg)| arg.clone());
+    let filter = filter(env::args().skip(1));
     let mut failed = 0;
     for (name, test) in tests {
         if filter

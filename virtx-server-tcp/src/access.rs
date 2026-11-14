@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
@@ -44,8 +43,6 @@ pub struct Access {
     projects: HashMap<String, (HashSet<String>, Arc<Home>)>,
     /// Whose the other tokens are, if anyone's.
     tenants: Option<Arc<dyn Tenants>>,
-    /// Set once this server is to take no more requests, as when it is let go.
-    draining: AtomicBool,
     /// The images the projects the config names share, and the registry they are served as.
     images: ImageStore,
     registry: Arc<RegistryServer>,
@@ -69,7 +66,6 @@ impl Access {
             origins: config.origins.clone(),
             projects,
             tenants: None,
-            draining: AtomicBool::new(false),
             registry: Arc::new(RegistryServer::new(images.clone(), "/images/oci")?),
             images,
             root,
@@ -87,15 +83,6 @@ impl Access {
     /// Where everything is kept.
     pub fn root(&self) -> &std::path::Path {
         &self.root
-    }
-
-    /// Take no more requests: this server is being let go.
-    pub fn drain(&self) {
-        self.draining.store(true, Ordering::Relaxed);
-    }
-
-    pub fn draining(&self) -> bool {
-        self.draining.load(Ordering::Relaxed)
     }
 
     /// Every project's home: those the config names, and those its tenants have made.

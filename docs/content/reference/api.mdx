@@ -52,7 +52,7 @@ See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `cre
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, running, with the options given. |
+| `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, running, with the options given. `image` has to be on the server already, pulled or built: this does not pull it. |
 | `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, running or stopped, without their ports. |
 | `find_sandbox(name)` | `Sandbox` or `None` | The sandbox made with the `name` given, without its ports, if one is. `undefined` in Node.js for none. |
 | `start_sandbox(id)`, `stop_sandbox(id)` | `Sandbox` | A `Sandbox`'s `start` and `stop`, by its id. |

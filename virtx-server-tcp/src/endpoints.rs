@@ -860,12 +860,15 @@ impl IntoResponse for Refused {
     }
 }
 
-/// The refusal an operation on the host's files that failed with `e` is.
+/// The refusal an operation on the host's files that failed with `e` is. `message` names the
+/// server's own paths, so it goes to the server's stderr, and the body says only `e`'s kind.
 fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
+    eprintln!("{message}");
+    let kind = format!("the server's files: {}", e.kind());
     match e.kind() {
-        std::io::ErrorKind::NotFound => not_found(message),
-        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", message),
-        _ => internal(message),
+        std::io::ErrorKind::NotFound => not_found(kind),
+        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", kind),
+        _ => internal(kind),
     }
 }
 
@@ -950,5 +953,54 @@ impl From<SandboxError> for Refused {
 impl From<tokio::task::JoinError> for Refused {
     fn from(e: tokio::task::JoinError) -> Refused {
         internal(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {
+        const CONTEXT: &str = "making /home/virtx/project/a/volume/v";
+        let kinds = [
+            (io::ErrorKind::NotFound, StatusCode::NOT_FOUND, "not_found"),
+            (io::ErrorKind::AlreadyExists, StatusCode::CONFLICT, "exists"),
+            (
+                io::ErrorKind::PermissionDenied,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+            ),
+        ];
+        for (kind, status, code) in kinds {
+            let refusals: [Refused; 3] = [
+                VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+                SnapshotError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+                ImageStoreError::Io {
+                    context: CONTEXT.into(),
+                    source: kind.into(),
+                }
+                .into(),
+            ];
+            for refusal in refusals {
+                let response = refusal.into_response();
+                assert_eq!(response.status(), status);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], code);
+                let message = body["error"]["message"].as_str().unwrap();
+                assert_eq!(message, format!("the server's files: {kind}"));
+            }
+        }
     }
 }

@@ -1,22 +1,30 @@
 # Everything a ref is built into, and tested, platform by platform; `ci` and `release` call it.
 #
-# Each job waits for what it uses and nothing else, so a platform's tests answer as soon as
-# that platform is built, whatever another platform's runner is still queued behind:
+# Two depths. Every run lints each platform and runs the tests that boot machines. A `full` one
+# -- `main`'s, a release's, and a pull request's labelled `full-ci` -- also builds what a release
+# carries, for every platform, packs each platform's packages and tries them: what a pull
+# request rarely changes, and finds out about on `main` if it does. Each job waits for what it
+# uses and nothing else, so a platform answers as soon as it is done, whatever another
+# platform's runner is still queued behind:
 #
 #   job (as the checks name it)           waits for     does
 #   version                               nothing       every manifest says one version
 #   check                                 nothing       format, clippy, unit tests, the bindings' lint
 #   guest (x86_64, aarch64)               version       the guest kernel and abin
-#   build + packages (macos-aarch64,      guest         server, clippy, library, packages and their
-#     windows-x86_64)                                   smoke, in one job (a pull request's Windows
-#                                                       on our own runner)
-#   build (linux-x86_64, linux-aarch64)   guest         server, clippy and library, in manylinux_2_28
-#   packages (linux-x86_64, -aarch64)     its build     packages and their smoke, on ubuntu-22.04
+#   start windows runner                  nothing       starts `virtx-windows-ci`
+#   lint (windows-x86_64,                 nothing       clippy with `gpu`, on this platform
+#     linux-x86_64, linux-aarch64)
 #   tests (linux-x86_64)                  guest         the crates' and packages' suites, on KVM
 #   tests (windows-x86_64)                guest         the machine-booting suites, on WHP
 #
-# The jobs below are in that order; `start windows runner` comes before the builds, since
-# Windows' build waits for it too.
+#   and, in a full run:
+#   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
+#     windows-x86_64)                                   in one job; macOS' clippy too
+#   build (linux-x86_64, linux-aarch64)   guest         server and library, in manylinux_2_28
+#   packages (linux-x86_64, -aarch64)     its build     packages and their smoke, on ubuntu-22.04
+#
+# macOS has no lint or tests of its own: no runner here can boot a machine on it, and the
+# machines virtx is written on are Macs.
 #
 # What a job builds it tests in the same job where it can. Two things cross between jobs, as
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
@@ -25,8 +33,8 @@
 # platform's build, which is made in a container and tried on the runner below its glibc. A
 # cache only ever saves time here: a miss builds the thing again.
 #
-# For a release (`release: true`) each platform's job also hands on what it packed and tried
-# -- its server archive, its npm package and its wheel -- for `release` to attach.
+# For a release (`release: true`, with `full`) each platform's job also hands on what it packed
+# and tried -- its server archive, its npm package and its wheel -- for `release` to attach.
 #
 # # Platforms
 #
@@ -50,8 +58,8 @@
 # # The Windows runner
 #
 # No GitHub runner has a hypervisor on Windows, so `tests (windows-x86_64)` runs on `virtx-windows-ci`,
-# an EC2 instance of our own with nested virtualization, registered to this repository; a pull
-# request's Windows build does too, for what its disk keeps from one build to the next.
+# an EC2 instance of our own with nested virtualization, registered to this repository; Windows'
+# lint and its build (but a release's) do too, for what its disk keeps from one to the next.
 # `windows-runner` starts it, and it stops itself once no job has run on it for 20 minutes. A
 # fork's pull request has no AWS role to start it with, and does not ask; that a fork's
 # workflow cannot reach the runner while it is up is the repository's fork approval setting's
@@ -69,8 +77,12 @@ name: pipeline
 on:
   workflow_call:
     inputs:
+      full:
+        description: Build, pack and smoke every platform, rather than lint and test them
+        type: boolean
+        default: false
       release:
-        description: Hand on what each platform packed, for a release to attach
+        description: Hand on what each platform packed, for a release to attach (with `full`)
         type: boolean
         default: false
     outputs:
@@ -267,6 +279,96 @@ jobs:
           aws ec2 start-instances --instance-ids "$id" --output text
           aws ec2 wait instance-running --instance-ids "$id"
 
+  # Each platform's lint: the client's clippy, and the servers' with `gpu`, as a release builds
+  # them -- the `cfg`s `check`, on Linux and without `gpu`, never compiles. Every run has it, a
+  # pull request's too, which builds nothing it would ship; `main`'s saves the caches it reads.
+  # macOS has none: no runner of ours can test it, and the machines virtx is written on are
+  # Macs. Its build lints it, on `main` and for a release.
+  lint-windows:
+    name: lint (windows-x86_64)
+    needs: windows-runner
+    if: needs.windows-runner.result == 'success'
+    runs-on: [self-hosted, virtx-windows-ci]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The Windows build's own: its GPU libraries and compiled crates, kept on the disk.
+      CARGO_TARGET_DIR: C:/virtx-ci/target-build
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          clean: false
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: x86_64-unknown-linux-musl
+          components: clippy, rustfmt
+
+      - name: Toolchain
+        run: |
+          where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask clippy --gpu
+
+  lint-linux:
+    name: lint (${{ matrix.release }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: linux-x86_64
+            runner: ubuntu-24.04
+            arch: x86_64
+          - release: linux-aarch64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-${{ matrix.release }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The guest init's cross-linker, bindgen's libclang, and meson with Vulkan's headers for
+      # virglrenderer, which `--gpu` builds first.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask clippy --gpu
+
   # macOS and Windows: `virtx-stdio`, archived with the kernel and abin; `libvirtx_core`; and
   # the platform's packages packed from them and tried, all on one runner.
   #
@@ -283,7 +385,7 @@ jobs:
     needs: [version, guest, windows-runner]
     # `windows-runner` is skipped for a fork's pull request; that only sends Windows to a
     # hosted runner, and stops nothing.
-    if: ${{ !cancelled() && needs.version.result == 'success' && needs.guest.result == 'success' }}
+    if: ${{ !cancelled() && inputs.full && needs.version.result == 'success' && needs.guest.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -386,10 +488,10 @@ jobs:
       - name: Server
         run: cargo xtask build server-stdio --locked
 
-      # This host's lint: the client's, and the servers' with `gpu`, as a release builds them --
-      # the `cfg`s `check`, on Linux and without `gpu`, never compiles. The GPU libraries are
-      # the server build's, already there.
-      - name: Clippy, with gpu
+      # macOS' lint, which has no lint job of its own (see `lint-windows`). The GPU libraries
+      # are the server build's, already there.
+      - name: Clippy, with gpu (macOS)
+        if: runner.os == 'macOS'
         run: cargo xtask clippy --gpu
 
       - name: virglrenderer's log (Windows, on failure)
@@ -464,6 +566,7 @@ jobs:
   build-linux:
     name: build (${{ matrix.release }})
     needs: guest
+    if: inputs.full
     strategy:
       fail-fast: false
       matrix:
@@ -534,12 +637,6 @@ jobs:
 
       - name: Server
         run: cargo xtask build server-stdio --locked
-
-      # This host's lint: the client's, and the servers' with `gpu`, as a release builds them --
-      # the `cfg`s `check`, on Linux and without `gpu`, never compiles. The GPU libraries are
-      # the server build's, already there.
-      - name: Clippy, with gpu
-        run: cargo xtask clippy --gpu
 
       - name: libvirtx_core
         run: cargo xtask build client --locked --target ${{ matrix.target }}

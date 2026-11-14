@@ -28,6 +28,7 @@ jobs:
     name: release
     uses: ./.github/workflows/pipeline.yml
     with:
+      full: true
       release: true
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:

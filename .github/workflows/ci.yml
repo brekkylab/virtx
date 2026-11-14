@@ -1,10 +1,14 @@
-# A pull request is built and tested platform by platform, as a release would be; nothing is
-# published. `main` is too, after each merge: that run is what saves the Rust caches every
-# other ref reads (see `pipeline`). The docs are `docs`'s.
+# A pull request is linted and tested platform by platform; nothing is published. `main` is
+# too, after each merge, and in full: built, packed and tried as a release would be (see
+# `pipeline`), and that run is what saves the Rust caches every other ref reads. A pull request
+# labelled `full-ci` runs in full as well -- one that changes the packaging or this workflow.
+# The docs are `docs`'s.
 name: ci
 
 on:
   pull_request:
+    # `labeled` too, for `full-ci`.
+    types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - "**/*.md"
       - docs/**
@@ -18,7 +22,9 @@ on:
 # A newer push to the pull request makes an older run moot. `main`'s runs are not cut short:
 # a merge after a merge would otherwise leave no run to save the caches.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # A label other than `full-ci` gets a group of its own, so it cuts short nothing it does not
+  # run again.
+  group: ci-${{ github.event.pull_request.number || github.ref }}${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -28,7 +34,11 @@ jobs:
   pipeline:
     # The checks are named `ci / <job>`.
     name: ci
+    # A label other than `full-ci` changes nothing to run again for.
+    if: github.event.action != 'labeled' || github.event.label.name == 'full-ci'
     uses: ./.github/workflows/pipeline.yml
+    with:
+      full: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read

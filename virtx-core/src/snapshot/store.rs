@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 /// A snapshot, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SnapshotListOutputItem {
     /// The snapshot's name.
     pub name: String,
@@ -32,4 +31,24 @@ pub struct SnapshotCreateArgs {
     /// server picks it; `0` is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_gib: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_snapshot_is_read_past_members_it_does_not_know() {
+        let value = json!({"name": "dev", "size": 4096, "in_use": false, "cell": "c1"});
+        assert_eq!(
+            serde_json::from_value::<SnapshotListOutputItem>(value).unwrap(),
+            SnapshotListOutputItem {
+                name: "dev".into(),
+                size: 4096,
+                in_use: false,
+            }
+        );
+    }
 }

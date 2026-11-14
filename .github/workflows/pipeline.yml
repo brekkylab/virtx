@@ -1,7 +1,7 @@
 # Everything a ref is built into, and tested, platform by platform; `ci` and `release` call it.
 #
 # Two depths. Every run lints each platform and runs the tests that boot machines. A `full` one
-# -- `main`'s, a release's, and a pull request's labelled `full-ci` -- also builds what a release
+# -- `main`'s, a release's, and one started by hand -- also builds what a release
 # carries, for every platform, packs each platform's packages and tries them: what a pull
 # request rarely changes, and finds out about on `main` if it does. Each job waits for what it
 # uses and nothing else, so a platform answers as soon as it is done, whatever another

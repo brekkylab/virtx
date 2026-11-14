@@ -103,7 +103,7 @@ cargo xtask check --client                        # the client's alone, without 
 cargo xtask clippy --gpu                          # clippy alone, the servers with `gpu`: this host's own `cfg`s, as a release builds them
 ```
 
-- Run `cargo xtask check` before pushing. CI (`ci`) runs it on every pull request too, lints each platform's own code with `cargo xtask clippy --gpu` and runs the machine-booting tests, but a push that fails here only finds out later there. Building, packing and trying each platform's release runs on `main` after a merge; label a pull request `full-ci` to run that too, as one that changes the packaging or the workflows should. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
+- Run `cargo xtask check` before pushing. CI (`ci`) runs it on every pull request too, lints each platform's own code with `cargo xtask clippy --gpu` and runs the machine-booting tests, but a push that fails here only finds out later there. Building, packing and trying each platform's release runs on `main` after a merge, and when `ci` is run by hand on a branch (`gh workflow run ci --ref <branch>`). `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - `cargo xtask check` runs no test that boots a VM. A change that reaches one runs `cargo xtask test`, or the suites it touches.
 
 ## Comments and docs

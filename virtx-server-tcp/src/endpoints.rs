@@ -3,11 +3,11 @@
 //! extensions.
 //!
 //! Beside the protocol, what virtx cloud's node needs of a home ([`Home`]'s `pub` methods): its
-//! storage kept past this server ([`Keeping`]), its machines held to the node's [`Capacity`],
-//! a sandbox opened again under the id it had on another node ([`Home::open_as`]), a sandbox
-//! resized or its disk grown as it next starts (`PUT /sandboxes/{id}/resources`, `/disk`), and
-//! the volumes listed a page at a time, `?limit=&after=` -- the cloud's extension, which a
-//! client that sends neither does not see.
+//! storage kept past this server ([`Keeping`]), room for its machines ([`Admission`]), its
+//! sandboxes themselves -- to count, stop, move to another node or copy the disk of
+//! ([`Home::sandboxes`]) -- a sandbox resized or its disk grown as it next starts
+//! (`PUT /sandboxes/{id}/resources`, `/disk`), and the volumes listed a page at a time,
+//! `?limit=&after=` -- the cloud's extension, which a client that sends neither does not see.
 //!
 //! A home's sandboxes are [`virtx_uvm::Sandboxes`], their disks snapshots of its store named
 //! by their ids; what the home adds to them -- its keeping, room for their machines
@@ -41,7 +41,7 @@ use virtx_core::{
     SandboxExecArgs, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
-use virtx_uvm::sandbox::{Activity, Given, Held, Hooks, Sandbox, Wanted, Written};
+use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted, Written};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, PublicImages, Reference,
@@ -352,56 +352,6 @@ impl Home {
             .contains_key(&(kind, name.to_owned()))
     }
 
-    /// Whether this home's snapshots and volumes are kept past this server.
-    pub fn is_kept(&self) -> bool {
-        self.keeping.is_some()
-    }
-
-    /// How many sandboxes run in this home, and how many jobs run in them now.
-    pub fn counts(&self) -> (usize, usize) {
-        self.sandboxes.counts()
-    }
-
-    /// A sandbox made of `args` under the id `id`, its ports behind `capabilities` (port by
-    /// capability), as one made elsewhere was -- what its client holds, its id and its port
-    /// URLs, naming it here too -- and started, over its disk as it is kept, unless not
-    /// `booted`: then made, and its disk brought here, for it to start at once when it is next
-    /// asked to. One here under that id already is started, if it is stopped and `booted`, and
-    /// answered.
-    pub async fn open_as(
-        &self,
-        id: String,
-        args: SandboxCreateArgs,
-        capabilities: HashMap<String, u16>,
-        booted: bool,
-    ) -> Result<virtx_core::Sandbox, Refused> {
-        if !id_like(&id) {
-            return Err(invalid("id: not a sandbox's id"));
-        }
-        if let Some(capability) = capabilities.keys().find(|c| !word(c, 128)) {
-            return Err(invalid(format!("capabilities: {capability} is not one")));
-        }
-        if let Ok(here) = self.sandboxes.get(&id) {
-            return match booted {
-                false => Ok(here.answer(true)),
-                true => Ok(here.start().await?),
-            };
-        }
-        let given = Given {
-            id,
-            keys: capabilities,
-        };
-        Ok(self.sandboxes.create(args, Some(given), booted).await?)
-    }
-
-    /// Sandbox `id`, stopped, let go of here, its disk left as it is kept: its record and its
-    /// jobs gone, as a delete does, but nothing removed from the storage home -- what a server
-    /// does once the sandbox is to run elsewhere, which takes its disk from there. Refused
-    /// `409`, `running`, while it runs; `404` for one this server does not have.
-    pub async fn let_go(&self, id: &str) -> Result<(), Refused> {
-        Ok(self.sandboxes.forget(id).await?)
-    }
-
     /// `cmd` on a terminal of its own, `cols` by `rows`, in sandbox `id`: a job of it, as an
     /// exec is, which keeps it in use while it runs, and ends with the [`Terminal`].
     pub async fn terminal(
@@ -528,56 +478,10 @@ impl Home {
         self.sandboxes.tend();
     }
 
-    /// Stop every sandbox here, in use or not: what runs in each ends, and its disk is kept
-    /// as it stopped -- a draining server told not to wait for what runs.
-    pub async fn stop_all(&self) {
-        self.sandboxes.stop_all().await;
-    }
-
-    /// Stop every sandbox that runs nothing and is reached at none of its ports now, whatever
-    /// its `auto_stop_minutes`: what a node draining lets go of before it goes. A terminal open
-    /// in one does not keep it.
-    pub async fn stop_unused(&self) {
-        self.sandboxes.stop_unused().await;
-    }
-
-    /// A copy of the disk of snapshot `name`, which a sandbox here stands on, at `to`, as its
-    /// machine has it: what the guest has written put on it first, and the machine paused while
-    /// it is copied -- for as long as that takes -- so that the copy is whole. `false`, and no
-    /// copy, where no sandbox here stands on it with its machine up.
-    #[cfg(unix)]
-    pub async fn copy_snapshot(&self, name: &str, to: &Path) -> Result<bool, Refused> {
-        Ok(self.copy_snapshot_marked(name, to).await?.is_some())
-    }
-
-    /// As [`copy_snapshot`](Self::copy_snapshot), the disk marked as it is copied: once the
-    /// copy is kept, what it was kept as can be made the disk's base
-    /// ([`rebase`](Self::rebase)) -- the mark's, if the disk could be marked. `None`, and no
-    /// copy, where no sandbox here stands on it with its machine up.
-    #[cfg(unix)]
-    pub async fn copy_snapshot_marked(
-        &self,
-        name: &str,
-        to: &Path,
-    ) -> Result<Option<Option<u64>>, Refused> {
-        match self.sandboxes.running_on(name) {
-            Some(sandbox) => Ok(sandbox.copy_disk(to).await?),
-            None => Ok(None),
-        }
-    }
-
-    /// What the copy of snapshot `name` made at `mark` ([`copy_snapshot_marked`]) was kept as
-    /// made what its disk is while its machine runs, as the server's disks have it -- what it
-    /// was kept as beside the disk already ([`Sandbox::rebase`]). Whether it was: not if its
-    /// machine is down now, or another mark came since.
-    ///
-    /// [`copy_snapshot_marked`]: Self::copy_snapshot_marked
-    #[cfg(unix)]
-    pub async fn rebase(&self, name: &str, mark: u64) -> Result<bool, Refused> {
-        match self.sandboxes.running_on(name) {
-            Some(sandbox) => Ok(sandbox.rebase(mark).await?),
-            None => Ok(false),
-        }
+    /// Its sandboxes, running or stopped: for an embedder to count, stop, move to another
+    /// server, or copy the disk of, beside what this home's routes do with them.
+    pub fn sandboxes(&self) -> &Sandboxes {
+        &self.sandboxes
     }
 
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
@@ -833,20 +737,6 @@ fn capability_for(protocol: PortProtocol) -> String {
             uuid::Uuid::new_v4().simple()
         ),
     }
-}
-
-/// Whether `s` is letters and digits alone, one to `most` of them.
-fn word(s: &str, most: usize) -> bool {
-    !s.is_empty() && s.len() <= most && s.bytes().all(|b| b.is_ascii_alphanumeric())
-}
-
-/// Whether `s` can be a sandbox's id: a name, never a path -- letters and digits, and `_` or
-/// `-` after the first, 64 at most.
-fn id_like(s: &str) -> bool {
-    s.len() <= 64
-        && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -2045,16 +1935,13 @@ mod tests {
     }
 
     #[test]
-    fn a_sandbox_made_again_is_named_by_an_id_and_capabilities_alone() {
-        for id in ["sbx_4f2a9c", "1a2b3c4d", "a-b_c"] {
-            assert!(id_like(id), "{id}");
-        }
-        for id in ["", "../x", "a/b", "_x", "-x", "a b", &"a".repeat(65)] {
-            assert!(!id_like(id), "{id}");
-        }
-        assert!(word(&capability_for(PortProtocol::Tcp), 128));
-        assert_eq!(capability_for(PortProtocol::Http).len(), 32);
-        assert!(!word("ab-cd", 128));
-        assert!(!word(&"a".repeat(129), 128));
+    fn a_port_s_capability_is_hex_32_digits_for_http_and_64_for_tcp() {
+        let hex = |c: &str| c.bytes().all(|b| b.is_ascii_hexdigit());
+        let (http, tcp) = (
+            capability_for(PortProtocol::Http),
+            capability_for(PortProtocol::Tcp),
+        );
+        assert!(hex(&http) && http.len() == 32, "{http}");
+        assert!(hex(&tcp) && tcp.len() == 64, "{tcp}");
     }
 }

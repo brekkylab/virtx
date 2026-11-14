@@ -26,6 +26,8 @@ permissions:
 
 jobs:
   pipeline:
+    # The checks are named `ci / <job>`.
+    name: ci
     uses: ./.github/workflows/pipeline.yml
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:

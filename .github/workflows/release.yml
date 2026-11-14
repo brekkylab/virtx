@@ -24,6 +24,8 @@ permissions:
 
 jobs:
   pipeline:
+    # The checks are named `release / <job>`.
+    name: release
     uses: ./.github/workflows/pipeline.yml
     with:
       release: true

@@ -3,14 +3,20 @@
 # Each job waits for what it uses and nothing else, so a platform's tests answer as soon as
 # that platform is built, whatever another platform's runner is still queued behind:
 #
-#   resolve, check                    nothing
-#   guest-parts (x86_64, aarch64)     nothing          the guest kernel and abin
-#   suites (linux-x86_64)             guest-parts      the crates' and packages' suites, on KVM
-#   suites (windows-x86_64)           guest-parts      the machine-booting suites, on WHP
-#   native (macOS, Windows)           guest-parts      server, clippy, library, packages, smoke: one job
-#                                                      (a pull request's Windows on our own runner)
-#   linux (x86_64, aarch64)           guest-parts      server, clippy and library, in manylinux_2_28
-#   linux-packages                    linux            packages and smoke, on ubuntu-22.04
+#   job (as the checks name it)           waits for     does
+#   version                               nothing       every manifest says one version
+#   check                                 nothing       format, clippy, unit tests, the bindings' lint
+#   guest (x86_64, aarch64)               version       the guest kernel and abin
+#   build + packages (macos-aarch64,      guest         server, clippy, library, packages and their
+#     windows-x86_64)                                   smoke, in one job (a pull request's Windows
+#                                                       on our own runner)
+#   build (linux-x86_64, linux-aarch64)   guest         server, clippy and library, in manylinux_2_28
+#   packages (linux-x86_64, -aarch64)     its build     packages and their smoke, on ubuntu-22.04
+#   tests (linux-x86_64)                  guest         the crates' and packages' suites, on KVM
+#   tests (windows-x86_64)                guest         the machine-booting suites, on WHP
+#
+# The jobs below are in that order; `start windows runner` comes before the builds, since
+# Windows' build waits for it too.
 #
 # What a job builds it tests in the same job where it can. Two things cross between jobs, as
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
@@ -43,7 +49,7 @@
 #
 # # The Windows runner
 #
-# No GitHub runner has a hypervisor on Windows, so `suites-windows` runs on `virtx-windows-ci`,
+# No GitHub runner has a hypervisor on Windows, so `tests (windows-x86_64)` runs on `virtx-windows-ci`,
 # an EC2 instance of our own with nested virtualization, registered to this repository; a pull
 # request's Windows build does too, for what its disk keeps from one build to the next.
 # `windows-runner` starts it, and it stops itself once no job has run on it for 20 minutes. A
@@ -70,7 +76,7 @@ on:
     outputs:
       version:
         description: The version every manifest says
-        value: ${{ jobs.resolve.outputs.version }}
+        value: ${{ jobs.version.outputs.version }}
 
 permissions:
   contents: read
@@ -81,7 +87,8 @@ env:
 jobs:
   # The version the manifests say, which all of them say alike, and which a tag names. Every
   # build waits for it, so a tag the manifests do not match builds nothing.
-  resolve:
+  version:
+    name: version
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -159,8 +166,8 @@ jobs:
 
   # The guest kernel for every platform of the architecture, and abin. Tarred before it is
   # handed on: an artifact keeps no file modes, and abin's programs have to stay executable.
-  guest-parts:
-    name: guest parts (${{ matrix.arch }})
+  guest:
+    name: guest (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +178,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
             targets: linux macos
-    needs: resolve
+    needs: version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -232,74 +239,11 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
-  # against the fixture, each booting machines. Linux x86_64, the one runner GitHub gives a
-  # hypervisor on.
-  suites:
-    name: suites (linux-x86_64)
-    needs: guest-parts
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: suites
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # What building the servers takes on this host: the guest init's cross-linker, bindgen's
-      # libclang, and meson with Vulkan's headers for virglrenderer.
-      - name: Toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
-
-      - name: Add the guest's musl target
-        run: cargo xtask init
-
-      # The runner has KVM, but /dev/kvm is root's until a rule says otherwise.
-      - name: KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          ls -la /dev/kvm
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: guest-x86_64
-
-      - name: Put the kernel in place
-        run: |
-          tar -xf guest-x86_64.tar
-          mkdir -p build/krunfw
-          cp -v guest/kernel/libkrunfw.so.* build/krunfw/
-
-      # A full version: setup-uv publishes no major tag to follow since v8.
-      - uses: astral-sh/setup-uv@v10.3.3
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-
-      - run: cargo xtask test
-
-  # Starts `virtx-windows-ci`, whose runner then takes `suites-windows`. Starting a running
-  # instance does nothing, so runs that overlap share it; one that finds it stopping waits for
-  # it to stop first, which is the only state it cannot be started from.
+  # Starts `virtx-windows-ci`, whose runner then takes Windows' tests and a pull request's
+  # Windows build. Starting a running instance does nothing, so runs that overlap share it; one
+  # that finds it stopping waits for it to stop first, the only state it cannot start from.
   windows-runner:
-    name: start the Windows runner
+    name: start windows runner
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -323,69 +267,23 @@ jobs:
           aws ec2 start-instances --instance-ids "$id" --output text
           aws ec2 wait instance-running --instance-ids "$id"
 
-  # The machine-booting crates' tests on Windows, over WHP. The target directory is outside
-  # the checkout, so it outlives the run on the instance's own disk: the next run builds what
-  # changed and not the world. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`):
-  # nested, the faults a guest takes as it first touches its memory are most of a boot.
-  suites-windows:
-    name: suites (windows-x86_64)
-    needs: [windows-runner, guest-parts]
-    runs-on: [self-hosted, virtx-windows-ci]
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_TARGET_DIR: C:\virtx-ci\target
-      VIRTX_PREFAULT_MEMORY: "1"
-    steps:
-      - name: Keep line endings as committed
-        run: git config --global core.autocrlf false
-
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: clippy, rustfmt
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: guest-x86_64
-
-      - name: Put the kernel in place
-        run: |
-          tar -xf guest-x86_64.tar
-          mkdir -p build/krunfw
-          cp -v guest/kernel/libkrunfw.dll build/krunfw/
-
-      - name: Add the guest's musl target
-        run: cargo xtask init
-
-      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored --test-threads 1
-
   # macOS and Windows: `virtx-stdio`, archived with the kernel and abin; `libvirtx_core`; and
   # the platform's packages packed from them and tried, all on one runner.
   #
   # Windows builds a pull request's (and `main`'s) on `virtx-windows-ci`, over what the runner's
   # own disk kept from the last build: its target directory (one of its own, apart from
-  # `suites-windows`', which builds without `gpu`) and the checkout's `build/`, virglrenderer's,
+  # the Windows tests', which build without `gpu`) and the checkout's `build/`, virglrenderer's,
   # which the checkout is told not to clean. A release is built on a hosted runner, a VM no
   # earlier run has touched: a pull request runs its code on the self-hosted one, and what it
   # leaves there -- in the toolchain, the crates' sources, the runner -- is no place to build
   # what is published from. A fork's pull request, or a run whose runner did not start, gets
   # the hosted one too.
-  native:
-    name: ${{ matrix.release }} (${{ matrix.platform }})
-    needs: [resolve, guest-parts, windows-runner]
+  build-native:
+    name: build + packages (${{ matrix.release }})
+    needs: [version, guest, windows-runner]
     # `windows-runner` is skipped for a fork's pull request; that only sends Windows to a
     # hosted runner, and stops nothing.
-    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.guest-parts.result == 'success' }}
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.guest.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -547,7 +445,7 @@ jobs:
 
       - uses: ./.github/actions/packages
         with:
-          version: ${{ needs.resolve.outputs.version }}
+          version: ${{ needs.version.outputs.version }}
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
@@ -562,10 +460,10 @@ jobs:
           retention-days: 1
 
   # Linux: `virtx-stdio` and `libvirtx_core`, built in manylinux_2_28 and handed to
-  # `linux-packages` to be packed and tried below the build runners' glibc.
-  linux:
-    name: ${{ matrix.release }} build
-    needs: guest-parts
+  # `packages-linux` to be packed and tried below the build runners' glibc.
+  build-linux:
+    name: build (${{ matrix.release }})
+    needs: guest
     strategy:
       fail-fast: false
       matrix:
@@ -676,9 +574,9 @@ jobs:
 
   # A Linux platform's packages, packed from what `linux` built and tried on ubuntu-22.04,
   # below the build runners' glibc.
-  linux-packages:
-    name: ${{ matrix.release }} (${{ matrix.platform }})
-    needs: [resolve, linux]
+  packages-linux:
+    name: packages (${{ matrix.release }})
+    needs: [version, build-linux]
     strategy:
       fail-fast: false
       matrix:
@@ -700,7 +598,7 @@ jobs:
 
       - uses: ./.github/actions/packages
         with:
-          version: ${{ needs.resolve.outputs.version }}
+          version: ${{ needs.version.outputs.version }}
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
@@ -713,3 +611,112 @@ jobs:
             dist/release/*.whl
           overwrite: true
           retention-days: 1
+
+  # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
+  # against the fixture, each booting machines. Linux x86_64, the one runner GitHub gives a
+  # hypervisor on.
+  tests-linux:
+    name: tests (linux-x86_64)
+    needs: guest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: suites
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # What building the servers takes on this host: the guest init's cross-linker, bindgen's
+      # libclang, and meson with Vulkan's headers for virglrenderer.
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      # The runner has KVM, but /dev/kvm is root's until a rule says otherwise.
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-x86_64
+
+      - name: Put the kernel in place
+        run: |
+          tar -xf guest-x86_64.tar
+          mkdir -p build/krunfw
+          cp -v guest/kernel/libkrunfw.so.* build/krunfw/
+
+      # A full version: setup-uv publishes no major tag to follow since v8.
+      - uses: astral-sh/setup-uv@v10.3.3
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - run: cargo xtask test
+
+  # The machine-booting crates' tests on Windows, over WHP. The target directory is outside
+  # the checkout, so it outlives the run on the instance's own disk: the next run builds what
+  # changed and not the world. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`):
+  # nested, the faults a guest takes as it first touches its memory are most of a boot.
+  tests-windows:
+    name: tests (windows-x86_64)
+    needs: [windows-runner, guest]
+    runs-on: [self-hosted, virtx-windows-ci]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: C:\virtx-ci\target
+      VIRTX_PREFAULT_MEMORY: "1"
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-x86_64
+
+      - name: Put the kernel in place
+        run: |
+          tar -xf guest-x86_64.tar
+          mkdir -p build/krunfw
+          cp -v guest/kernel/libkrunfw.dll build/krunfw/
+
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored --test-threads 1

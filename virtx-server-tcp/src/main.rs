@@ -49,12 +49,6 @@ async fn run(config: Config) -> anyhow::Result<()> {
     if let Some(secs) = config.minute_secs {
         endpoints::set_minute(std::time::Duration::from_secs(secs.max(1)));
     }
-    if let Some(capacity) = config.capacity {
-        endpoints::set_capacity(endpoints::Capacity {
-            vcpus: capacity.vcpus,
-            memory_mib: capacity.memory_mib,
-        });
-    }
     let access = Arc::new(Access::new(&config)?);
     let router = serve::router(Arc::clone(&access), &config.origins, axum::Router::new());
     serve::spawn_loops(&access);

@@ -42,23 +42,11 @@ pub struct Config {
     users: HashMap<String, User>,
     #[serde(default)]
     pub projects: HashMap<String, Project>,
-    /// What its machines may take at once, every project's together: four vCPUs for each of
-    /// the host's and twice its memory, without.
-    #[serde(default)]
-    pub capacity: Option<Capacity>,
     /// How long one of a sandbox's `auto_stop_minutes` lasts, in seconds: 60, unless a test
     /// that waits on sandboxes stopping by themselves makes it shorter. Sandboxes are looked at
     /// once a minute so measured, every 60 seconds at most.
     #[serde(default)]
     pub minute_secs: Option<u64>,
-}
-
-/// What a server's machines may take at once.
-#[derive(Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Capacity {
-    pub vcpus: u64,
-    pub memory_mib: u64,
 }
 
 #[derive(Deserialize)]

@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use anyhow::Context as _;
@@ -11,6 +12,24 @@ use sha2::{Digest, Sha256};
 /// Where a release's assets hang, unless `$VIRTX_DIST_URL` says otherwise:
 /// `<base>/v<version>/<asset>`.
 const DIST_URL: &str = "https://github.com/brekkylab/virtx/releases/download";
+
+/// How long a fetch waits before it gives up, so a release server that stops answering, or
+/// another caller's fetch that does not end, fails the call rather than holding it.
+#[derive(Clone, Copy)]
+struct Patience {
+    /// For a connection to the release server.
+    connect: Duration,
+    /// For the next bytes of an answer: since the request, or since the last bytes.
+    read: Duration,
+    /// For the lock another caller holds while it fetches the same version.
+    lock: Duration,
+}
+
+const PATIENCE: Patience = Patience {
+    connect: Duration::from_secs(10),
+    read: Duration::from_secs(30),
+    lock: Duration::from_secs(300),
+};
 
 /// The server's file name on this host.
 fn server_file() -> String {
@@ -56,18 +75,23 @@ pub async fn ensure_virtx() -> anyhow::Result<PathBuf> {
     let version = env("VIRTX_STDIO_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
     let base = env("VIRTX_DIST_URL").unwrap_or_else(|| DIST_URL.into());
     let root = cache_root().join("virtx-stdio").join(&version);
-    ensure_in(&root, &base, &version).await
+    ensure_in(&root, &base, &version, PATIENCE).await
 }
 
 /// [`ensure_virtx`] for the version `version`, kept under `root`, from the release at
-/// `<base>/v<version>/`.
+/// `<base>/v<version>/`, waiting as long as `patience` allows.
 ///
 /// Fetching is one process at a time, under a lock file in `root`, so concurrent callers --
 /// threads of one process or processes -- fetch once between them and the rest find the
 /// server placed. A fetch unpacks into a staging directory of its own in `root` and moves
 /// each entry into `bin/` by rename, the server last: a reader of `bin/` sees whole files
 /// only, and one that finds the server finds the rest.
-async fn ensure_in(root: &Path, base: &str, version: &str) -> anyhow::Result<PathBuf> {
+async fn ensure_in(
+    root: &Path,
+    base: &str,
+    version: &str,
+    patience: Patience,
+) -> anyhow::Result<PathBuf> {
     let server = server_file();
     let bin = root.join("bin");
     let placed = bin.join(&server);
@@ -77,34 +101,31 @@ async fn ensure_in(root: &Path, base: &str, version: &str) -> anyhow::Result<Pat
 
     fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
     let lock_path = root.join(".lock");
-    let _lock = tokio::task::spawn_blocking(move || -> anyhow::Result<fs::File> {
-        let lock = fs::File::create(&lock_path)
-            .with_context(|| format!("creating {}", lock_path.display()))?;
-        lock.lock()
-            .with_context(|| format!("locking {}", lock_path.display()))?;
-        Ok(lock)
-    })
-    .await
-    .context("locking panicked")??;
+    let _lock = lock(&lock_path, version, patience.lock).await?;
     // Another process may have placed it while this one waited.
     if placed.is_file() {
         return Ok(placed);
     }
 
+    let client = reqwest::Client::builder()
+        .connect_timeout(patience.connect)
+        .read_timeout(patience.read)
+        .build()
+        .context("making an HTTP client")?;
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let asset = format!("virtx-stdio-{platform}.tar.gz");
     let release = format!("{}/v{version}", base.trim_end_matches('/'));
-    let sums = fetch(&format!("{release}/SHA256SUMS"))
-        .await
-        .with_context(|| format!("no virtx-stdio release v{version} is published"))?;
+    let sums = fetch(&client, &format!("{release}/SHA256SUMS"), || {
+        format!("no virtx-stdio release v{version} is published")
+    })
+    .await?;
     let expected = checksum_for(&sums, &asset).with_context(|| {
         format!("no virtx-stdio release v{version} is published for {platform}")
     })?;
-    let archive = fetch(&format!("{release}/{asset}"))
-        .await
-        .with_context(|| {
-            format!("no virtx-stdio release v{version} is published for {platform}")
-        })?;
+    let archive = fetch(&client, &format!("{release}/{asset}"), || {
+        format!("no virtx-stdio release v{version} is published for {platform}")
+    })
+    .await?;
     let actual = format!("{:x}", Sha256::digest(&archive));
     anyhow::ensure!(
         actual == expected,
@@ -118,12 +139,44 @@ async fn ensure_in(root: &Path, base: &str, version: &str) -> anyhow::Result<Pat
     Ok(placed)
 }
 
-/// GET `url`, whole.
-async fn fetch(url: &str) -> anyhow::Result<Vec<u8>> {
-    let response = reqwest::get(url)
+/// The lock file at `path`, locked, waiting up to `deadline` for the caller fetching `version`
+/// that holds it.
+async fn lock(path: &Path, version: &str, deadline: Duration) -> anyhow::Result<fs::File> {
+    let lock = fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let since = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(fs::TryLockError::WouldBlock) if since.elapsed() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "another fetch of virtx-stdio v{version} has held {} for {deadline:?}",
+                path.display()
+            ),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
+    }
+}
+
+/// GET `url` with `client`, whole. An error names `url`, a timeout among them, and one for
+/// nothing there says `missing` first.
+async fn fetch(
+    client: &reqwest::Client,
+    url: &str,
+    missing: impl FnOnce() -> String,
+) -> anyhow::Result<Vec<u8>> {
+    let response = client
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
     let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow::anyhow!("fetching {url}: {status}").context(missing()));
+    }
     anyhow::ensure!(status.is_success(), "fetching {url}: {status}");
     let body = response
         .bytes()
@@ -290,7 +343,9 @@ mod tests {
         let release = release(None).await;
         let root = fresh_root();
 
-        let placed = ensure_in(&root, &release.base, "1.2.3").await.unwrap();
+        let placed = ensure_in(&root, &release.base, "1.2.3", PATIENCE)
+            .await
+            .unwrap();
         assert_eq!(placed, root.join("bin").join(server_file()));
         assert_eq!(fs::read(&placed).unwrap(), b"#!/bin/sh\necho server\n");
         assert_eq!(
@@ -307,7 +362,9 @@ mod tests {
             "the staging directory is gone"
         );
 
-        let again = ensure_in(&root, &release.base, "1.2.3").await.unwrap();
+        let again = ensure_in(&root, &release.base, "1.2.3", PATIENCE)
+            .await
+            .unwrap();
         assert_eq!(again, placed);
         assert_eq!(release.fetches.load(SeqCst), 1, "present is enough");
         fs::remove_dir_all(&root).unwrap();
@@ -320,7 +377,7 @@ mod tests {
 
         let calls = (0..8).map(|_| {
             let (root, base) = (root.clone(), release.base.clone());
-            tokio::spawn(async move { ensure_in(&root, &base, "1.2.3").await })
+            tokio::spawn(async move { ensure_in(&root, &base, "1.2.3", PATIENCE).await })
         });
         let mut placed = Vec::new();
         for call in calls {
@@ -343,7 +400,7 @@ mod tests {
         let release = release(Some(wrong.into_bytes())).await;
         let root = fresh_root();
 
-        let error = ensure_in(&root, &release.base, "1.2.3")
+        let error = ensure_in(&root, &release.base, "1.2.3", PATIENCE)
             .await
             .unwrap_err()
             .to_string();
@@ -357,11 +414,85 @@ mod tests {
         let release = release(None).await;
         let root = fresh_root();
 
-        let error = ensure_in(&root, &release.base, "9.9.9")
+        let error = ensure_in(&root, &release.base, "9.9.9", PATIENCE)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("no virtx-stdio release v9.9.9"), "{error}");
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no virtx-stdio release v9.9.9 is published"),
+            "{error:#}"
+        );
+        let url = format!("{}/v9.9.9/SHA256SUMS", release.base);
+        assert!(format!("{error:#}").contains(&url), "{error:#}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// [`PATIENCE`] cut short, so a test waits a fraction of a second.
+    const SHORT: Patience = Patience {
+        connect: Duration::from_secs(2),
+        read: Duration::from_millis(300),
+        lock: Duration::from_millis(300),
+    };
+
+    #[tokio::test]
+    async fn a_release_server_that_never_answers_fails_the_fetch_naming_its_url() {
+        // Accepts every connection and holds it open without a byte.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let root = fresh_root();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            ensure_in(&root, &base, "1.2.3", SHORT),
+        )
+        .await
+        .expect("the fetch gives up")
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains(&format!("fetching {base}/v1.2.3/SHA256SUMS")),
+            "{error}"
+        );
+        assert!(error.contains("timed out"), "{error}");
+        assert!(!error.contains("is published"), "{error}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lock_held_past_the_deadline_fails_the_call_saying_so() {
+        let release = release(None).await;
+        let root = fresh_root();
+        fs::create_dir_all(&root).unwrap();
+        let held = fs::File::create(root.join(".lock")).unwrap();
+        held.lock().unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            ensure_in(&root, &release.base, "1.2.3", SHORT),
+        )
+        .await
+        .expect("the wait for the lock gives up")
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("another fetch of virtx-stdio v1.2.3 has held"),
+            "{error}"
+        );
+        assert_eq!(release.fetches.load(SeqCst), 0);
+
+        // Released, the lock is taken and the fetch goes ahead.
+        drop(held);
+        let placed = ensure_in(&root, &release.base, "1.2.3", SHORT)
+            .await
+            .unwrap();
+        assert!(placed.is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 

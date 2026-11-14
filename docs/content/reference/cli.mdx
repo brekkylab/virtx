@@ -36,4 +36,4 @@ virtx rmi jq:latest
 
 ## Which server
 
-Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. See [Hello world](/docs/hello-world/#run-it) for the two servers.
+Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. `--host` and `--server` together are refused; otherwise a flag wins over the environment and a host over a program, so `--server` starts its program with `$VIRTX_HOST` set, and `$VIRTX_HOST` is reached with `$VIRTX_STDIO` set. See [Hello world](/docs/hello-world/#run-it) for the two servers.

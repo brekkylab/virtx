@@ -300,6 +300,34 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_wins_over_the_environment_and_a_host_over_a_server() {
+        // The environment is the process's, so this runs again as a process of its own with
+        // both variables set.
+        const HOST: &str = "https://from-the-environment";
+        if std::env::var("VIRTX_HOST").as_deref() != Ok(HOST) {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::command::tests::a_flag_wins_over_the_environment_and_a_host_over_a_server",
+                    "--quiet",
+                ])
+                .env("VIRTX_HOST", HOST)
+                .env("VIRTX_STDIO", "/nonexistent/virtx-stdio")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let cli = Cli::try_parse_from(["virtx", "images"]).unwrap();
+        assert_eq!(server::host(&cli.server).as_deref(), Some(HOST));
+        let cli = Cli::try_parse_from(["virtx", "-H", "https://x", "images"]).unwrap();
+        assert_eq!(server::host(&cli.server).as_deref(), Some("https://x"));
+        let cli = Cli::try_parse_from(["virtx", "--server", "./s", "images"]).unwrap();
+        assert_eq!(server::host(&cli.server), None);
+        assert_eq!(cli.server.server.as_deref(), Some(Path::new("./s")));
+    }
+
+    #[test]
     fn the_server_is_named_before_or_after_the_command() {
         let before = Cli::try_parse_from(["virtx", "--server", "./s", "images"]).unwrap();
         let after = Cli::try_parse_from(["virtx", "images", "--server", "./s"]).unwrap();

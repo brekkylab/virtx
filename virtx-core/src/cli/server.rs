@@ -13,39 +13,40 @@ use crate::{Auth, Client, ensure_virtx};
 /// on a command line.
 const TOKEN: &str = "VIRTX_TOKEN";
 
+/// The server's base URL when neither `--host` nor `--server` is given.
+const HOST: &str = "VIRTX_HOST";
+
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct ServerArgs {
     /// The server's base URL, reached over HTTP with `$VIRTX_TOKEN` as its bearer token if set;
-    /// a server started here if absent.
-    #[arg(
-        short = 'H',
-        long,
-        env = "VIRTX_HOST",
-        global = true,
-        value_name = "URL"
-    )]
+    /// if absent, `$VIRTX_HOST`, unless `--server` names a server to start.
+    #[arg(short = 'H', long, global = true, value_name = "URL")]
     pub(crate) host: Option<String>,
 
-    /// The server to start; if absent, `virtx-stdio` of this version, fetched into the cache the
-    /// first time.
-    #[arg(
-        long,
-        env = "VIRTX_STDIO",
-        global = true,
-        conflicts_with = "host",
-        value_name = "PROGRAM"
-    )]
+    /// The server to start; if absent, the one `$VIRTX_STDIO` names, or else `virtx-stdio` of
+    /// this version, fetched into the cache the first time. A host, from `--host` or
+    /// `$VIRTX_HOST`, is reached in place of `$VIRTX_STDIO`'s.
+    #[arg(long, global = true, conflicts_with = "host", value_name = "PROGRAM")]
     pub(crate) server: Option<PathBuf>,
+}
+
+/// The base URL of the server to reach over HTTP, if `args` and the environment name one:
+/// `--host`, or `$VIRTX_HOST` when `--server` names no server to start.
+pub(crate) fn host(args: &ServerArgs) -> Option<String> {
+    if args.host.is_some() || args.server.is_some() {
+        return args.host.clone();
+    }
+    std::env::var(HOST).ok().filter(|url| !url.is_empty())
 }
 
 /// A client of the server `args` names.
 pub(crate) async fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
-    if let Some(url) = &args.host {
+    if let Some(url) = host(args) {
         let auth = match std::env::var(TOKEN) {
             Ok(token) if !token.is_empty() => Auth::Bearer { token },
             _ => Auth::None,
         };
-        return Client::connect(url, auth, http::HeaderMap::new())
+        return Client::connect(&url, auth, http::HeaderMap::new())
             .with_context(|| format!("reaching {url}"));
     }
     let program = match &args.server {

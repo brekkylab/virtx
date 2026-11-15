@@ -19,7 +19,8 @@ const DIST_URL: &str = "https://github.com/brekkylab/virtx/releases/download";
 struct Patience {
     /// For a connection to the release server.
     connect: Duration,
-    /// For the next bytes of an answer: since the request, or since the last bytes.
+    /// For an answer: its head since the request, connecting and redirects included, and each
+    /// next part of its body since the last.
     read: Duration,
     /// For the lock another caller holds while it fetches the same version.
     lock: Duration,
@@ -162,7 +163,7 @@ async fn lock(path: &Path, version: &str, deadline: Duration) -> anyhow::Result<
 }
 
 /// GET `url` with `client`, whole. An error names `url`, a timeout among them, and one for
-/// nothing there says `missing` first.
+/// nothing there, a `404`, starts with what `missing` says.
 async fn fetch(
     client: &reqwest::Client,
     url: &str,

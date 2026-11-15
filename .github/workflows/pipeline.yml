@@ -10,7 +10,7 @@
 #   job (as the checks name it)           waits for     does
 #   version                               nothing       every manifest says one version
 #   check                                 nothing       format, clippy, unit tests, the bindings' lint
-#   guest (x86_64, aarch64)               version       the guest kernel and abin
+#   guest (x86_64, aarch64)               version       the guest kernel, abin and alib
 #   start windows runner                  nothing       starts `virtx-windows-ci`
 #   lint (windows-x86_64,                 nothing       clippy with `gpu`, on this platform
 #     linux-x86_64, linux-aarch64)
@@ -29,7 +29,8 @@
 # What a job builds it tests in the same job where it can. Two things cross between jobs, as
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
 # Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
-# containers, can run, and abin's C is cross-compiled by a shell script), and a Linux
+# containers, can run; abin's C is cross-compiled by a shell script, and each part of alib is
+# built in the Linux containers its `images` names), and a Linux
 # platform's build, which is made in a container and tried on the runner below its glibc. A
 # cache only ever saves time here: a miss builds the thing again.
 #
@@ -115,12 +116,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           toml() { sed -n 's/^version = "\(.*\)"$/\1/p' "$1" | head -1; }
-          version=$(jq -r .version virtx-node/package.json)
+          version=$(toml virtx-core/Cargo.toml)
+          [ -n "$version" ] || { echo "::error::virtx-core/Cargo.toml has no version"; exit 1; }
+          node=$(jq -r .version virtx-node/package.json)
           wrong=""
-          for f in virtx-core/Cargo.toml virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
+          [ "$node" = "$version" ] || wrong="$wrong virtx-node/package.json=$node"
+          for f in virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
-          [ -z "$wrong" ] || { echo "::error::virtx-node/package.json says $version, but:$wrong"; exit 1; }
+          [ -z "$wrong" ] || { echo "::error::virtx-core/Cargo.toml says $version, but:$wrong"; exit 1; }
           # Only these pre-releases have a PEP 440 form `publish` matches the wheels by.
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]] || {
             echo "::error::version $version is not X.Y.Z, X.Y.Z-alpha.N, X.Y.Z-beta.N or X.Y.Z-rc.N"; exit 1
@@ -176,7 +180,7 @@ jobs:
 
       - run: cargo xtask check
 
-  # The guest kernel for every platform of the architecture, and abin. Tarred before it is
+  # The guest kernel for every platform of the architecture, abin and alib. Tarred before it is
   # handed on: an artifact keeps no file modes, and abin's programs have to stay executable.
   guest:
     name: guest (${{ matrix.arch }})
@@ -237,11 +241,36 @@ jobs:
           cargo xtask build abin
           ls -la target/release/abin
 
-      - name: Hand the kernel and abin on
+      # alib is only `virtx-alibs/`, each part built again when its files change.
+      - uses: actions/cache@v6
+        id: alib
+        with:
+          path: alib
+          key: alib-${{ matrix.arch }}-${{ hashFiles('virtx-alibs/**') }}
+
+      # Each part's `build.sh`, built and installed into `alib/` in every image its `images`
+      # names, of this runner's architecture.
+      - name: alib
+        if: steps.alib.outputs.cache-hit != 'true'
+        run: |
+          for part in virtx-alibs/*/; do
+            grep -v '^#' "$part/images" | while read -r dir image; do
+              [ -n "$dir" ] || continue
+              image=$(echo "$image" | sed 's/{arch}/${{ matrix.arch }}/')
+              echo "::group::$part$dir in $image"
+              docker run --rm -v "$PWD:/src" -w /src "$image" \
+                sh -c "sh ${part}build.sh build && sh ${part}build.sh install /src/alib" </dev/null
+              echo "::endgroup::"
+            done
+          done
+          ls -laR alib
+
+      - name: Hand the kernel, abin and alib on
         run: |
           mkdir -p guest/kernel
           cp -v build/krunfw/* guest/kernel/
           cp -R target/release/abin guest/abin
+          cp -R alib guest/alib
           tar -cf guest-${{ matrix.arch }}.tar guest
 
       - uses: actions/upload-artifact@v7
@@ -369,7 +398,7 @@ jobs:
 
       - run: cargo xtask clippy --gpu
 
-  # macOS and Windows: `virtx-stdio`, archived with the kernel and abin; `libvirtx_core`; and
+  # macOS and Windows: `virtx-stdio`, archived with the kernel, abin and alib; `libvirtx_core`; and
   # the platform's packages packed from them and tried, all on one runner.
   #
   # Windows builds a pull request's (and `main`'s) on `virtx-windows-ci`, over what the runner's
@@ -472,8 +501,11 @@ jobs:
         with:
           name: guest-${{ matrix.arch }}
 
-      # macOS links the kernel.c the Linux job built; Windows takes the library as it is.
-      - name: Put the kernel and abin in place
+      # macOS links the kernel.c the Linux job built; Windows takes the library as it is. alib
+      # stays in `guest/`, named as virtx's cache to the server build and `archive`, which take
+      # it from `alib/` there -- to those two steps only: the packages' smoke keeps a cache of
+      # its own.
+      - name: Put the kernel, abin and alib in place
         run: |
           tar -xf guest-${{ matrix.arch }}.tar
           mkdir -p build/krunfw "$CARGO_TARGET_DIR/release"
@@ -481,12 +513,15 @@ jobs:
             macos-*)   LIBKRUNFW_KERNEL_C="$PWD/guest/kernel/kernel.c" cargo xtask build kernel ;;
             windows-*) cp -v guest/kernel/libkrunfw.dll build/krunfw/ ;;
           esac
-          rm -rf "$CARGO_TARGET_DIR/release/abin"
+          rm -rf "$CARGO_TARGET_DIR/release/abin" "$CARGO_TARGET_DIR/release/alib"
           cp -R guest/abin "$CARGO_TARGET_DIR/release/"
-          ls -la build/krunfw "$CARGO_TARGET_DIR/release/abin"
+          home="$PWD/guest"
+          if [ "$RUNNER_OS" = Windows ]; then home=$(cygpath -w "$home"); fi
+          echo "GUEST_HOME=$home" >> "$GITHUB_ENV"
+          ls -la build/krunfw "$CARGO_TARGET_DIR/release/abin" guest/alib
 
       - name: Server
-        run: cargo xtask build server-stdio --locked
+        run: VIRTX_HOME="$GUEST_HOME" cargo xtask build server-stdio --locked
 
       # macOS' lint, which has no lint job of its own (see `lint-windows`). The GPU libraries
       # are the server build's, already there.
@@ -519,7 +554,7 @@ jobs:
 
       - name: Archive
         run: |
-          cargo xtask archive --with-abin
+          VIRTX_HOME="$GUEST_HOME" cargo xtask archive --with-abin
           mkdir -p dist/release
           cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" dist/release/
 
@@ -627,16 +662,17 @@ jobs:
         with:
           name: guest-${{ matrix.arch }}
 
-      - name: Put the kernel and abin in place
+      # alib stays in `guest/`, named as virtx's cache to the server build and `archive`.
+      - name: Put the kernel, abin and alib in place
         run: |
           tar -xf guest-${{ matrix.arch }}.tar
           mkdir -p build/krunfw target/release
           cp -v guest/kernel/libkrunfw.so.* build/krunfw/
           cp -R guest/abin target/release/
-          ls -la build/krunfw target/release/abin
+          ls -la build/krunfw target/release/abin guest/alib
 
       - name: Server
-        run: cargo xtask build server-stdio --locked
+        run: VIRTX_HOME="$PWD/guest" cargo xtask build server-stdio --locked
 
       - name: libvirtx_core
         run: cargo xtask build client --locked --target ${{ matrix.target }}
@@ -657,7 +693,7 @@ jobs:
 
       - name: Hand the build on
         run: |
-          cargo xtask archive --with-abin
+          VIRTX_HOME="$PWD/guest" cargo xtask archive --with-abin
           mkdir -p built/dist/release built/dist/lib/${{ matrix.platform }}
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz built/dist/release/
           cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/

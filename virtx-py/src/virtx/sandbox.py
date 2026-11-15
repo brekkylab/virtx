@@ -65,6 +65,9 @@ class Sandbox(Files):
     ports: list[SandboxPort] = field(default_factory=list)
     """Its opened ports: answered by ``create_sandbox`` only."""
 
+    abins: list[str] = field(default_factory=list)
+    """virtx's own programs it has at ``/abin``."""
+
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Sandbox:
         return cls(
@@ -74,6 +77,7 @@ class Sandbox(Files):
             value.get("snapshot"),
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
+            list(value.get("abins", ())),
         )
 
     @property

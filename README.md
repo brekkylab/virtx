@@ -284,7 +284,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
+Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](docs/content/guides/using-gpus.mdx).
 
 ## How it works
 

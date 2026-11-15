@@ -8,14 +8,15 @@ Index document files and search them
 Usage: index <COMMAND>
 
 Commands:
-  init    Make a store where there is no file yet
-  ingest  Index files into a store
-  search  Search a store
-  sync    Make a store match the tree under the paths given
-  purge   Take documents back out of a store, by the paths they were ingested under
-  list    The stores in a directory, and how much is in each
-  drop    Remove a store. The files it was built from are untouched
-  help    Print this message or the help of the given subcommand(s)
+  init     Make a store where there is no file yet
+  ingest   Index files into a store
+  search   Search a store
+  sync     Make a store match the tree under the paths given
+  purge    Take documents back out of a store, by the paths they were ingested under
+  rechunk  Cut every document in a store into chunks again, by a new size and overlap
+  list     The stores in a directory, and how much is in each
+  drop     Remove a store. The files it was built from are untouched
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -28,13 +29,23 @@ Make a store where there is no file yet.
 
 The one command that brings a store into being. Every other one expects the file to be there, which is what keeps a mistyped path from becoming an empty store that answers every search with nothing.
 
-Usage: index init <STORE>
+Usage: index init [OPTIONS] <STORE>
 
 Arguments:
   <STORE>
           Where to make it, `notes.db` for instance
 
 Options:
+      --chunk-size <CHARS>
+          The most characters a chunk holds. A chunk is cut before a heading, at a blank line, at a line end or at whitespace where it can be, so most are shorter
+          
+          [default: 1200]
+
+      --overlap <CHARS>
+          How many characters at the end of a chunk the next one may start with again, so a passage cut in two is still whole in one of them
+          
+          [default: 200]
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -59,17 +70,30 @@ Options:
 
 ## index search
 
-Search a store
+Search a store.
+
+Each hit is a chunk of a document, on a line of its own: the score, larger being nearer, then `path:first-last` with the lines the chunk spans, then the document's name, all tab-separated. Under it, indented by a tab, is a snippet cut around the match, or the chunk's whole text with `--text`.
 
 Usage: index search [OPTIONS] <STORE> <QUERY>...
 
 Arguments:
-  <STORE>     Which store to ask
-  <QUERY>...  The words to look for, joined back together since a shell has already split them
+  <STORE>
+          Which store to ask
+
+  <QUERY>...
+          The words to look for, joined back together since a shell has already split them
 
 Options:
-  -n, --limit <N>  How many hits to answer with [default: 10]
-  -h, --help       Print help
+  -n, --limit <N>
+          How many hits to answer with
+          
+          [default: 10]
+
+      --text
+          Answer with each chunk's whole text, every line of it indented under the hit, in place of a snippet
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 ## index sync
 
@@ -113,6 +137,32 @@ Arguments:
           Paths, spelled as `ingest` spelled them
 
 Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+## index rechunk
+
+Cut every document in a store into chunks again, by a new size and overlap.
+
+From the text the store already holds: no file is read, so a document whose file is gone is cut too. The store keeps the new chunking for what is ingested after.
+
+Usage: index rechunk [OPTIONS] <STORE>
+
+Arguments:
+  <STORE>
+          Which store to cut again
+
+Options:
+      --chunk-size <CHARS>
+          The most characters a chunk holds. A chunk is cut before a heading, at a blank line, at a line end or at whitespace where it can be, so most are shorter
+          
+          [default: 1200]
+
+      --overlap <CHARS>
+          How many characters at the end of a chunk the next one may start with again, so a passage cut in two is still whole in one of them
+          
+          [default: 200]
+
   -h, --help
           Print help (see a summary with '-h')
 

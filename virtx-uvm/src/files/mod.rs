@@ -530,6 +530,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_put_answers_the_etag_of_the_file_it_wrote() {
+        let scratch = tempfile::tempdir().unwrap();
+        let volumes = VolumeStore::new(scratch.path().join("volume")).unwrap();
+        volumes.create("v").unwrap();
+        let snapshots = SnapshotStore::new(scratch.path().join("snapshot")).unwrap();
+        snapshots.create("s", 64 << 20).unwrap();
+        let files = Files::new(snapshots, volumes);
+        let sent =
+            async |method: Method, path: &str, if_match: Option<&str>, body: &'static str| {
+                let mut request = Request::builder().method(method).uri(path);
+                if let Some(etag) = if_match {
+                    request = request.header(header::IF_MATCH, etag);
+                }
+                let response = files
+                    .handle(request.body(Body::from(body)).unwrap(), &|_| false)
+                    .await;
+                let etag = response.headers().get(header::ETAG);
+                (
+                    response.status(),
+                    etag.map(|etag| etag.to_str().unwrap().to_owned()),
+                )
+            };
+
+        for path in ["/volumes/v/files/a.txt", "/snapshots/s/files/a.txt"] {
+            let (status, put) = sent(Method::PUT, path, None, "one").await;
+            assert_eq!(status, StatusCode::CREATED, "{path}");
+            let put = put.expect("a PUT answers an ETag");
+            let (status, got) = sent(Method::GET, path, None, "").await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(got.as_deref(), Some(put.as_str()), "{path}");
+
+            // The tag a write was answered is the one the next write is taken over. That write
+            // is longer: a tag is a file's length and time, and on a host whose file times move a
+            // clock tick at a time two writes in a row can have one time.
+            let (status, again) = sent(Method::PUT, path, Some(&put), "three").await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{path}");
+            let (_, got) = sent(Method::GET, path, None, "").await;
+            assert_eq!(got, again, "{path}");
+            let (status, _) = sent(Method::PUT, path, Some(&put), "old").await;
+            assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{path}");
+        }
+    }
+
     #[test]
     fn a_path_out_of_the_root_is_a_bad_request() {
         for out in ["/volumes/v/filesx", "/volumes/w/files/a", "/volumes/v"] {

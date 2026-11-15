@@ -218,15 +218,20 @@ impl DavFile for File {
         })
     }
 
-    /// A whole write, all here now, goes over the path.
+    /// A whole write, all here now, goes over the path. Its metadata is read before it does, as
+    /// a rename keeps a file's length and modification time, so a `PUT` answers the `ETag` of
+    /// the file it wrote and not of one another write puts at the path right after.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
+            let at = self.saving.as_deref().unwrap_or(&self.path);
+            let read = self.volume.stat(at).await.ok().map(|s| described(&s));
             if let Some(saving) = &self.saving {
                 self.volume
                     .rename(saving, &self.path, true)
                     .map_err(|e| refused(&e))?;
                 self.saving = None;
             }
+            self.meta = written(read, &self.meta);
             Ok(())
         })
     }
@@ -288,6 +293,15 @@ fn described(stat: &Stat) -> Meta {
         len: stat.size,
         modified: stat.mtime,
     }
+}
+
+/// The metadata of a file just written: `read` of it, or if it could not be read, `meta` with no
+/// time, so the write is answered with no validator rather than one the file does not have.
+pub(super) fn written(read: Option<Meta>, meta: &Meta) -> Meta {
+    read.unwrap_or_else(|| Meta {
+        modified: None,
+        ..meta.clone()
+    })
 }
 
 /// What `dav-server` is told of a volume's failure, which it answers with the status

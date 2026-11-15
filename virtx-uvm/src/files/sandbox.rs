@@ -13,7 +13,7 @@ use dav_server::fs::{
 };
 use futures_util::stream;
 
-use super::volume::Meta;
+use super::volume::{Meta, written};
 use crate::machine::Machine;
 use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 
@@ -257,10 +257,15 @@ impl DavFile for File {
         })
     }
 
-    /// A whole write, all here now, goes over the path, as what was there was.
+    /// A whole write, all here now, goes over the path, as what was there was. Its metadata is
+    /// the guest's, read before it does, as a rename keeps a file's length and modification
+    /// time, so a `PUT` answers the `ETag` of the file it wrote and not of one another write puts
+    /// at the path right after.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             self.send(0).await?;
+            let at = self.saving.clone().unwrap_or_else(|| self.path.clone());
+            let read = stat(&self.machine, &at).await.ok();
             if let Some(saving) = self.saving.take() {
                 let request = IoReq::Rename {
                     from: saving.clone(),
@@ -272,6 +277,7 @@ impl DavFile for File {
                     return Err(e);
                 }
             }
+            self.meta = written(read, &self.meta);
             Ok(())
         })
     }

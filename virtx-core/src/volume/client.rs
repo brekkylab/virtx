@@ -62,7 +62,7 @@ pub(crate) async fn create_mount(
 /// the volume's root, which is no mount's, and would go to the list of them.
 fn mount(path: &str) -> Result<String, Error> {
     match resolved(path).is_empty() {
-        true => Err(Error::Path(format!(
+        true => Err(Error::Client(format!(
             "{path:?} is the volume's root, which no mount is at"
         ))),
         false => Ok(segments(path)),

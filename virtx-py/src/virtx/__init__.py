@@ -28,7 +28,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 ``create_sandbox`` answered for it: an address on this machine's loopback.
 """
 
-from ._library import LIBRARY_ENV, VirtxError, library_path, load
+from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
 from .client import Client, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, Files, Metadata
 from .image import (
@@ -114,6 +114,7 @@ __all__ = [
     "SandboxPort",
     "SandboxVolume",
     "Snapshot",
+    "Source",
     "StartedJob",
     "Stderr",
     "Stdout",

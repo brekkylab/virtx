@@ -10,16 +10,10 @@ license.workspace = true
 name = "docread"
 path = "src/main.rs"
 
-# Reading a `.docx` is not a switch any more: it costs nothing anybody has to install, since it
-# is Rust from end to end and a build for the guest is the same `cargo build` either way. A
-# program whose answer to a Word document depended on how it was compiled was one more thing a
-# caller had to know about the binary in front of them, and this one always reads them.
-#
-# A PDF is read the same way, and that is no longer a switch either. It was one because the
-# engine is a `libpdfium.a` this machine has to have built, so the feature bought a `cargo
-# build` that needed nothing but rustup — at the price of a program whose answer to a PDF
-# depended on how it was compiled, which is exactly what a caller cannot see. `build.rs` is
-# where the library is found or made, and it is now on the path of every build here.
+# Word documents and PDFs are both read by Rust from end to end, so a build for the guest is
+# the same `cargo build` as any other, with nothing to install beyond rustup and the musl
+# sysroot `index` already needs. Neither is a feature: a program whose answer to a document
+# depended on how it was compiled is one a caller could not read off the binary in front of them.
 
 [dependencies]
 # The command line, and the whole of the driving. One command with two options is small enough
@@ -37,12 +31,10 @@ clap = { workspace = true }
 # quote line numbers of back at something, and text transcoded out of an encoding nobody
 # declared is a guess wearing the clothes of the file.
 #
-# A document that holds text without being it — a PDF — is a different question, and it is the
-# `pdfium` feature below. Off, this program builds with rustup and nothing else, which is what
-# lets a `/abin` be cross-compiled from a Mac with no toolchain to install. On, a PDF engine is
-# linked into the binary statically, and what a caller gets back is still numbered lines — but
-# lines the engine laid out rather than lines somebody wrote, which is a difference the output
-# says out loud rather than one a caller has to know.
+# A document that holds text without being it — a PDF — is a different question, and it is
+# `pdf_oxide` below: what a caller gets back is still numbered lines, but lines the engine laid
+# out rather than lines somebody wrote, which is a difference the output says out loud rather
+# than one a caller has to know.
 
 # Reading Word documents. The model it parses into keeps `w:ins` and `w:del` as what they are
 # — tracked insertions and deletions — which is the reason it is this crate and not one of the
@@ -76,36 +68,12 @@ zip = { version = "8", default-features = false, features = [
     "deflate-flate2",
 ] }
 
-# The PDF engine's Rust side, and only its bindings: `static` is the feature that offers
-# `bind_to_statically_linked_library`, which is the whole point — no `dlopen`, no `.so` beside
-# the binary, one static ELF in `/abin` as every other program there is.
-#
-# `default-features = false` drops the `image` crate, which is there to render pages to
-# bitmaps and is a tree this program has no use for: what is wanted here is the text layer.
-# `pdfium_7881` and not `pdfium_latest`: the API version has to be the one the library was
-# built at, so it is pinned here and in `build.rs` together, and a version that moved on its
-# own would be a link that fails or, worse, a call through the wrong signature.
-#
-# The linking itself is `build.rs`'s and not this crate's: setting `PDFIUM_STATIC_LIB_PATH`
-# would have this crate's own build script emit the flags too, and two places saying where a
-# library comes from is how one of them ends up wrong.
-pdfium-render = { version = "0.9.3", default-features = false, features = [
-    "static",
-    "pdfium_7881",
-] }
-
-# Fetching a published `libpdfium.a` in `build.rs`, and only there — none of this is in the
-# program. `ureq` is a blocking HTTP client with no runtime, which is what a build script wants
-# and what a `reqwest` would drag a whole async stack in to do; `sha2` is the check that makes
-# a URL usable at all, since what is fetched goes inside every binary built here; `flate2`
-# unwraps a `.gz`, because a 20 MB archive published uncompressed is a download nobody should
-# have to repeat.
-#
-# All three are the build script's alone: none of this is linked into the program.
-[build-dependencies]
-flate2 = { version = "1" }
-sha2 = { workspace = true }
-ureq = { version = "3" }
+# The PDF engine. Pure Rust, so it cross-compiles to the guest with nothing to fetch or build,
+# and the program stays one static ELF in `/abin`. Of its default features, `legacy-crypto` is
+# kept: it is the MD5 the older standard security handler derives keys with, and plenty of PDFs
+# are encrypted with an empty password only to restrict printing. `icc` is colour management,
+# which the text layer has no use for.
+pdf_oxide = { version = "0.3.78", default-features = false, features = ["legacy-crypto"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -252,6 +252,8 @@ let client = Client::connect(
 
 </details>
 
+`virtx token`は最後にサインインしたプロバイダーのトークンを返します。複数にサインインしている場合は、引数でサーバーのプロバイダーを指定してください: `token --json --issuer https://idp.example --client-id virtx`。
+
 クライアントが平文の`http`でトークンを送るのは自分のマシンのループバック宛てだけなので、別のマシンで動かすサーバーは前段にHTTPSを置いてください。
 
 ## 特長

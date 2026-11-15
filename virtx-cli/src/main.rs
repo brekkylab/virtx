@@ -224,7 +224,7 @@ fn login(
             Asked::Pending => {}
             Asked::SlowDown => interval += Duration::from_secs(5),
             Asked::Issued(tokens) => {
-                let session = Session::new(dir, &sign_in.issuer, keychain);
+                let session = Session::new(dir, sign_in, keychain);
                 let _lock = session.lock()?;
                 // Another session's tokens are not this one's to refresh with.
                 session.forget()?;
@@ -241,7 +241,7 @@ fn login(
 /// An ID token: the one kept while it has more than [`FRESH_FOR`] left and the server has not
 /// `refused` it, or else one refreshed from the session kept. All under the lock.
 fn token(dir: &Path, sign_in: &SignIn, refused: bool, keychain: bool) -> anyhow::Result<Kept> {
-    let session = Session::new(dir, &sign_in.issuer, keychain);
+    let session = Session::new(dir, sign_in, keychain);
     let _lock = session.lock()?;
     if !refused
         && let Some(kept) = session.kept_id()
@@ -262,7 +262,7 @@ fn token(dir: &Path, sign_in: &SignIn, refused: bool, keychain: bool) -> anyhow:
 }
 
 fn logout(dir: &Path, sign_in: &SignIn, keychain: bool) -> anyhow::Result<()> {
-    let session = Session::new(dir, &sign_in.issuer, keychain);
+    let session = Session::new(dir, sign_in, keychain);
     let _lock = session.lock()?;
     if let Some(refresh) = session.kept()?
         && let Ok(provider) = discover(sign_in)
@@ -327,6 +327,13 @@ mod tests {
         assert!(first.expires_at - now() > FRESH_FOR);
         let again = token(&dir, &sign_in, false, false).unwrap();
         assert_eq!(again.token, first.token);
+        // Another client of the provider has a session of its own: none, not signed in as it.
+        let another = SignIn {
+            client_id: "another".into(),
+            ..sign_in.clone()
+        };
+        let unsigned = token(&dir, &another, false, false).err().unwrap();
+        assert!(unsigned.to_string().contains("not signed in"));
         // The server takes it.
         let listed = reqwest::blocking::Client::new()
             .get(format!("{url}volumes/"))
@@ -343,7 +350,7 @@ mod tests {
         assert_ne!(renewed.token, first.token);
 
         // Signing out ends the session at the provider too.
-        let session = Session::new(&dir, &sign_in.issuer, false);
+        let session = Session::new(&dir, &sign_in, false);
         let refresh = session.kept().unwrap().unwrap();
         logout(&dir, &sign_in, false).unwrap();
         assert!(
@@ -363,7 +370,7 @@ mod tests {
         let (_, sign_in) = fixture();
         let dir = std::env::temp_dir().join(format!("virtx-cli-ended-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let session = Session::new(&dir, &sign_in.issuer, false);
+        let session = Session::new(&dir, &sign_in, false);
         session.keep("r-stale").unwrap();
         let ended = token(&dir, &sign_in, false, false).err().unwrap();
         assert!(ended.to_string().contains("the session has ended"));

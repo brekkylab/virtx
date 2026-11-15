@@ -255,6 +255,8 @@ let client = Client::connect(
 
 </details>
 
+`virtx token`은 마지막으로 로그인한 provider의 토큰을 줍니다. 여러 곳에 로그인해 두었다면 인자로 서버의 provider를 지정하세요: `token --json --issuer https://idp.example --client-id virtx`.
+
 클라이언트는 평문 `http`로는 자기 머신의 루프백 주소에만 토큰을 보내므로, 서버를 다른 머신에서 돌린다면 앞단에 HTTPS를 두세요.
 
 ## 주요 기능

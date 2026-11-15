@@ -302,10 +302,11 @@ mod tests {
     #[test]
     fn a_flag_wins_over_the_environment_and_a_host_over_a_server() {
         // The environment is the process's, so this runs again as a process of its own with
-        // both variables set.
+        // both variables set, and checks that the process ran one test: a name that matches
+        // none passes.
         const HOST: &str = "https://from-the-environment";
         if std::env::var("VIRTX_HOST").as_deref() != Ok(HOST) {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let ran = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "cli::command::tests::a_flag_wins_over_the_environment_and_a_host_over_a_server",
@@ -313,9 +314,10 @@ mod tests {
                 ])
                 .env("VIRTX_HOST", HOST)
                 .env("VIRTX_STDIO", "/nonexistent/virtx-stdio")
-                .status()
+                .output()
                 .unwrap();
-            assert!(status.success());
+            let said = String::from_utf8_lossy(&ran.stdout);
+            assert!(ran.status.success() && said.contains(" 1 passed"), "{said}");
             return;
         }
         let cli = Cli::try_parse_from(["virtx", "images"]).unwrap();

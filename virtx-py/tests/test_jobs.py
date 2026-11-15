@@ -59,8 +59,10 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         snapshot=snapshot,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
         ports=[8000],
+        abins=["index"],
     )
     assert sandbox.snapshot == snapshot.name and sandbox.running
+    assert sandbox.abins == ["index"]
     assert [port.port for port in sandbox.ports] == [8000]
     assert SandboxVolume(volume, "/data").to_dict() == {
         "volume": volume.name,
@@ -68,7 +70,7 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         "readonly": False,
     }
     got = await client.get_sandbox(sandbox.id)
-    assert got.id == sandbox.id
+    assert got.id == sandbox.id and got.abins == ["index"]
     assert sandbox.id in [item.id for item in await client.list_sandbox()]
 
     job = await sandbox.exec(["echo", "hi"])
@@ -163,7 +165,12 @@ async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Cl
 async def test_a_build_iterated_yields_its_log_to_its_end(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('iterated')}:latest"
-    log = [entry async for entry in client.build_image(Recipe(ALPINE).run(f"echo {reference} > /built"), reference)]
+    log = [
+        entry
+        async for entry in client.build_image(
+            Recipe(ALPINE).run(f"echo {reference} > /built"), reference
+        )
+    ]
     built = (await tags(client))[reference]
     assert log[-1].entry == ImageJobEnd(built)
     await client.remove_image(reference)

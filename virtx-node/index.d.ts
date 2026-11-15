@@ -298,6 +298,8 @@ export interface SandboxInfo {
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
+  /** virtx's own programs it has at `/abin`, if it was made with some. */
+  abins?: string[]
 }
 
 /**
@@ -312,6 +314,7 @@ export class Sandbox extends Files implements SandboxInfo {
   snapshot?: string
   running: boolean
   ports?: SandboxPort[]
+  abins?: string[]
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
@@ -341,6 +344,8 @@ export interface SandboxCreateOptions {
   gpuMemoryMib?: number
   /** Each volume, or its name, and where it is mounted. */
   volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
+  /** virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at `/abin/skills/{name}/`. */
+  abins?: string[]
 }
 
 export interface SandboxExecOptions {

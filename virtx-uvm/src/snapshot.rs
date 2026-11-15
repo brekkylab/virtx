@@ -76,6 +76,36 @@ impl Snapshot {
     /// How large a snapshot may grow when nothing says otherwise.
     pub const SIZE: u64 = 2 << 30;
 
+    /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not
+    /// an allocation.
+    ///
+    /// Unix keeps every file so. NTFS keeps one so only once it is marked: unmarked, a write
+    /// past the end fills the gap with zeros first, which is seconds for each GiB, so formatting
+    /// a 2 GiB disk -- whose last group's bitmaps are at its end -- writes it whole. A volume
+    /// that cannot mark it (FAT) still takes the disk, at that cost.
+    pub(crate) fn sparse(file: File) -> File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            // SAFETY: the handle is `file`'s, open for the call, and nothing goes in or out.
+            unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_SET_SPARSE,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+        file
+    }
+
     /// Hold it, refused while anything else does.
     pub fn lock(&self) -> Result<Lock> {
         let path = self.lock_path();
@@ -153,7 +183,7 @@ impl Store {
         }
         let part = path.with_extension("ext4.part");
         let file = match File::create_new(&part) {
-            Ok(file) => file,
+            Ok(file) => Snapshot::sparse(file),
             // Another create of this name, under way.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(Error::AlreadyExists(name.to_owned()));

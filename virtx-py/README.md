@@ -12,6 +12,7 @@ Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` 
 import asyncio
 from virtx import Client, Recipe, VirtxError
 
+
 async def main():
     with Client.spawn() as client:
         recipe = Recipe("alpine:3.20").run("apk add jq")
@@ -20,6 +21,7 @@ async def main():
             print("built", digest)
         except VirtxError as failed:
             print("failed", failed)
+
 
 asyncio.run(main())
 ```

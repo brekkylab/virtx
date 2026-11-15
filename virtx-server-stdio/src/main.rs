@@ -74,7 +74,10 @@ mod tests {
     //! the endpoints over a `VIRTX_HOME` of the test's own, and the files of its volumes and
     //! snapshots among them.
 
-    use std::path::PathBuf;
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, Recipe,
@@ -89,19 +92,34 @@ mod tests {
     struct Server {
         client: Client,
         home: PathBuf,
+        /// The app the client is served, for a request no client sends.
+        app: axum::Router,
     }
 
     impl Server {
         fn spawn(name: &str) -> Server {
+            Server::spawn_after(name, |_, _| {})
+        }
+
+        /// `spawn`, with `after` run once the app has answered each request, given the home
+        /// and the request's path: for what another client does between a client's requests.
+        fn spawn_after(name: &str, after: impl Fn(&Path, &str) + Send + Sync + 'static) -> Server {
             let home =
                 std::env::temp_dir().join(format!("virtx-stdio-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
             let (app, _) = app(&home).unwrap();
+            let served_app = app.clone();
+            let after = Arc::new(after);
+            let served = home.clone();
             let handle = move |request: http::Request<_>| {
                 let app = app.clone();
+                let after = Arc::clone(&after);
+                let home = served.clone();
                 async move {
+                    let path = request.uri().path().to_owned();
                     let Ok(response) = app.oneshot(request).await;
+                    after(&home, &path);
                     response
                 }
             };
@@ -111,6 +129,7 @@ mod tests {
             Server {
                 client: Client::over_stream(pipe),
                 home,
+                app: served_app,
             }
         }
 
@@ -135,8 +154,9 @@ mod tests {
     }
 
     fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
+        // Either kind: a Files refusal is plain HTTP, not the protocol's error body.
         match answered {
-            Err(Error::Status(status, _)) => status,
+            Err(ref e) if e.status().is_some() => e.status().expect("checked"),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -334,7 +354,15 @@ mod tests {
         args.gpu_memory_mib = Some(1024);
         assert_eq!(refused(args).await, 400);
 
-        assert_eq!(refused(SandboxCreateArgs::new("nothing:here")).await, 404);
+        let missing = SandboxCreateArgs::new("nothing:here");
+        let missing = server.client.create_sandbox(&missing).await.unwrap_err();
+        assert_eq!(missing.status(), Some(404), "{missing}");
+        assert!(
+            missing
+                .to_string()
+                .ends_with("no image here is tagged nothing:here: pull it first"),
+            "{missing}"
+        );
         let absent = format!("sha256:{}", "0".repeat(64));
         assert_ne!(absent, digest);
         assert_eq!(
@@ -357,14 +385,34 @@ mod tests {
             path: path.into(),
             readonly: false,
         };
+        // Each as the guest reads it: `.` and repeated `/` resolve, so the root and one path
+        // spelled another way are what they are spelled as.
         for volumes in [
             vec![at("/data"), at("/data/")],
+            vec![at("/data"), at("//data")],
             vec![at("data")],
             vec![at("/")],
+            vec![at("/.")],
+            vec![at("/./")],
+            vec![at("/..")],
+            vec![at("/data"), at("/data/.")],
+            vec![at("/data/../etc")],
         ] {
+            let spelled: Vec<_> = volumes.iter().map(|v| v.path.clone()).collect();
             let mut args = here();
             args.volumes = volumes;
-            assert_eq!(refused(args).await, 400);
+            assert_eq!(refused(args).await, 400, "{spelled:?}");
+        }
+        for name in ["nope", "skills", "../virtx-stdio"] {
+            assert_eq!(refused(here().abin(name)).await, 400, "{name}");
+        }
+        match server
+            .client
+            .create_sandbox(&here().abin("index").abin("index"))
+            .await
+        {
+            Err(Error::Status(400, body)) => assert!(body.contains("given twice"), "{body}"),
+            other => panic!("expected a refusal, got {other:?}"),
         }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);
@@ -455,6 +503,23 @@ mod tests {
         let nobody = FileRoot::Volume("nobody".into());
         assert_eq!(status(client.stat_file(&nobody, "").await), 404);
 
+        // `mkdir -p` of a path with a dot segment creates the parents of the path it resolves
+        // to, and no others.
+        client
+            .create_dir_all(&volume, "discard/../parent/child")
+            .await
+            .unwrap();
+        assert!(
+            client
+                .stat_file(&volume, "parent/child")
+                .await
+                .unwrap()
+                .is_dir
+        );
+        let mut top = names(client.read_dir(&volume, "").await.unwrap());
+        top.sort();
+        assert_eq!(top, ["b.txt", "c.txt", "copied", "parent"]);
+
         // The root is removed through its resource, and a request that would take it, or what is in
         // it, is refused before anything goes.
         client
@@ -467,6 +532,51 @@ mod tests {
             403
         );
         assert_eq!(client.read_text(&volume, "kept.txt").await.unwrap(), "kept");
+        // A client resolves a dot segment before it sends a path, as the SDK does, so the root
+        // has one spelling; one that arrives with a dot segment, or out of the volume, is refused
+        // before anything goes.
+        assert_eq!(status(client.remove_file(&volume, ".", false).await), 403);
+        assert_eq!(
+            status(client.remove_file(&volume, "copied/..", false).await),
+            403
+        );
+        let raw = async |method: &str, path: &str, to: Option<&str>| {
+            let mut request = http::Request::builder().method(method).uri(path);
+            if let Some(to) = to {
+                request = request.header("Destination", to);
+            }
+            let request = request.body(axum::body::Body::empty()).unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            response.status().as_u16()
+        };
+        for dotted in [
+            "/volumes/data/files/.",
+            "/volumes/data/files/%2e",
+            "/volumes/data/files/copied/..",
+        ] {
+            assert_eq!(raw("DELETE", dotted, None).await, 400, "DELETE {dotted}");
+            let copied = "/volumes/data/files/copied";
+            assert_eq!(
+                raw("MOVE", copied, Some(dotted)).await,
+                400,
+                "MOVE onto {dotted}"
+            );
+        }
+        assert_eq!(
+            raw("PROPFIND", "/volumes/data/files/../../nobody/files", None).await,
+            400
+        );
+        assert_eq!(
+            raw(
+                "COPY",
+                "/volumes/data/files/kept.txt",
+                Some("/volumes/nobody/files/x")
+            )
+            .await,
+            400
+        );
+        assert_eq!(client.read_text(&volume, "kept.txt").await.unwrap(), "kept");
+        assert!(client.stat_file(&volume, "copied").await.unwrap().is_dir);
 
         // A link in the volume, which a machine may have made, points at nothing here.
         #[cfg(unix)]
@@ -607,6 +717,28 @@ mod tests {
 
     /// A prune takes an image no tag names once it is old, and what only it held, and leaves a
     /// tagged one.
+    /// A list is three requests: the catalog, each repository's tags, each tag's manifest.
+    /// Between the first two, another client removes a repository's only tag.
+    #[tokio::test]
+    async fn a_repository_removed_mid_list_is_left_out() {
+        let server = Server::spawn_after("list-race", |home, path| {
+            if path == "/images/oci/v2/_catalog" {
+                let store = ImageStore::new(home.join("images")).unwrap();
+                store.remove_tag(&"gone:latest".parse().unwrap()).unwrap();
+            }
+        });
+        let kept = server.file_image("kept:latest");
+        server.file_image("gone:latest");
+        let listed = server.client.list_image().await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|image| (image.reference.as_str(), image.digest.as_str()))
+                .collect::<Vec<_>>(),
+            [("docker.io/library/kept:latest", kept.as_str())]
+        );
+    }
+
     #[tokio::test]
     async fn a_prune_takes_an_old_untagged_image() {
         let server = Server::spawn("prune");

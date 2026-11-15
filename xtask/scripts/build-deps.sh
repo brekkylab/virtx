@@ -35,6 +35,10 @@ if [ "$(uname -s)" = Darwin ]; then
 
     SPIRV_Cross_src="$ROOT/3rdparty/SPIRV-Cross"
     SPIRV_Cross_pin="$(cat "$MoltenVK_src/ExternalRevisions/SPIRV-Cross_repo_revision")"
+    # A shallow checkout, CI's among them, has no history to answer this with.
+    if [ "$(git -C "$SPIRV_Cross_src" rev-parse --is-shallow-repository)" = true ]; then
+        git -C "$SPIRV_Cross_src" fetch -q --unshallow
+    fi
     # The fork's branch is that revision and our commits on top of it.
     if ! git -C "$SPIRV_Cross_src" merge-base --is-ancestor "$SPIRV_Cross_pin" HEAD 2>/dev/null; then
         echo "3rdparty/SPIRV-Cross is not on the revision MoltenVK pins ($SPIRV_Cross_pin)." >&2

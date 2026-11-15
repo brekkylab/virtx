@@ -402,6 +402,9 @@ impl Client {
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
+    ///
+    /// The image has to be on the server already, pulled or built: this does not pull it, and a
+    /// tag the server has no image by is refused with `404`.
     pub async fn create_sandbox(&self, args: &SandboxCreateArgs) -> Result<Sandbox, Error> {
         sandbox::client::create(&self.inner, args).await
     }
@@ -1625,8 +1628,8 @@ pub(crate) mod ffi {
     /// Makes a sandbox, given
     /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-    /// `{"type": "tag", "tag": "name:tag"}` or
+    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
+    /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, and
     /// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.

@@ -21,7 +21,7 @@ pub(crate) use client::{Body, full};
 #[cfg(feature = "client")]
 pub use client::{PortForwarder, TransportClient};
 #[cfg(feature = "client")]
-pub(crate) use http::{segment, segments};
+pub(crate) use http::{resolved, segment, segments};
 #[cfg(feature = "server")]
 pub use server::serve_stdio;
 pub use sse::LogEntry;
@@ -31,6 +31,29 @@ pub use webdav::{
     DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot, FileWriteArgs,
     Metadata,
 };
+
+/// What a test of a client call shares: a router, served in memory as stdio serves one.
+#[cfg(all(test, feature = "server"))]
+pub(crate) mod testing {
+    use axum::Router;
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
+
+    use super::{TransportClient, serve_stdio};
+
+    /// A client over an in-memory pipe to `router`.
+    pub(crate) fn piped(router: Router) -> TransportClient {
+        let (pipe, server) = tokio::io::duplex(64 * 1024);
+        let (input, output) = tokio::io::split(server);
+        let service = TowerToHyperService::new(router);
+        let handle = move |request| {
+            let service = service.clone();
+            async move { service.call(request).await.unwrap_or_else(|e| match e {}) }
+        };
+        tokio::spawn(serve_stdio(handle, input, output));
+        TransportClient::over(pipe)
+    }
+}
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
@@ -248,5 +271,77 @@ mod tests {
         assert_eq!(http::get::<String>(&client, "/ping").await.unwrap(), "pong");
         client.close().await;
         served.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_file_s_path_goes_resolved_and_one_above_its_root_goes_nowhere() {
+        use std::sync::{Arc, Mutex};
+
+        use super::{FileRoot, testing::piped, webdav::client as files};
+        use crate::volume::client as volumes;
+
+        // Every path that reaches the server, over either transport.
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let router = {
+            let seen = Arc::clone(&seen);
+            Router::new().fallback(move |uri: ::http::Uri| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock().unwrap().push(uri.path().to_owned());
+                    StatusCode::NO_CONTENT
+                }
+            })
+        };
+        let url = serve(router.clone()).await;
+        let tcp = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        let stdio = piped(router);
+        let data = FileRoot::Volume("data".into());
+
+        for client in [&tcp, &stdio] {
+            for (path, sent) in [
+                (".", "/volumes/data/files/"),
+                ("./a/./b", "/volumes/data/files/a/b"),
+                ("dir/../x", "/volumes/data/files/x"),
+                ("a.b/..c/.d", "/volumes/data/files/a.b/..c/.d"),
+            ] {
+                files::remove(client, &data, path, false).await.unwrap();
+                assert_eq!(std::mem::take(&mut *seen.lock().unwrap()), [sent], "{path}");
+            }
+
+            // Over HTTP, the first would go as `DELETE /sandboxes/abc`.
+            for path in ["../../../sandboxes/abc", "a/../../b", ".."] {
+                let error = files::remove(client, &data, path, false).await.unwrap_err();
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
+            }
+            let error = files::rename(client, &data, "a", "../../other/files/a", true)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
+            let error = files::create_dir_all(client, &data, "../a/b")
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
+            // A name is not a path: `..` there is not resolved.
+            let error = files::remove(client, &FileRoot::Volume("..".into()), "a", false)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
+            let error = volumes::remove(client, "..").await.unwrap_err();
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
+            // A mount's path that resolves to the root would go to the list of mounts.
+            for path in [".", "a/.."] {
+                let error = volumes::remove_mount(client, "data", path)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
+            }
+            // A path not built from segments, such as one a registry answers: `\` separates
+            // segments in an `http` URL.
+            let error = http::get::<String>(client, "/a\\..\\..\\b")
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
+            assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
+        }
     }
 }

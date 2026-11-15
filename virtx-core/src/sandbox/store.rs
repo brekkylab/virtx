@@ -27,6 +27,10 @@ pub struct Sandbox {
     /// answers only, since the URLs carry credentials.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
+
+    /// virtx's own programs it has at `/abin`, as it was made with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abins: Vec<String>,
 }
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.
@@ -74,6 +78,12 @@ pub struct SandboxCreateArgs {
     /// Two at one path are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<SandboxVolume>,
+
+    /// virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at
+    /// `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program
+    /// by is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abins: Vec<String>,
 }
 
 impl SandboxCreateArgs {
@@ -85,10 +95,12 @@ impl SandboxCreateArgs {
     /// let args = SandboxCreateArgs::new("jq:latest")
     ///     .snapshot("dev")
     ///     .port(8000)
-    ///     .readonly_volume("data", "/data");
+    ///     .readonly_volume("data", "/data")
+    ///     .abin("index");
     ///
     /// assert_eq!(args.snapshot.as_deref(), Some("dev"));
     /// assert!(args.volumes[0].readonly);
+    /// assert_eq!(args.abins, ["index"]);
     /// ```
     pub fn new(image: impl Into<ImageName>) -> Self {
         Self {
@@ -101,6 +113,7 @@ impl SandboxCreateArgs {
             gpu: None,
             gpu_memory_mib: None,
             volumes: Vec::new(),
+            abins: Vec::new(),
         }
     }
 
@@ -158,6 +171,12 @@ impl SandboxCreateArgs {
         let mut args = self.volume(name, path);
         args.volumes.last_mut().unwrap().readonly = true;
         args
+    }
+
+    /// Give it virtx's program `name` at `/abin`, beside those given before.
+    pub fn abin(mut self, name: impl Into<String>) -> Self {
+        self.abins.push(name.into());
+        self
     }
 }
 

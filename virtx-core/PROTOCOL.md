@@ -216,7 +216,7 @@ Its files are reached at [`/volumes/{name}/files/`](#files).
 
 Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
 `size` is the bytes the volume's files take on the server.
-`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`.
+`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`.
 
 #### Mounts
 
@@ -248,16 +248,17 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running}` |
-| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?}` | `201`, `{id, image, snapshot?, running, ports?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running, abins?}` |
+| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, snapshot?, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running, abins?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
-- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path that is not absolute, `/`, and two at one path are refused.
+- `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
+- `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
@@ -366,6 +367,8 @@ A request that fails is answered with the specification's error codes, in its `{
 
 The files in a volume are reached at `/volumes/{name}/files/`, those in a snapshot at `/snapshots/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
 The path after the root is the file's path in the volume, snapshot or sandbox, each segment percent-encoded.
+A client resolves a path's `.` and `..` segments before it sends it, as a file's path is read: empty segments are dropped, and each `..` takes the segment before it, so `a/../b` and `a//../b` are both sent as `b`; a path that goes above the root is not sent.
+The server refuses with `400 Bad Request` a path, or the `Destination` of a `MOVE` or `COPY` up to its `?` or `#`, with a `.` or `..` segment, plain or percent-encoded, `/` and `\` both separating segments; and one that is not in the root (of a URL, its path alone, with consecutive slashes taken as one). It does so before anything in the volume, snapshot or sandbox is touched.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -383,8 +386,8 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` of the root is refused with `403 Forbidden`: a volume, snapshot or sandbox is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `502 Bad Gateway`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume, snapshot or sandbox is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `400 Bad Request`.
 - A request naming a volume, snapshot or sandbox that does not exist is answered `404 Not Found`.
 
 ### A sandbox's files

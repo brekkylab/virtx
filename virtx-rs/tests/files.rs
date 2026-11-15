@@ -188,9 +188,10 @@ fn a_snapshot_is_created_got_and_removed_and_refused_while_a_sandbox_holds_it() 
         (name.as_str(), false),
         "{created:?}"
     );
-    created.write_file("a.txt", "kept", None).wait().unwrap();
     let got = client.get_snapshot(&name).wait().unwrap();
     assert_eq!(got.info(), created.info());
+    // After the comparison: a write grows the size, what the snapshot takes on disk.
+    created.write_file("a.txt", "kept", None).wait().unwrap();
     assert_eq!(got.read_text("a.txt").wait().unwrap(), "kept");
 
     common::alpine(&client);
@@ -247,11 +248,14 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .create_sandbox(
             &SandboxCreateArgs::new(ALPINE)
                 .snapshot(snapshot.name())
-                .readonly_volume(volume.name(), "/data"),
+                .readonly_volume(volume.name(), "/data")
+                .abin("index"),
         )
         .wait()
         .unwrap();
     assert_eq!(on_handles.info().snapshot.as_deref(), Some(snapshot.name()));
+    let got = client.get_sandbox(on_handles.id()).wait().unwrap();
+    assert_eq!(got.info().abins, ["index"]);
     on_handles.remove().wait().unwrap();
     snapshot.remove().wait().unwrap();
     volume.remove().wait().unwrap();

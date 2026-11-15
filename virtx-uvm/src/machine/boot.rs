@@ -13,6 +13,8 @@
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
 //!                           ports -- see [`Network`]
+//! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
+//! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag after the pivot
 //! virtio-fs  virtx          the agent, mounted at /.virtx after the pivot
 //! ```
@@ -44,6 +46,15 @@
 //! filesystem of its own -- a [`FsDevice::new_null`] with the agent in its overlay -- since one
 //! on the root above would be left behind by the pivot. The init mounts it at [`AGENT_DIR`]
 //! once the image is the root.
+//!
+//! # `/abin` and `/alib`
+//!
+//! [`MachineConfig::abin`], the programs a sandbox was made with, and the `alib/` directory beside
+//! this executable, as `cargo xtask install` and a release put it there, each shared read-only
+//! and mounted at [`ABIN_DIR`] and [`ALIB_DIR`]. `/abin` goes in front of the guest's `PATH`;
+//! `/alib` is the libraries a GPU sandbox's programs load. A machine with no `abin`, or a host
+//! with no `alib/`, boots without it rather than refusing to.
+//! Both are mounted before the volumes, so a volume asked for at either lands over it.
 //!
 //! # The host
 //!
@@ -114,6 +125,15 @@ const AGENT_DIR: &str = "/.virtx";
 const AGENT_TAG: &str = "virtx";
 const AGENT_NAME: &str = "virtx-uvm-guest";
 
+/// Where virtx's own programs are mounted in the guest, and the tag they are attached under.
+const ABIN_DIR: &str = "/abin";
+const ABIN_TAG: &str = "abin";
+/// The same for what those programs run and load, and the directory beside this executable it
+/// is shared from.
+const ALIB_DIR: &str = "/alib";
+const ALIB_TAG: &str = "alib";
+const ALIB_HOST: &str = "alib";
+
 /// The log target libkrun gives what the guest's console prints.
 const CONSOLE_TARGET: &str = "init_or_kernel";
 
@@ -126,6 +146,20 @@ pub(super) struct BootArgs {
     pub ctrlout: u64,
     pub ioin: u64,
     pub ioout: u64,
+}
+
+/// Whether a machine's RAM is backed with host pages before it boots rather than as the guest
+/// first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
+///
+/// Only WHP heeds it. There each first touch is a fault the hypervisor resolves on its own,
+/// and nested -- a Windows instance in a cloud, as a CI runner is -- one costs about 130µs:
+/// the guest's struct pages alone, initialised before it reaches init, are 2s of a 3.8s
+/// boot, where faulting all 4 GiB in at once is 1.2s, and the machine tests there take 59s
+/// rather than 182. On a desktop the faults are cheap and the cost is all the other way:
+/// every machine holds its whole RAM on the host from the start, used or not. So it is for a
+/// runner to turn on, and nothing else.
+fn prefault_memory() -> bool {
+    std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
 }
 
 /// `ctrlout`, once this process [holds](hold) it.
@@ -153,7 +187,13 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // below, and `apply` is what appends `init=/init.krun` to the kernel cmdline. The two
     // devices go in as environment because that is how libkrun's init is told where its root
     // is.
-    let env = env(&machine.config);
+    let abin = machine.abin.clone();
+    #[cfg(windows)]
+    if let Some(dir) = &abin {
+        executable(dir);
+    }
+    let alib = beside(ALIB_HOST);
+    let env = env(&machine.config, abin.is_some());
     let mut init = krun_init::Config::builder()
         .args(&[&format!("{AGENT_DIR}/{AGENT_NAME}")])
         .env(&env.iter().map(String::as_str).collect::<Vec<_>>())
@@ -170,6 +210,15 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // order: each volume's files and the stores under them, with each volume held. Refused
     // where one could not be shown where it was asked.
     let mut shares = Vec::new();
+    for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
+        let Some(dir) = dir else { continue };
+        let host = utf8(dir)?;
+        init = init.mount(at, MOUNT_FSTYPE, tag);
+        shares.push(
+            FsDevice::new_read_only(tag, host)
+                .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+        );
+    }
     let mut holds = Vec::with_capacity(machine.volumes.len());
     for (i, asked) in machine.volumes.iter().enumerate() {
         let volume = crate::Volume::open(&asked.path)?;
@@ -180,18 +229,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 why,
             })
         };
-        // Asked of the text rather than of `Path`, which answers by this host's rules: on
-        // Windows `/data` is not absolute.
-        let at = asked.at.trim_end_matches('/');
-        if !asked.at.starts_with('/') {
-            return refused("a path in the guest is absolute");
-        }
-        if at.is_empty() {
-            return refused("/ is the guest's root");
-        }
+        // The guest is given the spelling checked, not the one asked.
+        let at = match crate::mount_point(&asked.at) {
+            Ok(at) => at,
+            Err(why) => return refused(why),
+        };
         if machine.volumes[..i]
             .iter()
-            .any(|other| other.at.trim_end_matches('/') == at)
+            .any(|other| crate::mount_point(&other.at).is_ok_and(|other| other == at))
         {
             return refused("another volume is mounted there");
         }
@@ -200,7 +245,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
         let host = utf8(&files)?;
-        init = init.mount(at, MOUNT_FSTYPE, &tag);
+        init = init.mount(&at, MOUNT_FSTYPE, &tag);
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
             match asked.read_only {
@@ -253,7 +298,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 context: format!("creating {}", path.display()),
                 source: e,
             })?;
-            FsTree::new().to_ext4(file, Snapshot::SIZE)?;
+            FsTree::new().to_ext4(Snapshot::sparse(file), Snapshot::SIZE)?;
             path
         }
     };
@@ -261,6 +306,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // The guest kernel, which libkrun `dlopen`s rather than links.
     let mut payload =
         Payload::load_krunfw().map_err(|e| Error::vmm("loading the guest kernel", e))?;
+    // No bounce buffer. A guest whose RAM reaches past 4 GiB -- the default 4 GiB does, over
+    // the MMIO hole -- sets aside 64 MiB for swiotlb and zeroes it while it boots, and no
+    // device here bounces through it: none offers `VIRTIO_F_ACCESS_PLATFORM`, so virtio
+    // reaches guest memory directly, and WHP passes no device through. Under WHP each page
+    // the guest first touches is a fault the hypervisor resolves one at a time; nested, as
+    // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
+    #[cfg(windows)]
+    payload.append_cmdline("swiotlb=noforce");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {
@@ -369,6 +422,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?
         .payload(payload)
         .devices(devices)
+        .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
 
@@ -515,9 +569,58 @@ fn utf8(path: &Path) -> Result<&str> {
     })
 }
 
+/// The directory `name` beside this executable, such as `alib/`, if there is one, with its
+/// programs made executable in the guest.
+fn beside(name: &str) -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join(name);
+    if !dir.is_dir() {
+        return None;
+    }
+    #[cfg(windows)]
+    executable(&dir);
+    Some(dir)
+}
+
+/// Mark each file directly in `dir` executable for the guest: the programs `/abin` runs by path.
+/// What is in their directories is read, not run -- a library is mapped by the guest's loader
+/// whatever its mode -- so it is left as it is, and a boot writes a stream for a handful of
+/// files rather than for every one.
+///
+/// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
+/// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
+/// mode for an unpacked release to have brought. Every boot, so a directory replaced since is
+/// marked again. A file it fails on is said and skipped, as a host with no `alib/` is a machine
+/// without it.
+#[cfg(windows)]
+fn executable(dir: &Path) {
+    const OVERRIDE_STAT: &str = ":user.containers.override_stat";
+    const ROOT_EXECUTABLE: &str = "0:0:0100755";
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        let mut stream = path.clone().into_os_string();
+        stream.push(OVERRIDE_STAT);
+        if let Err(e) = std::fs::write(std::path::PathBuf::from(stream), ROOT_EXECUTABLE) {
+            log::warn!(
+                "{} will not be executable in the guest: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// The environment the guest runs in: the image's, with `PATH` and `HOME` added when it
-/// sets neither, with the values docker uses.
-fn env(config: &Config) -> Vec<String> {
+/// sets neither, with the values docker uses, and [`ABIN_DIR`] in front of `PATH` when `abin`
+/// says the machine has one.
+///
+/// In front rather than behind: `/abin` is what virtx undertakes to provide, and an image's own
+/// `index` should not be what a caller reading `abin/skills/` ends up running.
+fn env(config: &Config, abin: bool) -> Vec<String> {
     let mut env = config.env().clone().unwrap_or_default();
     let set = |env: &[String], name: &str| env.iter().any(|var| var.starts_with(name));
     if !set(&env, "PATH=") {
@@ -525,6 +628,12 @@ fn env(config: &Config) -> Vec<String> {
     }
     if !set(&env, "HOME=") {
         env.push("HOME=/root".to_string());
+    }
+    if abin && let Some(path) = env.iter_mut().find(|var| var.starts_with("PATH=")) {
+        *path = match &path["PATH=".len()..] {
+            "" => format!("PATH={ABIN_DIR}"),
+            rest => format!("PATH={ABIN_DIR}:{rest}"),
+        };
     }
     env
 }
@@ -537,13 +646,38 @@ mod tests {
     fn a_path_the_image_did_not_set_is_added_and_one_it_did_is_left_alone() {
         let mut stated = Config::default();
         stated.set_env(Some(vec!["PATH=/opt/bin".to_string()]));
-        let stated = env(&stated);
+        let stated = env(&stated, false);
         assert!(stated.contains(&"PATH=/opt/bin".to_string()), "{stated:?}");
         assert!(!stated.iter().any(|var| var == DEFAULT_PATH), "{stated:?}");
 
-        let silent = env(&Config::default());
+        let silent = env(&Config::default(), false);
         assert!(silent.iter().any(|var| var == DEFAULT_PATH), "{silent:?}");
         assert!(silent.contains(&"HOME=/root".to_string()), "{silent:?}");
+    }
+
+    #[test]
+    fn abin_goes_in_front_of_the_path_only_when_the_machine_has_one() {
+        let mut stated = Config::default();
+        stated.set_env(Some(vec!["PATH=/opt/bin".to_string()]));
+        assert!(env(&stated, true).contains(&"PATH=/abin:/opt/bin".to_string()));
+
+        let silent = env(&Config::default(), true);
+        let path = format!("PATH=/abin:{}", &DEFAULT_PATH["PATH=".len()..]);
+        assert!(silent.contains(&path), "{silent:?}");
+        assert_eq!(
+            silent.iter().filter(|var| var.starts_with("PATH=")).count(),
+            1
+        );
+
+        let mut empty = Config::default();
+        empty.set_env(Some(vec!["PATH=".to_string()]));
+        assert!(env(&empty, true).contains(&"PATH=/abin".to_string()));
+
+        assert!(
+            !env(&Config::default(), false)
+                .iter()
+                .any(|var| var.contains("/abin"))
+        );
     }
 
     #[test]

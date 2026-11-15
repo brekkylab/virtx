@@ -14,6 +14,7 @@
 //!   tag/<hex>.json             one per reference: which image it names
 //!   origin/sha256/<hex>.json   one per registry blob or manifest, named by its digest: which layer
 //!                              or image it became
+//!   lock                       what a change holds while it checks and writes
 //! ```
 //!
 //! An image is its manifest and its config, each as a registry serves it, byte for byte: each
@@ -31,8 +32,15 @@
 //! An image a machine boots from is held (see [`Store::hold_image`]): a prune leaves it, with
 //! its layers and its root filesystem, and removing it is refused.
 //!
-//! Not locked otherwise: a check and the write after it are two steps, and another thread or
-//! process can act between them.
+//! Each change to a layer, an image or a tag -- one filed, renewed or removed, a prune --
+//! holds `<root>/lock` from its check to its write, across threads and processes: to every
+//! other change the two are one, and each waits for the one under way, so each is blocking
+//! work. A root filesystem or an origin is written and removed without it, being read as not
+//! there once what it names is gone. Reads are not locked, and read what the last change left.
+//!
+//! A prune leaves what is younger than its grace, for the pull or build still putting an image
+//! together over it: so a layer or an image filed again, or renewed by one that finds it here
+//! (see [`Store::renew_layer`]), is young again.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -40,7 +48,7 @@ use std::io::{self, BufReader, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use oci_spec::distribution::Reference;
 use oci_spec::image::{
@@ -125,6 +133,9 @@ enum OriginFile {
 /// An image held for as long as this lives: see [`Store::hold_image`].
 pub struct ImageHold(#[allow(dead_code)] File);
 
+/// The store's changes, one at a time, for as long as this lives: see the module.
+struct Change(#[allow(dead_code)] File);
+
 /// What a [`prune`](Store::prune) took away.
 #[derive(Debug, Default)]
 pub struct Pruned {
@@ -158,6 +169,16 @@ impl Store {
         &self.root
     }
 
+    /// Wait for every change under way, and keep others waiting for as long as the answer lives.
+    fn change(&self) -> Result<Change> {
+        let path = self.root.join("lock");
+        let file =
+            File::create(&path).map_err(|e| Error::io(format!("opening {}", path.display()), e))?;
+        file.lock()
+            .map_err(|e| Error::io(format!("locking {}", path.display()), e))?;
+        Ok(Change(file))
+    }
+
     pub fn layer_path(&self, layer: &Digest) -> PathBuf {
         self.shelf("layer", layer, "erofs")
     }
@@ -167,7 +188,7 @@ impl Store {
     }
 
     /// File `tree` as a layer under the digest of its EROFS image, which is returned. A layer
-    /// already here is left as it is.
+    /// already here is renewed.
     ///
     /// The name is only known once the image is written, so it is written beside the layers
     /// first, and named after.
@@ -186,7 +207,8 @@ impl Store {
                 .expect("sha2 writes 64 lowercase hex characters")
                 .into();
             let path = self.layer_path(&digest);
-            if path.is_file() {
+            let _change = self.change()?;
+            if renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))? {
                 fs::remove_file(&part)
                     .map_err(|e| Error::io(format!("removing {}", part.display()), e))?;
             } else {
@@ -201,6 +223,14 @@ impl Store {
         named
     }
 
+    /// Make `layer` young again, if it is here: a prune's grace spares it for the image being
+    /// made over it. `false` if it is not here.
+    pub fn renew_layer(&self, layer: &Digest) -> Result<bool> {
+        let _change = self.change()?;
+        let path = self.layer_path(layer);
+        renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))
+    }
+
     pub fn get_layer(&self, layer: &Digest) -> Result<Option<FsTree>> {
         let path = self.layer_path(layer);
         let file = match File::open(&path) {
@@ -213,6 +243,7 @@ impl Store {
 
     /// Delete a layer no image stacks. `false` if it was not here.
     pub fn remove_layer(&self, layer: &Digest) -> Result<bool> {
+        let _change = self.change()?;
         for image in self.images()? {
             if let Some((_, layers)) = self.get_image(&image)?
                 && layers.contains(layer)
@@ -342,7 +373,8 @@ impl Store {
 
     /// File the image `manifest` and `config` are, each as it is, and answer with its digest:
     /// the manifest's. Refused unless `config` is the one the manifest names, each layer is an
-    /// EROFS one here, and the config's diff_ids are the layers.
+    /// EROFS one here, and the config's diff_ids are the layers. An image already here is
+    /// renewed.
     pub fn insert_image_manifest(&self, manifest: &[u8], config: &[u8]) -> Result<Digest> {
         let parsed: ImageManifest =
             serde_json::from_slice(manifest).map_err(|e| Error::Malformed(e.to_string()))?;
@@ -352,6 +384,7 @@ impl Store {
                 parsed.config().digest()
             )));
         }
+        let _change = self.change()?;
         for layer in parsed.layers() {
             if layer.media_type().to_string() != EROFS_LAYER {
                 return Err(Error::Malformed(format!(
@@ -390,7 +423,7 @@ impl Store {
             .expect("sha2 writes 64 lowercase hex characters")
             .into();
         let path = self.shelf("image", &digest, "json");
-        if !path.is_file() {
+        if !renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))? {
             write_atomically(&path, |file| {
                 file.write_all(&bytes)
                     .map_err(|e| Error::io(format!("writing {}", path.display()), e))
@@ -399,17 +432,20 @@ impl Store {
         Ok(digest)
     }
 
+    /// Make `image` young again, if it is here: a prune's grace spares it for the tag about to
+    /// name it. `false` if it is not here.
+    pub fn renew_image(&self, image: &Digest) -> Result<bool> {
+        let _change = self.change()?;
+        let path = self.shelf("image", image, "json");
+        renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))
+    }
+
     /// An image's manifest and config, as they were filed.
     pub fn get_image_manifest(&self, image: &Digest) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let path = self.shelf("image", image, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
-        };
-        let read: ImageFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(Some((read.manifest.into_bytes(), read.config.into_bytes())))
+        Ok(
+            read_filed::<ImageFile>(&self.shelf("image", image, "json"))?
+                .map(|read| (read.manifest.into_bytes(), read.config.into_bytes())),
+        )
     }
 
     /// An image's config and its layers, bottom first.
@@ -432,9 +468,16 @@ impl Store {
     /// Delete an image no tag names and nothing holds. Its layers stay. `false` if it was not
     /// here.
     pub fn remove_image(&self, image: &Digest) -> Result<bool> {
+        let _change = self.change()?;
         if let Some((reference, _)) = self.tags()?.into_iter().find(|(_, named)| named == image) {
             return Err(Error::InUse(image.clone(), reference.to_string()));
         }
+        self.remove_image_untagged(image)
+    }
+
+    /// [`remove_image`](Store::remove_image) by a caller that holds the store's [`Change`] and
+    /// has found no tag names `image`.
+    fn remove_image_untagged(&self, image: &Digest) -> Result<bool> {
         let path = self.shelf("image", image, "json");
         if !path.is_file() {
             return Ok(false);
@@ -485,6 +528,7 @@ impl Store {
     /// whose layer or image is gone, and what a write that stopped part-way left. `grace`
     /// spares what a pull or a build is still putting together. Blocking work.
     pub fn prune(&self, grace: Duration) -> Result<Pruned> {
+        let _change = self.change()?;
         let mut pruned = Pruned::default();
         let old = |path: &Path| {
             fs::metadata(path)
@@ -501,7 +545,7 @@ impl Store {
                 continue;
             }
             let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-            match self.remove_image(&image) {
+            match self.remove_image_untagged(&image) {
                 Ok(true) => {
                     pruned.reclaimed += len;
                     pruned.images.push(image);
@@ -589,6 +633,7 @@ impl Store {
 
     /// Have `reference` name `image`, which must be here, in place of whatever it named.
     pub fn insert_tag(&self, reference: &Reference, image: &Digest) -> Result<()> {
+        let _change = self.change()?;
         if !self.shelf("image", image, "json").is_file() {
             return Err(Error::Missing(image.clone()));
         }
@@ -605,19 +650,12 @@ impl Store {
     }
 
     pub fn get_tag(&self, reference: &Reference) -> Result<Option<Digest>> {
-        let path = self.tag_path(reference);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
-        };
-        let read: TagFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
-        Ok(Some(read.image))
+        Ok(read_filed::<TagFile>(&self.tag_path(reference))?.map(|read| read.image))
     }
 
     /// Take `reference` away, and say what it named.
     pub fn remove_tag(&self, reference: &Reference) -> Result<Option<Digest>> {
+        let _change = self.change()?;
         let Some(image) = self.get_tag(reference)? else {
             return Ok(None);
         };
@@ -642,10 +680,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: TagFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<TagFile>(&path)? else {
+                continue;
+            };
             let reference = read.reference.parse::<Reference>().map_err(|e| {
                 Error::io(
                     format!("reading {}", path.display()),
@@ -689,14 +726,9 @@ impl Store {
 
     /// The layer the registry blob `blob` became, if it is still here.
     pub fn get_layer_origin(&self, blob: &Digest) -> Result<Option<Digest>> {
-        let path = self.shelf("origin", blob, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        let Some(read) = read_filed::<OriginFile>(&self.shelf("origin", blob, "json"))? else {
+            return Ok(None);
         };
-        let read: OriginFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
         match read {
             OriginFile::Layer { layer, .. } => Ok(self.contains_layer(&layer).then_some(layer)),
             OriginFile::Image { .. } => Ok(None),
@@ -717,10 +749,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: OriginFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<OriginFile>(&path)? else {
+                continue;
+            };
             if let OriginFile::Layer {
                 layer: of,
                 diff_id,
@@ -773,14 +804,9 @@ impl Store {
 
     /// The image the registry manifest or index `digest` became, if it is still here.
     pub fn get_image_origin(&self, digest: &Digest) -> Result<Option<Digest>> {
-        let path = self.shelf("origin", digest, "json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+        let Some(read) = read_filed::<OriginFile>(&self.shelf("origin", digest, "json"))? else {
+            return Ok(None);
         };
-        let read: OriginFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
         match read {
             OriginFile::Image { image, .. } => Ok(self
                 .shelf("image", &image, "json")
@@ -804,10 +830,9 @@ impl Store {
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
-            let read: OriginFile = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))?;
+            let Some(read) = read_filed::<OriginFile>(&path)? else {
+                continue;
+            };
             if let OriginFile::Image {
                 image: of,
                 manifest,
@@ -895,6 +920,28 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
         return Err(e);
     }
     Ok(part)
+}
+
+/// Make what is filed at `path` young again, or answer `false` when nothing is.
+fn renew(path: &Path) -> io::Result<bool> {
+    match File::options().write(true).open(path) {
+        Ok(file) => file.set_modified(SystemTime::now()).map(|()| true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// What is filed at `path`, or `None` when nothing is: a removal is its file removed, and
+/// a listing may name a file a removal takes before it is read.
+fn read_filed<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(format!("reading {}", path.display()), e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| Error::io(format!("reading {}", path.display()), e.into()))
 }
 
 #[cfg(test)]
@@ -1047,6 +1094,163 @@ mod tests {
         assert_eq!(tags.len(), 3, "{tags:?}");
         assert_eq!(store.get_tag(&reference("alpine:3.21")).unwrap(), Some(b));
         assert_eq!(store.get_tag(&reference("alpine:Latest")).unwrap(), Some(a));
+    }
+
+    /// A file a directory's listing names but a removal took before it is read: a dangling
+    /// link reads the same way.
+    #[cfg(unix)]
+    fn gone(dir: &Path) {
+        let gone = dir.join("gone.json");
+        std::os::unix::fs::symlink(gone.with_extension("removed"), &gone).unwrap();
+    }
+
+    #[test]
+    fn a_change_waits_for_the_one_under_way() {
+        let scratch = Scratch::new("change");
+        let store = &scratch.0;
+        let image = store.insert_image(&config("a"), &[]).unwrap();
+        let change = store.change().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let tagging = std::thread::spawn({
+            let (store, image) = (store.clone(), image.clone());
+            move || {
+                started.send(()).unwrap();
+                store.insert_tag(&reference("waited:latest"), &image)
+            }
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !tagging.is_finished(),
+            "a tag was named while a change was under way"
+        );
+        drop(change);
+        tagging.join().unwrap().unwrap();
+        assert_eq!(
+            store.get_tag(&reference("waited:latest")).unwrap(),
+            Some(image.clone())
+        );
+
+        let change = store.change().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let removing = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                started.send(()).unwrap();
+                store.remove_tag(&reference("waited:latest"))
+            }
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !removing.is_finished(),
+            "a tag was taken away while a change was under way"
+        );
+        drop(change);
+        assert_eq!(removing.join().unwrap().unwrap(), Some(image));
+        assert_eq!(store.get_tag(&reference("waited:latest")).unwrap(), None);
+    }
+
+    fn age(path: &Path, by: Duration) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - by)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_layer_filed_again_or_renewed_is_young_again() {
+        let scratch = Scratch::new("young-layer");
+        let store = &scratch.0;
+        let grace = Duration::from_secs(3600);
+        let layer = store.insert_layer(&tree(b"young")).unwrap();
+
+        age(&store.layer_path(&layer), 2 * grace);
+        store.insert_layer(&tree(b"young")).unwrap();
+        store.prune(grace).unwrap();
+        assert!(
+            store.contains_layer(&layer),
+            "a layer filed again was pruned"
+        );
+
+        age(&store.layer_path(&layer), 2 * grace);
+        assert!(store.renew_layer(&layer).unwrap());
+        store.prune(grace).unwrap();
+        assert!(store.contains_layer(&layer), "a layer renewed was pruned");
+
+        age(&store.layer_path(&layer), 2 * grace);
+        store.prune(grace).unwrap();
+        assert!(!store.contains_layer(&layer));
+        assert!(!store.renew_layer(&layer).unwrap());
+    }
+
+    #[test]
+    fn an_image_filed_again_or_renewed_is_young_again() {
+        let scratch = Scratch::new("young-image");
+        let store = &scratch.0;
+        let grace = Duration::from_secs(3600);
+        let image = store.insert_image(&config("young"), &[]).unwrap();
+        let path = store.shelf("image", &image, "json");
+
+        age(&path, 2 * grace);
+        store.insert_image(&config("young"), &[]).unwrap();
+        store.prune(grace).unwrap();
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "an image filed again was pruned"
+        );
+
+        age(&path, 2 * grace);
+        assert!(store.renew_image(&image).unwrap());
+        store.prune(grace).unwrap();
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "an image renewed was pruned"
+        );
+
+        age(&path, 2 * grace);
+        store.prune(grace).unwrap();
+        assert!(store.get_image(&image).unwrap().is_none());
+        assert!(!store.renew_image(&image).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tag_removed_while_listing_is_left_out() {
+        let scratch = Scratch::new("listing");
+        let store = &scratch.0;
+        let image = store.insert_image(&config("a"), &[]).unwrap();
+        store.insert_tag(&reference("kept:latest"), &image).unwrap();
+        gone(&store.root().join("tag"));
+
+        let tags = store.tags().unwrap();
+        assert_eq!(tags.len(), 1, "{tags:?}");
+        assert_eq!(tags[0].0.to_string(), "docker.io/library/kept:latest");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_origin_removed_while_listing_is_left_out() {
+        let scratch = Scratch::new("origin-listing");
+        let store = &scratch.0;
+        let digest = |hex: char| -> Digest {
+            format!("sha256:{}", hex.to_string().repeat(64))
+                .parse()
+                .unwrap()
+        };
+        let blob = Descriptor::new(MediaType::ImageLayerGzip, 1, digest('a'));
+        let diff_id = digest('1');
+        let layer = store.insert_layer(&tree(b"one")).unwrap();
+        store.insert_layer_origin(&blob, &diff_id, &layer).unwrap();
+        gone(&store.root().join("origin").join("sha256"));
+
+        assert_eq!(
+            store.layer_origins_of(&layer).unwrap(),
+            vec![(blob, diff_id)]
+        );
+        assert_eq!(store.image_origins_of(&layer).unwrap(), vec![]);
     }
 
     #[test]

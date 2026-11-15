@@ -76,8 +76,8 @@ from .volume import (
 
 __all__ = [
     "LIBRARY_ENV",
-    "BasicAuth",
     "Auth",
+    "BasicAuth",
     "BearerAuth",
     "Client",
     "CommandAuth",

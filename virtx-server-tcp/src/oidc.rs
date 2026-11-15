@@ -24,7 +24,7 @@ pub struct Config {
     pub issuer: String,
     /// The client the tokens are for: their `aud`.
     pub client_id: String,
-    /// The claim that names the user.
+    /// The claim that names the user. `email` is taken only with `email_verified` `true`.
     #[serde(default = "email")]
     pub username_claim: String,
 }
@@ -76,8 +76,8 @@ impl Oidc {
             .ok()?
             .claims;
         let claim = &self.config.username_claim;
-        // An address the provider has not verified is whatever its holder typed.
-        if claim == "email" && claims.get("email_verified") == Some(&Value::Bool(false)) {
+        // An address the provider does not say it verified is whatever its holder typed.
+        if claim == "email" && claims.get("email_verified") != Some(&Value::Bool(true)) {
             return None;
         }
         claims.get(claim)?.as_str().map(str::to_owned)

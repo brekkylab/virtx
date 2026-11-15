@@ -1261,6 +1261,10 @@ impl FixtureProvider {
             "for another client": self.sign(FIXTURE_KEY_ID, &good(|c| c["aud"] = "another".into()))?,
             "of an address not verified":
                 self.sign(FIXTURE_KEY_ID, &good(|c| c["email_verified"] = false.into()))?,
+            "of an address not said to be verified": self.sign(
+                FIXTURE_KEY_ID,
+                &good(|c| _ = c.as_object_mut().unwrap().remove("email_verified")),
+            )?,
             "signed with a shared secret": shared,
             "signed with a key the provider has not": self.sign("another", &good(|_| {}))?,
         })

@@ -207,6 +207,7 @@ let client = Client::connect(
 </Tabs>
 
 The `virtx-project` header names the project in `server.json` the requests belong to.
+The `virtx` command sends it with `--project`, beside `--host` and `$VIRTX_TOKEN`; see [CLI](/docs/reference/cli/#which-server).
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Next

@@ -256,6 +256,8 @@ let client = Client::connect(
 
 </details>
 
+`virtx token` 给出最后登录的提供方的令牌。如果登录了多个，请在参数中指定服务器的提供方：`token --json --issuer https://idp.example --client-id virtx`。
+
 客户端只有在目标是本机回环地址时，才会通过明文 `http` 发送令牌，所以部署在其他机器上的服务器，请在前面加一层 HTTPS。
 
 ## 功能亮点

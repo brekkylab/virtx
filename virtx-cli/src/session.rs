@@ -1,7 +1,8 @@
 //! What signing in keeps between runs, under `~/.config/virtx/`: which provider was signed in
-//! to (`oidc.json`), the session's refresh token -- in the OS's keychain, or where the OS has
-//! none in `<provider>.token` -- and the ID token last issued (`<provider>.id`). Each file is
-//! readable by its owner alone.
+//! to (`oidc.json`), and for each client of a provider signed in as, the session's refresh
+//! token -- in the OS's keychain, or where the OS has none in `<client_id>@<issuer>.token` --
+//! and the ID token last issued (`<client_id>@<issuer>.id`). Each file is readable by its
+//! owner alone.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ pub struct Kept {
 
 pub struct Session {
     dir: PathBuf,
-    /// The provider, as a file's name.
+    /// The client and its provider, as a file's name: `<client_id>@<issuer>`.
     key: String,
     keychain: bool,
 }
@@ -51,18 +52,21 @@ pub fn keep_sign_in(dir: &Path, sign_in: &SignIn) -> anyhow::Result<()> {
 }
 
 impl Session {
-    /// The session with `issuer`, kept in `dir`: its refresh token in the keychain if
-    /// `keychain`, and the OS has one.
-    pub fn new(dir: &Path, issuer: &str, keychain: bool) -> Session {
-        let key = issuer
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .chars()
-            .map(|c| match c {
-                c if c.is_ascii_alphanumeric() || c == '.' || c == '-' => c,
-                _ => '_',
-            })
-            .collect();
+    /// The session with `sign_in`'s provider as its client, kept in `dir`: its refresh token
+    /// in the keychain if `keychain`, and the OS has one.
+    pub fn new(dir: &Path, sign_in: &SignIn, keychain: bool) -> Session {
+        let named = |text: &str| -> String {
+            text.chars()
+                .map(|c| match c {
+                    c if c.is_ascii_alphanumeric() || c == '.' || c == '-' => c,
+                    _ => '_',
+                })
+                .collect()
+        };
+        let issuer = sign_in.issuer.trim_start_matches("https://");
+        let issuer = issuer.trim_start_matches("http://");
+        // Two clients of one provider are two sessions; `@` is in neither part.
+        let key = format!("{}@{}", named(&sign_in.client_id), named(issuer));
         Session {
             dir: dir.to_owned(),
             key,

@@ -1,15 +1,17 @@
 #!/bin/sh
-# Build the guest's half of a sandbox's GPU, the Vulkan loader and Mesa's venus driver, and
-# install it where a server shares `/alib` from.
+# Build what every machine gets at `/alib`, the guest's half of a sandbox's GPU -- the Vulkan
+# loader and Mesa's venus driver -- into PREFIX, which `cargo xtask build alib` names as
+# `alib/` in virtx's cache, where a server about to boot, `install` and `archive` take it from.
 #
-#     sh build.sh build              # in build/alib/vulkan/<libc>/ of this repository
-#     sh build.sh install [PREFIX]   # into PREFIX/<libc>/; default $VIRTX_HOME/alib, else
-#                                    # virtx/alib under $XDG_CACHE_HOME or ~/.cache
+#     xtask/scripts/build-alib.sh PREFIX
 #
-# Run as root, once in Alpine for musl and once in manylinux_2_28 for glibc, the images `images`
-# beside this script names: the two libraries are loaded into the guest's own programs, so each
-# has to be built against the C library of the program that loads it. What `install` puts in
-# PREFIX/musl or PREFIX/glibc is what `/alib/musl` or `/alib/glibc` holds:
+# The two libraries are loaded into the guest's own programs, so each has to be built against
+# the C library of the program that loads it: once in Alpine for musl and once in
+# manylinux_2_28 for glibc, glibc at 2.28 so an image as old as that loads it. Each is built in
+# a container of that image for this host's architecture, docker's, as the guest kernel's is in
+# build-libkrunfw.sh, under `build/alib/<libc>/` of this repository. What lands in PREFIX/musl
+# or PREFIX/glibc is what `/alib/musl` or `/alib/glibc` holds, by the names the agent's
+# `alib_env` (virtx-uvm-guest/src/main.rs) gives the guest:
 #
 #     libvulkan.so.1        the loader, which a Vulkan program links or opens
 #     libvulkan_virtio.so   venus, which carries Vulkan to the host's GPU over virtio-gpu
@@ -18,46 +20,41 @@
 # Each needs nothing of the guest but its C library: libdrm is built here as a static archive
 # and linked in, libgcc and libstdc++ are linked in too, and none of their symbols is exported.
 # Venus is built with no window system and no shader cache, which would each want more.
-# Mesa is MIT-licensed, libdrm MIT, and the loader Apache-2.0. The tarballs `sources` beside
-# this script lists are fetched into the build directory and checked against their sha256.
+# Mesa is MIT-licensed, libdrm MIT, and the loader Apache-2.0. Their tarballs are fetched into
+# the build directory and checked against the sha256 pinned below.
 set -eu
 
-HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../.." && pwd)
-if [ -f /etc/alpine-release ]; then
-    LIBC=musl
-else
-    LIBC=glibc
-fi
-WORK=$ROOT/build/alib/vulkan/$LIBC
-OUT=$WORK/out
+PREFIX="${1:?usage: build-alib.sh PREFIX}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BUILD="$ROOT/build/alib"
 
-case "${1:-}" in
-    build) ;;
-    install)
-        PREFIX=${2:-${VIRTX_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/virtx}/alib}
-        if [ ! -f "$OUT/virtio_icd.json" ]; then
-            echo "nothing built in $OUT -- run \`sh build.sh build\` first" >&2
-            exit 1
-        fi
-        rm -rf "${PREFIX:?}/$LIBC"
-        mkdir -p "$PREFIX/$LIBC"
-        cp "$OUT"/* "$PREFIX/$LIBC/"
-        echo "installed into $PREFIX/$LIBC"
-        exit 0
-        ;;
-    *)
-        echo "usage: sh build.sh build | install [PREFIX]" >&2
-        exit 2
-        ;;
+case "$(uname -m)" in
+    arm64 | aarch64) ARCH=aarch64 ;;
+    x86_64) ARCH=x86_64 ;;
+    *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-# What the libraries are built into, apart from what `install` takes.
+command -v docker >/dev/null 2>&1 || { echo "missing docker" >&2; exit 1; }
+if [ "$(docker info --format '{{.OSType}}')" != "linux" ]; then
+    echo "docker is in Windows container mode; switch it to Linux containers" >&2
+    exit 1
+fi
+
+mkdir -p "$BUILD" "$PREFIX"
+
+# Written out rather than passed to `docker run sh -c`, so that the quoting survives a Windows
+# command line intact.
+cat > "$BUILD/build.sh" <<'EOF'
+set -eu
+
+WORK=/build/$LIBC
+# What the libraries are built into, and what of it goes to /alib.
 STAGE=$WORK/stage
+OUT=$WORK/out
 rm -rf "$WORK/src" "$STAGE" "$OUT"
 mkdir -p "$WORK/sources" "$WORK/src" "$STAGE" "$OUT"
 
-if [ -f /etc/alpine-release ]; then
+if [ "$LIBC" = musl ]; then
     apk add --no-cache \
         build-base linux-headers cmake ninja pkgconf xz curl \
         meson py3-mako py3-packaging py3-yaml >/dev/null
@@ -70,19 +67,26 @@ else
     PATH=$WORK/venv/bin:$PATH
 fi
 
-grep -v '^#' "$HERE/sources" | while read -r file url sum; do
-    [ -n "$file" ] || continue
+# Each tarball, where it is fetched from, and its sha256. Mesa's venus is the guest's half of
+# the host's virglrenderer: any release speaks to it, and the newest stable one knows the most
+# of what the host's driver can do.
+while read -r file url sum; do
     if [ ! -f "$WORK/sources/$file" ]; then
         echo "fetching $url"
         curl -fsSL --retry 3 -o "$WORK/sources/$file" "$url"
     fi
     if ! echo "$sum  $WORK/sources/$file" | sha256sum -c >/dev/null; then
         rm -f "$WORK/sources/$file"
-        echo "$file is not the $sum $HERE/sources says" >&2
+        echo "$file is not the $sum pinned for it" >&2
         exit 1
     fi
     tar -xf "$WORK/sources/$file" -C "$WORK/src"
-done
+done <<'SOURCES'
+mesa-26.2.6.tar.xz https://archive.mesa3d.org/mesa-26.2.6.tar.xz b9436b3e1a8be76fbd4823dc884f90596ab7c6ac5e1867a305e66ffccfb31a92
+libdrm-2.4.134.tar.xz https://dri.freedesktop.org/libdrm/libdrm-2.4.134.tar.xz ac5e74d157830eb8bee44c6a6bf3ad49774ef0dd2a72bdad74a8f20308b52a95
+Vulkan-Headers-vulkan-sdk-1.4.363.0.tar.gz https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz 4a078be12bef21cfebc09d878b77a63cff9d68f899254a0b00d0e37ef73e7f7e
+Vulkan-Loader-vulkan-sdk-1.4.363.0.tar.gz https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz 941eff558fc74f248745fb7df367640cf89a8457f216dae498a74ae14b6ba6f7
+SOURCES
 
 export PKG_CONFIG_PATH=$STAGE/lib/pkgconfig
 JOBS=$(nproc)
@@ -141,4 +145,26 @@ for lib in "$OUT"/*.so*; do
         exit 1
     fi
 done
-du -sh "$OUT"/*
+
+rm -rf "/alib/$LIBC"
+mkdir -p "/alib/$LIBC"
+cp "$OUT"/* "/alib/$LIBC/"
+du -sh "/alib/$LIBC"/*
+EOF
+
+# Docker Hub's images through mirror.gcr.io, which has no rate limit for an anonymous pull.
+for libc in musl glibc; do
+    case "$libc" in
+        musl) image=mirror.gcr.io/library/alpine:3.22 ;;
+        glibc) image=quay.io/pypa/manylinux_2_28_$ARCH:2026.11.07-1 ;;
+    esac
+    echo "alib: $libc in $image"
+    # MSYS/Git Bash rewrites arguments that look like absolute paths; this stops it turning
+    # the container-side ones into Windows paths.
+    MSYS_NO_PATHCONV=1 docker run --rm \
+        -e LIBC="$libc" \
+        -v "$BUILD:/build" \
+        -v "$PREFIX:/alib" \
+        "$image" sh /build/build.sh
+done
+echo "alib built into $PREFIX"

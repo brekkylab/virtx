@@ -10,7 +10,7 @@ import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import Any, Generic, Self, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from ._library import args as _args
@@ -31,9 +31,6 @@ from .job import StartedJob
 from .sandbox import Sandbox, SandboxVolume
 from .snapshot import Snapshot
 from .volume import Volume
-
-if TYPE_CHECKING:
-    from typing_extensions import Self
 
 T = TypeVar("T")
 C = TypeVar("C")

@@ -9,8 +9,8 @@ use tokio::process::Command;
 
 use crate::{Auth, Client, ensure_virtx};
 
-/// The bearer token a server at `--host` wants, taken from the environment alone so it is never
-/// on a command line.
+/// The bearer token the server reached over HTTP wants, taken from the environment alone so it
+/// is never on a command line.
 const TOKEN: &str = "VIRTX_TOKEN";
 
 /// The server's base URL when neither `--host` nor `--server` is given.

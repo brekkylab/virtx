@@ -1,7 +1,8 @@
 //! virtx's own programs in a sandbox, against the fixture's `virtx-stdio`: `/abin`, the programs
-//! a sandbox is made with, from `abin/` beside the server, and `/alib`, what they run, from
-//! `alib/` beside it. The fixture always has `abin/`; it has `alib/` only once
-//! `cargo xtask build alib` has run, so the tests that need it are ignored without it.
+//! a sandbox is made with, from `abin/` beside the server, and `/alib`, the libraries a GPU
+//! sandbox's programs load, from `alib/` beside it. The fixture always has `abin/`; it has
+//! `alib/` only once `virtx-alibs/*/build.sh install` has run, so the tests that need it are
+//! ignored without it.
 
 use virtx::{Client, ImageJobEnd, ImageJobEntry, SandboxCreateArgs};
 
@@ -94,6 +95,12 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
             .any(|line| line.ends_with("\tthe borrow checker")),
         "{lines:?}"
     );
+
+    let (lines, code) = run(
+        &sandbox,
+        &["display", "run", "--", "display", "shot", "/tmp/shot.png"],
+    );
+    assert_eq!(code, 0, "{lines:?}");
     sandbox.remove().wait().unwrap();
 
     let only = client
@@ -118,28 +125,22 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
     none.remove().wait().unwrap();
 }
 
-/// `/alib` is read-only, with the X server `display` starts and Vulkan for each C library; a
-/// sandbox without a GPU is given none of it on `LD_LIBRARY_PATH`, and no Vulkan driver.
+/// `/alib` is read-only, with Vulkan for each C library; a sandbox without a GPU is given none
+/// of it on `LD_LIBRARY_PATH`, and no Vulkan driver.
 #[test]
-#[ignore = "needs alib/ beside the server: `cargo xtask build alib`"]
+#[ignore = "needs alib/ beside the server: `virtx-alibs/*/build.sh install`"]
 fn a_sandbox_without_a_gpu_has_alib_and_is_given_none_of_it() {
     let client = common::client();
     common::alpine(&client);
     let sandbox = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).abin("display"))
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
         .wait()
         .unwrap();
-    assert_eq!(run(&sandbox, &["test", "-x", "/alib/Xvfb"]).1, 0);
     assert_ne!(
         run(&sandbox, &["touch", "/alib/x"]).1,
         0,
         "/alib is read-only"
     );
-    let (lines, code) = run(
-        &sandbox,
-        &["display", "run", "--", "display", "shot", "/tmp/shot.png"],
-    );
-    assert_eq!(code, 0, "{lines:?}");
     sandbox.remove().wait().unwrap();
 
     for (image, libc) in [(ALPINE, "musl"), (DEBIAN, "glibc")] {

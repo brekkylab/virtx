@@ -1,5 +1,5 @@
-# What build.sh builds: the file, where it is fetched from, and its sha256. `cargo xtask build
-# alib` fetches each and checks it before handing it in.
+# What build.sh builds: the file, where it is fetched from, and its sha256, which build.sh
+# checks each against.
 #
 # Mesa's venus is the guest's half of the host's virglrenderer: any release speaks to it, and
 # the newest stable one knows the most of what the host's driver can do.

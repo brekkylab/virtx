@@ -8,8 +8,6 @@ use std::{
 
 use anyhow::{Context, bail, ensure};
 
-mod alib;
-
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
@@ -47,9 +45,6 @@ components:
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables a sandbox gets at /abin, those it names
-  alib          what every VM gets at /alib, built from virtx-alibs/ in virtx machines into
-                build/alib/ -- on the server built into the same profile, built without the
-                GPU first if there is none; a part is built again only when its files changed
 
   --force         (init) resets every submodule to its pinned commit first, discarding
                   any local changes in it
@@ -96,7 +91,6 @@ enum Component {
     ServerTcp,
     Kernel,
     Abin,
-    Alib,
 }
 
 struct Options {
@@ -236,7 +230,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
             Some("server-tcp") => Component::ServerTcp,
             Some("kernel") => Component::Kernel,
             Some("abin") => Component::Abin,
-            Some("alib") => Component::Alib,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
@@ -469,29 +462,6 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Abin) {
         build_abin(options.debug, &options.out().join("abin"))?;
     }
-    if options.has(Component::Alib) {
-        // Its machines are run through the client library, on the server of this tree: one
-        // downloaded would be of the version being released, before it is. Without the GPU
-        // where none was built, as the machines need none.
-        build_client(options)?;
-        let out = options.out();
-        let server = out.join(format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX));
-        if !server.is_file() {
-            let mut cargo = cargo();
-            cargo
-                .current_dir(root_path())
-                .args(["build", "-p", SERVERS[0].1]);
-            if !options.debug {
-                cargo.arg("--release");
-            }
-            if options.locked {
-                cargo.arg("--locked");
-            }
-            run(cargo, "the server, without the GPU")?;
-            ready(&server)?;
-        }
-        alib::build(&out.join(client_library()), &server)?;
-    }
     if options.has(Component::Kernel) {
         build_kernel()?;
     }
@@ -575,8 +545,8 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
-/// looks, `alib/` beside it, where a machine's `/alib` is shared from, as `build alib` last
-/// left it, when it has run, and the entitlement on it. `abin/` is not built here: `build abin`
+/// looks, `alib/` beside it, where a machine's `/alib` is shared from, when there is one to
+/// take, and the entitlement on it. `abin/` is not built here: `build abin`
 /// puts it there, and the fixture before it serves.
 fn ready(exe: &Path) -> anyhow::Result<()> {
     let kernel = kernel_library()?;
@@ -587,7 +557,7 @@ fn ready(exe: &Path) -> anyhow::Result<()> {
     if !beside.is_file() {
         place(&kernel, &beside)?;
     }
-    let alib = alib::dir()?;
+    let alib = alib_dir();
     if alib.is_dir() {
         place_dir(&alib, &dir.join("alib"))?;
     }
@@ -788,6 +758,12 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where `/alib` is taken from: `alib/` in virtx's cache, where `virtx-alibs/*/build.sh install`
+/// puts it.
+fn alib_dir() -> PathBuf {
+    cache_root().join("alib")
+}
+
 /// Where the guest kernel is built to, and what it is called there.
 ///
 /// One directory under `build/`, like everything else this repository compiles, and the
@@ -878,9 +854,9 @@ fn archive(abin: bool) -> anyhow::Result<()> {
         built.display()
     );
     ensure!(
-        !abin || alib::dir()?.is_dir(),
-        "--with-abin, but no alib in {} -- run `cargo xtask build alib` first",
-        alib::dir()?.display()
+        !abin || alib_dir().is_dir(),
+        "--with-abin, but no alib in {}",
+        alib_dir().display()
     );
     let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
     ensure!(
@@ -945,7 +921,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Put the set a `bin/` holds -- the `files` named, the guest kernel when a server is among
-/// them, and abin from `built` and alib from `build/alib/` if they were built and `abin` asks
+/// them, and abin from `built` and alib from virtx's cache if they are there and `abin` asks
 /// for them -- into `bin`. What
 /// `install` does, and what `archive` archives.
 fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::Result<()> {
@@ -975,7 +951,7 @@ fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::
     if abin && built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;
     }
-    let alib = alib::dir()?;
+    let alib = alib_dir();
     if abin && alib.is_dir() {
         place_dir(&alib, &bin.join("alib"))?;
     }

@@ -52,8 +52,8 @@
 //! [`MachineConfig::abin`], the programs a sandbox was made with, and the `alib/` directory beside
 //! this executable, as `cargo xtask install` and a release put it there, each shared read-only
 //! and mounted at [`ABIN_DIR`] and [`ALIB_DIR`]. `/abin` goes in front of the guest's `PATH`;
-//! `/alib` is what is not a program to run by name, such as the X server `display` starts. A
-//! machine with no `abin`, or a host with no `alib/`, boots without it rather than refusing to.
+//! `/alib` is the libraries a GPU sandbox's programs load. A machine with no `abin`, or a host
+//! with no `alib/`, boots without it rather than refusing to.
 //! Both are mounted before the volumes, so a volume asked for at either lands over it.
 //!
 //! # The host
@@ -562,10 +562,10 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-/// Mark each file directly in `dir` executable for the guest: the programs `/abin` and `/alib`
-/// run by path. What is in their directories is read, not run -- a library is mapped by the
-/// guest's loader whatever its mode, and `xkb/` is data -- so it is left as it is, and a boot
-/// writes a stream for a handful of files rather than for every keymap.
+/// Mark each file directly in `dir` executable for the guest: the programs `/abin` runs by path.
+/// What is in their directories is read, not run -- a library is mapped by the guest's loader
+/// whatever its mode -- so it is left as it is, and a boot writes a stream for a handful of
+/// files rather than for every one.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no

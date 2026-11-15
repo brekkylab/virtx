@@ -1,6 +1,12 @@
-//! The X server: `/alib/Xvfb`, its screen in a file.
+//! The X server: Xvfb, built into this program, its screen in a file.
 
 use std::{
+    fs::File,
+    io::Write as _,
+    os::{
+        fd::{AsRawFd as _, FromRawFd as _},
+        unix::process::CommandExt as _,
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -19,8 +25,9 @@ pub fn framebuffer_path(display: u16) -> PathBuf {
     dir(display).join("Xvfb_screen0")
 }
 
-/// The Xvfb this program runs. At a fixed path, as Xvfb is built to find `xkbcomp` beside it.
-const PROGRAM: &str = "/alib/Xvfb";
+/// The Xvfb this program runs, as `build.rs` fetched it: static, with its keymaps and fonts
+/// inside it, so it needs nothing of the image.
+const PROGRAM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Xvfb"));
 
 /// A running X server.
 pub struct Server {
@@ -31,9 +38,6 @@ pub struct Server {
 impl Server {
     /// Start `:display` with one `width`×`height` screen at 24 bits, and wait for it to be up.
     pub fn start(display: u16, width: u16, height: u16) -> Result<Self, String> {
-        if !Path::new(PROGRAM).is_file() {
-            return Err(format!("no X server at {PROGRAM}"));
-        }
         let dir = dir(display);
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let framebuffer = framebuffer_path(display);
@@ -42,8 +46,23 @@ impl Server {
         let log = std::fs::File::create(&log_path)
             .map_err(|e| format!("creating {}: {e}", log_path.display()))?;
 
-        let mut command = Command::new(PROGRAM);
+        // Run from a memfd: nothing is written where the image keeps its files, and a `noexec`
+        // /tmp stops nothing. Closed on exec, which the kernel does only once it has the
+        // program open.
+        // SAFETY: a name with its NUL, and flags.
+        let fd = unsafe { libc::memfd_create(c"Xvfb".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd == -1 {
+            return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+        }
+        // SAFETY: a fd just opened, which nothing else owns.
+        let mut program = unsafe { File::from_raw_fd(fd) };
+        program
+            .write_all(PROGRAM)
+            .map_err(|e| format!("writing Xvfb: {e}"))?;
+
+        let mut command = Command::new(format!("/proc/self/fd/{}", program.as_raw_fd()));
         command
+            .arg0("Xvfb")
             .arg(format!(":{display}"))
             .args(["-screen", "0", &format!("{width}x{height}x24")])
             .arg("-fbdir")
@@ -53,9 +72,7 @@ impl Server {
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log);
         crate::die_with_parent(&mut command);
-        let child = command
-            .spawn()
-            .map_err(|e| format!("starting {PROGRAM}: {e}"))?;
+        let child = command.spawn().map_err(|e| format!("starting Xvfb: {e}"))?;
         let mut server = Self { child, framebuffer };
 
         let socket = PathBuf::from(format!("/tmp/.X11-unix/X{display}"));

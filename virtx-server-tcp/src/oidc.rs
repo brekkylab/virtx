@@ -2,7 +2,8 @@
 //! config's `oidc` issuer signed for its client, and the user is the claim the config picks.
 //!
 //! The provider's keys are found through its discovery document and kept; a token signed with
-//! a key not among them has them fetched again, at most once in [`REFETCH_AFTER`].
+//! a key not among them has them fetched again, at most once in [`REFETCH_AFTER`], or in
+//! [`RETRY_AFTER`] after a fetch failed.
 
 use std::time::{Duration, Instant};
 
@@ -11,10 +12,14 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// How long the keys last fetched stand before a key unknown has them fetched again.
 const REFETCH_AFTER: Duration = Duration::from_secs(60);
+
+/// How long after a failed fetch a key unknown has them fetched again: a provider briefly
+/// down leaves every token refused no longer than this.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// The config's `oidc`.
 #[derive(Clone, Deserialize)]
@@ -39,11 +44,25 @@ struct Discovery {
     jwks_uri: String,
 }
 
+/// The provider's keys last fetched.
+struct Keys {
+    set: JwkSet,
+    /// When a key not among them may have them fetched again.
+    due: Instant,
+}
+
+impl Keys {
+    fn key(&self, kid: &str) -> Option<DecodingKey> {
+        DecodingKey::from_jwk(self.set.find(kid)?).ok()
+    }
+}
+
 pub struct Oidc {
     config: Config,
     http: reqwest::Client,
-    /// The provider's keys, and when they were last asked for.
-    keys: RwLock<(JwkSet, Option<Instant>)>,
+    keys: RwLock<Keys>,
+    /// Held while the keys are fetched, so one fetch runs at a time.
+    fetching: Mutex<()>,
 }
 
 impl Oidc {
@@ -54,7 +73,11 @@ impl Oidc {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("an HTTP client"),
-            keys: RwLock::new((JwkSet { keys: Vec::new() }, None)),
+            keys: RwLock::new(Keys {
+                set: JwkSet { keys: Vec::new() },
+                due: Instant::now(),
+            }),
+            fetching: Mutex::new(()),
         }
     }
 
@@ -84,24 +107,33 @@ impl Oidc {
     }
 
     async fn key(&self, kid: &str) -> Option<DecodingKey> {
+        if let Some(key) = self.keys.read().await.key(kid) {
+            return Some(key);
+        }
+        // Fetched outside `keys`, so tokens of keys known are checked meanwhile.
+        let _fetching = self.fetching.lock().await;
         {
-            let (keys, fetched) = &*self.keys.read().await;
-            if let Some(jwk) = keys.find(kid) {
-                return DecodingKey::from_jwk(jwk).ok();
+            let keys = self.keys.read().await;
+            if let Some(key) = keys.key(kid) {
+                return Some(key);
             }
-            if fetched.is_some_and(|at| at.elapsed() < REFETCH_AFTER) {
+            if Instant::now() < keys.due {
                 return None;
             }
         }
+        let fetched = self.fetch().await;
         let mut keys = self.keys.write().await;
-        if keys.1.is_none_or(|at| at.elapsed() >= REFETCH_AFTER) {
-            keys.1 = Some(Instant::now());
-            match self.fetch().await {
-                Ok(fetched) => keys.0 = fetched,
-                Err(e) => eprintln!("fetching the keys of {}: {e:#}", self.config.issuer),
+        match fetched {
+            Ok(set) => {
+                keys.set = set;
+                keys.due = Instant::now() + REFETCH_AFTER;
+            }
+            Err(e) => {
+                eprintln!("fetching the keys of {}: {e:#}", self.config.issuer);
+                keys.due = Instant::now() + RETRY_AFTER;
             }
         }
-        DecodingKey::from_jwk(keys.0.find(kid)?).ok()
+        keys.key(kid)
     }
 
     async fn fetch(&self) -> anyhow::Result<JwkSet> {

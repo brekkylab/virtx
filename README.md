@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <b>English</b> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -228,8 +228,8 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 
 Pick the one for the language you use.
 
-- **Python:** 3.10 or later.
-- **Node:** 18 or later.
+- **Python:** 3.11 or later.
+- **Node:** 22 or later.
 - **Rust:** 1.89 or later.
 
 ### Server

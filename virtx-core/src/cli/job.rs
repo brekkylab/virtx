@@ -38,7 +38,8 @@ async fn drain(client: &Client, id: &str, quiet: bool) -> anyhow::Result<String>
             ImageJobEntry::Truncated {} if !quiet => {
                 eprintln!("(the log reached the server's limit; the rest is not kept)")
             }
-            ImageJobEntry::End(end) => return ended(end.digest, end.error),
+            // A failed job's end is its error, which `entry?` returned.
+            ImageJobEntry::End(end) => return ended(end.digest, None),
             _ => {}
         }
     }

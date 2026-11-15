@@ -65,7 +65,5 @@ export async function tags(client) {
 export async function alpine(client) {
   const there = (await tags(client))[ALPINE]
   if (there) return there
-  const end = (await Array.fromAsync(client.pullImage(ALPINE))).at(-1).end
-  assert.ok(end.digest, end.error)
-  return end.digest
+  return client.pullImage(ALPINE).complete()
 }

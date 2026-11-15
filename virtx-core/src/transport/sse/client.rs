@@ -25,7 +25,7 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
         }
         let request = request
             .body(full(Vec::new()))
-            .map_err(|e| Error::Transport(format!("not a request: {e}")))?;
+            .map_err(|e| Error::Client(format!("not a request: {e}")))?;
         let response = client.send(request).await?;
         if !response.status().is_success() {
             Err::<(), _>(refused(response).await)?;
@@ -40,8 +40,8 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
             let id = event
                 .id
                 .and_then(|id| id.parse().ok())
-                .ok_or_else(|| Error::Transport(format!("an entry of {path} without its id")))?;
-            let entry = serde_json::from_str(&data).map_err(|e| Error::Json(e.to_string()))?;
+                .ok_or_else(|| Error::Client(format!("an entry of {path} without its id")))?;
+            let entry = serde_json::from_str(&data).map_err(|e| Error::Client(e.to_string()))?;
             yield LogEntry { id, entry };
         }
     }

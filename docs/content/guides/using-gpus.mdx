@@ -20,10 +20,9 @@ This installs `vulkaninfo` in a GPU sandbox and checks the GPU with it:
 
 ```python
 sandbox = await client.create_sandbox("alpine:latest", gpu=True)
-async for entry in sandbox.exec(
+await sandbox.exec(
     ["sh", "-c", "apk add --no-cache vulkan-tools && vulkaninfo --summary"]
-):
-    print(entry.entry)
+).complete(print=True)
 ```
 
 </TabItem>
@@ -31,9 +30,9 @@ async for entry in sandbox.exec(
 
 ```js
 const sandbox = await client.createSandbox('alpine:latest', { gpu: true })
-for await (const entry of sandbox.exec([
-  'sh', '-c', 'apk add --no-cache vulkan-tools && vulkaninfo --summary',
-])) console.log(entry)
+await sandbox
+  .exec(['sh', '-c', 'apk add --no-cache vulkan-tools && vulkaninfo --summary'])
+  .complete({ print: true })
 ```
 
 </TabItem>
@@ -43,16 +42,14 @@ for await (const entry of sandbox.exec([
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("alpine:latest").gpu(true))
     .await?;
-let mut log = sandbox
+sandbox
     .exec(&SandboxExecArgs::new([
         "sh",
         "-c",
         "apk add --no-cache vulkan-tools && vulkaninfo --summary",
     ]))
-    .log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+    .complete(true)
+    .await?;
 ```
 
 </TabItem>

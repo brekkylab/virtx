@@ -1,5 +1,7 @@
 use std::fmt;
 
+use virtx_core::Source;
+
 /// Why a call, or opening a client, failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -8,8 +10,9 @@ pub enum Error {
     /// The server refused the request with this HTTP status, as `PROTOCOL.md` lists them: `404`
     /// for what does not exist, `409` for what is in use or has ended, and the like.
     Status(u16, String),
-    /// The library answered with an error of its own or the transport's.
-    Call(String),
+    /// The library answered with an error that is not the server refusing the request: where
+    /// it failed, and why.
+    Call(Source, String),
     /// What crosses the C ABI did not encode or read back.
     Json(String),
     /// An argument cannot cross the C ABI: a string with a NUL in it.
@@ -17,6 +20,16 @@ pub enum Error {
 }
 
 impl Error {
+    /// Where it failed: [`Source::Server`] for a request the server refused, and for each
+    /// [`Call`](Self::Call) what the library said; [`Source::Client`] for what failed here.
+    pub fn source_kind(&self) -> Source {
+        match self {
+            Error::Status(..) => Source::Server,
+            Error::Call(source, _) => *source,
+            Error::Library(_) | Error::Json(_) | Error::Argument(_) => Source::Client,
+        }
+    }
+
     /// The HTTP status the server refused the request with, if it did.
     pub fn status(&self) -> Option<u16> {
         match self {
@@ -31,7 +44,7 @@ impl fmt::Display for Error {
         match self {
             Error::Library(message)
             | Error::Status(_, message)
-            | Error::Call(message)
+            | Error::Call(_, message)
             | Error::Json(message)
             | Error::Argument(message) => f.write_str(message),
         }

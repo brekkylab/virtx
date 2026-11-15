@@ -424,8 +424,12 @@ impl RegistryClient {
     ) -> Result<(Digest, Digest)> {
         report(format!("pulling {reference}"));
         let (digest, served, manifest) = self.pull_manifest(reference).await?;
+        // Renewed, so that a prune leaves it for the tag to come; one gone meanwhile is pulled.
         if let Some(image) = self.store.get_image_origin(&digest)? {
-            return Ok((digest, image));
+            let (store, found) = (self.store.clone(), image.clone());
+            if tokio::task::spawn_blocking(move || store.renew_image(&found)).await?? {
+                return Ok((digest, image));
+            }
         }
 
         let (config_served, config) = self.pull_config(reference, &manifest).await?;
@@ -437,9 +441,14 @@ impl RegistryClient {
             .zip(config.rootfs().diff_ids())
             .enumerate()
         {
+            // Renewed, so that a prune leaves it for the image to come; one gone meanwhile is
+            // pulled.
             if let Some(layer) = self.store.get_layer_origin(descriptor.digest())? {
-                layers.push(layer);
-                continue;
+                let (store, found) = (self.store.clone(), layer.clone());
+                if tokio::task::spawn_blocking(move || store.renew_layer(&found)).await?? {
+                    layers.push(layer);
+                    continue;
+                }
             }
             report(format!(
                 "layer {}/{count}: {}",
@@ -459,7 +468,10 @@ impl RegistryClient {
             layers.push(layer);
         }
 
-        let image = self.store.insert_image(&config, &layers)?;
+        let image = {
+            let store = self.store.clone();
+            tokio::task::spawn_blocking(move || store.insert_image(&config, &layers)).await??
+        };
         self.store
             .insert_image_origin(&digest, &served, &config_served, &image)?;
         Ok((digest, image))

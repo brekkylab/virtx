@@ -11,7 +11,7 @@ use std::{
     pin::pin,
     process::Command,
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
     },
     task::{Context, Poll, Wake},
@@ -146,6 +146,9 @@ pub fn tagged(client: &Client, reference: &str) -> Option<String> {
 /// [`ALPINE`] on the server, pulled unless it is there already, and its digest. Docker Hub
 /// limits the pulls an address makes, so a test that only needs the image takes the one there.
 pub fn alpine(client: &Client) -> String {
+    // One pull at a time: the second finds the first's, and Docker Hub counts one.
+    static PULL: Mutex<()> = Mutex::new(());
+    let _pull = PULL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(digest) = tagged(client, ALPINE) {
         return digest;
     }

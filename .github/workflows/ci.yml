@@ -27,5 +27,9 @@ jobs:
   test:
     needs: [check, build]
     uses: ./.github/workflows/test.yml
+    # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
+    permissions:
+      contents: read
+      id-token: write
     with:
       version: ${{ needs.check.outputs.version }}

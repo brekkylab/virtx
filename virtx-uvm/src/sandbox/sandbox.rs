@@ -18,8 +18,8 @@ use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, FsTree, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec,
-    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeMount,
-    VolumeStore,
+    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeHold,
+    VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -127,6 +127,9 @@ pub struct Sandbox {
     /// Its snapshot's lock, held for each of its machines and between them, until it is
     /// closed.
     snapshot_lock: Mutex<Option<SnapshotLock>>,
+    /// Its volumes, held against removal for each of its machines and between them, until it
+    /// is closed.
+    volume_holds: Mutex<Vec<VolumeHold>>,
     /// What each of its machines boots, and the process each runs as.
     config: MachineConfig,
     vm: Vec<OsString>,
@@ -173,16 +176,12 @@ impl Sandbox {
         }
         let mut at = HashSet::new();
         for volume in &args.volumes {
-            // Asked of the text rather than of `Path`, which answers by this host's rules.
-            let path = volume.path.trim_end_matches('/');
-            let why = if !volume.path.starts_with('/') {
-                "a path in the guest is absolute"
-            } else if path.is_empty() {
-                "/ is the guest's root"
-            } else if !at.insert(path) {
-                "another volume is there"
-            } else {
-                continue;
+            let why = match crate::mount_point(&volume.path) {
+                Err(why) => why,
+                Ok(path) => match at.insert(path) {
+                    false => "another volume is there",
+                    true => continue,
+                },
             };
             return Err(Error::Invalid(format!(
                 "volumes: {} at {}: {why}",
@@ -239,9 +238,9 @@ impl Sandbox {
                 let reference: Reference = tag
                     .parse()
                     .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
-                images
-                    .get_tag(&reference)?
-                    .ok_or_else(|| Error::NotFound(format!("no image here is tagged {tag}")))?
+                images.get_tag(&reference)?.ok_or_else(|| {
+                    Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
+                })?
             }
             ImageName::Digest { digest } => {
                 let digest = digest
@@ -271,12 +270,15 @@ impl Sandbox {
         // Held from here until the sandbox is closed, whether its machine runs or not, against
         // every other sandbox, removal and request to its files, in this process or another.
         let snapshot_lock = snapshot.as_ref().map(Snapshot::lock).transpose()?;
+        let mut volume_holds = Vec::new();
         let volumes = args
             .volumes
             .iter()
             .map(|asked| {
+                let volume = volumes.open(&asked.volume)?;
+                volume_holds.push(volume.hold()?);
                 Ok(VolumeMount {
-                    path: volumes.open(&asked.volume)?.path().to_owned(),
+                    path: volume.path().to_owned(),
                     at: asked.path.clone(),
                     read_only: asked.readonly,
                 })
@@ -331,6 +333,7 @@ impl Sandbox {
             upper: Mutex::new(upper),
             abin: Mutex::new(abin),
             snapshot_lock: Mutex::new(Some(snapshot_lock)),
+            volume_holds: Mutex::new(volume_holds),
             config,
             vm,
             state: Mutex::new(State::Parked),
@@ -480,6 +483,7 @@ impl Sandbox {
             machine.stop();
         }
         drop(self.snapshot_lock.lock().unwrap().take());
+        self.volume_holds.lock().unwrap().clear();
         drop(self.upper.lock().unwrap().take());
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
@@ -680,7 +684,14 @@ impl Upper {
 
     fn create(dir: &Path) -> Result<Upper, Error> {
         let io = |context: String| move |source| SnapshotError::Io { context, source };
-        let (name, owner, held) = own(dir)?;
+        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
+        let (name, held) = loop {
+            let name = pick(|name| dir.join(format!("{name}.owner")).exists());
+            if let Some(held) = Upper::claim(dir, &name)? {
+                break (name, held);
+            }
+        };
+        let owner = dir.join(format!("{name}.owner"));
         let path = dir.join(format!("{name}.ext4"));
         // Owned from here, so a disk that failed to format is deleted too.
         let upper = Upper {
@@ -691,9 +702,32 @@ impl Upper {
         let file = File::create_new(&upper.snapshot.path)
             .map_err(io(format!("creating {}", upper.snapshot.path.display())))?;
         FsTree::new()
-            .to_ext4(file, Snapshot::SIZE)
+            .to_ext4(Snapshot::sparse(file), Snapshot::SIZE)
             .map_err(SnapshotError::from)?;
         Ok(upper)
+    }
+
+    /// Hold `<name>.owner` under `dir`, or `None` for one another holds: a sandbox's, or a
+    /// sweep's for the moment it takes to find it nobody's and remove it.
+    fn claim(dir: &Path, name: &str) -> Result<Option<File>, Error> {
+        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let owner = dir.join(format!("{name}.owner"));
+        let held = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&owner)
+            .map_err(io(format!("creating {}", owner.display())))?;
+        match held.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(io(format!("locking {}", owner.display()))(e).into());
+            }
+        }
+        // A sweep that had it first has removed it: this is a lock on nothing.
+        Ok(owner.exists().then_some(held))
     }
 }
 
@@ -833,21 +867,6 @@ fn link(from: &Path, to: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// A name in `dir` no other sandbox's has, and `<name>.owner` there, locked for as long as the
-/// file answered is held.
-fn own(dir: &Path) -> Result<(String, PathBuf, File), Error> {
-    let io = |context: String| move |source| SnapshotError::Io { context, source };
-    fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
-    let name = pick(|name| dir.join(format!("{name}.owner")).exists());
-    let owner = dir.join(format!("{name}.owner"));
-    let held = File::create_new(&owner).map_err(io(format!("creating {}", owner.display())))?;
-    held.try_lock().map_err(|e| SnapshotError::Io {
-        context: format!("locking {}", owner.display()),
-        source: e.into(),
-    })?;
-    Ok((name, owner, held))
-}
-
 impl Sandbox {
     /// Delete what sandboxes made under `snapshots`' root by processes that have since ended
     /// left: a server that was killed closed none of its own.
@@ -934,5 +953,28 @@ mod tests {
         Abin::sweep(&dir);
         assert!(!made.exists());
         assert!(programs.join("index").is_file(), "the server's own stay");
+    }
+
+    #[test]
+    fn a_name_another_holds_is_not_claimed() {
+        let dir = std::env::temp_dir().join(format!("virtx-uvm-upper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let owner = dir.join("0badf00d.owner");
+
+        // A sweep's, for the moment it takes to find it nobody's.
+        let sweep = File::create(&owner).unwrap();
+        sweep.lock().unwrap();
+        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
+
+        drop(sweep);
+        fs::remove_file(&owner).unwrap();
+        let held = Upper::claim(&dir, "0badf00d").unwrap();
+        assert!(held.is_some());
+        assert!(owner.is_file());
+        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
+
+        drop(held);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

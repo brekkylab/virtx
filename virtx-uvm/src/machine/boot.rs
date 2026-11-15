@@ -148,6 +148,20 @@ pub(super) struct BootArgs {
     pub ioout: u64,
 }
 
+/// Whether a machine's RAM is backed with host pages before it boots rather than as the guest
+/// first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
+///
+/// Only WHP heeds it. There each first touch is a fault the hypervisor resolves on its own,
+/// and nested -- a Windows instance in a cloud, as a CI runner is -- one costs about 130µs:
+/// the guest's struct pages alone, initialised before it reaches init, are 2s of a 3.8s
+/// boot, where faulting all 4 GiB in at once is 1.2s, and the machine tests there take 59s
+/// rather than 182. On a desktop the faults are cheap and the cost is all the other way:
+/// every machine holds its whole RAM on the host from the start, used or not. So it is for a
+/// runner to turn on, and nothing else.
+fn prefault_memory() -> bool {
+    std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
+}
+
 /// `ctrlout`, once this process [holds](hold) it.
 static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
@@ -215,18 +229,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 why,
             })
         };
-        // Asked of the text rather than of `Path`, which answers by this host's rules: on
-        // Windows `/data` is not absolute.
-        let at = asked.at.trim_end_matches('/');
-        if !asked.at.starts_with('/') {
-            return refused("a path in the guest is absolute");
-        }
-        if at.is_empty() {
-            return refused("/ is the guest's root");
-        }
+        // The guest is given the spelling checked, not the one asked.
+        let at = match crate::mount_point(&asked.at) {
+            Ok(at) => at,
+            Err(why) => return refused(why),
+        };
         if machine.volumes[..i]
             .iter()
-            .any(|other| other.at.trim_end_matches('/') == at)
+            .any(|other| crate::mount_point(&other.at).is_ok_and(|other| other == at))
         {
             return refused("another volume is mounted there");
         }
@@ -235,7 +245,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
         let host = utf8(&files)?;
-        init = init.mount(at, MOUNT_FSTYPE, &tag);
+        init = init.mount(&at, MOUNT_FSTYPE, &tag);
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
             match asked.read_only {
@@ -288,7 +298,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 context: format!("creating {}", path.display()),
                 source: e,
             })?;
-            FsTree::new().to_ext4(file, Snapshot::SIZE)?;
+            FsTree::new().to_ext4(Snapshot::sparse(file), Snapshot::SIZE)?;
             path
         }
     };
@@ -296,6 +306,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // The guest kernel, which libkrun `dlopen`s rather than links.
     let mut payload =
         Payload::load_krunfw().map_err(|e| Error::vmm("loading the guest kernel", e))?;
+    // No bounce buffer. A guest whose RAM reaches past 4 GiB -- the default 4 GiB does, over
+    // the MMIO hole -- sets aside 64 MiB for swiotlb and zeroes it while it boots, and no
+    // device here bounces through it: none offers `VIRTIO_F_ACCESS_PLATFORM`, so virtio
+    // reaches guest memory directly, and WHP passes no device through. Under WHP each page
+    // the guest first touches is a fault the hypervisor resolves one at a time; nested, as
+    // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
+    #[cfg(windows)]
+    payload.append_cmdline("swiotlb=noforce");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {
@@ -404,6 +422,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?
         .payload(payload)
         .devices(devices)
+        .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
 

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     Error,
-    transport::{TransportClient, http, segment, segments},
+    transport::{TransportClient, http, resolved, segment, segments},
 };
 
 /// The path of the volume `name`.
@@ -54,8 +54,19 @@ pub(crate) async fn create_mount(
     path: &str,
     args: &VolumeMountCreateArgs,
 ) -> Result<VolumeMountListOutputItem, Error> {
-    let path = format!("{}/mounts/{}", volume(name), segments(path));
+    let path = format!("{}/mounts/{}", volume(name), mount(path)?);
     http::put(client, &path, args).await
+}
+
+/// `path`, a mount's in a volume, [as it is sent](segments): refused unsent where it resolves to
+/// the volume's root, which is no mount's, and would go to the list of them.
+fn mount(path: &str) -> Result<String, Error> {
+    match resolved(path).is_empty() {
+        true => Err(Error::Path(format!(
+            "{path:?} is the volume's root, which no mount is at"
+        ))),
+        false => Ok(segments(path)),
+    }
 }
 
 /// Take away the mount at `path` in the volume `name`, leaving its source as it is.
@@ -64,6 +75,6 @@ pub(crate) async fn remove_mount(
     name: &str,
     path: &str,
 ) -> Result<(), Error> {
-    let path = format!("{}/mounts/{}", volume(name), segments(path));
+    let path = format!("{}/mounts/{}", volume(name), mount(path)?);
     http::delete(client, &path).await
 }

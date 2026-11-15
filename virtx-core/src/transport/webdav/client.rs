@@ -11,7 +11,7 @@ use percent_encoding::percent_decode_str;
 use super::{DirEntry, FileRoot, Metadata};
 use crate::{
     Error,
-    transport::{Body, TransportClient, full, http::refused, segment, segments},
+    transport::{Body, TransportClient, full, http::refused, resolved, segment, segments},
 };
 
 /// What a `PROPFIND` asks for: the properties `PROTOCOL.md` says every server answers.
@@ -195,7 +195,7 @@ pub(crate) async fn create_dir_all(
     root: &FileRoot,
     path: &str,
 ) -> Result<(), Error> {
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let segments = resolved(path);
     if segments.is_empty() {
         return Ok(());
     }

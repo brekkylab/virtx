@@ -27,12 +27,14 @@ x86_64 Windows over the Windows Hypervisor Platform, which has its own setup —
 [Windows (WHP)](#windows-whp). The rest of this section is macOS.
 
 ```sh
-brew install lld meson ninja krunvm
+brew install lld meson ninja
 ```
+
+and Docker, running Linux containers: Docker Desktop, or colima.
 
 | Dependency | Why |
 |---|---|
-| `krunvm` | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in — see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). The library it produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
+| Docker | What `xtask/scripts/build-libkrunfw.sh` builds the guest kernel in, as far as `kernel.c`, which the host then links: see [The guest kernel is built, not installed](#the-guest-kernel-is-built-not-installed). Without it, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere and no container is started. The library the script produces is `dlopen`ed by leaf name at runtime and never linked, so it is not a build dependency of anything here. |
 | `lld` | libkrun's init blob cross-compiles the guest init to `aarch64-unknown-linux-musl` with `clang -fuse-ld=lld`. Apple's toolchain has no lld. |
 | `llvm` | Only for `virtx-abins/`, and only for `llvm-ar`: Apple's `ar` writes a Mach-O symbol table over ELF objects and `rust-lld` then reads an empty archive. The `lld` formula does not carry it; `llvm` does, and carries lld too. |
 | `meson`, `ninja` | Only for `xtask/scripts/build-deps.sh`, run by `cargo xtask build server-stdio` and `server-tcp`. |
@@ -574,9 +576,12 @@ build is only about controlling what is in the guest.
 **Where the kernel is built** depends on what the host can offer a Linux toolchain.
 Linux and Windows both build in a throwaway `ubuntu:24.04` container — Windows because
 it has no such toolchain at all, Linux so that it gets the same one rather than whatever
-the distribution has. macOS cannot: the output is a `.dylib` that has to be linked on
-macOS while the kernel inside it has to be built on Linux, which libkrunfw resolves with
-`krunvm`, and which the script defers to. `brew install krunvm` if it is missing.
+the distribution has. macOS splits it: the output is a `.dylib` that has to be linked on
+macOS while the kernel inside it has to be built on Linux, so the same container builds
+the kernel as far as `kernel.c`, the C bundle libkrunfw wraps it in, and the host links
+that. libkrunfw's own `krunvm` path does the same with a microVM in place of the
+container. A Mac without Docker can give a `kernel.c` built elsewhere, on an arm64 Linux
+machine with `LIBKRUNFW_TARGET=macos`, as `LIBKRUNFW_KERNEL_C=<path>`.
 
 Windows has a second reason to build rather than install, which is that there is nothing
 to install: libkrunfw gained a Windows target in
@@ -864,6 +869,37 @@ always has, two user mounts and ten.
 the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
 ceiling. macOS is aarch64, where the interrupt controller is a GIC and
 `IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
+
+### libkrun commit `whp-prefault`
+
+Under WHP each page the guest first touches is a fault the hypervisor resolves
+on its own, one page at a time. On a desktop that is cheap. Nested — a Windows
+instance in a cloud, which is what a CI runner is — one costs about 130µs, and
+a 4 GiB guest touches tens of thousands of pages before it reaches init:
+
+| what the guest is doing                      | pages  | time |
+|----------------------------------------------|--------|------|
+| initialising its struct pages (64 MiB)       | ~16000 | ~2s  |
+| zeroing swiotlb's bounce buffer (64 MiB)     | 16384  | 2.1s |
+
+Measured on an m8i.2xlarge with nested virtualization; the host process held
+206 MiB of the 4 GiB once the guest was up, so it is these, not the RAM.
+
+The bounce buffer goes on the guest's side: `boot.rs` boots a Windows guest
+with `swiotlb=noforce`. The guest sets one aside because its RAM reaches past
+4 GiB over the MMIO hole, and nothing bounces through it — no device offers
+`VIRTIO_F_ACCESS_PLATFORM`, so virtio reaches guest memory directly, and WHP
+passes no device through. A boot went from 6.4s to 3.8s.
+
+The struct pages do not: the guest has to initialise them for its RAM below
+4 GiB before it boots, and `DEFERRED_STRUCT_PAGE_INIT` defers only the zone
+above, which saved 0.15s. So the commit gives the host the other side of it.
+`VmmBuilder::prefault_memory(true)` has `memory_init` ask
+`WHvAdviseGpaRange` to populate each region it maps, writable, which is 1.2s
+for 4 GiB at once. The price is that all of the guest's RAM is resident on the
+host from the start, used or not, so it is off by default; `boot.rs` turns it
+on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner and nothing else. The
+machine tests on that runner take 59s with it and 182s without.
 
 ### virglrenderer commit `windows`
 

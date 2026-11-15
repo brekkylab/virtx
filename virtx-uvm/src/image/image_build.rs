@@ -126,6 +126,7 @@ pub async fn build_step(
         snapshot_held: false,
         spec: spec.clone(),
         volumes: Vec::new(),
+        abin: None,
         ports: Vec::new(),
     };
     let vm = vm.to_vec();

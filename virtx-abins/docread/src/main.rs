@@ -331,7 +331,6 @@ fn main() -> ExitCode {
 mod tests {
     use std::{
         alloc::{GlobalAlloc, Layout, System},
-        io::Write as _,
         sync::atomic::{AtomicUsize, Ordering},
     };
 

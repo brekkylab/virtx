@@ -1,13 +1,14 @@
 //! Fetching the server this client matches, when this host has none.
 
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use anyhow::Context as _;
 use sha2::{Digest, Sha256};
+
+use crate::Error;
 
 /// Where a release's assets hang, unless `$VIRTX_DIST_URL` says otherwise:
 /// `<base>/v<version>/<asset>`.
@@ -62,15 +63,16 @@ fn server_file() -> String {
 ///
 /// `<os>`/`<arch>` are as [`std::env::consts`] spells them. `<base>` is GitHub's releases
 /// unless `$VIRTX_DIST_URL` says otherwise.
-pub async fn ensure_virtx() -> anyhow::Result<PathBuf> {
+pub async fn ensure_virtx() -> Result<PathBuf, Error> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(named) = env("VIRTX_STDIO") {
         let path = PathBuf::from(named);
-        anyhow::ensure!(
-            path.is_file(),
-            "$VIRTX_STDIO: {} is not a file",
-            path.display()
-        );
+        if !path.is_file() {
+            return Err(Error::Client(format!(
+                "$VIRTX_STDIO: {} is not a file",
+                path.display()
+            )));
+        }
         return Ok(path);
     }
     let version = env("VIRTX_STDIO_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
@@ -92,7 +94,7 @@ async fn ensure_in(
     base: &str,
     version: &str,
     patience: Patience,
-) -> anyhow::Result<PathBuf> {
+) -> Result<PathBuf, Error> {
     let server = server_file();
     let bin = root.join("bin");
     let placed = bin.join(&server);
@@ -100,7 +102,7 @@ async fn ensure_in(
         return Ok(placed);
     }
 
-    fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    fs::create_dir_all(root).map_err(here(format!("creating {}", root.display())))?;
     let lock_path = root.join(".lock");
     let _lock = lock(&lock_path, version, patience.lock).await?;
     // Another process may have placed it while this one waited.
@@ -112,38 +114,35 @@ async fn ensure_in(
         .connect_timeout(patience.connect)
         .read_timeout(patience.read)
         .build()
-        .context("making an HTTP client")?;
+        .map_err(|e| Error::Client(format!("making an HTTP client: {}", reason(e))))?;
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let asset = format!("virtx-stdio-{platform}.tar.gz");
     let release = format!("{}/v{version}", base.trim_end_matches('/'));
+    let unpublished = || format!("no virtx-stdio release v{version} is published for {platform}");
     let sums = fetch(&client, &format!("{release}/SHA256SUMS"), || {
         format!("no virtx-stdio release v{version} is published")
     })
     .await?;
-    let expected = checksum_for(&sums, &asset).with_context(|| {
-        format!("no virtx-stdio release v{version} is published for {platform}")
-    })?;
-    let archive = fetch(&client, &format!("{release}/{asset}"), || {
-        format!("no virtx-stdio release v{version} is published for {platform}")
-    })
-    .await?;
+    let expected = checksum_for(&sums, &asset)?.ok_or_else(|| Error::Client(unpublished()))?;
+    let archive = fetch(&client, &format!("{release}/{asset}"), unpublished).await?;
     let actual = format!("{:x}", Sha256::digest(&archive));
-    anyhow::ensure!(
-        actual == expected,
-        "{asset} of v{version} does not match its SHA256SUMS: {actual} != {expected}"
-    );
+    if actual != expected {
+        return Err(Error::Client(format!(
+            "{asset} of v{version} does not match its SHA256SUMS: {actual} != {expected}"
+        )));
+    }
 
     let root = root.to_path_buf();
     tokio::task::spawn_blocking(move || unpack(&archive, &root, &server))
         .await
-        .context("unpacking virtx-stdio panicked")??;
+        .map_err(|e| Error::Client(format!("unpacking virtx-stdio: {e}")))??;
     Ok(placed)
 }
 
 /// The lock file at `path`, locked, waiting up to `deadline` for the caller fetching `version`
 /// that holds it.
-async fn lock(path: &Path, version: &str, deadline: Duration) -> anyhow::Result<fs::File> {
-    let lock = fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+async fn lock(path: &Path, version: &str, deadline: Duration) -> Result<fs::File, Error> {
+    let lock = fs::File::create(path).map_err(here(format!("creating {}", path.display())))?;
     let since = Instant::now();
     loop {
         match lock.try_lock() {
@@ -151,76 +150,94 @@ async fn lock(path: &Path, version: &str, deadline: Duration) -> anyhow::Result<
             Err(fs::TryLockError::WouldBlock) if since.elapsed() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(fs::TryLockError::WouldBlock) => anyhow::bail!(
-                "another fetch of virtx-stdio v{version} has held {} for {deadline:?}",
-                path.display()
-            ),
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(Error::Client(format!(
+                    "another fetch of virtx-stdio v{version} has held {} for {deadline:?}",
+                    path.display()
+                )));
+            }
             Err(fs::TryLockError::Error(e)) => {
-                return Err(e).with_context(|| format!("locking {}", path.display()));
+                return Err(here(format!("locking {}", path.display()))(e));
             }
         }
     }
 }
 
-/// GET `url` with `client`, whole. An error names `url`, a timeout among them, and one for
-/// nothing there, a `404`, starts with what `missing` says.
+/// GET `url` with `client`, whole. Nothing there, a `404`, is [`Error::Client`], starting with
+/// what `missing` says; any other answer than a success is one that did not get through. Every
+/// error names `url`.
 async fn fetch(
     client: &reqwest::Client,
     url: &str,
     missing: impl FnOnce() -> String,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, Error> {
     let response = client
         .get(url)
         .send()
         .await
-        .with_context(|| format!("fetching {url}"))?;
+        .map_err(|e| Error::Transport(format!("fetching {url}: {}", reason(e))))?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(anyhow::anyhow!("fetching {url}: {status}").context(missing()));
+        return Err(Error::Client(format!(
+            "{}: fetching {url}: {status}",
+            missing()
+        )));
     }
-    anyhow::ensure!(status.is_success(), "fetching {url}: {status}");
+    if !status.is_success() {
+        return Err(Error::Transport(format!("fetching {url}: {status}")));
+    }
     let body = response
         .bytes()
         .await
-        .with_context(|| format!("reading {url}"))?;
+        .map_err(|e| Error::Transport(format!("reading {url}: {}", reason(e))))?;
     Ok(body.to_vec())
 }
 
-/// The checksum `sums`, a `SHA256SUMS` as `sha256sum` writes it, gives for `name`.
-fn checksum_for(sums: &[u8], name: &str) -> anyhow::Result<String> {
-    let sums = std::str::from_utf8(sums).context("SHA256SUMS is not UTF-8")?;
-    sums.lines()
+/// `error` and each error under it, joined by `: `. reqwest's own text says what it was doing,
+/// `error sending request for url (…)`, and leaves why, `operation timed out` for one, to the
+/// errors under it.
+fn reason(error: reqwest::Error) -> String {
+    format!("{:#}", anyhow::Error::new(error))
+}
+
+/// The checksum `sums`, a `SHA256SUMS` as `sha256sum` writes it, gives for `name`, if any.
+fn checksum_for(sums: &[u8], name: &str) -> Result<Option<String>, Error> {
+    let sums = std::str::from_utf8(sums)
+        .map_err(|e| Error::Client(format!("SHA256SUMS is not UTF-8: {e}")))?;
+    Ok(sums
+        .lines()
         .filter_map(|line| {
             let (sum, file) = line.split_once(' ')?;
             (file.trim_start_matches([' ', '*']) == name).then(|| sum.to_string())
         })
-        .next()
-        .with_context(|| format!("SHA256SUMS has no {name}"))
+        .next())
 }
 
 /// Unpack `archive` into a staging directory in `root` and move its entries into `bin/`, `server`
 /// last. The staging directory is this process's own and on the same filesystem, so every move
 /// is a rename.
-fn unpack(archive: &[u8], root: &Path, server: &str) -> anyhow::Result<()> {
+fn unpack(archive: &[u8], root: &Path, server: &str) -> Result<(), Error> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let part = root.join(format!(".part-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&part).with_context(|| format!("creating {}", part.display()))?;
+    fs::create_dir_all(&part).map_err(here(format!("creating {}", part.display())))?;
     let moved = (|| {
         tar::Archive::new(flate2::read::GzDecoder::new(archive))
             .unpack(&part)
-            .context("unpacking the virtx-stdio archive")?;
-        anyhow::ensure!(
-            part.join(server).is_file(),
-            "the virtx-stdio archive has no {server}"
-        );
+            .map_err(here("unpacking the virtx-stdio archive"))?;
+        if !part.join(server).is_file() {
+            return Err(Error::Client(format!(
+                "the virtx-stdio archive has no {server}"
+            )));
+        }
 
         let bin = root.join("bin");
-        fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
-        for entry in fs::read_dir(&part).with_context(|| format!("reading {}", part.display()))? {
-            let entry = entry?;
+        fs::create_dir_all(&bin).map_err(here(format!("creating {}", bin.display())))?;
+        let reading = || here(format!("reading {}", part.display()));
+        for entry in fs::read_dir(&part).map_err(reading())? {
+            let entry = entry.map_err(reading())?;
             if entry.file_name() != server {
                 replace(&entry.path(), &bin.join(entry.file_name()))?;
             }
@@ -233,11 +250,20 @@ fn unpack(archive: &[u8], root: &Path, server: &str) -> anyhow::Result<()> {
 
 /// Rename `from` over `to`. A rename replaces a file but not a directory, so an old directory
 /// is removed first.
-fn replace(from: &Path, to: &Path) -> anyhow::Result<()> {
+fn replace(from: &Path, to: &Path) -> Result<(), Error> {
     if from.is_dir() && to.is_dir() {
-        fs::remove_dir_all(to).with_context(|| format!("removing {}", to.display()))?;
+        fs::remove_dir_all(to).map_err(here(format!("removing {}", to.display())))?;
     }
-    fs::rename(from, to).with_context(|| format!("moving {} to {}", from.display(), to.display()))
+    fs::rename(from, to).map_err(here(format!(
+        "moving {} to {}",
+        from.display(),
+        to.display()
+    )))
+}
+
+/// Why `what`, on this machine, failed.
+fn here(what: impl std::fmt::Display) -> impl FnOnce(io::Error) -> Error {
+    move |e| Error::Client(format!("{what}: {e}"))
 }
 
 /// Where virtx keeps what it keeps on this host: `$VIRTX_HOME`, or a `virtx` directory in the
@@ -281,6 +307,7 @@ mod tests {
     use axum::{Router, extract::State, routing::get};
 
     use super::*;
+    use crate::Source;
 
     /// A release at `v1.2.3` of an archive holding `virtx-stdio`, `libkrunfw` and `abin/`, served
     /// over HTTP with its `SHA256SUMS`, counting the archive's fetches.
@@ -304,7 +331,7 @@ mod tests {
         };
         file(&server, b"#!/bin/sh\necho server\n");
         file("libkrunfw.5.dylib", b"kernel");
-        file("abin/mem", b"mem");
+        file("abin/index", b"index");
         let archive = tar.into_inner().unwrap().finish().unwrap();
         let asset = format!(
             "virtx-stdio-{}-{}.tar.gz",
@@ -353,7 +380,7 @@ mod tests {
             fs::read(root.join("bin/libkrunfw.5.dylib")).unwrap(),
             b"kernel"
         );
-        assert_eq!(fs::read(root.join("bin/abin/mem")).unwrap(), b"mem");
+        assert_eq!(fs::read(root.join("bin/abin/index")).unwrap(), b"index");
         assert!(
             !fs::read_dir(&root).unwrap().any(|e| e
                 .unwrap()
@@ -418,14 +445,14 @@ mod tests {
         let error = ensure_in(&root, &release.base, "9.9.9", PATIENCE)
             .await
             .unwrap_err();
+        assert_eq!(error.source_kind(), Source::Client, "{error}");
+        let error = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("no virtx-stdio release v9.9.9 is published"),
-            "{error:#}"
+            error.contains("no virtx-stdio release v9.9.9 is published"),
+            "{error}"
         );
         let url = format!("{}/v9.9.9/SHA256SUMS", release.base);
-        assert!(format!("{error:#}").contains(&url), "{error:#}");
+        assert!(error.contains(&url), "{error}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -456,13 +483,28 @@ mod tests {
         .await
         .expect("the fetch gives up")
         .unwrap_err();
-        let error = format!("{error:#}");
+        assert_eq!(error.source_kind(), Source::Transport, "{error}");
+        let error = error.to_string();
         assert!(
             error.contains(&format!("fetching {base}/v1.2.3/SHA256SUMS")),
             "{error}"
         );
         assert!(error.contains("timed out"), "{error}");
         assert!(!error.contains("is published"), "{error}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_release_that_does_not_answer_is_a_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let root = fresh_root();
+
+        let error = ensure_in(&root, &closed, "1.2.3", PATIENCE)
+            .await
+            .unwrap_err();
+        assert_eq!(error.source_kind(), Source::Transport, "{error}");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -480,8 +522,9 @@ mod tests {
         )
         .await
         .expect("the wait for the lock gives up")
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        assert_eq!(error.source_kind(), Source::Client, "{error}");
+        let error = error.to_string();
         assert!(
             error.contains("another fetch of virtx-stdio v1.2.3 has held"),
             "{error}"
@@ -500,8 +543,18 @@ mod tests {
     #[test]
     fn a_sum_is_found_by_its_file_name() {
         let sums = b"aa  virtx-stdio-a.tar.gz\nbb *virtx-stdio-b.tar.gz\n";
-        assert_eq!(checksum_for(sums, "virtx-stdio-a.tar.gz").unwrap(), "aa");
-        assert_eq!(checksum_for(sums, "virtx-stdio-b.tar.gz").unwrap(), "bb");
-        assert!(checksum_for(sums, "virtx-stdio-c.tar.gz").is_err());
+        assert_eq!(
+            checksum_for(sums, "virtx-stdio-a.tar.gz")
+                .unwrap()
+                .as_deref(),
+            Some("aa")
+        );
+        assert_eq!(
+            checksum_for(sums, "virtx-stdio-b.tar.gz")
+                .unwrap()
+                .as_deref(),
+            Some("bb")
+        );
+        assert_eq!(checksum_for(sums, "virtx-stdio-c.tar.gz").unwrap(), None);
     }
 }

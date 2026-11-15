@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
-use std::io;
+use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -861,9 +861,10 @@ impl IntoResponse for Refused {
 }
 
 /// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
-/// `message` can name the server's own paths, so it goes to the server's stderr instead.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
+/// refusal is answered even when stderr cannot take it, as on a disk that is full.
 fn io_failure(e: &std::io::Error, message: impl Display) -> String {
-    eprintln!("{message}");
+    let _ = writeln!(io::stderr(), "{message}");
     format!("the server's files: {}", e.kind())
 }
 
@@ -984,9 +985,10 @@ mod tests {
             ),
         ];
         for (kind, status, code) in kinds {
+            let source = || io::Error::new(kind, "under /home/virtx/project/a");
             let tree = || FstreeError::Io {
                 context: CONTEXT.into(),
-                source: kind.into(),
+                source: source(),
             };
             let in_a_tree: [Refused; 2] = [
                 SnapshotError::Fstree(tree()).into(),
@@ -995,17 +997,17 @@ mod tests {
             let by_kind: [Refused; 3] = [
                 VolumeError::Io {
                     context: CONTEXT.into(),
-                    source: kind.into(),
+                    source: source(),
                 }
                 .into(),
                 SnapshotError::Io {
                     context: CONTEXT.into(),
-                    source: kind.into(),
+                    source: source(),
                 }
                 .into(),
                 ImageStoreError::Io {
                     context: CONTEXT.into(),
-                    source: kind.into(),
+                    source: source(),
                 }
                 .into(),
             ];

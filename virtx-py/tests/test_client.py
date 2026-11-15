@@ -1,5 +1,4 @@
 import pytest
-
 from conftest import fixture, unique
 
 import virtx

@@ -1,7 +1,5 @@
-# The tests, after `build`; `ci` and `release` call it.
+# The tests, after `check` and `build`; `ci` and `release` call it.
 #
-# - `check`: `cargo xtask check`: the format, clippy of the client and the servers, and the
-#   tests that boot nothing. It compiles the servers but runs none, so it answers first.
 # - `suites`: `cargo xtask test` with the servers built here: the crates' own tests, then the
 #   packages' against the fixture, each booting machines. Linux x86_64, the one runner GitHub
 #   gives a hypervisor on; the guest kernel is the one `build` made.
@@ -28,7 +26,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: The version `build` built
+        description: The version every manifest says, as `check` read it
         type: string
         required: true
 
@@ -39,38 +37,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: check
-
-      # The guest init's cross-linker: clippy of the servers builds `virtx-uvm`, whose build
-      # script builds the guest agent for musl.
-      - name: Toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm
-
-      - name: Add the guest's musl target
-        run: cargo xtask init
-
-      - run: cargo xtask check
-
   suites:
     name: suites (linux-x86_64)
     runs-on: ubuntu-24.04

@@ -17,8 +17,6 @@ chrono = { workspace = true }
 # The argument parser, and the whole of the driving. It answers its own `--help`, including on
 # each subcommand, which is the half a hand-written option loop always ends up missing.
 clap = { workspace = true }
-# Opening the store: the schema, `meta`, and the write that `mem` keeps the same.
-virtx-exec-storebase = { workspace = true }
 # The store. `bundled` (from the workspace) on purpose: the schema is an FTS5 index, and FTS5
 # is a compile-time option the host's own SQLite is free to have been built without. A store
 # that opened and then answered every search with nothing is the failure being avoided.

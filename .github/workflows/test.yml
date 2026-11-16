@@ -1,7 +1,5 @@
-# The tests, after `build`; `ci` and `release` call it.
+# The tests, after `check` and `build`; `ci` and `release` call it.
 #
-# - `check`: `cargo xtask check`: the format, clippy of the client and the servers, and the
-#   tests that boot nothing. It compiles the servers but runs none, so it answers first.
 # - `suites`: `cargo xtask test` with the servers built here: the crates' own tests, then the
 #   packages' against the fixture, each booting machines. Linux x86_64, the one runner GitHub
 #   gives a hypervisor on; the guest kernel is the one `build` made.
@@ -15,9 +13,7 @@
 #   What the runner has to have, for whoever builds it again (from the `virtx-windows-ci-*`
 #   AMI, which has all of it): WHP on (`HypervisorPlatform`, and nested virtualization on the
 #   instance); the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git with its `bin` on
-#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config; and zstd on PATH --
-#   without it `actions/cache` looks for a gzip archive of a key Linux saved with zstd, and
-#   misses.
+#   PATH (`shell: bash`, and actions written as bash), rustup, pkg-config.
 # - `packages`: on each platform, the npm packages installed from a registry on localhost and
 #   the wheel pip picks, each opening the library it carries; then the server that library
 #   fetches, from a release layout served on localhost, started and asked to answer.
@@ -30,7 +26,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: The version `build` built
+        description: The version every manifest says, as `check` read it
         type: string
         required: true
 
@@ -41,38 +37,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: check
-
-      # The guest init's cross-linker: clippy of the servers builds `virtx-uvm`, whose build
-      # script builds the guest agent for musl.
-      - name: Toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm
-
-      - name: Add the guest's musl target
-        run: cargo xtask init
-
-      - run: cargo xtask check
-
   suites:
     name: suites (linux-x86_64)
     runs-on: ubuntu-24.04
@@ -112,15 +76,13 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: handoff
-          key: guest-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-x86_64
 
       - name: Put the kernel in place
         run: |
+          tar -xf handoff.tar
           mkdir -p build/krunfw
           cp -v handoff/kernel/libkrunfw.so.* build/krunfw/
 
@@ -190,15 +152,13 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: handoff
-          key: guest-x86_64-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
+          name: guest-x86_64
 
       - name: Put the kernel in place
         run: |
+          tar -xf handoff.tar
           mkdir -p build/krunfw
           cp -v handoff/kernel/libkrunfw.dll build/krunfw/
 
@@ -241,12 +201,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/cache/restore@v6
+      - uses: actions/download-artifact@v8
         with:
+          name: bundle
           path: dist/release
-          key: bundle-${{ github.run_id }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
 
       # Published with an explicit --registry and a config of its own: the packages'
       # publishConfig names npmjs, and nothing here may reach it. Verdaccio is installed on its

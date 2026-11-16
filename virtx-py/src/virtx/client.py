@@ -285,7 +285,8 @@ class Client:
         self, recipe: Recipe | Mapping[str, Any], reference: str
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Build ``recipe``, to point ``reference`` at what it builds: awaited, the job;
-        iterated, its log, as ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        iterated, its log, as ``ImageJob.log``'s; ``complete``, its digest, as
+        ``ImageJob.complete``'s. Sent when first awaited, iterated or completed."""
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
@@ -296,7 +297,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Pull ``reference`` from its registry, to point it at what it pulls; without ``auth``
         the server pulls anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s; ``complete``, its digest, as ``ImageJob.complete``'s. Sent when first
+        awaited, iterated or completed."""
         return self._image_job(
             "virtx_client_pull_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -306,7 +308,8 @@ class Client:
     ) -> StartedJob[ImageJob, ImageJobEntry]:
         """Push the image ``reference`` points at to the registry ``reference`` names; without
         ``auth`` the server pushes anonymously. Awaited, the job; iterated, its log, as
-        ``ImageJob.log``'s. Sent when first awaited or iterated."""
+        ``ImageJob.log``'s; ``complete``, its digest, as ``ImageJob.complete``'s. Sent when first
+        awaited, iterated or completed."""
         return self._image_job(
             "virtx_client_push_image", _args(reference=reference, auth=auth and auth.to_dict())
         )
@@ -421,11 +424,17 @@ class Client:
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+        abins: Iterable[str] = (),
     ) -> Sandbox:
         """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
-        given, with ``volumes`` mounted into it, each a ``SandboxVolume``. ``ports`` are TCP
+        given, with ``volumes`` mounted into it, each a ``SandboxVolume``, and virtx's programs
+        named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at ``/abin/skills/{name}/``.
+        ``ports`` are TCP
         ports in it to open, reserved as it is made and answered here only, each with the
-        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks."""
+        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks.
+
+        ``image`` has to be on the server already, pulled or built: this does not pull it, and a
+        tag the server has no image by is refused with ``404``."""
         return Sandbox.from_dict(
             self,
             await self._call(
@@ -442,6 +451,7 @@ class Client:
                     volumes=[
                         v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
                     ],
+                    abins=list(abins),
                 ),
             ),
         )

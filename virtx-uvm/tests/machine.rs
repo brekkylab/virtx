@@ -343,6 +343,34 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
+async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
+    home.volumes.create("data").unwrap();
+    let mounting = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "data".into(),
+            path: "/data".into(),
+            readonly: false,
+        }],
+        ..SandboxCreateArgs::new(ALPINE)
+    };
+    let park = Some(Duration::from_millis(500));
+    let sandbox = home.sandbox(&mounting, park).await;
+    run(&sandbox, &["sh", "-c", "echo kept > /data/kept"], None)
+        .await
+        .unwrap();
+
+    // Its machine stopped, the volume is still the sandbox's, and there for its next machine.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let removed = home.volumes.remove("data");
+    assert!(matches!(removed, Err(VolumeError::InUse(_))), "{removed:?}");
+    let (lines, _) = run(&sandbox, &["cat", "/data/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+
+    // Closed, it lets it go.
+    close(sandbox).await;
+    home.volumes.remove("data").unwrap();
+}
+
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
 /// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
 /// nothing, not by `1`.
@@ -407,6 +435,7 @@ fn main() -> ExitCode {
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
+        a_parked_sandbox_holds_its_volume_against_removal,
     ];
     let filter = filter(env::args().skip(1));
     let mut failed = 0;

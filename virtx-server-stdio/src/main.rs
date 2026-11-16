@@ -354,7 +354,15 @@ mod tests {
         args.gpu_memory_mib = Some(1024);
         assert_eq!(refused(args).await, 400);
 
-        assert_eq!(refused(SandboxCreateArgs::new("nothing:here")).await, 404);
+        let missing = SandboxCreateArgs::new("nothing:here");
+        let missing = server.client.create_sandbox(&missing).await.unwrap_err();
+        assert_eq!(missing.status(), Some(404), "{missing}");
+        assert!(
+            missing
+                .to_string()
+                .ends_with("no image here is tagged nothing:here: pull it first"),
+            "{missing}"
+        );
         let absent = format!("sha256:{}", "0".repeat(64));
         assert_ne!(absent, digest);
         assert_eq!(
@@ -394,6 +402,17 @@ mod tests {
             let mut args = here();
             args.volumes = volumes;
             assert_eq!(refused(args).await, 400, "{spelled:?}");
+        }
+        for name in ["nope", "skills", "../virtx-stdio"] {
+            assert_eq!(refused(here().abin(name)).await, 400, "{name}");
+        }
+        match server
+            .client
+            .create_sandbox(&here().abin("index").abin("index"))
+            .await
+        {
+            Err(Error::Status(400, body)) => assert!(body.contains("given twice"), "{body}"),
+            other => panic!("expected a refusal, got {other:?}"),
         }
 
         assert_eq!(server.client.list_sandbox().await.unwrap(), []);

@@ -148,7 +148,7 @@ impl Store {
         Volume::open(self.dir(name)?)
     }
 
-    /// Delete volume `name` and everything in it -- refused while a machine holds it.
+    /// Delete volume `name` and everything in it -- refused while a sandbox or a machine holds it.
     pub fn remove(&self, name: &str) -> Result<()> {
         let dir = self.dir(name)?;
         let files = dir.join("files");
@@ -195,8 +195,8 @@ pub struct Mount {
     pub source: MountSource,
 }
 
-/// A volume held by a machine that mounts it, beside any other, and against its removal, until
-/// this drops.
+/// A volume held by a sandbox or a machine that mounts it, beside any other, and against its
+/// removal, until this drops.
 #[derive(Debug)]
 pub struct Hold(#[allow(dead_code)] File);
 
@@ -260,7 +260,7 @@ impl Volume {
         &self.mounts
     }
 
-    /// Hold it for a machine that mounts it. Refused while it is being removed.
+    /// Hold it for a sandbox or a machine that mounts it. Refused while it is being removed.
     pub fn hold(&self) -> Result<Hold> {
         let lock = lock(&self.dir, &self.name)?;
         match lock.try_lock_shared() {

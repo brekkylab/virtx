@@ -72,10 +72,9 @@ impl PortForwarder {
                     )
                     .await
                 }
-                Err(e) => Err(format!("{url}: {e}")),
+                Err(e) => Err(Error::Client(format!("{url}: {e}"))),
             },
         }
-        .map_err(Error::Transport)
     }
 
     /// Where the port is reached: on this machine's loopback.
@@ -89,16 +88,16 @@ impl PortForwarder {
     }
 
     /// The loopback address a server on this machine answered, as `http://127.0.0.1:54123`.
-    async fn direct(url: &str) -> Result<PortForwarder, String> {
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+    async fn direct(url: &str) -> Result<PortForwarder, Error> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
         let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
-            return Err(format!("{url} names no host and port"));
+            return Err(Error::Client(format!("{url} names no host and port")));
         };
         let address = tokio::net::lookup_host((host, port))
             .await
-            .map_err(|e| format!("{url}: {e}"))?
+            .map_err(|e| Error::Transport(format!("{url}: {e}")))?
             .next()
-            .ok_or_else(|| format!("{url} is no address"))?;
+            .ok_or_else(|| Error::Transport(format!("{url} is no address")))?;
         Ok(PortForwarder {
             address,
             _forwarding: None,
@@ -114,13 +113,12 @@ impl PortForwarder {
         auth: Shared<Auth>,
         headers: Shared<HeaderMap>,
         url: reqwest::Url,
-    ) -> Result<PortForwarder, String> {
+    ) -> Result<PortForwarder, Error> {
+        let opening = |e: std::io::Error| Error::Client(format!("opening a loopback port: {e}"));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .map_err(|e| format!("opening a loopback port: {e}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|e| format!("opening a loopback port: {e}"))?;
+            .map_err(opening)?;
+        let address = listener.local_addr().map_err(opening)?;
         #[cfg(test)]
         let tasks = Arc::new(AtomicUsize::new(0));
         let mut forwarding = JoinSet::new();
@@ -433,11 +431,8 @@ mod ffi {
         out: *mut VirtxBytes,
     ) -> c_int {
         let args = unsafe { json::<PortForwarderArgs>(args, args_len) };
-        let opened = unsafe { &(*client).0 }.block_on(|client| async move {
-            PortForwarder::open(&client.inner, &args?.url)
-                .await
-                .map_err(|e| e.to_string())
-        });
+        let opened = unsafe { &(*client).0 }
+            .block_on(|client| async move { PortForwarder::open(&client.inner, &args?.url).await });
         let output = opened.map(|opened| {
             let address = opened.address().to_string();
             unsafe { *forwarder = Box::into_raw(Box::new(VirtxPortForwarder(opened))) };

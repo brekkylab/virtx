@@ -18,15 +18,18 @@ permissions:
   contents: read
 
 jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
   build:
     uses: ./.github/workflows/build.yml
 
   test:
-    needs: build
+    needs: [check, build]
     uses: ./.github/workflows/test.yml
     # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read
       id-token: write
     with:
-      version: ${{ needs.build.outputs.version }}
+      version: ${{ needs.check.outputs.version }}

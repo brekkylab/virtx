@@ -128,7 +128,6 @@ mod tests {
     use serde_json::json;
 
     use super::{list, remove, tag, untag};
-    use crate::Error;
     use crate::transport::testing::piped;
 
     #[tokio::test]
@@ -213,20 +212,17 @@ mod tests {
         client.close().await;
     }
 
-    /// A registry failure other than a `404` still names the request it answered, with no
-    /// status to branch on.
+    /// A registry failure other than a `404` is left as it came: its status, and the request it
+    /// answered.
     #[tokio::test]
-    async fn a_registry_failure_other_than_404_names_its_request() {
+    async fn a_registry_failure_other_than_404_is_left_as_it_came() {
         let failing = || async { (StatusCode::INTERNAL_SERVER_ERROR, "") };
         let client = piped(Router::new().fallback(failing));
         let refused = untag(&client, "app:1").await.unwrap_err();
-        assert!(matches!(refused, Error::Registry(_)), "{refused:?}");
-        assert_eq!(refused.status(), None);
-        assert!(
-            refused
-                .to_string()
-                .starts_with("DELETE app/manifests/1: 500 Internal Server Error"),
-            "{refused}"
+        assert_eq!(refused.status(), Some(500), "{refused:?}");
+        assert_eq!(
+            refused.to_string(),
+            "the server answered 500 Internal Server Error: DELETE app/manifests/1"
         );
         client.close().await;
     }

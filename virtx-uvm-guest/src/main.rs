@@ -13,6 +13,9 @@
 //!
 //! Each channel is a named virtio-console port, not stdin and stdout: those are the guest's
 //! console, where the kernel prints, and one kernel warning would corrupt a frame there.
+//!
+//! Before any of it, it adds to its own environment, which every command inherits, what
+//! `/alib` holds for this image ([`alib_env`]): only from in here is the image's root seen.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
@@ -44,13 +47,64 @@ const LINE_LIMIT: u64 = 64 << 10;
 /// read or write, and the agent's.
 const HIDDEN: [&str; 4] = ["proc", "sys", "dev", ".virtx"];
 
+/// Where the libraries built against each C library are, and venus's manifest in each.
+const ALIB_MUSL: &str = "/alib/musl";
+const ALIB_GLIBC: &str = "/alib/glibc";
+const ALIB_ICD: &str = "virtio_icd.json";
+
 fn main() -> ExitCode {
+    // SAFETY: nothing else runs yet; the threads start in `serve`.
+    unsafe { alib_env() };
     match serve() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // To the console, which the host keeps as the machine's log.
             eprintln!("{}: {e}", env!("CARGO_BIN_NAME"));
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// When the machine has a GPU, put `/alib`'s libraries for the image's C library on
+/// `LD_LIBRARY_PATH`, after whatever the image set, and venus as the Vulkan driver when the
+/// image names none. Without a GPU there is no driver to give, and `/alib`'s loader, searched
+/// before the image's own directories, would only shadow a loader the image brings, such as
+/// lavapipe's. Nothing without an `/alib`.
+///
+/// # Safety
+///
+/// Changes this process's environment: only while it has one thread.
+unsafe fn alib_env() {
+    let gpu = fs::read_dir("/dev/dri").is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+    });
+    if !gpu {
+        return;
+    }
+    // The C library `/bin/sh` runs on, by the dynamic linker it names, rather than whether one
+    // is installed: an image on glibc may have musl beside it.
+    let musl = fs::read("/bin/sh").is_ok_and(|sh| sh.windows(8).any(|w| w == b"ld-musl-"));
+    let dir = Path::new(if musl { ALIB_MUSL } else { ALIB_GLIBC });
+    if !dir.is_dir() {
+        return;
+    }
+    let path = match std::env::var("LD_LIBRARY_PATH") {
+        Ok(set) if !set.is_empty() => format!("{set}:{}", dir.display()),
+        _ => dir.display().to_string(),
+    };
+    let named = ["VK_DRIVER_FILES", "VK_ICD_FILENAMES"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some());
+    // SAFETY: the caller's.
+    unsafe {
+        std::env::set_var("LD_LIBRARY_PATH", path);
+        if !named {
+            // Both names: loaders built before 1.3.207 read only the second.
+            let icd = dir.join(ALIB_ICD);
+            std::env::set_var("VK_DRIVER_FILES", &icd);
+            std::env::set_var("VK_ICD_FILENAMES", &icd);
         }
     }
 }

@@ -199,7 +199,7 @@ where
 }
 
 fn file_error(path: &Path) -> impl Fn(std::io::Error) -> Error + '_ {
-    move |e| Error::File(format!("{}: {e}", path.display()))
+    move |e| Error::Client(format!("{}: {e}", path.display()))
 }
 
 /// An archive being written, beside where it goes; removed unless it is finished.
@@ -214,7 +214,7 @@ impl Writer {
     async fn create(path: &Path) -> Result<Writer, Error> {
         let mut name = path
             .file_name()
-            .ok_or_else(|| Error::File(format!("{} names no file", path.display())))?
+            .ok_or_else(|| Error::Client(format!("{} names no file", path.display())))?
             .to_owned();
         name.push(".partial");
         let partial = path.with_file_name(name);
@@ -238,7 +238,7 @@ impl Writer {
         let mut header = tar::Header::new_ustar();
         header
             .set_path(name)
-            .map_err(|e| Error::File(format!("{name}: {e}")))?;
+            .map_err(|e| Error::Client(format!("{name}: {e}")))?;
         header.set_size(size);
         header.set_mode(0o644);
         header.set_mtime(0);
@@ -281,7 +281,7 @@ impl Writer {
             self.write(&data).await?;
         }
         if written != size {
-            return Err(Error::Registry(format!(
+            return Err(Error::Client(format!(
                 "the blob {digest} is {size} bytes, but more or fewer came"
             )));
         }
@@ -323,7 +323,7 @@ impl Archive {
             Ok(Archive { path, entries })
         })
         .await
-        .map_err(|e| Error::File(format!("reading the archive: {e}")))?
+        .map_err(|e| Error::Client(format!("reading the archive: {e}")))?
     }
 
     /// Where each regular file in the archive at `path` starts, and how long it is, by its
@@ -350,14 +350,14 @@ impl Archive {
         self.entries
             .get(name)
             .copied()
-            .ok_or_else(|| Error::File(format!("{} has no {name}", self.path.display())))
+            .ok_or_else(|| Error::Client(format!("{} has no {name}", self.path.display())))
     }
 
     /// The whole of the file `name`, which is small.
     async fn read(&self, name: &str) -> Result<Bytes, Error> {
         let (offset, size) = self.entry(name)?;
         if size > MAX_MANIFEST {
-            return Err(Error::File(format!(
+            return Err(Error::Client(format!(
                 "{name} in {} is {size} bytes, too many for a manifest",
                 self.path.display()
             )));
@@ -377,7 +377,7 @@ impl Archive {
             manifests: Vec<Descriptor>,
         }
         let index: Index = serde_json::from_slice(&self.read("index.json").await?)
-            .map_err(|e| Error::File(format!("{}: index.json: {e}", self.path.display())))?;
+            .map_err(|e| Error::Client(format!("{}: index.json: {e}", self.path.display())))?;
         let names = |descriptor: &Descriptor| -> Vec<String> {
             let annotations = descriptor.annotations.as_ref();
             [REF_NAME, IMAGE_NAME]
@@ -398,7 +398,7 @@ impl Archive {
             Some(i) => Ok(manifests.remove(i)),
             None => {
                 let all: Vec<String> = manifests.iter().flat_map(names).collect();
-                Err(Error::File(format!(
+                Err(Error::Client(format!(
                     "{} holds {} images, none named {reference:?}: {}",
                     self.path.display(),
                     manifests.len(),
@@ -411,7 +411,7 @@ impl Archive {
     async fn manifest(&self, descriptor: &Descriptor) -> Result<Manifest, Error> {
         let digest = &descriptor.digest;
         if !crate::image::is_digest(digest) {
-            return Err(Error::File(format!("{digest:?} is not a digest")));
+            return Err(Error::Client(format!("{digest:?} is not a digest")));
         }
         let bytes = self.read(&blob_path(digest)).await?;
         Manifest::new(bytes, Some(descriptor.media_type.clone()), Some(digest))
@@ -427,7 +427,7 @@ impl Archive {
         let name = blob_path(digest);
         let (offset, stored) = self.entry(&name)?;
         if stored != size {
-            return Err(Error::File(format!(
+            return Err(Error::Client(format!(
                 "{name} in {} is {stored} bytes, not the {size} its manifest says",
                 self.path.display()
             )));
@@ -557,7 +557,7 @@ mod tests {
         let path = scratch.path("image.tar");
         let mut archive = Writer::create(&path).await.unwrap();
         let refused = archive.blob(&sha256(b"a"), 1, full("b")).await;
-        assert!(matches!(refused, Err(Error::Registry(_))), "{refused:?}");
+        assert!(matches!(refused, Err(Error::Client(_))), "{refused:?}");
         drop(archive);
         assert!(!path.exists());
         assert!(!scratch.path("image.tar.partial").exists());
@@ -570,7 +570,7 @@ mod tests {
         let digest = sha256(b"ab");
         for (size, body) in [(2, "abc"), (3, "ab")] {
             let refused = archive.blob(&digest, size, full(body)).await;
-            assert!(matches!(refused, Err(Error::Registry(_))), "{refused:?}");
+            assert!(matches!(refused, Err(Error::Client(_))), "{refused:?}");
         }
     }
 
@@ -600,7 +600,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(by_reference.digest, two.digest);
-        let Err(Error::File(message)) = archive.select("3", "app:3").await else {
+        let Err(Error::Client(message)) = archive.select("3", "app:3").await else {
             panic!("selected an image named by neither");
         };
         assert!(
@@ -618,12 +618,12 @@ mod tests {
 
         let archive = Archive::open(path).await.unwrap();
         let layer = sha256(blobs[1]);
-        assert!(matches!(archive.blob(&layer, 99), Err(Error::File(_))));
+        assert!(matches!(archive.blob(&layer, 99), Err(Error::Client(_))));
         let missing = sha256(b"missing");
-        assert!(matches!(archive.blob(&missing, 7), Err(Error::File(_))));
+        assert!(matches!(archive.blob(&missing, 7), Err(Error::Client(_))));
         assert!(matches!(
             archive.manifest_by_digest(&missing).await,
-            Err(Error::File(_))
+            Err(Error::Client(_))
         ));
     }
 
@@ -641,7 +641,7 @@ mod tests {
         };
         assert!(matches!(
             archive.manifest(&by_path).await,
-            Err(Error::File(_))
+            Err(Error::Client(_))
         ));
     }
 
@@ -681,7 +681,7 @@ mod tests {
         let mut steps = Vec::new();
         let mut fetch = |digest: String| {
             let found = manifests.get(&digest).cloned();
-            async move { found.ok_or(Error::Registry(digest)) }
+            async move { found.ok_or(Error::Client(digest)) }
         };
         plan(&mut fetch, &index, &mut steps, &mut HashSet::new())
             .await

@@ -80,7 +80,7 @@ impl Manifest {
         let media_type = media_type
             .filter(|media_type| !media_type.is_empty())
             .or(names.media_type)
-            .ok_or_else(|| Error::Registry(format!("the manifest {digest} has no type")))?;
+            .ok_or_else(|| Error::Client(format!("the manifest {digest} has no type")))?;
         Ok(Manifest {
             media_type,
             digest,
@@ -110,7 +110,7 @@ impl Manifest {
         for child in &children {
             let (Child::Manifest(descriptor) | Child::Blob(descriptor)) = child;
             if !is_digest(&descriptor.digest) {
-                return Err(Error::Registry(format!(
+                return Err(Error::Client(format!(
                     "the manifest {} names {:?}, which is not a digest",
                     self.digest, descriptor.digest
                 )));
@@ -121,7 +121,7 @@ impl Manifest {
 }
 
 fn names(bytes: &[u8]) -> Result<Names, Error> {
-    serde_json::from_slice(bytes).map_err(|e| Error::Registry(format!("not a manifest: {e}")))
+    serde_json::from_slice(bytes).map_err(|e| Error::Client(format!("not a manifest: {e}")))
 }
 
 /// `bytes`'s SHA-256 digest, as `sha256:hex`.
@@ -150,7 +150,7 @@ impl Digester {
         let hasher = match expected.split_once(':') {
             Some(("sha256", _)) if is_digest(expected) => Hasher::Sha256(Sha256::new()),
             Some(("sha512", _)) if is_digest(expected) => Hasher::Sha512(Sha512::new()),
-            _ => return Err(Error::Registry(format!("{expected:?} is not a digest"))),
+            _ => return Err(Error::Client(format!("{expected:?} is not a digest"))),
         };
         Ok(Digester {
             expected: expected.to_owned(),
@@ -175,7 +175,7 @@ impl Digester {
         if digest == self.expected {
             Ok(())
         } else {
-            Err(Error::Registry(format!(
+            Err(Error::Client(format!(
                 "{} was read as {digest}",
                 self.expected
             )))

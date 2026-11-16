@@ -107,7 +107,8 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     assert_eq!(list(Some(bob), Some("other")), 200);
     assert_eq!(list(None, Some("demo")), 401);
     assert_eq!(list(Some("x"), Some("demo")), 401);
-    assert_eq!(list(Some(alice), None), 400);
+    // Naming none, it is in `default`, which this server has not.
+    assert_eq!(list(Some(alice), None), 403);
     assert_eq!(list(Some(bob), Some("demo")), 403);
     assert_eq!(list(Some(alice), Some("other")), 403);
     assert_eq!(list(Some(alice), Some("nobody")), 403);

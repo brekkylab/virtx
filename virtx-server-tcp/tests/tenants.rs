@@ -78,7 +78,7 @@ async fn a_server_of_its_own_authenticator_and_routes_is_built_from_the_library(
     // The token names its project, whose home is made as it first reaches it.
     let (status, body) = get("/volumes/", Some("acme-key"), None).await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
-    assert!(root.join("acme").is_dir());
+    assert!(root.join("project").join("acme").is_dir());
     assert_eq!(get("/node/homes", None, None).await.1, "1");
 
     // Its images are its own.

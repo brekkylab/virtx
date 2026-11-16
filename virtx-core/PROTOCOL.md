@@ -58,7 +58,7 @@ The client starts the server as a child process, and the server's stdin and stdo
 - The connection starts with prior knowledge (RFC 9113, section 3.3): the client sends the connection preface first, with no TLS and no upgrade. Requests use the `http` scheme. The authority is not checked.
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
-- The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin).
+- The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin), and the client reaches every [project](#projects) it has.
 - The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then delete every sandbox and cancel every job, as `DELETE` does, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
 
 ## Authentication
@@ -72,6 +72,18 @@ How the client obtains the token is outside this protocol, but a server MAY say 
 - Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
+
+## Projects
+
+Everything a server keeps, its images, snapshots, volumes and sandboxes, belongs to a project.
+A request names its project in the `virtx-project` header, the same over either transport.
+A request that names none belongs to the project `default`.
+
+- A project's name is lower-case letters, digits, `.`, `_` and `-`, up to 128 characters, and starts with neither `.` nor `-`.
+- Projects are apart: a name is one project's, so the volume `data` of one project is not that of another, and nothing in one is reached from another.
+- A server that takes no credentials has `default`. A server that takes them has `default` only if it names it among its projects.
+- A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
+- A URL the server forms, such as a [port's](#ports), carries the project it was made in.
 
 ## Resources
 
@@ -94,7 +106,7 @@ A request that fails is answered with an HTTP error status and a body:
 | Status | `code` | When |
 | --- | --- | --- |
 | `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member. |
-| `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
+| `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication), [Projects](#projects) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |

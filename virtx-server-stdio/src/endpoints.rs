@@ -1,5 +1,6 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, answered from this
-//! host's [`Home`]: one client is on the other end of stdio, so all of it is its.
+//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, answered from the
+//! [`Home`] of the project a request names: one client is on the other end of stdio, so all of
+//! it is its.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -30,8 +31,8 @@ use virtx_core::{
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError,
+    VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -41,9 +42,11 @@ type ImageJobOf = Job<ImageJob, ImageJobEntry>;
 /// flight has put it there and not yet pointed a reference at it.
 const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
-/// What the endpoints answer from: the stores, and the sandboxes and jobs made from them.
+/// What the endpoints answer from, for one project: the stores, and the sandboxes and jobs made
+/// from them.
 pub struct Home {
     images: ImageStore,
+    registry: Arc<RegistryServer>,
     snapshots: SnapshotStore,
     volumes: VolumeStore,
     /// The files of the snapshots and volumes, over WebDAV.
@@ -57,13 +60,19 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, and the snapshots and volumes under `root`.
-    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
+    /// The images in `images`, which `registry` answers for, and the snapshots and volumes
+    /// under `root`.
+    pub fn new(
+        images: ImageStore,
+        registry: Arc<RegistryServer>,
+        root: &Path,
+    ) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         Sandbox::sweep(&snapshots);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
+            registry,
             files: Files::new(snapshots.clone(), volumes.clone()),
             snapshots,
             volumes,
@@ -74,6 +83,11 @@ impl Home {
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
         })
+    }
+
+    /// What answers this home's `/images/oci/v2/`.
+    pub fn registry(&self) -> &Arc<RegistryServer> {
+        &self.registry
     }
 
     /// Close every sandbox here, as removing each does, side by side: blocks until each

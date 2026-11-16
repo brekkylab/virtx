@@ -1,11 +1,13 @@
 //! Images, the machines provisioned from them, and the snapshots and registries around
 //! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client.
+//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client; and
+//! the projects all of it belongs to.
 
 mod files;
 mod fstree;
 mod image;
 mod machine;
+mod project;
 mod sandbox;
 mod snapshot;
 mod volume;
@@ -26,6 +28,9 @@ pub use machine::{
 pub use oci_spec::image::Digest;
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
+pub use project::{
+    Error as ProjectError, ProjectStore, is_project_name, project_names, project_root,
+};
 pub use sandbox::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
     LOG_LIMIT, Sandbox, park_after, signal_number,

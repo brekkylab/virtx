@@ -4467,6 +4467,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "futures-util",
  "http",
  "jsonwebtoken",
  "reqwest",

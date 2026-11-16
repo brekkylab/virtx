@@ -55,7 +55,7 @@ pub fn become_machine_if_spawned() {
 /// client signs in for its tokens, answered without any -- the provider and the client to
 /// sign in as, or nothing where no one signs in.
 pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>, axum::Router)> {
-    let homes = Arc::new(Homes::new(config.home().join("project")));
+    let homes = Arc::new(Homes::new(config.home()));
     let projects = Arc::new(Projects::new(config, &homes)?);
     let advertised = match &config.oidc {
         Some(oidc) => serde_json::json!({
@@ -200,7 +200,7 @@ fn cors(origins: &[String]) -> CorsLayer {
             header::CONTENT_TYPE,
             header::IF_MATCH,
             header::RANGE,
-            HeaderName::from_static(access::PROJECT_HEADER),
+            HeaderName::from_static(virtx_core::PROJECT_HEADER),
             HeaderName::from_static("depth"),
             HeaderName::from_static("destination"),
             HeaderName::from_static("overwrite"),
@@ -221,7 +221,7 @@ fn refusal(status: StatusCode) -> Response {
         StatusCode::FORBIDDEN => ("forbidden", "not a member of the project, or not from here"),
         _ => (
             "invalid",
-            "a request names its project in the virtx-project header",
+            "the virtx-project header is not a project's name",
         ),
     };
     endpoints::refused(status, code, message).into_response()

@@ -26,6 +26,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::{self, FsTree};
 
+/// How long a removal or a replacement waits for a snapshot to be let go of: a process this one
+/// spawns holds it from its fork to its exec, a moment, and is waited out; a machine on it
+/// holds it for as long as it runs, and is refused.
+const LET_GO: Duration = Duration::from_secs(1);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0:?} is not a name: letters, digits, '.', '_' and '-', not starting with '.' or '-'")]
@@ -315,7 +320,7 @@ impl Store {
     pub fn remove(&self, name: &str) -> Result<()> {
         let snapshot = self.open(name)?;
         // Held until the disk is gone, so nothing boots it in between.
-        let lock = snapshot.lock()?;
+        let lock = snapshot.lock_within(LET_GO)?;
         fs::remove_file(&snapshot.path)
             .map_err(|e| Error::io(format!("removing {}", snapshot.path.display()), e))?;
         let _ = crate::disks::disks().forget(&snapshot.path);
@@ -332,7 +337,7 @@ impl Store {
             name: name.to_owned(),
             path: self.path(name)?,
         };
-        let lock = snapshot.lock()?;
+        let lock = snapshot.lock_within(LET_GO)?;
         fs::rename(disk, &snapshot.path)
             .map_err(|e| Error::io(format!("moving {} into place", snapshot.path.display()), e))?;
         // What is beside it with it; and none left of the disk it replaced.

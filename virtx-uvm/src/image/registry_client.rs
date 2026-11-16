@@ -982,7 +982,7 @@ mod tests {
 
     #[tokio::test]
     async fn what_the_proxy_refused_a_client_is_its_error() {
-        let scratch = Scratch::new("refused");
+        let scratch = Scratch::new("proxy-refused");
         let (_registry_listener, port) = listener();
         // A proxy that refuses whatever it is asked.
         let (proxy_listener, proxy_port) = listener();

@@ -5,25 +5,19 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 use tokio::sync::oneshot;
 
 use super::{Error, Sandbox};
 use crate::{Digest, ImageStoreError, Reference, written_layer};
 
 /// How long a guest has to say it has synced before its disk is copied as it is.
-#[cfg(unix)]
 const SYNC_WAIT: Duration = Duration::from_secs(5);
 /// How long a machine is waited on to mark its disk, or rebase it.
-#[cfg(unix)]
 const MARK_WAIT: Duration = Duration::from_secs(5);
 /// The next mark of a running machine's disk, as it is copied: one per copy, in this process.
-#[cfg(unix)]
 static NEXT_MARK: AtomicU64 = AtomicU64::new(1);
 
 impl Sandbox {
@@ -32,7 +26,6 @@ impl Sandbox {
     /// the copy is whole. The disk is marked as it is copied: once the copy is kept, what it
     /// was kept as can be made the disk's base ([`rebase`](Self::rebase)) -- the mark's, if the
     /// disk could be marked. `None`, and no copy, where its machine is not up.
-    #[cfg(unix)]
     pub async fn copy_disk(&self, to: &Path) -> Result<Option<Option<u64>>, Error> {
         let Some(run) = self.run() else {
             return Ok(None);
@@ -80,7 +73,6 @@ impl Sandbox {
     /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)) -- what it was kept as
     /// beside the disk already, as they keep it. Whether it was: not if its machine is down
     /// now, or another mark came since.
-    #[cfg(unix)]
     pub async fn rebase(&self, mark: u64) -> Result<bool, Error> {
         let Some(run) = self.run() else {
             return Ok(false);
@@ -102,9 +94,6 @@ impl Sandbox {
     /// one more layer, and that image's config. Of a running sandbox, its disk is copied as its
     /// machine has it, paused meanwhile ([`copy_disk`](Self::copy_disk)); of a stopped one, as
     /// it was left. Neither uses the sandbox, nor starts it.
-    ///
-    /// Where a machine cannot be paused (Windows), a running sandbox is refused: it is
-    /// committed once it is stopped.
     pub async fn commit(
         self: &Arc<Self>,
         reference: &Reference,
@@ -133,20 +122,13 @@ impl Sandbox {
                 drop(turn);
             } else {
                 drop(turn);
-                #[cfg(unix)]
-                {
-                    if self.copy_disk(&copy).await?.is_none() {
-                        return Err(Error::Stopped(format!(
-                            "sandbox {id} stopped as it was committed"
-                        )));
-                    }
-                    // Made all here, to be read, as the server's disks have it.
-                    shared.hooks.materialize(id, &copy).await?;
+                if self.copy_disk(&copy).await?.is_none() {
+                    return Err(Error::Stopped(format!(
+                        "sandbox {id} stopped as it was committed"
+                    )));
                 }
-                #[cfg(not(unix))]
-                return Err(Error::Running(format!(
-                    "sandbox {id} runs: it is committed once it is stopped here"
-                )));
+                // Made all here, to be read, as the server's disks have it.
+                shared.hooks.materialize(id, &copy).await?;
             }
         }
         report("filing what it wrote as a layer".into());

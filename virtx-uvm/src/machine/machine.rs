@@ -317,6 +317,26 @@ impl Machine {
         })
     }
 
+    /// Pause the machine -- its vCPUs and its devices, the whole process -- until what this
+    /// answers drops: its disks are left as they are meanwhile, to be copied whole.
+    #[cfg(windows)]
+    pub fn pause(&self) -> Result<Paused<'_>> {
+        use std::os::windows::io::AsRawHandle as _;
+        let process = self.process.lock().unwrap().as_raw_handle();
+        // SAFETY: this machine's own process's handle, open for as long as the machine is.
+        let status = unsafe { NtSuspendProcess(process) };
+        if status < 0 {
+            return Err(Error::io(
+                "pausing the machine",
+                io::Error::other(format!("NTSTATUS {status:#x}")),
+            ));
+        }
+        Ok(Paused {
+            process,
+            _machine: self,
+        })
+    }
+
     /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.
     pub fn signal(&self, id: u32, signal: i32) -> Result<()> {
         wire::send(
@@ -448,6 +468,30 @@ impl Drop for Paused<'_> {
         // SAFETY: as in `pause`.
         unsafe { libc::kill(self.pid, libc::SIGCONT) };
     }
+}
+
+/// A machine paused by [`Machine::pause`], resumed as this drops.
+#[cfg(windows)]
+pub struct Paused<'a> {
+    process: std::os::windows::io::RawHandle,
+    _machine: &'a Machine,
+}
+
+#[cfg(windows)]
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        // SAFETY: as in `pause`.
+        unsafe { NtResumeProcess(self.process) };
+    }
+}
+
+// Every thread of a process suspended, or resumed, at once: what `SIGSTOP` and `SIGCONT` do,
+// which Windows exports from ntdll alone.
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
+    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
 
 /// A pipe end as the command line names it.

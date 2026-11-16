@@ -984,7 +984,7 @@ the `DRM_IOCTL_*` definitions evaluate to zero.
 
 `/abin` is a directory of virtx's own executables for the guest, from [`virtx-abins/`](../virtx-abins), built for the machine that runs them.
 `/alib` holds the Vulkan loader and venus driver a GPU sandbox uses, built twice, at `/alib/musl/` and `/alib/glibc/`.
-Each part is built from source by a `build.sh` under [`virtx-alibs/`](../virtx-alibs), run in the image its `images` names, and installed into `alib/` in virtx's cache, where a server about to boot, `install` and `archive` take it from.
+They are built from source by `cargo xtask build alib`, whose [`build-alib.sh`](../xtask/scripts/build-alib.sh) builds them in a docker container of Alpine for musl and of manylinux_2_28 for glibc, into `alib/` in virtx's cache, where a server about to boot, `install` and `archive` take it from.
 
 When a machine with a GPU starts, the agent reads the image's C library, by the dynamic linker `/bin/sh` names, and adds `/alib/musl` or `/alib/glibc` after the image's `LD_LIBRARY_PATH`.
 Without `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that directory's venus manifest in both, so the image needs neither a loader nor a driver of its own.
@@ -995,13 +995,12 @@ The programs are hard-linked, or copied where they cannot be, with their `SKILL.
 That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
 A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
 On Windows each file directly in them, the programs `/abin` runs by path, is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report; what is in their directories is read, not run, and left as it is.
-`cargo xtask build abin` builds `abin/` beside the server binary, as the fixture `cargo xtask test` serves does, and `alib/` is placed there when a `build.sh` has installed it.
+`cargo xtask build abin` builds `abin/` beside the server binary, as the fixture `cargo xtask test` serves does, and `alib/` is placed there once `cargo xtask build alib` has built it.
 
 ```sh
 cargo xtask build abin                     # -> target/release/abin, beside the server;
                                            #    fetches the musl sysroot the first time
-sh virtx-alibs/vulkan/build.sh build       # in Alpine for musl, in manylinux_2_28 for glibc
-sh virtx-alibs/vulkan/build.sh install     # -> alib/ in virtx's cache
+cargo xtask build alib                     # -> alib/ in virtx's cache; needs docker
 cargo xtask install --prefix <dir>         # -> <dir>/bin/abin and alib, with the rest
 ```
 
@@ -1052,15 +1051,14 @@ virtx-uvm-guest/            the agent in every machine, which runs the commands 
                             embedded in it
 virtx-abins/                the programs for /abin and a SKILL.md each; its own workspace,
                             built for musl
-virtx-alibs/                what /alib holds, a build.sh per part, run in a virtx machine
 3rdparty/virglrenderer/     fork of virglrenderer, pinned to its virtx branch
 3rdparty/MoltenVK/          fork of MoltenVK, with SPIRV-Cross; macOS builds only
 3rdparty/libepoxy/          fork of libepoxy at 1.5.10, unchanged; Windows builds only
 xtask/                      every build, check and release step as `cargo xtask`;
-                            xtask/scripts/ has what it runs -- the guest kernel's and the GPU
-                            libraries' builds, the musl sysroot fetch, and the musl cc/ar that
-                            virtx-abins/ cross-compiles with
-build/                      untracked: the kernel, the GPU libraries, alib's parts, the musl
+                            xtask/scripts/ has what it runs -- the builds of the guest kernel,
+                            /alib and the GPU libraries, the musl sysroot fetch, and the musl
+                            cc/ar that virtx-abins/ cross-compiles with
+build/                      untracked: the kernel, the GPU libraries, alib's builds, the musl
                             sysroot and the meson venv, all reproducible from the scripts
 ```
 

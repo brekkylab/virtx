@@ -1,4 +1,4 @@
-use crate::{ImageStoreError, MachineError, SnapshotError, VolumeError};
+use crate::{ImageStoreError, MachineError, VolumeError};
 
 /// What making a sandbox, or asking something of one, fails with.
 #[derive(Debug, thiserror::Error)]
@@ -30,8 +30,14 @@ pub enum Error {
     #[error(transparent)]
     Image(#[from] ImageStoreError),
 
-    #[error(transparent)]
-    Snapshot(#[from] SnapshotError),
+    /// What it keeps on this host beside its machine's disk -- the owner of its upper disk, its
+    /// `/abin` -- that could not be made or read.
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error(transparent)]
     Volume(#[from] VolumeError),

@@ -4,7 +4,7 @@
 //! `main` of its own: spawned with `vm`, it becomes the machine; otherwise it runs each test.
 //! `cargo xtask test -p virtx-uvm` signs it and puts the guest kernel beside it, which a
 //! machine needs. The images are pulled once, into a store every test shares; each test keeps
-//! its sandboxes' snapshots and its volumes under a home of its own.
+//! its sandboxes' upper disks and its volumes under a home of its own.
 
 use std::{
     env,
@@ -19,9 +19,7 @@ use std::{
 use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
-use virtx_uvm::{
-    ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError, VolumeStore,
-};
+use virtx_uvm::{ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError, VolumeStore};
 
 /// What this binary is spawned with to be a machine.
 const MACHINE: &str = "vm";
@@ -29,12 +27,11 @@ const MACHINE: &str = "vm";
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
-/// The stores a test makes its sandboxes of: the images every test shares, and the snapshots
+/// The stores a test makes its sandboxes of: the images every test shares, and the upper disks
 /// its sandboxes make and its volumes under a home of its own, removed when this drops.
 struct Home {
     root: PathBuf,
     images: ImageStore,
-    snapshots: SnapshotStore,
     volumes: VolumeStore,
 }
 
@@ -44,7 +41,6 @@ impl Home {
         std::fs::create_dir_all(&root).unwrap();
         Home {
             images: images.clone(),
-            snapshots: SnapshotStore::new(&root).unwrap(),
             volumes: VolumeStore::new(&root).unwrap(),
             root,
         }
@@ -59,7 +55,7 @@ impl Home {
         let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
         let sandbox = Sandbox::create(
             &self.images,
-            &self.snapshots,
+            &self.root,
             &self.volumes,
             args,
             vm,
@@ -170,7 +166,7 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     let (lines, _) = run(&sandbox, &still, None).await.unwrap();
     assert_eq!(lines, ["kept", "0"]);
 
-    // Its own snapshot goes with it.
+    // Its own upper disk goes with it.
     close(sandbox).await;
     let left = std::fs::read_dir(home.root.join("sandbox"))
         .unwrap()

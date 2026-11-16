@@ -17,9 +17,8 @@ use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, Sand
 use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
-    Digest, FsTree, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec,
-    Network, Ports, Reference, Snapshot, SnapshotError, SnapshotLock, SnapshotStore, VolumeHold,
-    VolumeMount, VolumeStore,
+    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
+    Ports, Reference, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -109,22 +108,19 @@ enum State {
 /// A sandbox: a machine booted as it was made, again whenever it is needed after it was
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
-/// What it wrote is kept across its machine's stops, on the snapshot it made for itself, until
+/// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
 /// it is closed; what ran in it is not.
 pub struct Sandbox {
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
     _held: ImageHold,
-    /// The snapshot it made for itself, until it is closed.
+    /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
     abin: Mutex<Option<Abin>>,
-    /// Its upper snapshot's lock, held for each of its machines and between them, until it is
-    /// closed.
-    snapshot_lock: Mutex<Option<SnapshotLock>>,
     /// Its volumes, held against removal for each of its machines and between them, until it
     /// is closed.
     volume_holds: Mutex<Vec<VolumeHold>>,
@@ -149,12 +145,12 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
-    /// image to a snapshot it makes in `snapshots`, by running `vm` as its machine's process
+    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
     /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
     /// nothing for `park_after`.
     pub async fn create(
         images: &ImageStore,
-        snapshots: &SnapshotStore,
+        root: &Path,
         volumes: &VolumeStore,
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
@@ -269,17 +265,15 @@ impl Sandbox {
             })
             .collect::<Result<_, Error>>()?;
 
-        // Merging the layers' metadata, and formatting a snapshot, are blocking work.
+        // Merging the layers' metadata, and formatting an upper disk, are blocking work.
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
-        let dir = Upper::dir(snapshots);
+        let dir = Upper::dir(root);
         let upper = tokio::task::spawn_blocking(move || Upper::create(&dir)).await??;
-        // Held from here until the sandbox is closed, whether its machine runs or not.
-        let snapshot_lock = upper.snapshot.lock()?;
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
-                let (dir, names) = (Abin::dir(snapshots), args.abins.clone());
+                let (dir, names) = (Abin::dir(root), args.abins.clone());
                 let made = move || Abin::create(&dir, &programs, &names);
                 Some(tokio::task::spawn_blocking(made).await??)
             }
@@ -288,8 +282,7 @@ impl Sandbox {
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
-            snapshot: Some(upper.snapshot.clone()),
-            snapshot_held: true,
+            upper: upper.path.clone(),
             spec: MachineSpec {
                 vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
                 ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
@@ -310,7 +303,6 @@ impl Sandbox {
             abins: args.abins.clone(),
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
-            snapshot_lock: Mutex::new(Some(snapshot_lock)),
             volume_holds: Mutex::new(volume_holds),
             config,
             vm,
@@ -443,7 +435,7 @@ impl Sandbox {
     }
 
     /// Stop its machine for good, and end and remove every job in it, as cancelling each does.
-    /// Blocks while the guest puts what it wrote on its snapshot, and so must not be called on
+    /// Blocks while the guest puts what it wrote on its upper disk, and so must not be called on
     /// an async runtime's thread.
     pub fn close(&self) {
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
@@ -454,7 +446,6 @@ impl Sandbox {
         if let State::Up(machine) = state {
             machine.stop();
         }
-        drop(self.snapshot_lock.lock().unwrap().take());
         self.volume_holds.lock().unwrap().clear();
         drop(self.upper.lock().unwrap().take());
         drop(self.abin.lock().unwrap().take());
@@ -638,24 +629,24 @@ impl Drop for Activity {
     }
 }
 
-/// The snapshot a sandbox makes for itself, deleted when the sandbox is closed, or by the next
+/// The upper disk a sandbox makes for itself, deleted when the sandbox is closed, or by the next
 /// [`Sandbox::sweep`] once the process that made it has ended.
 ///
 /// Each is `<name>.ext4` in `<root>/sandbox/`, beside `<name>.owner`, which the process that
 /// made it holds a lock on for as long as it runs.
 struct Upper {
-    snapshot: Snapshot,
+    path: PathBuf,
     owner: PathBuf,
     _held: File,
 }
 
 impl Upper {
-    fn dir(snapshots: &SnapshotStore) -> PathBuf {
-        snapshots.root().join("sandbox")
+    fn dir(root: &Path) -> PathBuf {
+        root.join("sandbox")
     }
 
     fn create(dir: &Path) -> Result<Upper, Error> {
-        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let io = |context: String| move |source| Error::Io { context, source };
         fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
         let (name, held) = loop {
             let name = pick(|name| dir.join(format!("{name}.owner")).exists());
@@ -663,26 +654,20 @@ impl Upper {
                 break (name, held);
             }
         };
-        let owner = dir.join(format!("{name}.owner"));
-        let path = dir.join(format!("{name}.ext4"));
-        // Owned from here, so a disk that failed to format is deleted too.
+        // Owned from here, so the owner goes with a disk that failed to be made.
         let upper = Upper {
-            snapshot: Snapshot { name, path },
-            owner,
+            path: dir.join(format!("{name}.ext4")),
+            owner: dir.join(format!("{name}.owner")),
             _held: held,
         };
-        let file = File::create_new(&upper.snapshot.path)
-            .map_err(io(format!("creating {}", upper.snapshot.path.display())))?;
-        FsTree::new()
-            .to_ext4(Snapshot::sparse(file), Snapshot::SIZE)
-            .map_err(SnapshotError::from)?;
+        crate::machine::create_upper(&upper.path)?;
         Ok(upper)
     }
 
     /// Hold `<name>.owner` under `dir`, or `None` for one another holds: a sandbox's, or a
     /// sweep's for the moment it takes to find it nobody's and remove it.
     fn claim(dir: &Path, name: &str) -> Result<Option<File>, Error> {
-        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let io = |context: String| move |source| Error::Io { context, source };
         let owner = dir.join(format!("{name}.owner"));
         let held = File::options()
             .read(true)
@@ -695,7 +680,7 @@ impl Upper {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => return Ok(None),
             Err(fs::TryLockError::Error(e)) => {
-                return Err(io(format!("locking {}", owner.display()))(e).into());
+                return Err(io(format!("locking {}", owner.display()))(e));
             }
         }
         // A sweep that had it first has removed it: this is a lock on nothing.
@@ -705,7 +690,7 @@ impl Upper {
 
 impl Drop for Upper {
     fn drop(&mut self) {
-        self.snapshot.delete();
+        let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(&self.owner);
     }
 }
@@ -723,14 +708,14 @@ struct Abin {
 }
 
 impl Abin {
-    fn dir(snapshots: &SnapshotStore) -> PathBuf {
-        Upper::dir(snapshots).join(ABIN_HOST)
+    fn dir(root: &Path) -> PathBuf {
+        Upper::dir(root).join(ABIN_HOST)
     }
 
     /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
     /// that has one: made, when no sandbox has made it yet.
     fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
-        let io = |context: String| move |source| SnapshotError::Io { context, source };
+        let io = |context: String| move |source| Error::Io { context, source };
         let mut files = Vec::new();
         for program in names {
             files.push(PathBuf::from(program));
@@ -774,11 +759,9 @@ impl Abin {
                 .iter()
                 .try_for_each(|file| link(&programs.join(file), &part.join(file)))
                 .and_then(|()| {
-                    fs::rename(&part, &made).map_err(|source| {
-                        Error::from(SnapshotError::Io {
-                            context: format!("placing {}", made.display()),
-                            source,
-                        })
+                    fs::rename(&part, &made).map_err(|source| Error::Io {
+                        context: format!("placing {}", made.display()),
+                        source,
                     })
                 });
             // Placed by another sandbox meanwhile, where the rename failed for that.
@@ -830,7 +813,7 @@ impl Abin {
 /// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one, such
 /// as on another filesystem.
 fn link(from: &Path, to: &Path) -> Result<(), Error> {
-    let io = |context: String| move |source| SnapshotError::Io { context, source };
+    let io = |context: String| move |source| Error::Io { context, source };
     let parent = to.parent().unwrap_or(to);
     fs::create_dir_all(parent).map_err(io(format!("making {}", parent.display())))?;
     if fs::hard_link(from, to).is_err() {
@@ -840,10 +823,10 @@ fn link(from: &Path, to: &Path) -> Result<(), Error> {
 }
 
 impl Sandbox {
-    /// Delete what sandboxes made under `snapshots`' root by processes that have since ended
-    /// left: a server that was killed closed none of its own.
-    pub fn sweep(snapshots: &SnapshotStore) {
-        let dir = Upper::dir(snapshots);
+    /// Delete what sandboxes made under `root` by processes that have since ended left: a
+    /// server that was killed closed none of its own.
+    pub fn sweep(root: &Path) {
+        let dir = Upper::dir(root);
         let Ok(entries) = fs::read_dir(&dir) else {
             return;
         };
@@ -861,15 +844,10 @@ impl Sandbox {
             let Some(name) = owner.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let path = dir.join(format!("{name}.ext4"));
-            Snapshot {
-                name: name.to_owned(),
-                path,
-            }
-            .delete();
+            let _ = fs::remove_file(dir.join(format!("{name}.ext4")));
             let _ = fs::remove_file(&owner);
         }
-        Abin::sweep(&Abin::dir(snapshots));
+        Abin::sweep(&Abin::dir(root));
     }
 }
 

@@ -8,7 +8,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,8 +31,8 @@ use virtx_core::{
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
-    RegistryClient, RegistryServer, Sandbox, SandboxError, SnapshotError, SnapshotStore,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step,
+    park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -50,7 +50,8 @@ const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 pub struct Home {
     images: ImageStore,
     registry: Arc<RegistryServer>,
-    pub snapshots: SnapshotStore,
+    /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
+    pub root: PathBuf,
     volumes: VolumeStore,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
@@ -65,20 +66,19 @@ pub struct Home {
 
 impl Home {
     /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' snapshots under `root`.
+    /// sandboxes' upper disks under `root`.
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
-        let snapshots = SnapshotStore::new(root)?;
-        Sandbox::sweep(&snapshots);
+        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
             registry,
             files: Files::new(volumes.clone()),
-            snapshots,
+            root: root.to_owned(),
             volumes,
             vm: vec![
                 std::env::current_exe()?.into(),
@@ -600,7 +600,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
     let args: SandboxCreateArgs = body(&request)?;
     let sandbox = Sandbox::create(
         &home.images,
-        &home.snapshots,
+        &home.root,
         &home.volumes,
         &args,
         home.vm.clone(),
@@ -810,18 +810,6 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
     }
 }
 
-impl From<SnapshotError> for Refused {
-    fn from(e: SnapshotError) -> Refused {
-        match &e {
-            SnapshotError::InvalidName(_) => invalid(e),
-            SnapshotError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
-            SnapshotError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SnapshotError::Io { source, .. } => io_refused(source, &e),
-            SnapshotError::Fstree(_) => internal(e),
-        }
-    }
-}
-
 impl From<VolumeError> for Refused {
     fn from(e: VolumeError) -> Refused {
         match &e {
@@ -879,7 +867,7 @@ impl From<SandboxError> for Refused {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
             SandboxError::Image(e) => e.into(),
-            SandboxError::Snapshot(e) => e.into(),
+            SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),

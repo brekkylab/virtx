@@ -10,7 +10,7 @@
 //! }
 //! ```
 //!
-//! A project's volumes, images and its sandboxes' snapshots are under
+//! A project's volumes, images and its sandboxes' upper disks are under
 //! `<home>/project/<name>/`, its own.
 //! Without `home`, it is [`virtx_uvm::cache_root`].
 //!

@@ -36,9 +36,18 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     pub(crate) fn open(make: impl FnOnce() -> Result<T, Error>) -> Result<Self, Error> {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| Error::Client(format!("starting a runtime: {e}")))?;
-        let value = {
+        let made = {
             let _entered = runtime.enter();
-            make()?
+            make()
+        };
+        let value = match made {
+            Ok(value) => value,
+            Err(e) => {
+                // Not dropped: dropping blocks, which a thread of the program's tokio, the
+                // library linked in, refuses.
+                runtime.shutdown_background();
+                return Err(e);
+            }
         };
         Ok(Runtime {
             runtime,
@@ -52,12 +61,11 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         &self.value
     }
 
-    /// What `make` makes of the value, run to its end on the runtime, whose tasks what it starts
-    /// stay on.
-    ///
-    /// Blocks, so not called on the runtime's own threads.
-    pub(crate) fn block_on<R, F: Future<Output = R>>(&self, make: impl FnOnce(Arc<T>) -> F) -> R {
-        self.runtime.block_on(make(Arc::clone(&self.value)))
+    /// What `f` makes of the value, inside the runtime: for what needs one without waiting on
+    /// it, such as a listener whose connections it will carry.
+    pub(crate) fn inside<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        let _entered = self.runtime.enter();
+        f(&self.value)
     }
 
     /// Start what `make` makes of the value, and hand C the future, answered with its output
@@ -99,23 +107,30 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 
     /// Answer every request not yet answered with `VIRTX_ERROR`, then end the value with
-    /// `close`.
+    /// `close`, and hand C the future that answers once it has ended. Freeing that future
+    /// does not stop the ending.
     ///
-    /// Not called on the runtime's own threads, which this stops.
-    pub(crate) fn close<F: Future<Output = ()>>(self, close: impl FnOnce(T) -> F) {
+    /// On a thread of its own: this is called from any thread, a runtime's among them, and
+    /// the runtime stops here.
+    pub(crate) fn close<F: Future<Output = ()>>(
+        self,
+        close: impl FnOnce(T) -> F + Send + 'static,
+    ) -> *mut VirtxFuture {
         let Runtime {
             runtime,
             value,
             tasks,
         } = self;
         let mut tasks = tasks.into_inner().unwrap_or_else(PoisonError::into_inner);
-        runtime.block_on(async move {
-            tasks.shutdown().await;
-            // Every request's clone went with its task.
-            if let Ok(value) = Arc::try_unwrap(value) {
-                close(value).await;
-            }
-        });
+        future::done_by(move || {
+            runtime.block_on(async move {
+                tasks.shutdown().await;
+                // Every request's clone went with its task.
+                if let Ok(value) = Arc::try_unwrap(value) {
+                    close(value).await;
+                }
+            });
+        })
     }
 }
 
@@ -173,8 +188,8 @@ mod tests {
 
     use super::{
         super::{
-            VIRTX_END, VIRTX_ERROR, virtx_future_free, virtx_future_wait, virtx_stream_free,
-            virtx_stream_wait_next,
+            VIRTX_END, VIRTX_ERROR, virtx_bytes_free, virtx_future_free, virtx_future_wait,
+            virtx_stream_free, virtx_stream_wait_next,
             waker::testing::{empty, taken},
         },
         *,
@@ -195,9 +210,13 @@ mod tests {
     fn close(held: *mut Held) -> bool {
         match unsafe { release(held) } {
             Some(Held(runtime)) => {
-                runtime.close(async |closes| {
+                let ended = runtime.close(async |closes| {
                     closes.fetch_add(1, SeqCst);
                 });
+                let mut out = empty();
+                assert_eq!(unsafe { virtx_future_wait(ended, &mut out) }, VIRTX_OK);
+                unsafe { virtx_bytes_free(out) };
+                unsafe { virtx_future_free(ended) };
                 true
             }
             None => false,

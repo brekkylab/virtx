@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::{
     env,
     ffi::OsString,
@@ -13,7 +14,7 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
-       cargo xtask archive  [--with-abin]
+       cargo xtask archive  [<server>...] [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
        cargo xtask fixture  -- <command>...
@@ -25,16 +26,21 @@ usage: cargo xtask init     [--force]
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
-  archive   archives the stdio server and the guest kernel, for this platform, as a release
-            carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
+  archive   archives each <server> named (server-stdio, server-tcp; both when none is) with
+            the guest kernel, for this platform, as a release carries them:
+            target/release/dist/virtx-stdio-<os>-<arch>.tar.gz and
+            virtx-server-tcp-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
-            the fixture where they name virtx
+            the fixture where they name virtx or virtx-cli
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
-            loopback; both and the home are gone once it ends, and its exit is this one's.
+            loopback; VIRTX_TEST_USERS a token of each of alice and carol, of its project
+            `demo`, and of bob, of `other`, and VIRTX_TEST_REFUSED tokens it lets no one in
+            with, both as JSON; all and the home are gone once it ends, and its exit is
+            this one's.
             Where the environment names them already, <command> runs as it is. With --serve,
             it writes each of those as NAME=value on stdout, then `ready`, and serves until
             its stdin closes, for a test runner to start it the way pytest's conftest does
@@ -58,9 +64,9 @@ components:
                       built for this host and its guest only
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
-  --with-abin     (archive) puts the abin and alib that were built in the archive too;
-                  without it the archive has neither, and sessions from the release no /abin
-                  and no /alib";
+  --with-abin     (archive) puts the abin and alib that were built in the archives too;
+                  without it the archives have neither, and sessions from the release no
+                  /abin and no /alib";
 
 /// The client's packages, which `check` checks before `init` has run.
 const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
@@ -73,9 +79,9 @@ const SERVER_PACKAGES: &[&str] = &[
     "virtx-server-tcp",
     "xtask",
 ];
-/// Each server: its component, the package it is built from, and the binary it builds. The
-/// stdio server's binary is `virtx-stdio`, which is what a release archive carries
-/// and what a client spawns.
+/// Each server: its component, the package it is built from, and the binary it builds, which
+/// also names its release archive. The stdio server's binary is `virtx-stdio`, which a client
+/// spawns.
 const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
@@ -176,24 +182,25 @@ fn main() -> anyhow::Result<()> {
             check(client_only)
         }
         Some("archive") => {
-            let abin = match args.next() {
-                None => false,
-                Some(arg) if arg == "--with-abin" => true,
-                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
-            };
-            ensure!(
-                args.next().is_none(),
-                "archive takes only --with-abin\n\n{USAGE}"
-            );
-            archive(abin)
+            let mut abin = false;
+            let mut servers = Vec::new();
+            for arg in args {
+                match arg.to_str() {
+                    Some("--with-abin") => abin = true,
+                    Some("server-stdio") => servers.push(Component::ServerStdio),
+                    Some("server-tcp") => servers.push(Component::ServerTcp),
+                    _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+                }
+            }
+            archive(abin, &servers)
         }
         Some("run") => run_target(args.collect(), false, &[]),
         Some("test") => {
             let args: Vec<OsString> = args.collect();
             match args.as_slice() {
                 [] => test_all(),
-                // virtx-rs's tests are against the fixture too.
-                _ if args.iter().any(|arg| arg == "virtx") => {
+                // virtx-rs's tests are against the fixture too, and virtx-cli's.
+                _ if args.iter().any(|arg| arg == "virtx" || arg == "virtx-cli") => {
                     let fixture = Fixture::start()?;
                     run_target(args, true, &fixture.vars())
                 }
@@ -852,21 +859,14 @@ fn dist_platform() -> anyhow::Result<String> {
     Ok(format!("{os}-{arch}"))
 }
 
-/// Archive the set `install` would put in `bin/`, as a release carries it:
-/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
-/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
-/// which commit that was.
-fn archive(abin: bool) -> anyhow::Result<()> {
+/// Archive each of `servers`, every server when it is empty, with the set `install` would put
+/// beside it in `bin/`, as a release carries them:
+/// `target/release/dist/<binary>-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
+/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about which
+/// commit that was.
+fn archive(abin: bool, servers: &[Component]) -> anyhow::Result<()> {
     let platform = dist_platform()?;
-
-    // Staged under the release profile's own directory, and emptied first: a file a
-    // previous build had and this one does not must not ride along.
     let dist = target_path().join("release").join("dist");
-    let name = format!("virtx-stdio-{platform}");
-    let stage = dist.join(&name);
-    if stage.exists() {
-        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
-    }
     let built = target_path().join("release");
     ensure!(
         !abin || built.join("abin").is_dir(),
@@ -878,18 +878,47 @@ fn archive(abin: bool) -> anyhow::Result<()> {
         "--with-abin, but no alib in {} -- run `cargo xtask build alib` first",
         alib_dir().display()
     );
-    let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
-    ensure!(
-        built.join(&stdio).is_file(),
-        "no {stdio} in {} -- run `cargo xtask build server-stdio` first",
-        built.display()
-    );
-    stage_bin(&built, &stage, &[stdio], abin)?;
+    let servers: Vec<_> = SERVERS
+        .iter()
+        .filter(|(component, _, _)| servers.is_empty() || servers.contains(component))
+        .collect();
+    // Each one named is checked before any is archived, so a missing one leaves nothing half done.
+    for (_, package, binary) in &servers {
+        let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+        ensure!(
+            built.join(&file).is_file(),
+            "no {file} in {} -- run `cargo xtask build {}` first",
+            built.display(),
+            package.trim_start_matches("virtx-")
+        );
+    }
+    for (_, _, binary) in &servers {
+        archive_server(&built, &dist, binary, &platform, abin)?;
+    }
     if !abin {
         eprintln!(
             "xtask: leaving abin and alib out; sessions from this release get no /abin and no /alib (--with-abin puts them in)"
         );
     }
+    Ok(())
+}
+
+fn archive_server(
+    built: &Path,
+    dist: &Path,
+    binary: &str,
+    platform: &str,
+    abin: bool,
+) -> anyhow::Result<()> {
+    // Staged under the release profile's own directory, and emptied first: a file a
+    // previous build had and this one does not must not ride along.
+    let name = format!("{binary}-{platform}");
+    let stage = dist.join(&name);
+    if stage.exists() {
+        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
+    }
+    let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+    stage_bin(built, &stage, &[file], abin)?;
 
     // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
     // remote host, and Windows' own bsdtar has no `--force-local` to say otherwise.
@@ -900,7 +929,7 @@ fn archive(abin: bool) -> anyhow::Result<()> {
         .collect::<Result<_, _>>()?;
     entries.sort();
     let status = Command::new("tar")
-        .current_dir(&dist)
+        .current_dir(dist)
         // macOS' bsdtar otherwise adds an AppleDouble `._` file for any file with xattrs.
         .env("COPYFILE_DISABLE", "1")
         .arg("-czf")
@@ -1034,11 +1063,258 @@ fn cache_root() -> std::path::PathBuf {
         .join("virtx");
 }
 
-/// The token the fixture's server over HTTP lets a request through with, made up and no one's,
-/// and its SHA-256, which its config holds.
-const FIXTURE_TOKEN: &str = "test-token";
-const FIXTURE_TOKEN_SHA256: &str =
-    "4c5dc9b7708905f77f5e5d16316b5dfb425e68cb326dcd55a860e90a7707031e";
+/// The user every suite's requests are from, and the client the fixture's tokens are for.
+const FIXTURE_USER: &str = "test";
+const FIXTURE_CLIENT: &str = "virtx-test";
+/// The key the fixture's provider signs with, made up and no one's.
+const FIXTURE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2VGrzT1wOXvQVtaT\nL+shE0n9BR9/rn3Qn7RrXiJOcHKhRANCAAQCHMHdyNbFbHDPyRIdE7zhyTcL7XuZ\nlymVLSds5EVclDhHznH6nXaR6DUzWH+gad5rKfYNLAnnobLUNbrydOJS\n-----END PRIVATE KEY-----";
+const FIXTURE_KEY_ID: &str = "fixture";
+/// The projects of the fixture's server, and the members of each: [`FIXTURE_PROJECT`] for
+/// every suite, and two that share nothing for the tests of who reaches what.
+const FIXTURE_PROJECTS: &[(&str, &[&str])] = &[
+    (FIXTURE_PROJECT, &[FIXTURE_USER]),
+    ("demo", &["alice", "carol"]),
+    ("other", &["bob"]),
+];
+
+/// How long the fixture's tokens are good for, in seconds.
+const DAY: i64 = 24 * 60 * 60;
+
+/// The address the fixture's provider names `user` by.
+fn fixture_email(user: &str) -> String {
+    format!("{user}@example.com")
+}
+
+/// The fixture's OpenID Connect provider, on the loopback until this process ends. It serves
+/// what a server asks of one, its discovery document and its key, and what `virtx login`
+/// does: the device flow, approved as [`FIXTURE_USER`] at the second ask, each refresh
+/// replacing the refresh token, and revocation. `GET /keys/asked` says how many times the key
+/// was asked for.
+struct FixtureProvider {
+    issuer: String,
+    key: jsonwebtoken::EncodingKey,
+    /// How many tokens it signed: each carries its number, so no two are the same.
+    signed: std::sync::atomic::AtomicU64,
+}
+
+impl FixtureProvider {
+    fn serve() -> anyhow::Result<std::sync::Arc<FixtureProvider>> {
+        use jsonwebtoken::jwk::{Jwk, JwkSet};
+        use jsonwebtoken::{Algorithm, EncodingKey};
+        use serde_json::json;
+        use std::io::{BufRead as _, Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").context("serving a provider")?;
+        let issuer = format!("http://{}", listener.local_addr()?);
+        let key = EncodingKey::from_ec_pem(FIXTURE_KEY.as_bytes())?;
+        let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256)?;
+        jwk.common.key_id = Some(FIXTURE_KEY_ID.into());
+        let keys = serde_json::to_string(&JwkSet { keys: vec![jwk] })?;
+        let discovery = json!({
+            "issuer": issuer,
+            "jwks_uri": format!("{issuer}/keys"),
+            "token_endpoint": format!("{issuer}/token"),
+            "device_authorization_endpoint": format!("{issuer}/device"),
+            "revocation_endpoint": format!("{issuer}/revoke"),
+        })
+        .to_string();
+        let provider = std::sync::Arc::new(FixtureProvider {
+            issuer,
+            key,
+            signed: Default::default(),
+        });
+
+        let serving = std::sync::Arc::clone(&provider);
+        std::thread::spawn(move || {
+            let mut keys_asked = 0u64;
+            // How many times each device's tokens were asked for, and the refresh tokens of
+            // the sessions there are.
+            let mut devices: Vec<u32> = Vec::new();
+            let mut sessions = std::collections::HashSet::new();
+            let session = |sessions: &mut std::collections::HashSet<String>, lasts| {
+                let refresh = format!("r-{}", serving.signed.load(Ordering::Relaxed));
+                sessions.insert(refresh.clone());
+                let id_token = serving.token(FIXTURE_USER, lasts).unwrap_or_default();
+                (
+                    200,
+                    json!({ "id_token": id_token, "refresh_token": refresh }).to_string(),
+                )
+            };
+            let refused = |error: &str| (400, json!({ "error": error }).to_string());
+
+            for stream in listener.incoming().flatten() {
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut asked = String::new();
+                let _ = reader.read_line(&mut asked);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; length];
+                let _ = reader.read_exact(&mut body);
+                let form = form(&String::from_utf8_lossy(&body));
+                let field = |name: &str| form.get(name).map(String::as_str).unwrap_or_default();
+
+                let mut asked = asked.split(' ');
+                let (status, body) = match (asked.next(), asked.next()) {
+                    (Some("GET"), Some("/keys")) => {
+                        keys_asked += 1;
+                        (200, keys.clone())
+                    }
+                    (Some("GET"), Some("/keys/asked")) => (200, keys_asked.to_string()),
+                    (Some("POST"), Some("/device")) => {
+                        devices.push(0);
+                        let codes = json!({
+                            "device_code": format!("d-{}", devices.len() - 1),
+                            "user_code": "ABCD",
+                            "verification_uri": format!("{}/approve", serving.issuer),
+                            "expires_in": 60,
+                            "interval": 1,
+                        });
+                        (200, codes.to_string())
+                    }
+                    (Some("POST"), Some("/token")) if field("client_id") != FIXTURE_CLIENT => {
+                        refused("invalid_client")
+                    }
+                    (Some("POST"), Some("/token")) if field("grant_type") == "refresh_token" => {
+                        match sessions.remove(field("refresh_token")) {
+                            true => session(&mut sessions, DAY),
+                            false => refused("invalid_grant"),
+                        }
+                    }
+                    (Some("POST"), Some("/token")) => {
+                        let device = field("device_code").strip_prefix("d-");
+                        let device = device.and_then(|n| n.parse::<usize>().ok());
+                        match device.and_then(|n| devices.get_mut(n)) {
+                            None => refused("expired_token"),
+                            Some(asks @ 0) => {
+                                *asks += 1;
+                                refused("authorization_pending")
+                            }
+                            // Running out already: the `virtx token` after it refreshes.
+                            Some(_) => session(&mut sessions, 60),
+                        }
+                    }
+                    (Some("POST"), Some("/revoke")) => {
+                        sessions.remove(field("token"));
+                        (200, String::new())
+                    }
+                    _ => (200, discovery.clone()),
+                };
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 {status} -\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Ok(provider)
+    }
+
+    /// What an ID token of `user`'s says, good for `seconds` from now -- or since, below 0.
+    fn claims(&self, user: &str, seconds: i64) -> serde_json::Value {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        serde_json::json!({
+            "iss": self.issuer,
+            "aud": FIXTURE_CLIENT,
+            "sub": user,
+            "email": fixture_email(user),
+            "email_verified": true,
+            "iat": now.min(now + seconds),
+            "exp": now + seconds,
+            "jti": self.signed.fetch_add(1, Ordering::Relaxed),
+        })
+    }
+
+    /// `claims`, signed with the provider's key, as of the key `kid` names.
+    fn sign(&self, kid: &str, claims: &serde_json::Value) -> anyhow::Result<String> {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid.into());
+        Ok(jsonwebtoken::encode(&header, claims, &self.key)?)
+    }
+
+    /// An ID token of `user`'s the server takes, good for `seconds`.
+    fn token(&self, user: &str, seconds: i64) -> anyhow::Result<String> {
+        self.sign(FIXTURE_KEY_ID, &self.claims(user, seconds))
+    }
+
+    /// A token of each member of [`FIXTURE_PROJECTS`], by user, as JSON.
+    fn users(&self) -> anyhow::Result<String> {
+        let mut users = serde_json::Map::new();
+        for user in FIXTURE_PROJECTS.iter().flat_map(|(_, members)| *members) {
+            users.insert((*user).to_owned(), self.token(user, DAY)?.into());
+        }
+        Ok(serde_json::Value::from(users).to_string())
+    }
+
+    /// Tokens naming a member that the server lets no one in with, by what is wrong with each,
+    /// as JSON.
+    fn refused(&self) -> anyhow::Result<String> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let good = |edit: fn(&mut serde_json::Value)| {
+            let mut claims = self.claims("alice", DAY);
+            edit(&mut claims);
+            claims
+        };
+        // No provider signs with a shared secret: whoever checks one could sign with it.
+        let mut shared = Header::new(Algorithm::HS256);
+        shared.kid = Some(FIXTURE_KEY_ID.into());
+        let shared = jsonwebtoken::encode(
+            &shared,
+            &self.claims("alice", DAY),
+            &EncodingKey::from_secret(b"fixture"),
+        )?;
+        Ok(serde_json::json!({
+            "expired": self.token("alice", -DAY)?,
+            "for another client": self.sign(FIXTURE_KEY_ID, &good(|c| c["aud"] = "another".into()))?,
+            "of an address not verified":
+                self.sign(FIXTURE_KEY_ID, &good(|c| c["email_verified"] = false.into()))?,
+            "of an address not said to be verified": self.sign(
+                FIXTURE_KEY_ID,
+                &good(|c| _ = c.as_object_mut().unwrap().remove("email_verified")),
+            )?,
+            "signed with a shared secret": shared,
+            "signed with a key the provider has not": self.sign("another", &good(|_| {}))?,
+        })
+        .to_string())
+    }
+}
+
+/// The fields of a form, as a client posts one.
+fn form(body: &str) -> std::collections::HashMap<String, String> {
+    let decoded = |text: &str| {
+        let mut bytes = Vec::new();
+        let mut rest = text.bytes();
+        while let Some(byte) = rest.next() {
+            bytes.push(match byte {
+                b'+' => b' ',
+                b'%' => {
+                    let hex = [rest.next().unwrap_or(b'0'), rest.next().unwrap_or(b'0')];
+                    u8::from_str_radix(&String::from_utf8_lossy(&hex), 16).unwrap_or(b'?')
+                }
+                byte => byte,
+            });
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    body.split('&')
+        .filter_map(|field| field.split_once('='))
+        .map(|(name, value)| (decoded(name), decoded(value)))
+        .collect()
+}
+
 /// The one project the fixture's server over HTTP lets a request reach.
 const FIXTURE_PROJECT: &str = "test";
 
@@ -1077,10 +1353,11 @@ fn serve_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
-/// cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
+/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's and
+/// virtx-cli's with cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
+    ("virtx-cli", ".", &[&["cargo", "test", "-p", "virtx-cli"]]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (
         "virtx-node",
@@ -1181,6 +1458,11 @@ struct Fixture {
     process: std::process::Child,
     stdio: PathBuf,
     url: String,
+    /// An ID token its provider signed for [`FIXTURE_USER`], one for each member of
+    /// [`FIXTURE_PROJECTS`] as JSON, and ones the server refuses, as JSON too.
+    token: String,
+    users: String,
+    refused: String,
     scratch: PathBuf,
 }
 
@@ -1213,10 +1495,21 @@ impl Fixture {
         }
         let home = scratch.join("home");
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+        let provider = FixtureProvider::serve()?;
+        let projects: serde_json::Map<_, _> = FIXTURE_PROJECTS
+            .iter()
+            .map(|(name, members)| {
+                let members: Vec<_> = members.iter().map(|user| fixture_email(user)).collect();
+                (
+                    (*name).to_owned(),
+                    serde_json::json!({ "members": members }),
+                )
+            })
+            .collect();
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
-            "users": { "test": { "token_sha256": FIXTURE_TOKEN_SHA256 } },
-            "projects": { FIXTURE_PROJECT: { "members": ["test"] } },
+            "oidc": { "issuer": provider.issuer, "client_id": FIXTURE_CLIENT },
+            "projects": projects,
         });
         let config_path = scratch.join("config.json");
         fs::write(&config_path, config.to_string())
@@ -1239,6 +1532,9 @@ impl Fixture {
             process,
             stdio: built("virtx-stdio"),
             url: String::new(),
+            token: provider.token(FIXTURE_USER, DAY)?,
+            users: provider.users()?,
+            refused: provider.refused()?,
             scratch,
         };
         let line = lines
@@ -1265,8 +1561,10 @@ impl Fixture {
             ("VIRTX_HOME", self.scratch.join("home").into()),
             ("VIRTX_TEST_STDIO", self.stdio.clone().into()),
             ("VIRTX_TEST_URL", self.url.clone().into()),
-            ("VIRTX_TEST_TOKEN", FIXTURE_TOKEN.into()),
+            ("VIRTX_TEST_TOKEN", self.token.clone().into()),
             ("VIRTX_TEST_PROJECT", FIXTURE_PROJECT.into()),
+            ("VIRTX_TEST_USERS", self.users.clone().into()),
+            ("VIRTX_TEST_REFUSED", self.refused.clone().into()),
         ]
     }
 }

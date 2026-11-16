@@ -1,11 +1,12 @@
-# Everything a release carries, built from the ref the caller runs on: the stdio server and the
+# Everything a release carries, built from the ref the caller runs on: the servers and the
 # client's packages, for every platform. `ci` and `release` call it beside `check`, and take
 # what it built from the run's `bundle` artifact, `dist/release/`:
 #
-#   virtx-stdio-<os>-<arch>.tar.gz   the server, the guest kernel, abin and alib
-#   brekkylab-virtx-*.tgz            the npm packages
-#   virtx-*.whl                      the wheels
-#   SHA256SUMS                       over all of them
+#   virtx-stdio-<os>-<arch>.tar.gz        the stdio server, the guest kernel, abin and alib
+#   virtx-server-tcp-<os>-<arch>.tar.gz   the HTTP server, the guest kernel, abin and alib
+#   brekkylab-virtx-*.tgz                 the npm packages
+#   virtx-*.whl                           the wheels
+#   SHA256SUMS                            over all of them
 #
 # Jobs hand on as artifacts of the run, which a called workflow shares with its caller, and
 # a rerun uploads over. They are kept a day, the least allowed: long enough to rerun a job.
@@ -130,7 +131,7 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # `virtx-stdio`, archived with the kernel, abin and alib.
+  # `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin and alib.
   server:
     name: server (${{ matrix.release }})
     needs: guest-parts
@@ -240,7 +241,7 @@ jobs:
           ls -la build/krunfw target/release/abin handoff/alib
 
       - name: Build
-        run: cargo xtask build server-stdio --locked
+        run: cargo xtask build server-stdio server-tcp --locked
 
       - name: virglrenderer's log (Windows, on failure)
         if: failure() && runner.os == 'Windows'
@@ -256,28 +257,32 @@ jobs:
       - name: The glibc floor (Linux)
         if: runner.os == 'Linux'
         run: |
-          f=target/release/virtx-stdio
-          syms=$(objdump -T "$f")
-          need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
-          libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
-          echo "$f needs $need; links $libs"
-          [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
-          if grep -q __isoc23_ <<<"$syms"; then echo "::error::$f references __isoc23_*"; fail=1; fi
-          if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
+          for f in target/release/virtx-stdio target/release/virtx-server-tcp; do
+            syms=$(objdump -T "$f")
+            need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
+            libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
+            echo "$f needs $need; links $libs"
+            [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
+            if grep -q __isoc23_ <<<"$syms"; then echo "::error::$f references __isoc23_*"; fail=1; fi
+            if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
+          done
           exit ${fail:-0}
 
       # Nothing Windows may lack is loaded at start-up: the C++ runtime is linked in and the rest
-      # delay-loaded, so a host without them runs virtx-stdio far enough to say what to install.
+      # delay-loaded, so a host without them runs a server far enough to say what to install.
       - name: DLL imports (Windows)
         if: runner.os == 'Windows'
         run: |
-          f=target/release/virtx-stdio.exe
-          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
-            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
-            | sort -u | tee "$RUNNER_TEMP/imports.txt"
-          if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
-            echo "::error::$f needs the DLLs above to start"; exit 1
-          fi
+          for f in target/release/virtx-stdio.exe target/release/virtx-server-tcp.exe; do
+            echo "$f:"
+            "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+              | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+              | sort -u | tee "$RUNNER_TEMP/imports.txt"
+            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
+              echo "::error::$f needs the DLLs above to start"; fail=1
+            fi
+          done
+          exit ${fail:-0}
 
       - name: Archive
         run: cargo xtask archive --with-abin
@@ -285,7 +290,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.release }}
-          path: target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz
+          path: |
+            target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz
+            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz
           overwrite: true
           retention-days: 1
 
@@ -422,7 +429,7 @@ jobs:
       - name: Server archives
         run: |
           mkdir -p dist/release
-          mv target/release/dist/virtx-stdio-*.tar.gz dist/release/
+          mv target/release/dist/virtx-stdio-*.tar.gz target/release/dist/virtx-server-tcp-*.tar.gz dist/release/
 
       - name: npm packages
         run: |

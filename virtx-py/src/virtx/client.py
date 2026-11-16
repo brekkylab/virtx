@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import ctypes
 import json
@@ -74,7 +73,26 @@ def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_ch
     return (ctypes.c_char_p * len(strings))(*strings)
 
 
-def _auth_bytes(auth: BearerAuth | None) -> bytes:
+@dataclass(frozen=True)
+class CommandAuth:
+    """The token ``program`` with ``args`` prints, sent as ``Authorization: Bearer <token>``:
+    a token alone, or ``{"token": ..., "expires_in": <seconds>}``. It is run for the first
+    request, and again when its token is a minute from running out or the server refuses it:
+    a person's short-lived token, as ``virtx token --json`` prints it."""
+
+    program: str
+    args: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        return {"type": "command", "program": self.program, "args": list(self.args)}
+
+
+Auth = BearerAuth | CommandAuth
+"""The credentials a server wants with every request."""
+
+
+def _auth_bytes(auth: Auth | None) -> bytes:
     """``auth`` as ``virtx_client_connect`` takes it: JSON, or nothing for none."""
     return b"" if auth is None else json.dumps(auth.to_dict()).encode()
 
@@ -90,21 +108,14 @@ def _close_all() -> None:
 
 async def ensure_virtx() -> str:
     """Fetch ``virtx-stdio``, the server of the library's version, into this host's cache if it
-    is not there, and give its path: what ``Client.spawn()`` without a program starts. The
-    fetch runs in a thread, off the event loop.
+    is not there, and give its path: what ``Client.spawn()`` without a program starts.
 
     The server is kept one directory per version, so a library that is upgraded fetches its
     own. ``$VIRTX_STDIO`` names a server to use as it is; ``$VIRTX_STDIO_VERSION`` another
     version; ``$VIRTX_DIST_URL`` where releases are fetched from; ``$VIRTX_HOME`` the cache.
     """
     lib = library()
-
-    def fetch() -> str:
-        out = _Bytes()
-        status = lib.virtx_ensure_virtx(ctypes.byref(out))
-        return lib.take(status, out)
-
-    return await asyncio.to_thread(fetch)
+    return await lib.answer(lib.virtx_ensure_virtx())
 
 
 class Client:
@@ -125,16 +136,18 @@ class Client:
     @classmethod
     def spawn(cls, program: str | None = None, args: Iterable[str] = ()) -> Client:
         """Start ``program`` with ``args`` as the server, and talk to it over its stdin and
-        stdout. Blocks until it has started. Without ``program``, the server is ``virtx-stdio``
-        of this library's version, fetched first if this host has none -- blocking for the
-        fetch; ``ensure_virtx`` does that fetch alone, and off the event loop."""
+        stdout. Without ``program``, the server is ``virtx-stdio`` of this library's version,
+        fetched first if this host has none -- blocking for the fetch; ``ensure_virtx`` does
+        that fetch alone, on the event loop."""
         lib = library()
+        if program is None:
+            program = lib.wait(lib.virtx_ensure_virtx())
         argv = [arg.encode() for arg in args]
         array = (ctypes.c_char_p * len(argv))(*argv)
         raw = ctypes.c_void_p()
         error = _Bytes()
         status = lib.virtx_client_spawn(
-            None if program is None else program.encode(),
+            program.encode(),
             array,
             len(argv),
             ctypes.byref(raw),
@@ -146,7 +159,7 @@ class Client:
     def connect(
         cls,
         url: str,
-        auth: BearerAuth | None = None,
+        auth: Auth | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the credentials it wants, and ``headers``, whatever else it asks
@@ -169,7 +182,7 @@ class Client:
         )
         return cls._opened(lib, status, raw, error)
 
-    def set_auth(self, auth: BearerAuth | None) -> None:
+    def set_auth(self, auth: Auth | None) -> None:
         """Send ``auth`` with every request from now on, in place of what was given at
         ``connect``: a new token, when the server's are short-lived. A forwarder already open
         sends it with its next connection. Over stdio, where none is sent, nothing changes.
@@ -229,14 +242,20 @@ class Client:
     def close(self) -> None:
         """Let go of this hold; the last ends the session, blocking until it has. Closing twice
         does nothing."""
-        raw, self._raw = self._raw, None
-        _open.discard(self)
+        raw = self._let_go()
         if raw is not None:
-            self._lib.virtx_client_release(raw)
+            self._lib.wait(self._lib.virtx_client_release(raw))
 
     async def aclose(self) -> None:
-        """``close``, off the event loop's thread."""
-        await asyncio.to_thread(self.close)
+        """``close``, awaited on the event loop."""
+        raw = self._let_go()
+        if raw is not None:
+            await self._lib.answer(self._lib.virtx_client_release(raw))
+
+    def _let_go(self) -> int | None:
+        raw, self._raw = self._raw, None
+        _open.discard(self)
+        return raw
 
     def __enter__(self) -> Self:
         return self

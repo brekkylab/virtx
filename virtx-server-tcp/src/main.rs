@@ -611,6 +611,46 @@ mod tests {
         );
     }
 
+    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
+    /// and a path whose segment does not read as one is `400` `invalid`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
+        let served = Served::spawn("envelope").await;
+        let send = async |request: reqwest::RequestBuilder| {
+            let response = request
+                .bearer_auth("a-token")
+                .header("virtx-project", "demo")
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, kind, body["error"].clone())
+        };
+        let client = reqwest::Client::new();
+
+        let over = client
+            .post(format!("{}sandboxes/", served.url))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(vec![b' '; 3 << 20]);
+        let (status, kind, error) = send(over).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "too_large", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("2 MiB"),
+            "{error}"
+        );
+
+        let unreadable = client.get(format!("{}sandboxes/%FF", served.url));
+        let (status, kind, error) = send(unreadable).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "invalid", "{error}");
+    }
+
     #[tokio::test]
     async fn the_files_endpoints_take_the_same_token_and_project() {
         let served = Served::spawn("files").await;

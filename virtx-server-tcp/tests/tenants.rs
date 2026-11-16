@@ -1,31 +1,23 @@
-//! A server built on this one, from outside the crate: tenants of its own in place of the
+//! A server built on this one, from outside the crate: an authenticator of its own in place of the
 //! config's projects, and a route of its own beside the server's.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use http::StatusCode;
 use serde_json::json;
-use virtx_server_tcp::access::{Access, Checked, REGISTRY_PATH, Tenants};
+use virtx_server_tcp::access::{Access, Authenticator, Checked, Homes};
 use virtx_server_tcp::config::Config;
-use virtx_server_tcp::endpoints::Home;
 use virtx_server_tcp::serve;
-use virtx_uvm::{ImageStore, RegistryServer};
 
-/// Each token `<project>-key` is its project's, whose home is made the first time it is
-/// named, its images its own.
-struct Keys {
-    root: PathBuf,
-    made: Mutex<HashMap<String, Arc<Home>>>,
-}
+/// Each token `<project>-key` is its project's.
+struct Keys;
 
-impl Tenants for Keys {
-    fn home<'a>(
+impl Authenticator for Keys {
+    fn authenticate<'a>(
         &'a self,
         token: Option<&'a str>,
         named: Option<&'a str>,
-    ) -> Checked<'a, (String, Arc<Home>)> {
+    ) -> Checked<'a, (String, String)> {
         Box::pin(async move {
             let project = token
                 .and_then(|token| token.strip_suffix("-key"))
@@ -33,41 +25,26 @@ impl Tenants for Keys {
             if named.is_some_and(|named| named != project) {
                 return Err(StatusCode::FORBIDDEN);
             }
-            let mut made = self.made.lock().unwrap();
-            let home = made.entry(project.to_owned()).or_insert_with(|| {
-                let dir = self.root.join(project);
-                let images = ImageStore::new(dir.join("images")).unwrap();
-                let registry = RegistryServer::new(images.clone(), REGISTRY_PATH).unwrap();
-                Arc::new(Home::new(images, Arc::new(registry), &dir).unwrap())
-            });
-            Ok((project.to_owned(), Arc::clone(home)))
+            Ok((project.to_owned(), project.to_owned()))
         })
-    }
-
-    fn homes(&self) -> Vec<Arc<Home>> {
-        self.made.lock().unwrap().values().cloned().collect()
     }
 }
 
 #[tokio::test]
-async fn a_server_of_its_own_tenants_and_routes_is_built_from_the_library() {
+async fn a_server_of_its_own_authenticator_and_routes_is_built_from_the_library() {
     let root = std::env::temp_dir().join(format!("virtx-tcp-tenants-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     // Off the loopback and naming no provider: what the config's own projects refuse is not
-    // asked of a server whose tenants authenticate.
+    // asked of a server whose authenticator checks tokens.
     let config = Config::parse(json!({ "listen": "0.0.0.0:0", "home": root })).unwrap();
-    let keys = Arc::new(Keys {
-        root: config.home(),
-        made: Mutex::default(),
-    });
-    let tenants: Arc<dyn Tenants> = keys.clone();
-    let access = Arc::new(Access::new(config.origins.clone(), tenants));
+    let homes = Arc::new(Homes::new(config.home()));
+    let access = Arc::new(Access::new(config.origins.clone(), Arc::new(Keys), homes));
     let counting = Arc::clone(&access);
     let own = axum::Router::new().route(
         "/node/homes",
         axum::routing::get(move || async move { counting.homes().len().to_string() }),
     );
-    let router = serve::router(access, own);
+    let router = serve::router(Arc::clone(&access), own);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -121,7 +98,7 @@ async fn a_server_of_its_own_tenants_and_routes_is_built_from_the_library() {
     );
 
     task.abort();
-    for home in keys.homes() {
+    for home in access.homes() {
         home.close_all();
     }
     let _ = std::fs::remove_dir_all(&root);

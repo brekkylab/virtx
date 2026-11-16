@@ -1,15 +1,16 @@
 //! Who may send a request, and which project's [`Home`] it reaches. [`Access`] lets a request
-//! in from where a browser may call, and asks its [`Tenants`] the rest: whose the token is,
-//! and the home of the project it names, whose images are its own.
+//! in from where a browser may call, asks its [`Authenticator`] who the token is and which
+//! project it reaches, and takes that project's home from its [`Homes`].
 //!
-//! The server's own are [`Projects`]: the projects its config names, each to its members
-//! among the users of the config's OpenID Connect provider ([`Oidc`]) -- or, of a config that
-//! names no provider, to [`ANYONE`]. A server built on this one gives tenants of its own.
+//! The server's own authenticator is [`Projects`]: the projects its config names, each to its
+//! members among the users of the config's OpenID Connect provider ([`Oidc`]) -- or, of a
+//! config that names no provider, to [`ANYONE`]. A server built on this one gives its own.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::bail;
 use http::{HeaderMap, StatusCode, header};
@@ -28,43 +29,83 @@ pub const ANYONE: &str = "anyone";
 /// Where a home's images are served as a registry.
 pub const REGISTRY_PATH: &str = "/images/oci";
 
-/// What [`Tenants`] answer, once they have checked a token.
+/// What an [`Authenticator`] answers, once it has checked a token.
 pub type Checked<'a, T> = Pin<Box<dyn Future<Output = Result<T, StatusCode>> + Send + 'a>>;
 
-/// Whose a server's tokens are, and the projects they reach.
-pub trait Tenants: Send + Sync {
+/// Who a server's tokens are, and the projects they reach.
+pub trait Authenticator: Send + Sync {
     /// Who a request carrying `token`, naming project `named` if it names one, is sent by,
-    /// and the home it reaches: `401` for a token that is no one's, `400` naming no project
+    /// and the project it reaches: `401` for a token that is no one's, `400` naming no project
     /// where one must be named, and `403` naming one its sender does not reach.
-    fn home<'a>(
+    fn authenticate<'a>(
         &'a self,
         token: Option<&'a str>,
         named: Option<&'a str>,
-    ) -> Checked<'a, (String, Arc<Home>)>;
+    ) -> Checked<'a, (String, String)>;
+}
 
-    /// Every home there is.
-    fn homes(&self) -> Vec<Arc<Home>>;
+/// Each project's home, in a directory of its name under a root, made as it is first reached.
+pub struct Homes {
+    root: PathBuf,
+    made: Mutex<HashMap<String, Arc<Home>>>,
+}
+
+impl Homes {
+    pub fn new(root: PathBuf) -> Homes {
+        Homes {
+            root,
+            made: Mutex::default(),
+        }
+    }
+
+    /// Project `project`'s home, its images its own.
+    pub fn home(&self, project: &str) -> anyhow::Result<Arc<Home>> {
+        let mut made = self.made.lock().unwrap();
+        if let Some(home) = made.get(project) {
+            return Ok(Arc::clone(home));
+        }
+        let dir = self.root.join(project);
+        let images = ImageStore::new(dir.join("images"))?;
+        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let home = Arc::new(Home::new(images, registry, &dir)?);
+        made.insert(project.to_owned(), Arc::clone(&home));
+        Ok(home)
+    }
+
+    /// Every home made.
+    pub fn all(&self) -> Vec<Arc<Home>> {
+        self.made.lock().unwrap().values().cloned().collect()
+    }
 }
 
 pub struct Access {
     /// The `Origin`s a browser may call from.
     origins: Vec<String>,
-    tenants: Arc<dyn Tenants>,
+    authenticator: Arc<dyn Authenticator>,
+    homes: Arc<Homes>,
 }
 
 impl Access {
-    /// Requests from the `origins` a browser may call from, to `tenants`.
-    pub fn new(origins: Vec<String>, tenants: Arc<dyn Tenants>) -> Access {
-        Access { origins, tenants }
+    /// Requests from the `origins` a browser may call from, let in by `authenticator` to `homes`.
+    pub fn new(
+        origins: Vec<String>,
+        authenticator: Arc<dyn Authenticator>,
+        homes: Arc<Homes>,
+    ) -> Access {
+        Access {
+            origins,
+            authenticator,
+            homes,
+        }
     }
 
     pub fn origins(&self) -> &[String] {
         &self.origins
     }
 
-    /// Every home there is.
+    /// Every home made.
     pub fn homes(&self) -> Vec<Arc<Home>> {
-        self.tenants.homes()
+        self.homes.all()
     }
 
     /// `403` for a request with `headers` from an `Origin` not let in.
@@ -81,11 +122,19 @@ impl Access {
     }
 
     /// Who a request with `headers` is sent by, and the home it reaches: `403` from an
-    /// `Origin` not let in, and otherwise as [`Tenants::home`] says.
+    /// `Origin` not let in, and otherwise as [`Authenticator::authenticate`] says.
     pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
         self.origin(headers)?;
         let named = project_named(headers)?;
-        self.tenants.home(bearer(headers), named).await
+        let (user, project) = self
+            .authenticator
+            .authenticate(bearer(headers), named)
+            .await?;
+        let home = self.homes.home(&project).map_err(|e| {
+            eprintln!("making project {project}'s home: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Ok((user, home))
     }
 }
 
@@ -110,15 +159,15 @@ pub struct Projects {
     /// Who a token is, if the config names a provider: without one, requests are let
     /// through without credentials.
     oidc: Option<Oidc>,
-    /// Each project's members, and its home.
-    projects: HashMap<String, (HashSet<String>, Arc<Home>)>,
+    /// Each project's members.
+    members: HashMap<String, HashSet<String>>,
 }
 
 impl Projects {
-    /// The projects `config` names, each project's home made where it says. Naming no
-    /// provider, it authenticates no one, and has the project [`DEFAULT_PROJECT`] if it names
-    /// none: refused listening off the loopback, unless the config says so.
-    pub fn new(config: &Config) -> anyhow::Result<Projects> {
+    /// The projects `config` names, each one's home made in `homes`. Naming no provider, it
+    /// authenticates no one, and has the project [`DEFAULT_PROJECT`] if it names none:
+    /// refused listening off the loopback, unless the config says so.
+    pub fn new(config: &Config, homes: &Homes) -> anyhow::Result<Projects> {
         match (&config.auth, &config.oidc) {
             (Some(Auth::None), Some(_)) => bail!("auth is none, with oidc to authenticate"),
             (None, None) if !config.listen.ip().is_loopback() => bail!(
@@ -128,24 +177,22 @@ impl Projects {
             ),
             _ => {}
         }
-        let root = config.home().join("project");
-        let project = |name: &str, members: &[String]| -> anyhow::Result<_> {
-            let dir = root.join(name);
-            let images = ImageStore::new(dir.join("images"))?;
-            let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-            let members: HashSet<String> = members.iter().cloned().collect();
-            Ok((members, Arc::new(Home::new(images, registry, &dir)?)))
-        };
-        let mut projects = HashMap::new();
-        for (name, named) in &config.projects {
-            projects.insert(name.clone(), project(name, &named.members)?);
+        let mut members: HashMap<String, HashSet<String>> = config
+            .projects
+            .iter()
+            .map(|(name, named)| (name.clone(), named.members.iter().cloned().collect()))
+            .collect();
+        if config.oidc.is_none() && members.is_empty() {
+            members.insert(DEFAULT_PROJECT.to_owned(), HashSet::new());
         }
-        if config.oidc.is_none() && projects.is_empty() {
-            projects.insert(DEFAULT_PROJECT.to_owned(), project(DEFAULT_PROJECT, &[])?);
+        // Made now, not as first reached: a project's sandboxes left from before are swept as
+        // the server starts.
+        for name in members.keys() {
+            homes.home(name)?;
         }
         Ok(Projects {
             oidc: config.oidc.clone().map(Oidc::new),
-            projects,
+            members,
         })
     }
 
@@ -164,31 +211,27 @@ impl Projects {
     }
 }
 
-impl Tenants for Projects {
+impl Authenticator for Projects {
     /// `403` for a project the user is not a member of -- or none at all, which is not told
     /// apart. Where no one is authenticated, everyone is a member, and a request naming no
     /// project reaches [`DEFAULT_PROJECT`].
-    fn home<'a>(
+    fn authenticate<'a>(
         &'a self,
         token: Option<&'a str>,
         named: Option<&'a str>,
-    ) -> Checked<'a, (String, Arc<Home>)> {
+    ) -> Checked<'a, (String, String)> {
         Box::pin(async move {
             let user = self.user(token).await?;
             let project = named
                 .or(self.open().then_some(DEFAULT_PROJECT))
                 .ok_or(StatusCode::BAD_REQUEST)?;
-            self.projects
-                .get(project)
-                .filter(|(members, _)| self.open() || members.contains(&user))
-                .map(|(_, home)| (user.clone(), Arc::clone(home)))
-                .ok_or(StatusCode::FORBIDDEN)
+            match self.members.get(project) {
+                Some(members) if self.open() || members.contains(&user) => {
+                    Ok((user, project.to_owned()))
+                }
+                _ => Err(StatusCode::FORBIDDEN),
+            }
         })
-    }
-
-    fn homes(&self) -> Vec<Arc<Home>> {
-        let homes = self.projects.values();
-        homes.map(|(_, home)| Arc::clone(home)).collect()
     }
 }
 
@@ -202,8 +245,9 @@ mod tests {
     /// The access the config at `path` makes, over its own projects.
     fn configured(path: &std::path::Path) -> anyhow::Result<Access> {
         let config = Config::read(path)?;
-        let projects = Arc::new(Projects::new(&config)?);
-        Ok(Access::new(config.origins, projects))
+        let homes = Arc::new(Homes::new(config.home().join("project")));
+        let projects = Arc::new(Projects::new(&config, &homes)?);
+        Ok(Access::new(config.origins, projects, homes))
     }
 
     fn headers(token: Option<&str>, project: Option<&str>, origin: Option<&str>) -> HeaderMap {
@@ -258,12 +302,13 @@ mod tests {
             config["home"] = json!(dir);
             let path = dir.join("config.json");
             std::fs::write(&path, config.to_string()).unwrap();
-            Projects::new(&Config::read(&path).unwrap())
+            let config = Config::read(&path).unwrap();
+            Projects::new(&config, &Homes::new(config.home().join("project")))
         };
 
         let local = projects(json!({ "listen": "127.0.0.1:0" })).unwrap();
         assert!(local.open());
-        assert!(local.projects.contains_key(DEFAULT_PROJECT));
+        assert!(local.members.contains_key(DEFAULT_PROJECT));
 
         let refused = projects(json!({ "listen": "0.0.0.0:0" })).err().unwrap();
         assert!(refused.to_string().contains("auth"), "{refused}");
@@ -273,7 +318,7 @@ mod tests {
         let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
         let checked = projects(json!({ "listen": "0.0.0.0:0", "oidc": oidc })).unwrap();
         assert!(!checked.open());
-        assert!(checked.projects.is_empty());
+        assert!(checked.members.is_empty());
         let both = json!({ "listen": "127.0.0.1:0", "oidc": oidc, "auth": "none" });
         assert!(projects(both).is_err());
         let _ = std::fs::remove_dir_all(&dir);

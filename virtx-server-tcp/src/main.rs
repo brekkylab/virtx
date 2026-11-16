@@ -7,9 +7,9 @@
 //! [`virtx_uvm::Machine`].
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
-use virtx_server_tcp::access::Tenants as _;
 use virtx_server_tcp::config::Config;
 use virtx_server_tcp::serve;
 
@@ -33,14 +33,14 @@ fn main() -> anyhow::Result<()> {
 #[tokio::main]
 async fn run(config: Config) -> anyhow::Result<()> {
     let (projects, access, router) = serve::configured(&config)?;
-    serve::keep_pruned(access);
+    serve::keep_pruned(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
     if projects.open() {
         eprintln!("without authentication: every request reaches every project");
     }
     let served = serve::run(listener, router).await;
     tokio::task::spawn_blocking(move || {
-        for home in projects.homes() {
+        for home in access.homes() {
             home.close_all();
         }
     })

@@ -1,8 +1,8 @@
 //! The server's routes, for an [`Access`]: the endpoints of `virtx-core`'s `PROTOCOL.md`
 //! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an
-//! OCI registry, and each sandbox's ports. A server built on this one gives [`router`]
-//! tenants of its own in the access, and routes of its own beside these; the server a config
-//! alone makes is [`configured`], which does both.
+//! OCI registry, and each sandbox's ports. A server built on this one gives [`router`] an
+//! authenticator of its own in the access, and routes of its own beside these; the server a
+//! config alone makes is [`configured`], which does both.
 //!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::access::{self, Access, Projects, Tenants};
+use crate::access::{self, Access, Homes, Projects};
 use crate::config::Config;
 use crate::endpoints::{self, Tunnel};
 use anyhow::Context as _;
@@ -55,8 +55,8 @@ pub fn become_machine_if_spawned() {
 /// client signs in for its tokens, answered without any -- the provider and the client to
 /// sign in as, or nothing where no one signs in.
 pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>, axum::Router)> {
-    let projects = Arc::new(Projects::new(config)?);
-    let tenants: Arc<dyn Tenants> = projects.clone();
+    let homes = Arc::new(Homes::new(config.home().join("project")));
+    let projects = Arc::new(Projects::new(config, &homes)?);
     let advertised = match &config.oidc {
         Some(oidc) => serde_json::json!({
             "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
@@ -71,7 +71,7 @@ pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>
         "/auth",
         axum::routing::get(move || async move { advertised }),
     );
-    let access = Arc::new(Access::new(config.origins.clone(), tenants));
+    let access = Arc::new(Access::new(config.origins.clone(), projects.clone(), homes));
     let router = router(Arc::clone(&access), own);
     Ok((projects, access, router))
 }

@@ -109,9 +109,7 @@ pub(crate) fn attach(
 
 /// Where the agent is asked to connect to a guest port, for a program that listened before
 /// its port was published (`relay`): a Unix socket of this process's, which libkrun listens on
-/// and carries into the guest's vsock [`DIAL_PORT`](super::wire::DIAL_PORT). None on a host
-/// whose standard library has no Unix socket to connect it with.
-#[cfg(unix)]
+/// and carries into the guest's vsock [`DIAL_PORT`](super::wire::DIAL_PORT).
 fn dial(device: &mut VsockDevice) -> relay::Dial {
     let path = std::env::temp_dir().join(format!("virtx-uvm-dial-{}.sock", std::process::id()));
     // A process before this one under the same pid left its socket: libkrun binds the name.
@@ -123,11 +121,6 @@ fn dial(device: &mut VsockDevice) -> relay::Dial {
         }
         None => relay::Dial(None),
     }
-}
-
-#[cfg(not(unix))]
-fn dial(_: &mut VsockDevice) -> relay::Dial {
-    relay::Dial(None)
 }
 
 /// Publishes a guest port while the machine runs, as [`attach`] did those it booted with.

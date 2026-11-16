@@ -109,22 +109,20 @@ enum State {
 /// A sandbox: a machine booted as it was made, again whenever it is needed after it was
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
-/// What it wrote is kept across its machine's stops, on its snapshot or on the one it made for
-/// itself; what ran in it is not.
+/// What it wrote is kept across its machine's stops, on the snapshot it made for itself, until
+/// it is closed; what ran in it is not.
 pub struct Sandbox {
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
     _held: ImageHold,
-    /// The snapshot it was made on, by name.
-    snapshot: Option<String>,
-    /// The one it made for itself, without one, until it is closed.
+    /// The snapshot it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
     abin: Mutex<Option<Abin>>,
-    /// Its snapshot's lock, held for each of its machines and between them, until it is
+    /// Its upper snapshot's lock, held for each of its machines and between them, until it is
     /// closed.
     snapshot_lock: Mutex<Option<SnapshotLock>>,
     /// Its volumes, held against removal for each of its machines and between them, until it
@@ -150,15 +148,14 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// Boot a sandbox as `args` asks, of what `images`, `snapshots` and `volumes` hold, by
-    /// running `vm` as its machine's process (see [`Machine::start`]). `held` says whether
-    /// another sandbox stands on a snapshot, which this one is then refused. Its machine is
-    /// stopped once the sandbox has been in use by nothing for `park_after`.
+    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
+    /// image to a snapshot it makes in `snapshots`, by running `vm` as its machine's process
+    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
+    /// nothing for `park_after`.
     pub async fn create(
         images: &ImageStore,
         snapshots: &SnapshotStore,
         volumes: &VolumeStore,
-        held: impl Fn(&str) -> bool,
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
@@ -257,19 +254,6 @@ impl Sandbox {
         })?;
         let (image, layers) = images.get_image(&digest)?.ok_or_else(missing)?;
 
-        let snapshot = args
-            .snapshot
-            .as_deref()
-            .map(|name| snapshots.open(name))
-            .transpose()?;
-        if let Some(snapshot) = &snapshot
-            && held(&snapshot.name)
-        {
-            return Err(SnapshotError::InUse(snapshot.name.clone()).into());
-        }
-        // Held from here until the sandbox is closed, whether its machine runs or not, against
-        // every other sandbox, removal and request to its files, in this process or another.
-        let snapshot_lock = snapshot.as_ref().map(Snapshot::lock).transpose()?;
         let mut volume_holds = Vec::new();
         let volumes = args
             .volumes
@@ -288,15 +272,10 @@ impl Sandbox {
         // Merging the layers' metadata, and formatting a snapshot, are blocking work.
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
-        let (upper, snapshot_lock) = match snapshot_lock {
-            Some(lock) => (None, lock),
-            None => {
-                let dir = Upper::dir(snapshots);
-                let upper = tokio::task::spawn_blocking(move || Upper::create(&dir)).await??;
-                let lock = upper.snapshot.lock()?;
-                (Some(upper), lock)
-            }
-        };
+        let dir = Upper::dir(snapshots);
+        let upper = tokio::task::spawn_blocking(move || Upper::create(&dir)).await??;
+        // Held from here until the sandbox is closed, whether its machine runs or not.
+        let snapshot_lock = upper.snapshot.lock()?;
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
@@ -309,7 +288,7 @@ impl Sandbox {
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
-            snapshot: snapshot.or_else(|| upper.as_ref().map(|upper| upper.snapshot.clone())),
+            snapshot: Some(upper.snapshot.clone()),
             snapshot_held: true,
             spec: MachineSpec {
                 vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
@@ -328,9 +307,8 @@ impl Sandbox {
         let sandbox = Arc::new(Sandbox {
             image: digest,
             _held: held_image,
-            snapshot: args.snapshot.clone(),
             abins: args.abins.clone(),
-            upper: Mutex::new(upper),
+            upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
             snapshot_lock: Mutex::new(Some(snapshot_lock)),
             volume_holds: Mutex::new(volume_holds),
@@ -357,16 +335,10 @@ impl Sandbox {
         virtx_core::Sandbox {
             id,
             image: self.image.to_string(),
-            snapshot: self.snapshot.clone(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
             abins: self.abins.clone(),
         }
-    }
-
-    /// The snapshot it stands on, by name.
-    pub fn snapshot(&self) -> Option<&str> {
-        self.snapshot.as_deref()
     }
 
     /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
@@ -666,8 +638,8 @@ impl Drop for Activity {
     }
 }
 
-/// The snapshot a sandbox made without one makes for itself, deleted when the sandbox is
-/// closed, or by the next [`Sandbox::sweep`] once the process that made it has ended.
+/// The snapshot a sandbox makes for itself, deleted when the sandbox is closed, or by the next
+/// [`Sandbox::sweep`] once the process that made it has ended.
 ///
 /// Each is `<name>.ext4` in `<root>/sandbox/`, beside `<name>.owner`, which the process that
 /// made it holds a lock on for as long as it runs.

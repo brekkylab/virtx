@@ -14,10 +14,6 @@ pub struct Sandbox {
     /// The digest of the image it booted, as `algorithm:hex`.
     pub image: String,
 
-    /// The snapshot it stands on, by name, if it was given one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
-
     /// Whether it takes processes: `false` once its VM has exited on its own. One whose VM the
     /// server stopped for want of use is booted again by the next job, and is `true`; one that
     /// is `false` is still held until it is removed.
@@ -43,11 +39,6 @@ pub struct Sandbox {
 pub struct SandboxCreateArgs {
     /// The image its root filesystem is built on.
     pub image: ImageName,
-
-    /// The snapshot, by name, that is its root filesystem's upper layer: it starts with the
-    /// changes in it, and its writes go into it. Without one its writes go when it does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
 
     /// Whether its processes reach a network at all: the way out, which `ports` do not need.
     #[serde(default = "on", skip_serializing_if = "is_on")]
@@ -93,19 +84,16 @@ impl SandboxCreateArgs {
     /// ```
     /// # use virtx_core::SandboxCreateArgs;
     /// let args = SandboxCreateArgs::new("jq:latest")
-    ///     .snapshot("dev")
     ///     .port(8000)
     ///     .readonly_volume("data", "/data")
     ///     .abin("index");
     ///
-    /// assert_eq!(args.snapshot.as_deref(), Some("dev"));
     /// assert!(args.volumes[0].readonly);
     /// assert_eq!(args.abins, ["index"]);
     /// ```
     pub fn new(image: impl Into<ImageName>) -> Self {
         Self {
             image: image.into(),
-            snapshot: None,
             network: true,
             ports: Vec::new(),
             vcpus: None,
@@ -115,12 +103,6 @@ impl SandboxCreateArgs {
             volumes: Vec::new(),
             abins: Vec::new(),
         }
-    }
-
-    /// Stand on the snapshot `name`.
-    pub fn snapshot(mut self, name: impl Into<String>) -> Self {
-        self.snapshot = Some(name.into());
-        self
     }
 
     /// Whether its processes reach a network at all.
@@ -236,7 +218,6 @@ mod tests {
     #[test]
     fn each_method_sets_its_field() {
         let args = SandboxCreateArgs::new("img:latest")
-            .snapshot("s")
             .network(false)
             .port(80)
             .port(443)
@@ -247,7 +228,6 @@ mod tests {
             .volume("a", "/a")
             .readonly_volume("b", "/a/b");
         let mut expected = SandboxCreateArgs::new("img:latest");
-        expected.snapshot = Some("s".into());
         expected.network = false;
         expected.ports = vec![80, 443];
         expected.vcpus = Some(2);

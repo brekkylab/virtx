@@ -1,16 +1,11 @@
-//! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume, a snapshot or a
-//! sandbox over WebDAV at `/volumes/{name}/files/`, `/snapshots/{name}/files/` and
-//! `/sandboxes/{id}/files/`.
+//! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume or a sandbox over
+//! WebDAV at `/volumes/{name}/files/` and `/sandboxes/{id}/files/`.
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their
-//! paths. A snapshot's are the ext4 image a machine writes: read whole into an
-//! [`FsTree`](crate::FsTree) for each request, and written back whole after one that changed
-//! it, so a snapshot's requests go one at a time. A snapshot in use -- a sandbox's, or under a
-//! machine -- answers `423` to everything. A sandbox's are its machine's root as its processes
-//! see it, asked of the agent there ([`Machine::io`]).
+//! paths. A sandbox's are its machine's root as its processes see it, asked of the agent there
+//! ([`Machine::io`]).
 
 mod sandbox;
-mod snapshot;
 mod volume;
 
 use std::collections::HashMap;
@@ -29,63 +24,54 @@ use http_body_util::BodyExt as _;
 
 use crate::machine::Machine;
 use crate::sandbox::Activity;
-use crate::snapshot::{Error as SnapshotError, Store as SnapshotStore};
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
 
-/// Whether a sandbox holds the snapshot named, which no lock on its disk says: a sandbox
-/// holds its snapshot from its making to its removal, and a machine's lock only while the
-/// machine runs.
-pub type Held<'a> = &'a (dyn Fn(&str) -> bool + Sync);
-
-/// The files endpoints over one home's snapshots and volumes.
+/// The files endpoints over one home's volumes, and its sandboxes' as each is asked of.
 pub struct Files {
-    snapshots: SnapshotStore,
     volumes: VolumeStore,
-    /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
-    /// and each volume's that write over an etag, by `volume:` and its name, so the etag each
-    /// checks is the one the file has when it writes.
+    /// Each volume's requests that write over an etag, by its name, so the etag each checks is
+    /// the one the file has when it writes.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-/// Whose files a request names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Root {
-    Volume(String),
-    Snapshot(String),
-}
-
-impl fmt::Display for Root {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Root::Volume(name) => write!(f, "/volumes/{name}/files"),
-            Root::Snapshot(name) => write!(f, "/snapshots/{name}/files"),
-        }
-    }
-}
-
 impl Files {
-    /// The endpoints over `snapshots` and `volumes`.
-    pub fn new(snapshots: SnapshotStore, volumes: VolumeStore) -> Files {
+    /// The endpoints over `volumes`.
+    pub fn new(volumes: VolumeStore) -> Files {
         Files {
-            snapshots,
             volumes,
             serial: Mutex::default(),
         }
     }
 
-    /// Answer `request`, one to `/volumes/{name}/files` or `/snapshots/{name}/files` and what is under
-    /// them; anything else is `404`.
-    pub async fn handle(&self, request: Request<Body>, held: Held<'_>) -> Response {
-        let path = request.uri().path().to_owned();
-        let root = match (
-            path.strip_prefix("/volumes/"),
-            path.strip_prefix("/snapshots/"),
-        ) {
-            (Some(rest), _) => Root::Volume(name(rest)),
-            (_, Some(rest)) => Root::Snapshot(name(rest)),
-            _ => return StatusCode::NOT_FOUND.into_response(),
+    /// Answer `request`, one to `/volumes/{name}/files` and what is under it; anything else is
+    /// `404`.
+    pub async fn handle(&self, request: Request<Body>) -> Response {
+        let Some(rest) = request.uri().path().strip_prefix("/volumes/") else {
+            return StatusCode::NOT_FOUND.into_response();
         };
-        self.dav(&root, request, held).await
+        let name = name(rest);
+        let handler = match handler(format!("/volumes/{name}/files"), &request) {
+            Ok(handler) => handler,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let volume = match self.volumes.open(&name) {
+            Ok(volume) => Arc::new(volume),
+            Err(e) => return refused(status(&e), e).into_response(),
+        };
+        let handler = handler
+            .filesystem(Box::new(volume::Fs(volume)))
+            .build_handler();
+        let conditional = request.headers().contains_key(http::header::IF_MATCH);
+        let _serial = match conditional {
+            true => {
+                let serial = Arc::clone(self.serial.lock().unwrap().entry(name).or_default());
+                Some(serial.lock_owned().await)
+            }
+            false => None,
+        };
+        lingering(request, |request| handler.handle(request))
+            .await
+            .map(Body::new)
     }
 
     /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from the guest
@@ -112,76 +98,6 @@ impl Files {
                 frame
             }))
         })
-    }
-
-    /// A WebDAV request to `root`, a volume or a snapshot.
-    async fn dav(&self, root: &Root, request: Request<Body>, held: Held<'_>) -> Response {
-        let handler = match handler(root.to_string(), &request) {
-            Ok(handler) => handler,
-            Err(refusal) => return refusal.into_response(),
-        };
-        match root {
-            Root::Volume(name) => {
-                let volume = match self.volumes.open(name) {
-                    Ok(volume) => Arc::new(volume),
-                    Err(e) => return refused(status(&e), e).into_response(),
-                };
-                let handler = handler
-                    .filesystem(Box::new(volume::Fs(volume)))
-                    .build_handler();
-                let conditional = request.headers().contains_key(http::header::IF_MATCH);
-                let _serial = match conditional {
-                    true => {
-                        let key = format!("volume:{name}");
-                        let serial =
-                            Arc::clone(self.serial.lock().unwrap().entry(key).or_default());
-                        Some(serial.lock_owned().await)
-                    }
-                    false => None,
-                };
-                lingering(request, |request| handler.handle(request))
-                    .await
-                    .map(Body::new)
-            }
-            Root::Snapshot(name) => {
-                let image = match self.load(name, held).await {
-                    Ok(image) => image,
-                    Err(refusal) => return refusal.into_response(),
-                };
-                let handler = handler.filesystem(Box::new(image.fs())).build_handler();
-                let response = lingering(request, |request| handler.handle(request)).await;
-                match image.save().await {
-                    Ok(()) => response.map(Body::new),
-                    Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-                }
-            }
-        }
-    }
-
-    /// The snapshot `name` read whole, its requests before this one done and nothing else
-    /// holding it: `404` for none here, `423` for one in use.
-    async fn load(&self, name: &str, held: Held<'_>) -> Result<snapshot::Image, Refusal> {
-        let snapshot = self
-            .snapshots
-            .open(name)
-            .map_err(|e| refused(snapshot_status(&e), e))?;
-        let serial = Arc::clone(
-            self.serial
-                .lock()
-                .unwrap()
-                .entry(name.to_owned())
-                .or_default(),
-        );
-        let serial = serial.lock_owned().await;
-        if held(name) {
-            return Err(refused(
-                StatusCode::LOCKED,
-                SnapshotError::InUse(name.to_owned()),
-            ));
-        }
-        snapshot::Image::load(snapshot, serial)
-            .await
-            .map_err(|e| refused(snapshot_status(&e), e))
     }
 }
 
@@ -367,19 +283,6 @@ fn status(e: &VolumeError) -> StatusCode {
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         },
         VolumeError::Source(_) | VolumeError::Origins(..) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-/// The status a request on a snapshot's files is refused with when opening or holding the
-/// snapshot fails with `e`.
-fn snapshot_status(e: &SnapshotError) -> StatusCode {
-    match e {
-        SnapshotError::InvalidName(_) => StatusCode::BAD_REQUEST,
-        SnapshotError::Unknown(_) => StatusCode::NOT_FOUND,
-        SnapshotError::InUse(_) => StatusCode::LOCKED,
-        SnapshotError::AlreadyExists(_) | SnapshotError::Fstree(_) | SnapshotError::Io { .. } => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
     }
 }
 

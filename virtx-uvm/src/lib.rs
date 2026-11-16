@@ -1,6 +1,6 @@
 //! Images, the machines provisioned from them, and the snapshots and registries around
 //! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client.
+//! run in each -- and the files of a volume or a sandbox, served to a client.
 
 mod files;
 mod fstree;

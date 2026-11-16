@@ -9,11 +9,11 @@
 //! ```text
 //! <root>/
 //!   snapshot/<name>.ext4        one per snapshot, under the name it was made with
-//!   snapshot/<name>.ext4.lock   what a machine over it, or a removal of it, holds
+//!   snapshot/<name>.ext4.lock   what a machine over it holds
 //! ```
 //!
 //! A writable ext4 takes one machine at a time, and nothing stops a second from opening it;
-//! the lock is the agreement that does. Whoever boots a snapshot or removes it locks it first.
+//! the lock is the agreement that does. Whoever boots a snapshot locks it first.
 //! The lock is on a file beside the disk, not on the disk: on Windows a lock is mandatory, and
 //! one on the disk would refuse the machine's own reads and writes.
 
@@ -29,9 +29,6 @@ use crate::fstree::{self, FsTree};
 pub enum Error {
     #[error("{0:?} is not a name: letters, digits, '.', '_' and '-', not starting with '.' or '-'")]
     InvalidName(String),
-
-    #[error("no snapshot here is named {0}")]
-    Unknown(String),
 
     #[error("a snapshot named {0} is already here")]
     AlreadyExists(String),
@@ -67,7 +64,7 @@ pub struct Snapshot {
     pub path: PathBuf,
 }
 
-/// A snapshot held for one machine or one removal, against every other in this process or
+/// A snapshot held for one machine, against every other in this process or
 /// any other, until this drops -- or the process holding it ends.
 #[derive(Debug)]
 pub struct Lock(#[allow(dead_code)] File);
@@ -120,27 +117,6 @@ impl Snapshot {
         }
     }
 
-    /// Whether anything holds it now.
-    pub fn in_use(&self) -> Result<bool> {
-        match self.lock() {
-            Ok(_) => Ok(false),
-            Err(Error::InUse(_)) => Ok(true),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// The bytes it takes on this host: what was written to it, not the ceiling it was made
-    /// with, since the file is sparse.
-    pub fn size(&self) -> Result<u64> {
-        let metadata = fs::metadata(&self.path)
-            .map_err(|e| Error::io(format!("reading {}", self.path.display()), e))?;
-        #[cfg(unix)]
-        let size = std::os::unix::fs::MetadataExt::blocks(&metadata) * 512;
-        #[cfg(not(unix))]
-        let size = metadata.len();
-        Ok(size)
-    }
-
     /// Delete its disk and its lock, whoever holds them: for a snapshot nothing else names.
     pub(crate) fn delete(&self) {
         let _ = fs::remove_file(&self.path);
@@ -174,7 +150,7 @@ impl Store {
     /// Make an empty snapshot named `name`, that may hold up to `size` bytes. The size is a
     /// ceiling and not an allocation: the file is sparse.
     ///
-    /// Formatted beside its name and linked under it once whole, so a snapshot that is listed
+    /// Formatted beside its name and linked under it once whole, so a snapshot under its name
     /// is one that finished, and two creates of one name cannot both win.
     pub fn create(&self, name: &str, size: u64) -> Result<Snapshot> {
         let path = self.path(name)?;
@@ -209,57 +185,6 @@ impl Store {
             name: name.to_owned(),
             path,
         })
-    }
-
-    /// Snapshot `name`, which has to be here.
-    pub fn open(&self, name: &str) -> Result<Snapshot> {
-        let path = self.path(name)?;
-        match path.is_file() {
-            true => Ok(Snapshot {
-                name: name.to_owned(),
-                path,
-            }),
-            false => Err(Error::Unknown(name.to_owned())),
-        }
-    }
-
-    /// Every snapshot here, in no set order.
-    pub fn list(&self) -> Result<Vec<Snapshot>> {
-        let dir = self.root.join("snapshot");
-        let mut snapshots = Vec::new();
-        for entry in
-            fs::read_dir(&dir).map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
-        {
-            let path = entry
-                .map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
-                .path();
-            if path.extension().is_none_or(|e| e != "ext4") {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if crate::is_name(name) {
-                snapshots.push(Snapshot {
-                    name: name.to_owned(),
-                    path: path.clone(),
-                });
-            }
-        }
-        Ok(snapshots)
-    }
-
-    /// Delete snapshot `name`, and everything a machine wrote to it -- refused while a machine
-    /// runs over it.
-    pub fn remove(&self, name: &str) -> Result<()> {
-        let snapshot = self.open(name)?;
-        // Held until the disk is gone, so nothing boots it in between.
-        let lock = snapshot.lock()?;
-        fs::remove_file(&snapshot.path)
-            .map_err(|e| Error::io(format!("removing {}", snapshot.path.display()), e))?;
-        drop(lock);
-        let _ = fs::remove_file(snapshot.lock_path());
-        Ok(())
     }
 
     /// Snapshot `name`'s disk, refused unless `name` [is one](crate::is_name).
@@ -307,25 +232,13 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_is_there_until_it_is_removed() {
-        let scratch = Scratch::new("remove");
-        let store = &scratch.0;
-        let one = store.create("one", Snapshot::SIZE).unwrap();
-        let two = store.create("two", Snapshot::SIZE).unwrap();
-        assert_eq!(store.open("one").unwrap(), one);
+    fn a_name_is_made_once() {
+        let scratch = Scratch::new("once");
+        scratch.0.create("one", Snapshot::SIZE).unwrap();
         assert!(matches!(
-            store.create("one", Snapshot::SIZE),
+            scratch.0.create("one", Snapshot::SIZE),
             Err(Error::AlreadyExists(_))
         ));
-
-        let mut listed = store.list().unwrap();
-        listed.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(listed, [one, two.clone()]);
-
-        store.remove("one").unwrap();
-        assert!(matches!(store.remove("one"), Err(Error::Unknown(_))));
-        assert!(matches!(store.open("one"), Err(Error::Unknown(_))));
-        assert_eq!(store.list().unwrap(), [two]);
     }
 
     #[test]
@@ -343,38 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_in_use_is_not_removed() {
+    fn a_snapshot_is_held_by_one_at_a_time() {
         let scratch = Scratch::new("lock");
-        let store = &scratch.0;
-        let snapshot = store.create("held", Snapshot::SIZE).unwrap();
-        assert!(!snapshot.in_use().unwrap());
-
+        let snapshot = scratch.0.create("held", Snapshot::SIZE).unwrap();
         let held = snapshot.lock().unwrap();
         assert!(matches!(snapshot.lock(), Err(Error::InUse(name)) if name == "held"));
-        assert!(snapshot.in_use().unwrap());
-        assert!(matches!(store.remove("held"), Err(Error::InUse(_))));
-        assert_eq!(
-            store.list().unwrap(),
-            std::slice::from_ref(&snapshot),
-            "the lock was listed"
-        );
-
         drop(held);
-        store.remove("held").unwrap();
-        assert!(
-            fs::read_dir(store.root().join("snapshot"))
-                .unwrap()
-                .next()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn a_part_formatted_snapshot_is_not_listed() {
-        let scratch = Scratch::new("part");
-        let store = &scratch.0;
-        let part = store.path("half").unwrap().with_extension("ext4.part");
-        fs::write(part, b"half").unwrap();
-        assert!(store.list().unwrap().is_empty());
+        snapshot.lock().unwrap();
     }
 }

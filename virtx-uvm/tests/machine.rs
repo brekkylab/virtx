@@ -4,7 +4,7 @@
 //! `main` of its own: spawned with `vm`, it becomes the machine; otherwise it runs each test.
 //! `cargo xtask test -p virtx-uvm` signs it and puts the guest kernel beside it, which a
 //! machine needs. The images are pulled once, into a store every test shares; each test keeps
-//! its snapshots and volumes under a home of its own.
+//! its sandboxes' snapshots and its volumes under a home of its own.
 
 use std::{
     env,
@@ -20,8 +20,7 @@ use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::{
-    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
-    VolumeStore,
+    ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -30,11 +29,8 @@ const MACHINE: &str = "vm";
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
-/// A snapshot's size here: a ceiling, the file sparse.
-const GIB: u64 = 1 << 30;
-
-/// The stores a test makes its sandboxes of: the images every test shares, and snapshots and
-/// volumes under a home of its own, removed when this drops.
+/// The stores a test makes its sandboxes of: the images every test shares, and the snapshots
+/// its sandboxes make and its volumes under a home of its own, removed when this drops.
 struct Home {
     root: PathBuf,
     images: ImageStore,
@@ -54,8 +50,7 @@ impl Home {
         }
     }
 
-    /// A sandbox as `args` asks, its machine stopped once it has been idle for `park_after`;
-    /// no other sandbox is taken to hold a snapshot.
+    /// A sandbox as `args` asks, its machine stopped once it has been idle for `park_after`.
     async fn sandbox(
         &self,
         args: &SandboxCreateArgs,
@@ -66,7 +61,6 @@ impl Home {
             &self.images,
             &self.snapshots,
             &self.volumes,
-            |_| false,
             args,
             vm,
             park_after,
@@ -184,45 +178,11 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     assert_eq!(left, 0);
 }
 
-async fn a_parked_sandbox_holds_its_snapshot_against_another(home: Home) {
-    home.snapshots.create("work", GIB).unwrap();
-    let on_work = SandboxCreateArgs::new(ALPINE).snapshot("work");
-    let park = Some(Duration::from_millis(500));
-    let sandbox = home.sandbox(&on_work, park).await;
-    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
-        .await
-        .unwrap();
-
-    // Its machine stopped, the snapshot is still the sandbox's, to a sandbox no one told of it,
-    // as one over the same home in another process is.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
-    let other = Sandbox::create(
-        &home.images,
-        &home.snapshots,
-        &home.volumes,
-        |_| false,
-        &on_work,
-        vm,
-        None,
-    );
-    assert!(other.await.is_err());
-    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
-    assert_eq!(lines, ["kept"]);
-
-    // Closed, it lets it go.
-    close(sandbox).await;
-    let again = home.sandbox(&on_work, None).await;
-    close(again).await;
-}
-
-async fn a_sandbox_closed_while_its_machine_stops_has_synced(home: Home) {
+async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
     // The machine is parked about 500 ms after its last job ends, and syncs for a hundred or
-    // so: one close per delay across that, each a sandbox on a snapshot of its own.
+    // so: one close per delay across that.
     for delay in (450..=700).step_by(50) {
-        let name = format!("work-{delay}");
-        home.snapshots.create(&name, GIB).unwrap();
-        let args = SandboxCreateArgs::new(ALPINE).snapshot(&name);
+        let args = SandboxCreateArgs::new(ALPINE);
         let sandbox = home.sandbox(&args, Some(Duration::from_millis(500))).await;
         // Left in the guest's page cache, so stopping the machine takes the while it syncs.
         let big = ["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=256"];
@@ -230,46 +190,11 @@ async fn a_sandbox_closed_while_its_machine_stops_has_synced(home: Home) {
 
         tokio::time::sleep(Duration::from_millis(delay)).await;
         close(sandbox).await;
-        // The next machine over the snapshot sees all it wrote.
-        let next = home.sandbox(&args, None).await;
-        let (lines, _) = run(&next, &["stat", "-c", "%s", "/root/big"], None)
-            .await
-            .unwrap();
-        assert_eq!(lines, [(256 << 20).to_string()], "closed after {delay} ms");
-        close(next).await;
+        let left = std::fs::read_dir(home.root.join("sandbox"))
+            .unwrap()
+            .count();
+        assert_eq!(left, 0, "closed after {delay} ms");
     }
-}
-
-async fn a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed(home: Home) {
-    home.snapshots.create("work", GIB).unwrap();
-    let args = SandboxCreateArgs::new(ALPINE).snapshot("work");
-    let sandbox = home.sandbox(&args, None).await;
-    // Synced, so committed, and then killed with the snapshot still mounted.
-    let write = "mkdir /root/kept && for i in $(seq 100); do echo $i > /root/kept/$i; done \
-                 && sync && echo synced";
-    let (lines, _) = run(&sandbox, &["sh", "-c", write], None).await.unwrap();
-    assert_eq!(lines, ["synced"]);
-    close(sandbox).await;
-
-    let path = home.root.join("snapshot/work.ext4");
-    let image = std::fs::read(&path).unwrap();
-    let incompat = u32::from_le_bytes(image[1024 + 0x60..1024 + 0x64].try_into().unwrap());
-    assert_ne!(incompat & 0x4, 0, "left needing its journal replayed");
-    let tree = FsTree::from_ext4(std::fs::File::open(&path).unwrap()).unwrap();
-    let kept = tree
-        .walk()
-        .into_iter()
-        .filter(|(path, ..)| path.starts_with(b"upper/root/kept/"))
-        .count();
-    assert_eq!(kept, 100);
-
-    // And the next machine over it finds the same.
-    let sandbox = home.sandbox(&args, None).await;
-    let (lines, _) = run(&sandbox, &["cat", "/root/kept/100"], None)
-        .await
-        .unwrap();
-    assert_eq!(lines, ["100"]);
-    close(sandbox).await;
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -429,9 +354,7 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
-        a_parked_sandbox_holds_its_snapshot_against_another,
-        a_sandbox_closed_while_its_machine_stops_has_synced,
-        a_snapshot_a_killed_machine_left_reads_as_its_kernel_committed,
+        a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

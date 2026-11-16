@@ -9,8 +9,8 @@ A sandbox's files can be read and written from your code directly, without a com
 A path is the path in the guest without its leading `/`: `etc/hostname` is `/etc/hostname`.
 
 <Aside type="note">
-A [snapshot](/docs/guides/keeping-snapshots/) and a [volume](/docs/guides/mounting-volumes/) share this file API with a sandbox.
-Every call on this page works on them the same way, each on its own files, and needs no sandbox running.
+A [volume](/docs/guides/mounting-volumes/) shares this file API with a sandbox.
+Every call on this page works on it the same way, on its own files, and needs no sandbox running.
 </Aside>
 
 ## Put a file in, and get one out
@@ -155,4 +155,4 @@ If something changed it in between, the write is refused with `412`, and nothing
 ## Reading while the sandbox is stopped
 
 A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
-To read the output of a task that is done, keep it in a snapshot and read it from there instead, with no VM at all; see [Keeping work in snapshots](/docs/guides/keeping-snapshots/#read-what-it-made).
+To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/guides/mounting-volumes/).

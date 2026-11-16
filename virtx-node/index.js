@@ -103,10 +103,6 @@ const SIGNATURES = {
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_list_snapshot: PLAIN,
-  virtx_client_create_snapshot: WITH_ARGS,
-  virtx_client_get_snapshot: WITH_ARGS,
-  virtx_client_remove_snapshot: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_get_volume: WITH_ARGS,
@@ -605,19 +601,6 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  async listSnapshot() {
-    const infos = await this._call('virtx_client_list_snapshot')
-    return infos.map((info) => new Snapshot(this, info))
-  }
-
-  async createSnapshot(name, diskGib) {
-    return new Snapshot(this, await this._call('virtx_client_create_snapshot', { name, diskGib }))
-  }
-
-  async getSnapshot(name) {
-    return new Snapshot(this, await this._call('virtx_client_get_snapshot', { name }))
-  }
-
   async listVolume() {
     const infos = await this._call('virtx_client_list_volume')
     return infos.map((info) => new Volume(this, info))
@@ -636,13 +619,12 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
-  // `snapshot` and each of `volumes`' `volume` are a handle or its name.
+  // Each of `volumes`' `volume` is a handle or its name.
   async createSandbox(image, options = {}) {
-    const { snapshot, volumes } = options
+    const { volumes } = options
     const info = await this._call('virtx_client_create_sandbox', {
       ...options,
       image: imageName(image),
-      snapshot: snapshot instanceof Snapshot ? snapshot.name : snapshot,
       volumes: volumes?.map((v) => (v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v)),
     })
     return new Sandbox(this, info)
@@ -714,8 +696,8 @@ function held(handle, client, info) {
   Object.assign(handle, info)
 }
 
-// The files of a volume, a snapshot or a sandbox, at its `_root`, the `{ volume }`,
-// `{ snapshot }` or `{ sandbox }` each request names. A path is relative to the root, as
+// The files of a volume or a sandbox, at its `_root`, the `{ volume }` or `{ sandbox }` each
+// request names. A path is relative to the root, as
 // `dir/file.txt`.
 class Files {
   _call(name, args, raw = false) {
@@ -859,26 +841,8 @@ class Volume extends Files {
   }
 }
 
-// A snapshot the server holds (`name`, `size`, `inUse`), and the client that reaches it: its
-// files, refused while a sandbox holds it. Dropping it leaves the snapshot; `remove` removes it.
-class Snapshot extends Files {
-  constructor(client, info) {
-    super()
-    held(this, client, info)
-  }
-
-  get _root() {
-    return { snapshot: this.name }
-  }
-
-  // Deletes it and its upper layer; refused with a `409` while a sandbox holds it.
-  async remove() {
-    await this.client._call('virtx_client_remove_snapshot', { name: this.name })
-  }
-}
-
-// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
-// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
+// A sandbox the server holds, as making it or asking for it answered (`id`, `image`, `running`,
+// `ports`), and the client that reaches it, to run processes in it and
 // read and write its files, its root as its processes see it. Dropping it leaves the sandbox;
 // `remove` removes it.
 class Sandbox extends Files {
@@ -914,7 +878,7 @@ class Sandbox extends Files {
     return new SandboxJob(this.client, this.id, info)
   }
 
-  // Stops it, ends its jobs and forgets it, keeping its snapshot and volumes.
+  // Stops it, ends its jobs and forgets it, with everything it wrote outside its volumes.
   async remove() {
     await this.client._call('virtx_client_remove_sandbox', { id: this.id })
   }
@@ -983,7 +947,6 @@ module.exports = {
   Recipe,
   Sandbox,
   SandboxJob,
-  Snapshot,
   StartedJob,
   VirtxError,
   Volume,

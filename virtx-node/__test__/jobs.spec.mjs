@@ -1,4 +1,4 @@
-// Images, snapshots, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
+// Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
 // against the fixture's `virtx-stdio`.
 
 import assert from 'node:assert/strict'
@@ -20,17 +20,6 @@ describe('against virtx-stdio', () => {
     client = Client.spawn(fixture().stdio)
   })
   afterEach(() => client.close())
-
-  test('a snapshot is created, got and removed', async () => {
-    const name = unique('made')
-    const snapshot = await client.createSnapshot(name, 1)
-    assert.equal(snapshot.name, name)
-    assert.equal(snapshot.inUse, false)
-    assert.deepEqual(await client.getSnapshot(name), snapshot)
-    assert.ok((await client.listSnapshot()).some((s) => s.name === name))
-    await snapshot.remove()
-    await assert.rejects(client.getSnapshot(name), { source: 'server', status: 404 })
-  })
 
   test('a volume is created and got', async () => {
     const name = unique('volume')

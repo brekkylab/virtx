@@ -13,8 +13,6 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
-| `/snapshots/` | [HTTP](#snapshots) | Snapshot CRUD |
-| `/snapshots/{name}/files/` | [WebDAV](#files) | The files in a snapshot |
 | `/volumes/` | [HTTP](#volumes) | Volume CRUD |
 | `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
 | `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
@@ -85,7 +83,7 @@ A `DELETE` answers `204 No Content` once what it names is gone.
 A request that fails is answered with an HTTP error status and a body:
 
 ```text
-{"error": {"code": "in_use", "message": "snapshot `dev` is held by a sandbox"}}
+{"error": {"code": "in_use", "message": "volume `dev` is mounted by a sandbox"}}
 ```
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
@@ -186,25 +184,6 @@ The server MAY remove an image job that has ended, once a time it chooses has pa
 `images` is the digest of each image it deleted, and `reclaimed` how many bytes that freed.
 It MAY leave what is too new to tell from what a running image job will point a reference at.
 
-### Snapshots
-
-A snapshot is the upper layer of a sandbox's root filesystem, kept under a name.
-A sandbox started on one begins with the changes in it, and writes into it.
-Its files are reached at [`/snapshots/{name}/files/`](#files).
-
-| Request | Body | Answer |
-| --- | --- | --- |
-| `GET /snapshots/` | | `200`, array of `{name, size, in_use}` |
-| `POST /snapshots/` | `{name?, disk_gib?}` | `201`, `{name, size, in_use}` |
-| `GET /snapshots/{name}` | | `200`, `{name, size, in_use}` |
-| `DELETE /snapshots/{name}` | | `204` |
-
-Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
-`disk_gib` is how much a sandbox standing on it may write over its image, in GiB; without it the server picks it, and `0` is refused.
-`size` is the bytes the upper layer takes on the server.
-`in_use` is whether a sandbox holds the snapshot now, from its `POST` until its `DELETE`.
-`DELETE` refuses a snapshot in use with `409`, `in_use`.
-
 ### Volumes
 
 A volume is storage kept under a name, apart from any sandbox, and mounted into sandboxes.
@@ -247,17 +226,16 @@ The mount is a directory it creates, not the root and not inside another mount, 
 
 ### Sandboxes
 
-A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), with [volumes](#volumes) mounted into it.
+A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it.
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, snapshot?, running, abins?}` |
-| `POST /sandboxes/` | `{image, snapshot?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, snapshot?, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, snapshot?, running, abins?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?}` |
+| `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `snapshot` is the snapshot, by name, that is its root filesystem's upper layer. Without one its writes go when it does.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
@@ -267,7 +245,7 @@ A sandbox is a VM booted from an image, optionally on a [snapshot](#snapshots), 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; its snapshot and volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM, ends every job in it as a cancellation does, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
@@ -368,10 +346,10 @@ A request that fails is answered with the specification's error codes, in its `{
 
 ## Files
 
-The files in a volume are reached at `/volumes/{name}/files/`, those in a snapshot at `/snapshots/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
-The path after the root is the file's path in the volume, snapshot or sandbox, each segment percent-encoded.
+The files in a volume are reached at `/volumes/{name}/files/` and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
+The path after the root is the file's path in the volume or sandbox, each segment percent-encoded.
 A client resolves a path's `.` and `..` segments before it sends it, as a file's path is read: empty segments are dropped, and each `..` takes the segment before it, so `a/../b` and `a//../b` are both sent as `b`; a path that goes above the root is not sent.
-The server refuses with `400 Bad Request` a path, or the `Destination` of a `MOVE` or `COPY` up to its `?` or `#`, with a `.` or `..` segment, plain or percent-encoded, `/` and `\` both separating segments; and one that is not in the root (of a URL, its path alone, with consecutive slashes taken as one). It does so before anything in the volume, snapshot or sandbox is touched.
+The server refuses with `400 Bad Request` a path, or the `Destination` of a `MOVE` or `COPY` up to its `?` or `#`, with a `.` or `..` segment, plain or percent-encoded, `/` and `\` both separating segments; and one that is not in the root (of a URL, its path alone, with consecutive slashes taken as one). It does so before anything in the volume or sandbox is touched.
 
 The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
@@ -389,9 +367,9 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
 - `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
-- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume, snapshot or sandbox is removed through [Resources](#resources).
-- `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `400 Bad Request`.
-- A request naming a volume, snapshot or sandbox that does not exist is answered `404 Not Found`.
+- `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume or sandbox is removed through [Resources](#resources).
+- `MOVE` and `COPY` take a `Destination` in the same volume or sandbox, and refuse any other with `400 Bad Request`.
+- A request naming a volume or sandbox that does not exist is answered `404 Not Found`.
 
 ### A sandbox's files
 
@@ -403,5 +381,3 @@ A sandbox's files are its root filesystem as its processes see it, the volumes m
 - A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.
-
-A snapshot in use, held by a sandbox from its `POST` until its `DELETE` or its reclaiming, is answered `423 Locked` to every request, reads included: its files are the sandbox's until then.

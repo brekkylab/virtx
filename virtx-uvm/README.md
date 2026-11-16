@@ -98,7 +98,7 @@ stacked over it by [`machine`](src/machine/):
 /dev/vda  erofs, read-only   the image's disk              ─┘
 ```
 
-A sandbox made without a snapshot gets one of its own, gone with it. A sandbox's machine is
+Each sandbox makes a snapshot of its own, gone with it. A sandbox's machine is
 stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
 unless it says otherwise, `0` for never) and booted again over the same snapshot when something
 does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
@@ -1027,9 +1027,9 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
   bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
                         beside them, libvirtx_core, abin/, alib/
   images/               the image store, shared by both servers
-  snapshot/             the stdio server's snapshots, one ext4 each
+  sandbox/              the stdio server's sandboxes' snapshots, one ext4 each
   volume/               the stdio server's volumes
-  project/<name>/       the HTTP server's, a snapshot/ and a volume/ per project; its config's
+  project/<name>/       the HTTP server's, a sandbox/ and a volume/ per project; its config's
                         `home` moves the whole of it
 ```
 

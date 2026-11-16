@@ -56,6 +56,8 @@ const CHUNK: usize = 64 << 10;
 pub struct ForwardError {
     /// For a person: the port, and what the server answered.
     pub message: String,
+    /// Where it failed: the server, where it refused the WebSocket; the transport otherwise.
+    pub source: crate::Source,
     /// The HTTP status the server refused the WebSocket with, if it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
@@ -68,6 +70,7 @@ impl ForwardError {
     fn new(message: impl Into<String>) -> ForwardError {
         ForwardError {
             message: message.into(),
+            source: crate::Source::Transport,
             status: None,
             code: None,
         }
@@ -132,10 +135,11 @@ impl PortForwarder {
                     .await
                 }
                 // Its message would quote the URL, which is secret.
-                Err(e) => Err(format!("a port's URL that does not read as one: {e}")),
+                Err(e) => Err(Error::Client(format!(
+                    "a port's URL that does not read as one: {e}"
+                ))),
             },
         }
-        .map_err(Error::Transport)
     }
 
     /// Where the port is reached: on this machine's loopback.
@@ -161,16 +165,16 @@ impl PortForwarder {
     }
 
     /// The loopback address a server on this machine answered, as `http://127.0.0.1:54123`.
-    async fn direct(url: &str) -> Result<PortForwarder, String> {
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+    async fn direct(url: &str) -> Result<PortForwarder, Error> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
         let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
-            return Err(format!("{url} names no host and port"));
+            return Err(Error::Client(format!("{url} names no host and port")));
         };
         let address = tokio::net::lookup_host((host, port))
             .await
-            .map_err(|e| format!("{url}: {e}"))?
+            .map_err(|e| Error::Transport(format!("{url}: {e}")))?
             .next()
-            .ok_or_else(|| format!("{url} is no address"))?;
+            .ok_or_else(|| Error::Transport(format!("{url} is no address")))?;
         Ok(PortForwarder {
             address,
             _forwarding: None,
@@ -188,13 +192,12 @@ impl PortForwarder {
         headers: Shared<HeaderMap>,
         url: reqwest::Url,
         port: Option<u16>,
-    ) -> Result<PortForwarder, String> {
+    ) -> Result<PortForwarder, Error> {
+        let opening = |e: std::io::Error| Error::Client(format!("opening a loopback port: {e}"));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .map_err(|e| format!("opening a loopback port: {e}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|e| format!("opening a loopback port: {e}"))?;
+            .map_err(opening)?;
+        let address = listener.local_addr().map_err(opening)?;
         let failures = Arc::new(Failures {
             port: match port {
                 Some(port) => format!("port {port}, forwarded at {address}"),
@@ -296,6 +299,7 @@ async fn open(
                 .await;
         return Err(ForwardError {
             message: format!("its WebSocket was refused: {refusal}"),
+            source: refusal.source_kind(),
             status: refusal.status(),
             code: refusal.code().map(str::to_owned),
         });
@@ -723,9 +727,7 @@ mod ffi {
         let args = unsafe { json::<PortForwarderArgs>(args, args_len) };
         let opened = unsafe { &(*client).0 }.block_on(|client| async move {
             let args = args?;
-            PortForwarder::open(&client.inner, &args.url, args.port)
-                .await
-                .map_err(|e| e.to_string())
+            PortForwarder::open(&client.inner, &args.url, args.port).await
         });
         let output = opened.map(|opened| {
             let address = opened.address().to_string();

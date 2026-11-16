@@ -15,7 +15,7 @@ use virtx_core::{
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
     ImageUploadOutput, InboundRule, LogEntry, Metadata, MountSource, PortInbound, Recipe,
     RegistryAuth, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, Source,
     VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
@@ -146,7 +146,10 @@ impl Client {
             ));
         }
         let url = url.ok_or_else(|| {
-            Error::Call("VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned())
+            Error::Call(
+                Source::Client,
+                "VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned(),
+            )
         })?;
         let auth = match (key, &org) {
             (Some(token), _) => Auth::Bearer { token },

@@ -29,8 +29,8 @@
 // Succeeded: the output, as JSON, is written.
 #define VIRTX_OK 0
 
-// Failed: the error is written, as `{"message": "...", "status": 404}`, `status` only for a
-// request the server refused with that HTTP status.
+// Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
+// `source` where it failed, `status` only for a request the server refused with it.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.
@@ -247,8 +247,8 @@ struct VirtxFuture *virtx_client_remove_image_job(struct VirtxClient *client,
 // The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
 // its start, or after its `after`th entry. Its items are the entries, each with its number
 // beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
-// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
-// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` last, or, if the
+// job failed, its error in that entry's place. Freeing it leaves the job as it is.
 //
 // # Safety
 //
@@ -576,7 +576,7 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // `{"image": {...}, "name": "...", "ephemeral": bool, "auto_stop_minutes": n,
 // "auto_delete_days": n, "disk_gib": n, "network": bool, "ports": [n],
 // "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`,
+// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // `auto_delete_days` `null` to keep it until it is deleted, the image as
 // `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the

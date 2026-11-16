@@ -205,6 +205,7 @@ pub(crate) unsafe fn take<T: DeserializeOwned>(
 #[derive(serde::Deserialize)]
 struct Failure {
     message: String,
+    source: virtx_core::Source,
     status: Option<u16>,
     #[serde(default)]
     code: Option<String>,
@@ -230,12 +231,15 @@ unsafe fn take_with<T>(
                     message,
                     status: Some(status),
                     code,
+                    ..
                 }) => Error::Status {
                     status,
                     code,
                     message,
                 },
-                Ok(Failure { message, .. }) => Error::Call(message),
+                Ok(Failure {
+                    message, source, ..
+                }) => Error::Call(source, message),
                 Err(e) => Error::Json(e.to_string()),
             }),
             other => Err(Error::Library(format!("unknown status {other}"))),

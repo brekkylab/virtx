@@ -2,8 +2,9 @@
 
 A job, an image's build, pull, push or commit or a process in a sandbox, runs on the server
 apart from the request that started it. Its log is read with the job's ``log``, from its start
-or after an entry's ``id``, until its end entry. A request that starts one answers a
-``StartedJob``: awaited, the job; iterated, its log.
+or after an entry's ``id``, until its end entry, or the ``VirtxError`` it failed with. A request
+that starts one answers a ``StartedJob``: awaited, the job; iterated, its log; or followed to its
+end with ``complete``.
 """
 
 from __future__ import annotations
@@ -11,10 +12,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
 J = TypeVar("J")
 E = TypeVar("E")
+T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+
+
+class _Completes(Protocol[T_co]):
+    """A job, which ``complete`` follows to its end."""
+
+    def complete(self, print: bool = False) -> Awaitable[T_co]: ...
 
 
 @dataclass(frozen=True)
@@ -34,8 +43,9 @@ class Truncated:
 class StartedJob(Generic[J, E]):
     """A request that starts a job, sent the first time this is awaited or iterated, and only
     then: awaited, it answers the job; iterated, it yields the job's log, each a ``LogEntry``,
-    until its end entry. Both ways read the one job it started. Closing the iteration leaves
-    the job running; cancelling it is the client's ``remove_*_job``.
+    until its end entry; ``complete``, the job's own ``complete`` once started. Each way reads
+    the one job it started. Closing the iteration leaves the job running; cancelling it is the
+    client's ``remove_*_job``.
 
     Given ``run``, one iterated before it is awaited starts the job and reads its log as one:
     ``run`` yields the job first, then the log's entries."""
@@ -55,6 +65,10 @@ class StartedJob(Generic[J, E]):
         if self._job is None:
             self._job = asyncio.ensure_future(self._start())
         return self._job.__await__()
+
+    async def complete(self: StartedJob[_Completes[T], E], print: bool = False) -> T:
+        """Start the job and follow it to its end, as its ``complete`` does."""
+        return await (await self).complete(print=print)
 
     async def __aiter__(self) -> AsyncIterator[LogEntry[E]]:
         if self._job is None and self._run is not None:

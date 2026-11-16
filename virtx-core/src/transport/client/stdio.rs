@@ -18,6 +18,7 @@ use tokio::{
 };
 
 use super::Body;
+use crate::Error;
 
 /// How long a server whose stdin is closed has to exit before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -88,15 +89,15 @@ impl Stdio {
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,
-    ) -> Result<http::Response<Body>, String> {
-        let mut sender = self.sender.clone().await?;
-        let gone = |e: hyper::Error| format!("the server is gone: {e}");
+    ) -> Result<http::Response<Body>, Error> {
+        let mut sender = self.sender.clone().await.map_err(Error::Transport)?;
+        let gone = |e: hyper::Error| Error::Transport(format!("the server is gone: {e}"));
         sender.ready().await.map_err(gone)?;
         // The authority is not checked.
         let (mut parts, body) = request.into_parts();
         parts.uri = format!("http://virtx{}", parts.uri)
             .parse()
-            .map_err(|e| format!("{e}"))?;
+            .map_err(|e| Error::Client(format!("{}: {e}", parts.uri)))?;
         let request = http::Request::from_parts(parts, body);
         let response = sender.send_request(request).await.map_err(gone)?;
         Ok(response.map(|body| body.map_err(io::Error::other).boxed()))

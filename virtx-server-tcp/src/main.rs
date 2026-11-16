@@ -438,23 +438,24 @@ mod tests {
         let job = client.pull_image(&reference, None).await.unwrap();
         let mut log = client.image_job_log(&job.id, None);
         // A guard against a hang, not a measure of anything.
-        let end = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
-                if let ImageJobEntry::End(end) = log.next().await.unwrap().unwrap().entry {
-                    break end;
+                match log.next().await.unwrap() {
+                    Ok(entry) => assert!(!matches!(entry.entry, ImageJobEntry::End(_))),
+                    Err(failed) => break failed,
                 }
             }
         })
         .await
         .unwrap();
+        let virtx_core::Error::Job(why) = failed else {
+            panic!("{failed:?}");
+        };
         assert_eq!(
-            end.error.as_deref(),
-            Some(
-                format!(
-                    "{reference}: the registry is not reachable from this server: \
-                     it is not let through"
-                )
-                .as_str()
+            why,
+            format!(
+                "{reference}: the registry is not reachable from this server: \
+                 it is not let through"
             )
         );
         assert_eq!(

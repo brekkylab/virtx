@@ -184,6 +184,7 @@ impl Record {
                 true => self.opened.lock().unwrap().clone(),
                 false => Vec::new(),
             },
+            abins: self.args.abins.clone(),
         }
     }
 }

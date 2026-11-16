@@ -44,9 +44,11 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null, code = null) {
+  constructor(message, status = null, body = null, code = null, source = 'client') {
     super(message)
     this.name = 'VirtxError'
+    // Where it failed: `server`, `job`, `transport` or `client`.
+    this.source = source
     // The HTTP status the server refused the request with, if it did.
     this.status = status
     // The protocol's code it refused with, where it answered one: `not_found`, `stopped`,
@@ -217,6 +219,7 @@ class Library {
         failure.status ?? null,
         failure.body ?? null,
         failure.code ?? null,
+        failure.source,
       )
     }
     throw new VirtxError(`unknown status ${status}`)
@@ -366,9 +369,9 @@ class Recipe {
   }
 }
 
-// A job as it starts: a promise of the job, and an async iterable of its log's entries, read once
-// the job has started, until its `end` entry. The job starts when it is made, once however it is
-// used; leaving the loop leaves the job running.
+// A job as it starts: a promise of the job, an async iterable of its log's entries, read once the
+// job has started, until its `end` entry, and `complete`, the job's own once started. The job
+// starts when it is made, once however it is used; leaving the loop leaves the job running.
 class StartedJob extends Promise {
   // `then` and the rest answer plain promises.
   static get [Symbol.species]() {
@@ -403,6 +406,10 @@ class StartedJob extends Promise {
   then(resolved, rejected) {
     this._start?.()
     return super.then(resolved, rejected)
+  }
+
+  async complete(options) {
+    return (await this).complete(options)
   }
 
   async *[Symbol.asyncIterator]() {
@@ -914,9 +921,19 @@ class ImageJob {
   }
 
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
-  // entry.
+  // entry, or throwing the error it failed with in that entry's place.
   log(after) {
     return this.client._items('virtx_client_image_job_log', { id: this.id, after })
+  }
+
+  // Follows it to its end, each line of its log printed if `print`: the digest it ended with.
+  async complete({ print = false } = {}) {
+    for await (const entry of this.log()) {
+      if ('log' in entry && print) console.log(entry.log)
+      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('end' in entry) return entry.end.digest
+    }
+    throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
   }
 
   // Cancels it if it runs, and forgets it.
@@ -1141,6 +1158,18 @@ class SandboxJob {
       job: this.id,
       after,
     })
+  }
+
+  // Follows it to its end, what its process writes to stdout and stderr printed there if
+  // `print`: its exit code, `128 + signal` for one a signal ended.
+  async complete({ print = false } = {}) {
+    for await (const entry of this.log()) {
+      if ('stdout' in entry && print) console.log(entry.stdout)
+      else if ('stderr' in entry && print) console.error(entry.stderr)
+      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('end' in entry) return entry.end.code
+    }
+    throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
   }
 
   // Cancels it if it runs, killing its process, and forgets it.

@@ -138,7 +138,7 @@ pub(crate) fn exec_log<'a>(
     args: &SandboxExecArgs,
 ) -> impl Stream<Item = Result<SandboxExecItem, Error>> + Send + use<'a> {
     let (id, path) = (id.to_owned(), format!("{}/jobs/exec/", sandbox(id)));
-    let body = serde_json::to_vec(args).map_err(|e| Error::Json(e.to_string()));
+    let body = serde_json::to_vec(args).map_err(|e| Error::Client(e.to_string()));
     async_stream::try_stream! {
         let request = ::http::Request::post(&path)
             .header(header::CONTENT_TYPE, "application/json")
@@ -169,7 +169,7 @@ pub(crate) fn exec_log<'a>(
             .get(JOB_HEADER)
             .and_then(|j| j.to_str().ok())
             .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
-            .and_then(|j| serde_json::from_str(j).map_err(|e| Error::Json(e.to_string())))?;
+            .and_then(|j| serde_json::from_str(j).map_err(|e| Error::Client(e.to_string())))?;
         // Its log, from this answer; and, where the connection breaks, from the job's log
         // after the last entry read.
         let at = format!("{}/events", self::job(&id, &job.id));

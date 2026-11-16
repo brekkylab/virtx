@@ -11,7 +11,7 @@ use std::{
 
 use virtx::{
     Error, InboundRule, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPortOpenArgs,
+    SandboxPortOpenArgs, Source,
 };
 
 mod common;
@@ -150,7 +150,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
         until(|| forwarder.last_error().is_some()),
         "no error was kept"
     );
-    let Some(Error::Call(failed)) = forwarder.last_error() else {
+    let Some(Error::Call(Source::Transport, failed)) = forwarder.last_error() else {
         panic!("{:?}", forwarder.last_error());
     };
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());

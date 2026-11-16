@@ -5,7 +5,7 @@ use virtx_core::{
     SandboxExecArgs, SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort,
 };
 
-use crate::{Call, Client, Events, ImageJob, StartedJob, files};
+use crate::{Call, Client, Error, Events, ImageJob, JobEnd, StartedJob, files, job::sealed::Ends};
 
 /// A sandbox the server holds, as making, finding or asking for it answered, and the client
 /// that reaches it: what is needed to start and stop it, run processes in it, open its ports,
@@ -206,9 +206,44 @@ impl SandboxJob {
             .sandbox_job_log(&self.sandbox, &self.info.id, after)
     }
 
+    /// Follow it to its end, printing what its process writes to stdout and stderr as it
+    /// wrote them if `print`: its exit status, `128 + signal` for one a signal ended.
+    pub fn complete(&self, print: bool) -> JobEnd<SandboxJob> {
+        JobEnd::new(self.log(None), print)
+    }
+
     /// Cancel it if it runs, killing its process, and forget it.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox_job(&self.sandbox, &self.info.id)
+    }
+}
+
+impl Ends for SandboxJob {
+    type Entry = SandboxJobEntry;
+    type Output = i32;
+
+    fn ended(entry: SandboxJobEntry, print: bool) -> Option<Result<i32, Error>> {
+        match entry {
+            SandboxJobEntry::Stdout(line) => {
+                if print {
+                    println!("{line}");
+                }
+                None
+            }
+            SandboxJobEntry::Stderr(line) => {
+                if print {
+                    eprintln!("{line}");
+                }
+                None
+            }
+            SandboxJobEntry::Truncated {} => {
+                if print {
+                    eprintln!("(the log reached the server's limit; the rest is not kept)");
+                }
+                None
+            }
+            SandboxJobEntry::End(end) => Some(Ok(end.code)),
+        }
     }
 }
 

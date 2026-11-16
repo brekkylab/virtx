@@ -230,9 +230,15 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .wait()
         .unwrap();
     let on_handles = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).readonly_volume(volume.name(), "/data"))
+        .create_sandbox(
+            &SandboxCreateArgs::new(ALPINE)
+                .readonly_volume(volume.name(), "/data")
+                .abin("index"),
+        )
         .wait()
         .unwrap();
+    let got = client.get_sandbox(on_handles.id()).wait().unwrap();
+    assert_eq!(got.info().abins, ["index"]);
     on_handles.remove().wait().unwrap();
     volume.remove().wait().unwrap();
 

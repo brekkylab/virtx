@@ -129,7 +129,19 @@ impl Server {
         let mut log = self.client.image_job_log(&job.id, None);
         let mut lines = Vec::new();
         while let Some(entry) = log.next().await {
-            match entry.unwrap().entry {
+            // A job that failed ends with its error in place of its end entry.
+            let entry = match entry {
+                Ok(entry) => entry.entry,
+                Err(virtx_core::Error::Job(why)) => {
+                    let end = ImageJobEnd {
+                        digest: None,
+                        error: Some(why),
+                    };
+                    return (lines, end);
+                }
+                Err(e) => panic!("{e}"),
+            };
+            match entry {
                 ImageJobEntry::Log(line) => lines.push(line),
                 ImageJobEntry::End(end) => return (lines, end),
                 ImageJobEntry::Truncated {} => {}

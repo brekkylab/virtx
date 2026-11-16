@@ -30,7 +30,7 @@ address on this machine's loopback. What the library warns of, such as a forward
 that reached nothing, the ``virtx`` logger logs.
 """
 
-from ._library import LIBRARY_ENV, VirtxError, library_path, load
+from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
 from .client import DOMAIN, Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, Files, Metadata
 from .image import (
@@ -127,6 +127,7 @@ __all__ = [
     "SandboxPort",
     "SandboxState",
     "SandboxVolume",
+    "Source",
     "StartedJob",
     "Stderr",
     "Stdout",

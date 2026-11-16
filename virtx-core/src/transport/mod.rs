@@ -613,36 +613,36 @@ mod tests {
             // Over HTTP, the first would go as `DELETE /sandboxes/abc`.
             for path in ["../../../sandboxes/abc", "a/../../b", ".."] {
                 let error = files::remove(client, &data, path, false).await.unwrap_err();
-                assert!(matches!(error, Error::Path(_)), "{path}: {error:?}");
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
             }
             let error = files::rename(client, &data, "a", "../../other/files/a", true)
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             let error = files::create_dir_all(client, &data, "../a/b")
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             // A name is not a path: `..` there is not resolved.
             let error = files::remove(client, &FileRoot::Volume("..".into()), "a", false)
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             let error = volumes::remove(client, "..").await.unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             // A mount's path that resolves to the root would go to the list of mounts.
             for path in [".", "a/.."] {
                 let error = volumes::remove_mount(client, "data", path)
                     .await
                     .unwrap_err();
-                assert!(matches!(error, Error::Path(_)), "{path}: {error:?}");
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
             }
             // A path not built from segments, such as one a registry answers: `\` separates
             // segments in an `http` URL.
             let error = http::get::<String>(client, "/a\\..\\..\\b")
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
         }
     }

@@ -31,7 +31,7 @@ pub struct Sandbox {
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.
 ///
-/// The machine members (`vcpus`, `memory_mib`, `gpu`, `gpu_memory_mib`) each leave
+/// The machine members (`vcpus`, `memory_mib`, `disk_gib`, `gpu`, `gpu_memory_mib`) each leave
 /// it to the server without one. A server gives exactly what is asked or refuses; `0` for a
 /// number is refused, not another way to leave it out.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +56,11 @@ pub struct SandboxCreateArgs {
     /// Memory, in MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
+
+    /// How much it may write over its image, in GiB: the size of its writable layer, which
+    /// goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
 
     /// Whether it gets a GPU. `false` forbids one on a server that would attach one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,6 +103,7 @@ impl SandboxCreateArgs {
             ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
+            disk_gib: None,
             gpu: None,
             gpu_memory_mib: None,
             volumes: Vec::new(),
@@ -124,6 +130,11 @@ impl SandboxCreateArgs {
 
     pub fn memory_mib(mut self, mib: u32) -> Self {
         self.memory_mib = Some(mib);
+        self
+    }
+
+    pub fn disk_gib(mut self, gib: u32) -> Self {
+        self.disk_gib = Some(gib);
         self
     }
 
@@ -223,6 +234,7 @@ mod tests {
             .port(443)
             .vcpus(2)
             .memory_mib(512)
+            .disk_gib(8)
             .gpu(true)
             .gpu_memory_mib(256)
             .volume("a", "/a")
@@ -232,6 +244,7 @@ mod tests {
         expected.ports = vec![80, 443];
         expected.vcpus = Some(2);
         expected.memory_mib = Some(512);
+        expected.disk_gib = Some(8);
         expected.gpu = Some(true);
         expected.gpu_memory_mib = Some(256);
         expected.volumes = vec![

@@ -44,6 +44,7 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 |---|---|
 | files it shares with the host or later sandboxes | a volume, made with `create_volume`, in `volumes` as `SandboxVolume(volume, path, readonly)`, the `Volume` or its name |
 | files it must not change | the same, with `readonly=True` |
+| room to install more than 2 GiB over its image | `disk_gib=8`, or as much as it needs |
 | what it installs kept for the next sandbox | an image with it installed, built with `build_image`, as the image each sandbox is made of |
 | a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0].url)` |
 | no network | `network=False`; on unless turned off |

@@ -24,6 +24,7 @@ use crate::{
 /// A machine's size where a sandbox leaves it to the server.
 pub const DEFAULT_VCPUS: u8 = 4;
 pub const DEFAULT_MEMORY_MIB: u32 = 4096;
+pub const DEFAULT_DISK_GIB: u32 = 2;
 /// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
 const MIN_MEMORY_MIB: u32 = 64;
 
@@ -181,6 +182,11 @@ impl Sandbox {
                 volume.volume, volume.path
             )));
         }
+        if args.disk_gib == Some(0) {
+            return Err(Error::Invalid(
+                "disk_gib: 0 is a disk nothing fits on".into(),
+            ));
+        }
         for (what, given) in [
             ("vcpus", args.vcpus.map(u32::from)),
             ("gpu_memory_mib", args.gpu_memory_mib),
@@ -269,7 +275,8 @@ impl Sandbox {
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
         let dir = Upper::dir(root);
-        let upper = tokio::task::spawn_blocking(move || Upper::create(&dir)).await??;
+        let gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+        let upper = tokio::task::spawn_blocking(move || Upper::create(&dir, gib)).await??;
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
@@ -435,8 +442,8 @@ impl Sandbox {
     }
 
     /// Stop its machine for good, and end and remove every job in it, as cancelling each does.
-    /// Blocks while the guest puts what it wrote on its upper disk, and so must not be called on
-    /// an async runtime's thread.
+    /// Blocks while the guest shuts down, and so must not be called on an async runtime's
+    /// thread.
     pub fn close(&self) {
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
@@ -645,7 +652,7 @@ impl Upper {
         root.join("sandbox")
     }
 
-    fn create(dir: &Path) -> Result<Upper, Error> {
+    fn create(dir: &Path, gib: u32) -> Result<Upper, Error> {
         let io = |context: String| move |source| Error::Io { context, source };
         fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
         let (name, held) = loop {
@@ -660,7 +667,7 @@ impl Upper {
             owner: dir.join(format!("{name}.owner")),
             _held: held,
         };
-        crate::machine::create_upper(&upper.path)?;
+        crate::machine::create_upper(&upper.path, gib)?;
         Ok(upper)
     }
 

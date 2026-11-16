@@ -19,7 +19,9 @@ use std::{
 use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
-use virtx_uvm::{ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError, VolumeStore};
+use virtx_uvm::{
+    DEFAULT_DISK_GIB, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError, VolumeStore,
+};
 
 /// What this binary is spawned with to be a machine.
 const MACHINE: &str = "vm";
@@ -193,6 +195,27 @@ async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
     }
 }
 
+async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
+    let asked = [
+        (DEFAULT_DISK_GIB, SandboxCreateArgs::new(ALPINE)),
+        (8, SandboxCreateArgs::new(ALPINE).disk_gib(8)),
+    ];
+    for (gib, args) in asked {
+        let sandbox = home.sandbox(&args, None).await;
+        // The root is the overlay, whose size is its writable layer's.
+        let df = ["sh", "-c", "df -k / | tail -n 1 | awk '{print $2}'"];
+        let (lines, _) = run(&sandbox, &df, None).await.unwrap();
+        let kib: u64 = lines[0].parse().unwrap();
+        // Less what ext4 keeps for itself.
+        let size = u64::from(gib) << 20;
+        assert!(
+            kib <= size && kib > size * 9 / 10,
+            "{kib} KiB for {gib} GiB"
+        );
+        close(sandbox).await;
+    }
+}
+
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = SandboxCreateArgs::new(ALPINE);
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
@@ -351,6 +374,7 @@ fn main() -> ExitCode {
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
+        a_sandbox_s_writable_layer_is_as_large_as_asked,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

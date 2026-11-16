@@ -1516,7 +1516,7 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox, given
     /// `{"image": {...}, "network": bool, "ports": [n],
-    /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
+    /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the

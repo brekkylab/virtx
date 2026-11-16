@@ -26,8 +26,8 @@ pub use oci_spec::image::Digest;
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
 pub use sandbox::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
-    LOG_LIMIT, Sandbox, park_after, signal_number,
+    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
+    Job as SandboxJob, LOG_LIMIT, Sandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,

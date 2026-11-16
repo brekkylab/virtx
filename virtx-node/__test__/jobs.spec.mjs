@@ -32,7 +32,7 @@ describe('against virtx-stdio', () => {
 
   test('a command in a sandbox is a job whose log ends with its code', async () => {
     await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { abins: ['index'] })
+    const sandbox = await client.createSandbox(ALPINE, { diskGib: 4, abins: ['index'] })
     assert.equal(sandbox.running, true)
     assert.deepEqual(sandbox.abins, ['index'])
     assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])

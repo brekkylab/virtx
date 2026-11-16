@@ -415,6 +415,7 @@ class Client:
         ports: Iterable[int] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
+        disk_gib: int | None = None,
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
@@ -424,7 +425,8 @@ class Client:
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
         ``/abin/skills/{name}/``. ``ports`` are TCP ports in it to open, reserved as it is made
         and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
-        is left out the server picks.
+        is left out the server picks. ``disk_gib`` is how much it may write over its image, in
+        GiB, which goes with it.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
@@ -438,6 +440,7 @@ class Client:
                     ports=list(ports),
                     vcpus=vcpus,
                     memory_mib=memory_mib,
+                    disk_gib=disk_gib,
                     gpu=gpu,
                     gpu_memory_mib=gpu_memory_mib,
                     volumes=[

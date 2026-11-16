@@ -101,7 +101,8 @@ pub async fn build_step(
     let scratch = Scratch::new()?;
     let upper = scratch.0.join("layer.ext4");
     let made = upper.clone();
-    tokio::task::spawn_blocking(move || machine::create_upper(&made)).await??;
+    tokio::task::spawn_blocking(move || machine::create_upper(&made, crate::DEFAULT_DISK_GIB))
+        .await??;
 
     // From the root, as the guest's init would fail to go somewhere not there yet. Synced
     // before it is done, since the machine is killed after and what the guest had not put on

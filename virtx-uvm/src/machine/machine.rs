@@ -64,16 +64,14 @@ pub struct MachineConfig {
     pub ports: Vec<u16>,
 }
 
-/// How large an upper disk may grow: a ceiling and not an allocation, since the file is sparse.
-const UPPER_SIZE: u64 = 2 << 30;
-
-/// Make an empty upper disk at `path`, where nothing is yet: an ext4, since overlayfs takes
+/// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
+/// ceiling and not an allocation, since the file is sparse. An ext4, since overlayfs takes
 /// nothing else as an upper layer, formatted here rather than in the guest so that it works
 /// over an image nobody prepared. One that fails to format is removed.
-pub(crate) fn create_upper(path: &Path) -> Result<()> {
+pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
     let file =
         File::create_new(path).map_err(|e| Error::io(format!("creating {}", path.display()), e))?;
-    if let Err(e) = FsTree::new().to_ext4(sparse(file), UPPER_SIZE) {
+    if let Err(e) = FsTree::new().to_ext4(sparse(file), u64::from(gib) << 30) {
         let _ = std::fs::remove_file(path);
         return Err(e.into());
     }
@@ -456,12 +454,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("work.ext4");
-        create_upper(&path).unwrap();
+        create_upper(&path, 2).unwrap();
 
         let read = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
         let paths: Vec<_> = read.walk().into_iter().map(|(path, ..)| path).collect();
         assert_eq!(paths, [b"".to_vec(), b"lost+found".to_vec()]);
-        assert!(matches!(create_upper(&path), Err(Error::Io { .. })));
+        assert!(matches!(create_upper(&path, 2), Err(Error::Io { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

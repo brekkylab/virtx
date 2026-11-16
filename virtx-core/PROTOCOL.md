@@ -231,13 +231,13 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?}` |
-| `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
+| `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
 | `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `network` is whether its processes reach a network at all, and is `true` without it.
-- `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
+- `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.

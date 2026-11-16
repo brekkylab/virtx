@@ -9,3 +9,5 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 serde_json = "1"
+# The ID token the fixture's provider signs for the tests, and the key it is checked against.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }

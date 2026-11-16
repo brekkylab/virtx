@@ -19,6 +19,10 @@ use crate::volume::{DirentKind, Error, Stat, Volume};
 /// How much a `GET` reads at a time: each read opens the file again.
 pub(super) const READ: usize = 1 << 20;
 
+/// How much of a body is gathered before it is written: each write opens the file again, and a
+/// body comes in pieces far smaller.
+const WRITE: usize = 256 << 10;
+
 /// A volume's files for one request, with the [`Landing`] of a conditional `PUT`.
 #[derive(Clone)]
 pub(super) struct Fs {
@@ -36,6 +40,8 @@ struct File {
     saving: Option<String>,
     /// What a whole write is checked by as it lands, with a condition.
     landing: Option<Arc<Landing>>,
+    /// What has arrived and is not yet written, written a [`WRITE`] at a time.
+    pending: Vec<u8>,
     offset: u64,
     meta: Meta,
 }
@@ -106,6 +112,7 @@ impl DavFileSystem for Fs {
                 path,
                 landing: saving.as_ref().and(self.landing.clone()),
                 saving,
+                pending: Vec::new(),
                 offset: 0,
                 meta,
             }) as Box<dyn DavFile>)
@@ -189,6 +196,25 @@ impl DavFileSystem for Fs {
     }
 }
 
+impl File {
+    /// Write what is pending at the offset.
+    fn send(&mut self) -> Result<(), FsError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        self.volume
+            .write(
+                self.saving.as_deref().unwrap_or(&self.path),
+                &self.pending,
+                Some(self.offset),
+            )
+            .map_err(|e| refused(&e))?;
+        self.offset += self.pending.len() as u64;
+        self.pending.clear();
+        Ok(())
+    }
+}
+
 impl DavFile for File {
     fn metadata(&mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
         Box::pin(async move { Ok(Box::new(self.meta.clone()) as Box<dyn DavMetaData>) })
@@ -199,17 +225,15 @@ impl DavFile for File {
         self.write_bytes(bytes)
     }
 
+    /// Held until a [`WRITE`] has arrived, so a body's many small pieces go to the file as few
+    /// writes.
     fn write_bytes(&mut self, buf: Bytes) -> FsFuture<'_, ()> {
         Box::pin(async move {
-            self.volume
-                .write(
-                    self.saving.as_deref().unwrap_or(&self.path),
-                    &buf,
-                    Some(self.offset),
-                )
-                .map_err(|e| refused(&e))?;
-            self.offset += buf.len() as u64;
-            self.meta.len = self.meta.len.max(self.offset);
+            self.pending.extend_from_slice(&buf);
+            self.meta.len = self.meta.len.max(self.offset + self.pending.len() as u64);
+            if self.pending.len() >= WRITE {
+                self.send()?;
+            }
             Ok(())
         })
     }
@@ -228,6 +252,7 @@ impl DavFile for File {
 
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<'_, u64> {
         Box::pin(async move {
+            self.send()?;
             let offset = match pos {
                 SeekFrom::Start(n) => Some(n),
                 SeekFrom::End(n) => self.meta.len.checked_add_signed(n),
@@ -239,9 +264,10 @@ impl DavFile for File {
     }
 
     /// A whole write, all here now, goes over the path: with a condition, as its [`Landing`]
-    /// lets it.
+    /// lets it, once all of it is in the file, so the hold is only for the check and the move.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
+            self.send()?;
             let Some(saving) = self.saving.clone() else {
                 return Ok(());
             };
@@ -412,5 +438,38 @@ mod tests {
         let refused = fs.open(&DavPath::new("/no/c.txt").unwrap(), whole()).await;
         assert!(matches!(refused, Err(FsError::NotFound)), "{refused:?}");
         assert_eq!(names(&files), ["b.txt", "dir"]);
+    }
+
+    /// A body that comes in many small pieces, more than a [`WRITE`] of them, lands whole and
+    /// in order: what is gathered is written as it fills, and the rest when the file is flushed.
+    /// Until then, what was at the path is what is there.
+    #[tokio::test]
+    async fn a_body_in_many_pieces_lands_whole_and_in_order() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::new(scratch.path().join("volumes")).unwrap();
+        let fs = Fs {
+            volume: Arc::new(store.create("v").unwrap()),
+            landing: None,
+        };
+        fs.volume.write("a.bin", b"old", None).unwrap();
+        let whole = OpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            ..Default::default()
+        };
+        let path = DavPath::new("/a.bin").unwrap();
+        let body: Vec<u8> = (0..(3 * WRITE + 1234)).map(|i| (i % 251) as u8).collect();
+
+        let mut file = fs.open(&path, whole).await.unwrap();
+        for piece in body.chunks(4000) {
+            file.write_bytes(Bytes::copy_from_slice(piece))
+                .await
+                .unwrap();
+        }
+        assert_eq!(fs.volume.read("a.bin", 0, None).await.unwrap(), b"old");
+        file.flush().await.unwrap();
+        drop(file);
+        assert_eq!(fs.volume.read("a.bin", 0, None).await.unwrap(), body);
     }
 }

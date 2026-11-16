@@ -3387,6 +3387,7 @@ dependencies = [
  "libloading",
  "serde",
  "serde_json",
+ "tokio",
  "virtx-core",
 ]
 

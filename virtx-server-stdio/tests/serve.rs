@@ -970,21 +970,33 @@ async fn a_cancelled_build_takes_its_machine_with_it() {
             _ => {}
         }
     }
-    // A machine's process names the server's home on its command line, in its rootfs's path.
+    // A machine's process names the server's home on its command line, in its rootfs's path:
+    // on Windows, its name, as the path there is spelled with its backslashes escaped.
     let running = || {
-        std::process::Command::new("pgrep")
+        #[cfg(unix)]
+        let looked = std::process::Command::new("pgrep")
             .arg("-f")
             .arg(&server.home)
             .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
+            .status();
+        #[cfg(windows)]
+        let looked = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!(
+                "if (Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne $PID -and \
+                 $_.CommandLine -like '*{}*' }}) {{ exit 0 }} else {{ exit 1 }}",
+                server.home.file_name().unwrap().to_str().unwrap()
+            ))
+            .stdout(std::process::Stdio::null())
+            .status();
+        looked.unwrap().success()
     };
     assert!(running());
 
     server.client.remove_image_job(&job.id).await.unwrap();
     // Looked for a minute: what is tried is that it goes, not how soon.
-    for _ in 0..600 {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < until {
         if !running() {
             return;
         }

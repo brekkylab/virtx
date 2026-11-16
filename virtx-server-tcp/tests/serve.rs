@@ -1,14 +1,13 @@
 //! The built binary, served over a config of its own and called over HTTP as a client would:
 //! what its sandboxes' machines do, and what it keeps across a restart -- each test booting
 //! them, and so ignored but where `--include-ignored` asks. What is answered without a machine
-//! is the app's own tests, in `src/main.rs`.
+//! is the app's own tests, in `src/serve.rs`.
 
 use std::path::PathBuf;
 
 use futures_util::{SinkExt as _, StreamExt as _, TryStreamExt as _};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
@@ -57,11 +56,8 @@ impl Served {
             "listen": "127.0.0.1:0",
             "home": home,
             "origins": ["https://allowed.example"],
-            "users": {
-                "alice": { "token_sha256": sha256("a-token") },
-                "bob": { "token_sha256": sha256("b-token") },
-            },
-            "projects": { "demo": { "members": ["alice"] } },
+            // On the loopback and naming no provider: anyone reaches it, the token sent unread.
+            "projects": { "demo": {} },
         });
         for (key, value) in more.as_object().unwrap() {
             config[key] = value.clone();
@@ -123,9 +119,9 @@ impl Served {
         Client::connect(&self.url, auth, headers).unwrap()
     }
 
-    /// Pull `reference` from its registry into the store the server reads.
+    /// Pull `reference` from its registry into `demo`'s images.
     async fn pull_image(&self, reference: &str) {
-        let store = ImageStore::new(self.home.join("images")).unwrap();
+        let store = ImageStore::new(self.home.join("project/demo/images")).unwrap();
         let named = reference.parse().unwrap();
         let reference = mirrored(reference).parse().unwrap();
         let registry = RegistryClient::new(store.clone(), None);
@@ -171,10 +167,6 @@ impl Drop for Served {
             let _ = std::fs::remove_dir_all(&self.home);
         }
     }
-}
-
-fn sha256(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 /// The HTTP status a request was refused with.

@@ -157,3 +157,54 @@ async fn run(
     }
     Ok((token, expires_in))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str) -> Credentials {
+        Credentials::new(Auth::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+        })
+    }
+
+    /// A script printing how many times it has run, as a token lasting `expires_in` seconds.
+    fn counting(name: &str, expires_in: u64) -> Credentials {
+        let runs = std::env::temp_dir().join(format!("virtx-token-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&runs);
+        let runs = runs.display();
+        sh(&format!(
+            r#"echo x >> {runs}; printf '{{"token": "%s", "expires_in": {expires_in}}}' $(wc -l < {runs})"#
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_token_printed_bare_is_kept_until_the_server_refuses_it() {
+        let credentials =
+            sh(r#"if [ -n "$VIRTX_TOKEN_REFUSED" ]; then echo new; else echo old; fi"#);
+        assert_eq!(credentials.token().await.unwrap().as_deref(), Some("old"));
+        assert_eq!(credentials.token().await.unwrap().as_deref(), Some("old"));
+        credentials.refused();
+        assert_eq!(credentials.token().await.unwrap().as_deref(), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn a_token_is_printed_again_within_a_minute_of_running_out() {
+        let lasting = counting("lasting", 3600);
+        assert_eq!(lasting.token().await.unwrap().as_deref(), Some("1"));
+        assert_eq!(lasting.token().await.unwrap().as_deref(), Some("1"));
+
+        let ending = counting("ending", 30);
+        assert_eq!(ending.token().await.unwrap().as_deref(), Some("1"));
+        assert_eq!(ending.token().await.unwrap().as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn a_command_that_prints_no_token_fails_the_request_with_what_it_said() {
+        let failed = sh("echo not signed in >&2; exit 1").token().await;
+        assert!(failed.unwrap_err().contains("not signed in"));
+        let silent = sh("true").token().await;
+        assert!(silent.unwrap_err().contains("printed no token"));
+    }
+}

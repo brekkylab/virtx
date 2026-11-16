@@ -95,6 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: abin-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: abin
         run: |
@@ -193,6 +194,7 @@ jobs:
         with:
           # Apart from builds on the runner itself, whose newer glibc C would carry into this one.
           key: server-${{ matrix.release }}${{ matrix.container && '-manylinux_2_28' || '' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # AlmaLinux's packages and the image's own Python, for meson and virglrenderer's
       # generators. The image sets PKG_CONFIG_PATH, which `.cargo/config.toml`'s [env] does not
@@ -356,6 +358,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-${{ matrix.target }}${{ matrix.container && '-manylinux_2_28' || '' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: zstd, for the cache (Linux)
         if: runner.os == 'Linux'

@@ -185,7 +185,7 @@ impl Home {
         // The disks no sandbox was made of gone before its keeping counts what is here.
         virtx_uvm::sandbox::forget_unrecorded(&snapshots, root);
         let keeping = keeping.map(|make| make(&snapshots, &volumes)).transpose()?;
-        let mut registry = RegistryServer::new(images.clone(), "/images/oci")?;
+        let mut registry = RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH)?;
         if let Some(keeping) = &keeping {
             registry = registry.listing_too(keeping.listed_too());
         }

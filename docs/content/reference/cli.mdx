@@ -51,4 +51,6 @@ The same command signs a person in to virtx cloud, for the SDKs to use. `--domai
 
 The session is kept in `~/.config/virtx/<domain>.token` and `<domain>.access`, readable by their owner alone. An access token lasts 15 minutes.
 
+The `virtx` built from `virtx-cli/` also signs in to a virtx server's OpenID Connect provider: `virtx login <the server's URL>`, or `--issuer` and `--client-id`. There, a command is of the provider it names, of virtx cloud with `--domain` or `token --org`, and otherwise of what was signed in to last, or of virtx cloud where nothing was. The `virtx` the Python and Node packages install signs in to virtx cloud alone.
+
 A client made by `Client.from_env()` authenticates with `$VIRTX_API_KEY` if it is set. Without one and with `$VIRTX_ORG` (an organization's ID) set, it authenticates as the person signed in, running `virtx token --json --org $VIRTX_ORG` for a token for that organization each time, so the `virtx` the package installs serves it with no other program.

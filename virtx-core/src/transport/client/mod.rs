@@ -277,3 +277,53 @@ fn dot_segment(request: &http::Request<Body>) -> Option<&str> {
         .flatten()
         .find(|path| path.split(['/', '\\']).any(is_dot))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_request_refused_a_command_s_token_goes_again_with_the_one_printed_anew() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        let router = axum::Router::new().fallback(move |headers: HeaderMap| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            let token = headers.get(http::header::AUTHORIZATION).cloned();
+            async move {
+                match token.is_some_and(|token| token == "Bearer new") {
+                    true => StatusCode::NO_CONTENT,
+                    false => StatusCode::UNAUTHORIZED,
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let script = r#"if [ -n "$VIRTX_TOKEN_REFUSED" ]; then echo new; else echo old; fi"#;
+        let auth = Auth::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+        };
+        let client = TransportClient::connect(&url, auth, HeaderMap::new()).unwrap();
+        let request = || http::Request::get("/volumes/").body(full("")).unwrap();
+        assert_eq!(client.send(request()).await.unwrap().status(), 204);
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+        assert_eq!(client.send(request()).await.unwrap().status(), 204);
+        assert_eq!(requests.load(Ordering::Relaxed), 3);
+
+        // A token given is the caller's to replace: refused, the request is not sent again.
+        let given = Auth::Bearer {
+            token: "old".into(),
+        };
+        let client = TransportClient::connect(&url, given, HeaderMap::new()).unwrap();
+        assert_eq!(
+            client.send(request()).await.unwrap_err().status(),
+            Some(401)
+        );
+        assert_eq!(requests.load(Ordering::Relaxed), 4);
+    }
+}

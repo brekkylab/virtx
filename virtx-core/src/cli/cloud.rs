@@ -224,6 +224,7 @@ impl Cloud {
                 let _lock = self.lock()?;
                 self.keep(refresh)?;
                 self.keep_access(&tokens)?;
+                self.keep_signed_in()?;
                 let me = self.me(&tokens.access_token).await?;
                 eprintln!(
                     "Signed in as {}.",
@@ -407,6 +408,18 @@ impl Cloud {
 
     fn forget(&self) -> anyhow::Result<()> {
         removed(&self.config("token"))
+    }
+
+    /// virtx cloud kept as what was signed in to last, `{"domain": ...}` in
+    /// `~/.config/virtx/signed-in.json`: where `virtx-cli`'s `virtx`, which signs in to a
+    /// server's OpenID Connect provider too, keeps a provider's, and takes a command that names
+    /// neither to be of the one there.
+    fn keep_signed_in(&self) -> anyhow::Result<()> {
+        let signed_in = json!({ "domain": self.domain });
+        write_private(
+            &self.config.join("signed-in.json"),
+            &serde_json::to_vec(&signed_in)?,
+        )
     }
 }
 

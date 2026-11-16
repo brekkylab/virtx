@@ -146,6 +146,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 遠端
 
+每個[版本](https://github.com/brekkylab/virtx/releases)都附有伺服器 `virtx-server-tcp-<os>-<arch>.tar.gz`（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。
+其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
+解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
+
 在伺服器那台機器上產生一組權杖，再寫一份 `server.json`，讓權杖對應的使用者可以存取某個專案：
 
 ```sh

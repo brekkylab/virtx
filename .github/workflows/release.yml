@@ -73,7 +73,9 @@ jobs:
             [ -f "brekkylab-virtx-$platform-$VERSION.tgz" ] || { echo "::error::no $platform npm package"; fail=1; }
           done
           for release in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            [ -f "virtx-stdio-$release.tar.gz" ] || { echo "::error::no $release server"; fail=1; }
+            for server in virtx-stdio virtx-server-tcp; do
+              [ -f "$server-$release.tar.gz" ] || { echo "::error::no $release $server"; fail=1; }
+            done
           done
           [ "$(ls *.whl | wc -l)" = 4 ] || { echo "::error::not four wheels"; fail=1; }
           pipx run twine check --strict *.whl || fail=1

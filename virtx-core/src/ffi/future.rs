@@ -17,6 +17,7 @@ use super::{
     bytes::{VirtxBytes, failure, write},
     waker::{VirtxWaker, Waker, block_on},
 };
+use crate::Error;
 
 /// A request that answers once: polled until it answers, then freed.
 pub struct VirtxFuture {
@@ -65,7 +66,9 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        self.finish(failure("the call ended before it answered"));
+        self.finish(failure(Error::Transport(
+            "the call ended before it answered".into(),
+        )));
     }
 }
 
@@ -114,7 +117,7 @@ pub unsafe extern "C" fn virtx_future_poll(
             return VIRTX_PENDING;
         }
         State::Ready(status, output) => (status, output),
-        State::Taken => failure("the call already answered"),
+        State::Taken => failure(Error::Client("the call already answered".into())),
     };
     drop(state);
     drop(waker);
@@ -181,7 +184,7 @@ mod tests {
     ) -> (*mut VirtxFuture, oneshot::Sender<u32>) {
         let (send, receive) = oneshot::channel();
         let future = start(runtime.handle(), tasks, async move {
-            encode(receive.await.map_err(|e| e.to_string()))
+            encode(receive.await.map_err(|e| Error::Transport(e.to_string())))
         });
         (future, send)
     }

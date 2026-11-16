@@ -4,7 +4,7 @@
 # localhost, started and asked to answer.
 #
 # What the job built is where it built it: the platform's library in `dist/lib/<platform>/`
-# and its server's archive in `dist/release/`. Only that platform is packed
+# and its servers' archives in `dist/release/`. Only that platform is packed
 # (`--allow-missing`), beside `@brekkylab/virtx` itself, which names every platform's package
 # and gets the one this runner is -- the others are not in the registry, and an optional
 # dependency that is not there is passed over, as it is on a platform npm does not match.
@@ -50,7 +50,8 @@ runs:
         done
         [ "$(count '*.tgz')" = 2 ] || { echo "::error::not one platform's npm package"; exit 1; }
         [ "$(count '*.whl')" = 1 ] || { echo "::error::not one wheel"; exit 1; }
-        [ "$(count 'virtx-stdio-*.tar.gz')" = 1 ] || { echo "::error::not one server archive"; exit 1; }
+        [ "$(count 'virtx-stdio-*.tar.gz')" = 1 ] || { echo "::error::not one stdio server archive"; exit 1; }
+        [ "$(count 'virtx-server-tcp-*.tar.gz')" = 1 ] || { echo "::error::not one HTTP server archive"; exit 1; }
 
     # What a client checks the server it fetches against, over this platform's files. Python's,
     # since macOS has no sha256sum.

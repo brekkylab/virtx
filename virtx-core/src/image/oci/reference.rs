@@ -23,8 +23,7 @@ impl Reference {
     /// `s` as `name:tag` or `name@algorithm:hex`. A name or tag the registry's paths could not
     /// carry as it is, such as one with `..` or `?` in it, is refused.
     pub(crate) fn parse(s: &str) -> Result<Reference, Error> {
-        let refused =
-            |why: &str| Error::Registry(format!("{s:?} is not an image reference: {why}"));
+        let refused = |why: &str| Error::Client(format!("{s:?} is not an image reference: {why}"));
         let (name, target) = if let Some((name, digest)) = s.split_once('@') {
             if !is_digest(digest) {
                 return Err(refused("the digest is not `algorithm:hex`"));
@@ -57,7 +56,7 @@ impl Reference {
                 name,
                 target: Target::Tag(tag),
             } => Ok((name, tag)),
-            _ => Err(Error::Registry(format!("{s:?} is not `name:tag`"))),
+            _ => Err(Error::Client(format!("{s:?} is not `name:tag`"))),
         }
     }
 

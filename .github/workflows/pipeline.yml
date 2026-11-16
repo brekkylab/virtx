@@ -35,7 +35,7 @@
 # cache only ever saves time here: a miss builds the thing again.
 #
 # For a release (`release: true`, with `full`) each platform's job also hands on what it packed
-# and tried -- its server archive, its npm package and its wheel -- for `release` to attach.
+# and tried -- its servers' archives, its npm package and its wheel -- for `release` to attach.
 #
 # # Platforms
 #
@@ -398,7 +398,8 @@ jobs:
 
       - run: cargo xtask clippy --gpu
 
-  # macOS and Windows: `virtx-stdio`, archived with the kernel, abin and alib; `libvirtx_core`; and
+  # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
+  # and alib; `libvirtx_core`; and
   # the platform's packages packed from them and tried, all on one runner.
   #
   # Windows builds a pull request's (and `main`'s) on `virtx-windows-ci`, over what the runner's
@@ -520,8 +521,8 @@ jobs:
           echo "GUEST_HOME=$home" >> "$GITHUB_ENV"
           ls -la build/krunfw "$CARGO_TARGET_DIR/release/abin" guest/alib
 
-      - name: Server
-        run: VIRTX_HOME="$GUEST_HOME" cargo xtask build server-stdio --locked
+      - name: Servers
+        run: VIRTX_HOME="$GUEST_HOME" cargo xtask build server-stdio server-tcp --locked
 
       # macOS' lint, which has no lint job of its own (see `lint-windows`). The GPU libraries
       # are the server build's, already there.
@@ -540,23 +541,27 @@ jobs:
           tail -30 build/virglrenderer-build/meson-logs/meson-log.txt 2>/dev/null || true
 
       # Nothing Windows may lack is loaded at start-up: the C++ runtime is linked in and the rest
-      # delay-loaded, so a host without them runs virtx-stdio far enough to say what to install.
-      - name: Server's DLL imports (Windows)
+      # delay-loaded, so a host without them runs a server far enough to say what to install.
+      - name: Servers' DLL imports (Windows)
         if: runner.os == 'Windows'
         run: |
-          f="$CARGO_TARGET_DIR/release/virtx-stdio.exe"
-          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
-            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
-            | sort -u | tee "$RUNNER_TEMP/imports.txt"
-          if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
-            echo "::error::$f needs the DLLs above to start"; exit 1
-          fi
+          for f in "$CARGO_TARGET_DIR/release/virtx-stdio.exe" "$CARGO_TARGET_DIR/release/virtx-server-tcp.exe"; do
+            echo "$f:"
+            "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+              | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+              | sort -u | tee "$RUNNER_TEMP/imports.txt"
+            if grep -iE "load: (vcruntime|msvcp|vulkan-1|winhv)" "$RUNNER_TEMP/imports.txt"; then
+              echo "::error::$f needs the DLLs above to start"; fail=1
+            fi
+          done
+          exit ${fail:-0}
 
       - name: Archive
         run: |
           VIRTX_HOME="$GUEST_HOME" cargo xtask archive --with-abin
           mkdir -p dist/release
-          cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" dist/release/
+          cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" \
+            "$CARGO_TARGET_DIR/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz" dist/release/
 
       - name: libvirtx_core
         env:
@@ -591,12 +596,13 @@ jobs:
           name: release-${{ matrix.platform }}
           path: |
             dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
+            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
             dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
             dist/release/*.whl
           overwrite: true
           retention-days: 1
 
-  # Linux: `virtx-stdio` and `libvirtx_core`, built in manylinux_2_28 and handed to
+  # Linux: `virtx-stdio`, `virtx-server-tcp` and `libvirtx_core`, built in manylinux_2_28 and handed to
   # `packages-linux` to be packed and tried below the build runners' glibc.
   build-linux:
     name: build (${{ matrix.release }})
@@ -671,8 +677,8 @@ jobs:
           cp -R guest/abin target/release/
           ls -la build/krunfw target/release/abin guest/alib
 
-      - name: Server
-        run: VIRTX_HOME="$PWD/guest" cargo xtask build server-stdio --locked
+      - name: Servers
+        run: VIRTX_HOME="$PWD/guest" cargo xtask build server-stdio server-tcp --locked
 
       - name: libvirtx_core
         run: cargo xtask build client --locked --target ${{ matrix.target }}
@@ -680,7 +686,7 @@ jobs:
       # `__isoc23_*` is glibc 2.38's and comes in unversioned, so the version alone would not show it.
       - name: The glibc floor
         run: |
-          for f in target/release/virtx-stdio target/${{ matrix.target }}/release/libvirtx_core.so; do
+          for f in target/release/virtx-stdio target/release/virtx-server-tcp target/${{ matrix.target }}/release/libvirtx_core.so; do
             syms=$(objdump -T "$f")
             need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
             libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
@@ -695,7 +701,8 @@ jobs:
         run: |
           VIRTX_HOME="$PWD/guest" cargo xtask archive --with-abin
           mkdir -p built/dist/release built/dist/lib/${{ matrix.platform }}
-          cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz built/dist/release/
+          cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz \
+            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz built/dist/release/
           cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
 
       - uses: actions/upload-artifact@v7
@@ -740,6 +747,7 @@ jobs:
           name: release-${{ matrix.platform }}
           path: |
             dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
+            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
             dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
             dist/release/*.whl
           overwrite: true

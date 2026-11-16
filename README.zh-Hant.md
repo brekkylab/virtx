@@ -157,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -169,7 +169,7 @@ virtx-server-tcp serve --config server.json
 其餘部分和本機範例完全相同。
 
 使用者就是提供者核發給 `client_id` 所指用戶端的 ID 權杖中的 `email`，該用戶端須是使用裝置流程的公開用戶端。
-用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖和專案名稱連線：
+用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖連線：
 
 ```sh
 virtx login https://virtx.example
@@ -184,7 +184,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -196,8 +195,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -210,7 +208,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

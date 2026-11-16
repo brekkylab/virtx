@@ -157,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -169,7 +169,7 @@ virtx-server-tcp serve --config server.json
 나머지는 로컬 예제와 같습니다.
 
 사용자는 제공자가 `client_id`의 클라이언트에 발급한 ID 토큰의 `email`입니다. 이 클라이언트는 device flow를 쓰는 공개 클라이언트여야 합니다.
-`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰과 프로젝트를 지정해 접속합니다.
+`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰으로 접속합니다.
 
 ```sh
 virtx login https://virtx.example
@@ -184,7 +184,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -196,8 +195,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -210,7 +208,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

@@ -149,7 +149,7 @@ On the machine that should run the VMs, write a `server.json` naming your OpenID
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -166,7 +166,7 @@ Sign in once with `virtx`, built from `virtx-cli/`:
 virtx login https://virtx.example
 ```
 
-Then, in the program, connect with the token it prints and the project in place of `Client.spawn()`:
+Then, in the program, connect with the token it prints in place of `Client.spawn()`:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -177,7 +177,6 @@ from virtx import CommandAuth
 with Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 ) as client:
 ```
 
@@ -187,8 +186,7 @@ with Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -201,7 +199,8 @@ use virtx::Auth;
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -210,7 +209,7 @@ let client = Client::connect(
 
 `virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
 
-The `virtx-project` header names the project in `server.json` the requests belong to.
+Every request is in the project `default`, which `server.json` names; a client names another with `project`.
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Next

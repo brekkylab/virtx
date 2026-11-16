@@ -93,12 +93,6 @@ impl Access {
                 Err(e) => return Err(e.into()),
             }
         }
-        if !config.projects.is_empty() {
-            eprintln!(
-                "the config's projects are made once, and each one's members are its own from \
-                 then on: change them at /projects/, not in the config"
-            );
-        }
         Access::new(
             config.origins.clone(),
             Arc::new(Oidc::new(config.oidc.clone())),

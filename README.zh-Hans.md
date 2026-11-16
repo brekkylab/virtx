@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -166,7 +166,7 @@ virtx-server-tcp serve --config server.json
 在客户端，不再调用 `Client.spawn()`，而是连接到这台服务器。其余部分和本地示例完全一样。
 
 用户就是提供方签发给 `client_id` 这个客户端的 ID 令牌里的 `email`。该客户端需要是使用设备流程的公开客户端。
-用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌和项目名去连接：
+用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌去连接：
 
 ```sh
 virtx login https://virtx.example
@@ -181,7 +181,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -193,8 +192,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -207,7 +205,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

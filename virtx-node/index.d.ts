@@ -174,6 +174,44 @@ export interface SnapshotInfo {
   inUse: boolean
 }
 
+/** A user's role in a project: an owner manages its members and removes it; a member uses what is in it. */
+export type Role = 'owner' | 'member'
+
+/** What the server answers about a project. */
+export interface ProjectInfo {
+  name: string
+  /** The client's role in it. */
+  role: Role
+}
+
+/** What the server answers about a member of a project. */
+export interface ProjectMemberInfo {
+  /** The user, as the server names them, such as an email address. */
+  user: string
+  role: Role
+}
+
+/**
+ * A project the client has a role in, as making it or asking for it answered, and the client
+ * that reaches it: its members, and its removal. What is in it, a client reaches with the
+ * project set (`setProject`). Dropping it leaves the project; `remove` removes it.
+ */
+export class Project implements ProjectInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  name: string
+  role: Role
+  /** Its members, with their roles. */
+  members(): Promise<ProjectMemberInfo[]>
+  /** Give `user` `role` in it, adding them if they are no member. */
+  setMember(user: string, role: Role): Promise<ProjectMemberInfo>
+  /** Take `user`'s role in it away: theirs to do, leaving it, or an owner's. */
+  removeMember(user: string): Promise<void>
+  /** Delete it and everything in it. */
+  remove(): Promise<void>
+}
+
 /** What the server answers about a volume. */
 export interface VolumeInfo {
   name: string
@@ -453,12 +491,13 @@ export class Client {
    */
   static spawn(program?: string | null, args?: string[]): Client
   /**
-   * Reach the server at `url`, its base `http` or `https` URL, sending
-   * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
-   * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
-   * would go in the clear: over `http` to any host but this machine.
+   * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+   * it wants, `project`, the project every request is in (the server's `default` without one),
+   * and `headers`, whatever else it asks of each request, with every request. `Authorization`
+   * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
+   * token would go in the clear: over `http` to any host but this machine.
    */
-  static connect(url: string, auth?: Auth | null, headers?: Record<string, string>): Client
+  static connect(url: string, auth?: Auth | null, project?: string | null, headers?: Record<string, string>): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -472,6 +511,12 @@ export class Client {
    * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
    */
   setHeaders(headers: Record<string, string>): void
+  /**
+   * Name `project` in every request from now on, over either transport, or with null none, for
+   * the server's `default`. It is sent in place of a `virtx-project` among the headers given. A
+   * name no header carries throws, the project unchanged.
+   */
+  setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */
@@ -512,6 +557,12 @@ export class Client {
   /** The server picks a name or size not given. */
   createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
   getSnapshot(name: string): Promise<Snapshot>
+  /** Every project the client has a role in. */
+  listProject(): Promise<Project[]>
+  /** Make the project `name`, the client its owner. */
+  createProject(name: string): Promise<Project>
+  /** The project `name`, with the client's role in it. */
+  getProject(name: string): Promise<Project>
   listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>

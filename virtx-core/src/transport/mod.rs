@@ -61,14 +61,14 @@ mod tests {
     //! connection as stdio serves one; and what every endpoint shares on either, such as the
     //! credentials sent with each request.
 
-    use ::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
+    use ::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION};
     use axum::{Json, Router, routing::get};
     use hyper::service::Service as _;
     use hyper_util::service::TowerToHyperService;
     use tokio::net::TcpListener;
 
-    use super::{TransportClient, http, serve_stdio};
-    use crate::{Auth, Error};
+    use super::{TransportClient, http, serve_stdio, testing::piped};
+    use crate::{Auth, Error, PROJECT_HEADER};
 
     /// `router` served over HTTP on this machine's loopback, and its base URL.
     async fn serve(router: Router) -> String {
@@ -242,6 +242,39 @@ mod tests {
                 panic!("not a 404: {error:?}");
             };
             assert_eq!(message, "not_found: none");
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_project_set_goes_with_every_request_over_either_transport() {
+        let router = Router::new().route(
+            "/project",
+            get(|headers: HeaderMap| async move {
+                let named = headers.get(PROJECT_HEADER).map(|v| v.to_str().unwrap());
+                Json(named.map(str::to_owned))
+            }),
+        );
+        let given = HeaderMap::from_iter([(
+            HeaderName::from_static(PROJECT_HEADER),
+            HeaderValue::from_static("given"),
+        )]);
+        let tcp = TransportClient::connect(&serve(router.clone()).await, Auth::None, given);
+        let named = async |client: &TransportClient| {
+            http::get::<Option<String>>(client, "/project")
+                .await
+                .unwrap()
+        };
+
+        for (client, given) in [(tcp.unwrap(), Some("given")), (piped(router), None)] {
+            assert_eq!(named(&client).await.as_deref(), given);
+            // Set, it is named in place of one among the headers given; unset, none is.
+            client.set_project(Some("demo")).unwrap();
+            assert_eq!(named(&client).await.as_deref(), Some("demo"));
+            assert!(client.set_project(Some("a\nb")).is_err());
+            assert_eq!(named(&client).await.as_deref(), Some("demo"));
+            client.set_project(None).unwrap();
+            assert_eq!(named(&client).await.as_deref(), given);
             client.close().await;
         }
     }

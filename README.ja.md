@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -166,7 +166,7 @@ virtx-server-tcp serve --config server.json
 クライアント側では、`Client.spawn()`の代わりにサーバーへ接続します。それ以外はローカルの例と同じです。
 
 ユーザーは、プロバイダーが`client_id`のクライアントに発行するIDトークンの`email`です。このクライアントはデバイスフローを使う公開クライアントである必要があります。
-`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンとプロジェクトを指定して接続します。
+`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンで接続します。
 
 ```sh
 virtx login https://virtx.example
@@ -181,7 +181,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -193,8 +192,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -207,7 +205,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

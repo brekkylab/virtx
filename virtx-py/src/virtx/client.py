@@ -27,6 +27,7 @@ from .image import (
     image_name,
 )
 from .job import StartedJob
+from .project import Project
 from .sandbox import Sandbox, SandboxVolume
 from .snapshot import Snapshot
 from .volume import Volume
@@ -157,12 +158,15 @@ class Client:
         cls,
         url: str,
         auth: Auth | None = None,
+        project: str | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Client:
-        """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the credentials it wants, and ``headers``, whatever else it asks
-        of each request, with every request. ``Authorization`` is ``auth``'s, over one given as
-        a header. Refused when a token would go in the clear: over ``http`` to any host but
-        this machine."""
+        """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the
+        credentials it wants, ``project``, the project every request is in (the server's
+        ``default`` without one), and ``headers``, whatever else it asks of each request, with
+        every request. ``Authorization`` is ``auth``'s, and ``virtx-project`` names ``project``,
+        over one given as a header. Refused when a token would go in the clear: over ``http`` to
+        any host but this machine."""
         lib = library()
         auth_json = _auth_bytes(auth)
         array = _header_array(headers)
@@ -177,7 +181,9 @@ class Client:
             ctypes.byref(raw),
             ctypes.byref(error),
         )
-        return cls._opened(lib, status, raw, error)
+        client = cls._opened(lib, status, raw, error)
+        client.set_project(project)
+        return client
 
     def set_auth(self, auth: Auth | None) -> None:
         """Send ``auth`` with every request from now on, in place of what was given at
@@ -201,6 +207,17 @@ class Client:
         error = _Bytes()
         status = self._lib.virtx_client_set_headers(
             self._held(), array, len(array) // 2, ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
+
+    def set_project(self, project: str | None) -> None:
+        """Name ``project`` in every request from now on, over either transport, or with
+        ``None`` none, for the server's ``default``. It is sent in place of a ``virtx-project``
+        among the headers given. A name no header carries raises, the project unchanged."""
+        error = _Bytes()
+        status = self._lib.virtx_client_set_project(
+            self._held(), None if project is None else project.encode(), ctypes.byref(error)
         )
         if status != OK:
             self._lib.take(status, error)
@@ -407,6 +424,21 @@ class Client:
         """The snapshot ``name``."""
         output = await self._call("virtx_client_get_snapshot", _args(name=name))
         return Snapshot.from_dict(self, output)
+
+    async def list_project(self) -> list[Project]:
+        """Every project the client has a role in."""
+        items = await self._call("virtx_client_list_project")
+        return [Project.from_dict(self, item) for item in items]
+
+    async def create_project(self, name: str) -> Project:
+        """Make the project ``name``, the client its owner."""
+        output = await self._call("virtx_client_create_project", _args(name=name))
+        return Project.from_dict(self, output)
+
+    async def get_project(self, name: str) -> Project:
+        """The project ``name``, with the client's role in it."""
+        output = await self._call("virtx_client_get_project", _args(name=name))
+        return Project.from_dict(self, output)
 
     async def list_volume(self) -> list[Volume]:
         """Every volume the server holds."""

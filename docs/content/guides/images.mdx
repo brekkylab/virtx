@@ -197,7 +197,7 @@ with Client.spawn() as local:
         pass
 
 with Client.connect(
-    "https://virtx.example.com", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example.com", BearerAuth("<token>")
 ) as remote:
     async for _ in remote.upload_image("jq.tar", "jq:latest"):
         pass
@@ -214,8 +214,7 @@ await local.close()
 
 const remote = Client.connect(
   'https://virtx.example.com',
-  { type: 'bearer', token: '<token>' },
-  { 'virtx-project': 'demo' }
+  { type: 'bearer', token: '<token>' }
 )
 for await (const _ of remote.uploadImage('jq.tar', 'jq:latest')) {}
 const sandbox = await remote.createSandbox('jq:latest')
@@ -234,7 +233,8 @@ while let Some(event) = events.next().await {
 let remote = Client::connect(
     "https://virtx.example.com",
     Auth::Bearer { token: "<token>".into() },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 let mut events = remote.upload_image("jq.tar", "jq:latest");
 while let Some(event) = events.next().await {

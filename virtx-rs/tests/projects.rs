@@ -13,7 +13,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use virtx::{Auth, Client, Files, SandboxCreateArgs, SandboxVolume};
+use virtx::{Auth, Client, Files, Role, SandboxCreateArgs, SandboxVolume};
 
 mod common;
 
@@ -64,7 +64,7 @@ impl Served {
         let auth = Auth::Bearer {
             token: token.into(),
         };
-        Client::connect(&self.url, auth, [("virtx-project", project)]).unwrap()
+        Client::connect(&self.url, auth, Some(project), [] as [(&str, &str); 0]).unwrap()
     }
 
     /// `method` sent to `path` as `token` in `project`: the status, and the body.
@@ -273,6 +273,49 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
 #[test]
 fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provider() {
     members_share_a_project_and_no_one_else_reaches_it(&Served::fixture());
+}
+
+/// A user makes a project, owns it, and brings another in, who reaches what is in it while a
+/// member and no longer once they leave; the project goes with what is in it.
+#[test]
+fn a_user_makes_a_project_brings_another_in_and_removes_it() {
+    let served = Served::fixture();
+    virtx::load(common::library()).unwrap();
+    let name = common::unique("made");
+    let alice = served.client(&served.alice, &name);
+    let bob = served.client(&served.bob, &name);
+
+    let made = alice.create_project(&name).wait().unwrap();
+    assert_eq!((made.name(), made.role()), (name.as_str(), Role::Owner));
+    let listed = alice.list_project().wait().unwrap();
+    assert!(listed.iter().any(|project| project.name() == name));
+    assert_eq!(refused(alice.create_project(&name).wait()), Some(409));
+    assert_eq!(refused(bob.get_project(&name).wait()), Some(403));
+    assert_eq!(refused(bob.list_volume().wait()), Some(403));
+
+    let added = made
+        .set_member("bob@example.com", Role::Member)
+        .wait()
+        .unwrap();
+    assert_eq!(added.role, Role::Member);
+    let members = made.members().wait().unwrap();
+    let users: Vec<_> = members.iter().map(|member| member.user.as_str()).collect();
+    assert_eq!(users, ["alice@example.com", "bob@example.com"]);
+    let theirs = bob.get_project(&name).wait().unwrap();
+    assert_eq!(theirs.role(), Role::Member);
+    let volume = alice.create_volume(Some("data")).wait().unwrap();
+    assert!(bob.get_volume(volume.name()).wait().is_ok());
+    assert_eq!(refused(theirs.remove().wait()), Some(403));
+    assert_eq!(
+        refused(theirs.set_member("carol@example.com", Role::Member).wait()),
+        Some(403)
+    );
+
+    theirs.remove_member("bob@example.com").wait().unwrap();
+    assert_eq!(refused(bob.list_volume().wait()), Some(403));
+    made.remove().wait().unwrap();
+    assert_eq!(refused(alice.get_project(&name).wait()), Some(403));
+    assert_eq!(refused(alice.list_volume().wait()), Some(403));
 }
 
 /// The provider's keys are asked for again for a token of a key the server has not, and not

@@ -156,7 +156,7 @@ On the server machine, write a `server.json` naming your OpenID Connect provider
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
   "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
+  "projects": { "default": { "members": ["alice@example.com"] } }
 }
 ```
 
@@ -168,7 +168,7 @@ On the client, connect to it in place of `Client.spawn()`.
 The rest is the same as the local example.
 
 A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
-Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints and the project:
+Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints:
 
 ```sh
 virtx login https://virtx.example
@@ -183,7 +183,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -195,8 +194,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -209,7 +207,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

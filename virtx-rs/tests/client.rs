@@ -21,11 +21,10 @@ fn a_client_over_http_sends_its_token_and_project() {
         project,
         ..
     } = common::fixture();
-    let headers = [("virtx-project", project.as_str())];
     let token = Auth::Bearer {
         token: token.clone(),
     };
-    let client = Client::connect(url, token, headers).unwrap();
+    let client = Client::connect(url, token, Some(project), [] as [(&str, &str); 0]).unwrap();
     let volume = client
         .create_volume(Some(&common::unique("over-http")))
         .wait()
@@ -34,7 +33,8 @@ fn a_client_over_http_sends_its_token_and_project() {
     assert!(listed.iter().any(|v| v.name() == volume.name()));
     volume.remove().wait().unwrap();
 
-    let anonymous = Client::connect(url, Auth::None, headers).unwrap();
+    let anonymous =
+        Client::connect(url, Auth::None, Some(project), [] as [(&str, &str); 0]).unwrap();
     let refused = anonymous.list_volume().wait().unwrap_err();
     assert_eq!(refused.status(), Some(401), "{refused}");
 }

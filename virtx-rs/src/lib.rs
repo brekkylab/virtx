@@ -28,6 +28,7 @@ mod image;
 mod job;
 mod library;
 mod portforward;
+mod project;
 mod sandbox;
 mod snapshot;
 mod volume;
@@ -40,10 +41,15 @@ pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;
+pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
 pub use snapshot::Snapshot;
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
 pub use virtx_core::ImageJob as ImageJobInfo;
+/// What the server answers about a project; a [`Project`] carries it with its client.
+pub use virtx_core::ProjectListOutputItem as ProjectInfo;
+/// What the server answers about a member of a project.
+pub use virtx_core::ProjectMemberListOutputItem as ProjectMemberInfo;
 /// What the server answers about a sandbox; a [`Sandbox`] carries it with its client.
 pub use virtx_core::Sandbox as SandboxInfo;
 /// What the server answers about a sandbox job; a [`SandboxJob`] carries it with its client.
@@ -55,8 +61,8 @@ pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, MountType, Progress, Recipe, RegistryAuth, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume, Source, Step,
-    VolumeMountListOutputItem,
+    MountSource, MountType, Progress, Recipe, RegistryAuth, Role, SandboxCreateArgs,
+    SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxVolume,
+    Source, Step, VolumeMountListOutputItem,
 };
 pub use volume::Volume;

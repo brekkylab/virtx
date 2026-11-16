@@ -37,6 +37,11 @@ name: build
 
 on:
   workflow_call:
+    inputs:
+      packages:
+        description: Everything a release carries; without, the guest parts alone, which the suites boot
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -136,6 +141,7 @@ jobs:
   server:
     name: server (${{ matrix.release }})
     needs: guest-parts
+    if: inputs.packages
     strategy:
       fail-fast: false
       matrix:
@@ -301,6 +307,7 @@ jobs:
   # `libvirtx_core`, which every package of the platform carries.
   client:
     name: client (${{ matrix.platform }})
+    if: inputs.packages
     strategy:
       fail-fast: false
       matrix:

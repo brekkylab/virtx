@@ -1,11 +1,15 @@
 # A pull request, and `main` once merged, are built as a release would be, and tested; nothing
 # is published. The docs are `docs`'s. `main`'s runs leave the caches every other ref restores.
+#
+# A push to `cloud` -- virtx's server and client as virtx cloud builds on them -- is checked and
+# tested as a pull request is, the suites on the guest parts it builds, but not packed for every
+# platform: no server or client builds of each platform, no bundle, no packages smoke-tested.
 name: ci
 
 # Markdown is left out, but for the READMEs the packages ship.
 on:
   push:
-    branches: [main]
+    branches: [main, cloud]
     paths: &paths
       - "**"
       - "!**/*.md"
@@ -16,11 +20,11 @@ on:
     paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot. A run on `main` finishes once
-# started; of the runs waiting behind it, only the newest is kept.
+# A newer push to the pull request, or to `cloud`, makes an older run moot. A run on `main`
+# finishes once started; of the runs waiting behind it, only the newest is kept.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/cloud' }}
 
 permissions:
   contents: read
@@ -31,6 +35,8 @@ jobs:
 
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      packages: ${{ github.ref != 'refs/heads/cloud' }}
 
   test:
     needs: [check, build]
@@ -41,3 +47,4 @@ jobs:
       id-token: write
     with:
       version: ${{ needs.check.outputs.version }}
+      packages: ${{ github.ref != 'refs/heads/cloud' }}

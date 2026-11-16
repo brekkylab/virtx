@@ -29,6 +29,10 @@ on:
         description: The version every manifest says, as `check` read it
         type: string
         required: true
+      packages:
+        description: Whether `build` built the packages, for `packages` to smoke-test
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -172,6 +176,7 @@ jobs:
 
   packages:
     name: packages (${{ matrix.platform }})
+    if: inputs.packages
     strategy:
       fail-fast: false
       matrix:

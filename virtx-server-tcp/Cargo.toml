@@ -39,10 +39,10 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
-# A test's own root, removed when it is done.
-tempfile = "3"
 # A blob's digest, as a registry's client computes it.
 sha2 = "0.10"
+# A test's own root, removed when it is done.
+tempfile = "3"
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }

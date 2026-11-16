@@ -346,7 +346,8 @@ async fn project_list(Extension(access): Extension<Arc<Access>>, headers: Header
     Ok(json(&listed))
 }
 
-/// Make a project, its maker its owner.
+/// Make a project, its maker its owner: refused for a name starting with `_`, which is the
+/// server's, for each user's own project.
 async fn project_create(
     Extension(access): Extension<Arc<Access>>,
     headers: HeaderMap,
@@ -354,6 +355,12 @@ async fn project_create(
 ) -> Answer {
     let user = access.user(&headers).await.map_err(refusal)?;
     let args: ProjectCreateArgs = body(&request)?;
+    if args.name.starts_with('_') {
+        return Err(invalid(format!(
+            "{:?}: a name starting with '_' is the server's",
+            args.name
+        )));
+    }
     access.membership().create(&args.name, &user).await?;
     let made = ProjectListOutputItem {
         name: args.name,

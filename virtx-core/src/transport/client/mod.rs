@@ -51,7 +51,7 @@ impl Connection {
 pub struct TransportClient {
     connection: Connection,
     /// The project every request names, over either transport, in place of one among the
-    /// headers given: the server's `default` while there is none.
+    /// headers given: the user's own project while there is none.
     project: RwLock<Option<HeaderValue>>,
 }
 
@@ -101,8 +101,8 @@ impl TransportClient {
         }
     }
 
-    /// Name `project` in every request from now on, or with `None` none, for the server's
-    /// `default`. Refused for a name no header carries, the project unchanged.
+    /// Name `project` in every request from now on, or with `None` none, for the user's own
+    /// project. Refused for a name no header carries, the project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         let project = project
             .map(HeaderValue::from_str)

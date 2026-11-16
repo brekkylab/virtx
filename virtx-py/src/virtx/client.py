@@ -162,8 +162,8 @@ class Client:
         headers: Mapping[str, str] | None = None,
     ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the
-        credentials it wants, ``project``, the project every request is in (the server's
-        ``default`` without one), and ``headers``, whatever else it asks of each request, with
+        credentials it wants, ``project``, the project every request is in (the user's own
+        without one), and ``headers``, whatever else it asks of each request, with
         every request. ``Authorization`` is ``auth``'s, and ``virtx-project`` names ``project``,
         over one given as a header. Refused when a token would go in the clear: over ``http`` to
         any host but this machine."""
@@ -213,7 +213,7 @@ class Client:
 
     def set_project(self, project: str | None) -> None:
         """Name ``project`` in every request from now on, over either transport, or with
-        ``None`` none, for the server's ``default``. It is sent in place of a ``virtx-project``
+        ``None`` none, for the user's own project. It is sent in place of a ``virtx-project``
         among the headers given. A name no header carries raises, the project unchanged."""
         error = _Bytes()
         status = self._lib.virtx_client_set_project(

@@ -1,6 +1,6 @@
 """Projects: what everything a server keeps belongs to, and the members of each, in a role.
 
-A client's requests are in the project ``Client.set_project`` names, or the server's ``default``
+A client's requests are in the project ``Client.set_project`` names, or the user's own project
 without one.
 """
 

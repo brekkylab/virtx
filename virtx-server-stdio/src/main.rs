@@ -1,7 +1,7 @@
 //! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
 //! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
 //! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
-//! this host keeps is that one client's, who owns every project here: `default`, and each one
+//! this host keeps is that one client's, who owns every project here: its own, `_`, and each one
 //! made, each a directory of its own in the cache (see [`virtx_uvm::ProjectStore`]).
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
@@ -108,7 +108,8 @@ fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
     Ok((app, host))
 }
 
-/// The projects this host keeps: `default`, made as the server starts, and each made since,
+/// The projects this host keeps: the client's own, `_`, made as the server starts, and each made
+/// since,
 /// the home of each made as it is first reached.
 pub struct Host {
     store: ProjectStore,
@@ -117,7 +118,7 @@ pub struct Host {
 }
 
 impl Host {
-    /// The projects under `root`, `default` made if it is not there, and the home of each made
+    /// The projects under `root`, `_` made if it is not there, and the home of each made
     /// now, so that its sandboxes left from before are swept as the server starts.
     fn open(root: &Path) -> anyhow::Result<Host> {
         let store = ProjectStore::new(root);
@@ -139,7 +140,7 @@ impl Host {
         &self.store
     }
 
-    /// The home of the project `headers` name, or of `default` where they name none: `403` for
+    /// The home of the project `headers` name, or of the client's own, `_`, where they name none: `403` for
     /// a project not here.
     fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
         let project = match headers.get(PROJECT_HEADER) {
@@ -192,8 +193,8 @@ impl Host {
     }
 }
 
-/// Move what this host kept before it kept projects, at `root` itself, into `default`'s root:
-/// once, while `default` has none.
+/// Move what this host kept before it kept projects, at `root` itself, into the client's own
+/// project, `_`: once, while it has none.
 fn adopt_unprojected(root: &Path) -> anyhow::Result<()> {
     let default = ProjectStore::new(root).path(DEFAULT_PROJECT)?;
     if default.exists() {
@@ -242,7 +243,7 @@ mod tests {
     struct Server {
         client: Client,
         root: PathBuf,
-        /// The root of `default`, the project the client reaches.
+        /// The root of `_`, the client's own project, which it reaches naming none.
         home: PathBuf,
         /// The app the client is served, for a request no client sends.
         app: axum::Router,
@@ -253,7 +254,7 @@ mod tests {
             Server::spawn_after(name, |_, _| {}).await
         }
 
-        /// `spawn`, with `after` run once the app has answered each request, given `default`'s
+        /// `spawn`, with `after` run once the app has answered each request, given `_`'s
         /// root and the request's path: for what another client does between a client's
         /// requests.
         async fn spawn_after(
@@ -264,7 +265,7 @@ mod tests {
                 std::env::temp_dir().join(format!("virtx-stdio-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
-            let home = root.join("project").join("default");
+            let home = root.join("project").join("_");
             let (app, _) = app(&root).unwrap();
             let served_app = app.clone();
             let after = Arc::new(after);
@@ -940,7 +941,7 @@ mod tests {
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
 
-    /// The client owns every project: `default`, there from the start, and each it makes. A
+    /// The client owns every project: its own, `_`, there from the start, and each it makes. A
     /// project's things are its own, and go with it.
     #[tokio::test]
     async fn the_client_makes_reaches_and_removes_its_projects() {
@@ -970,27 +971,28 @@ mod tests {
                 .collect();
             format!("[{}]", listed.join(","))
         };
-        assert_eq!(
-            send("GET", "/projects/", None, "").await.1,
-            owned(&["default"])
-        );
+        assert_eq!(send("GET", "/projects/", None, "").await.1, owned(&["_"]));
         let made = send("POST", "/projects/", None, r#"{"name": "demo"}"#).await;
         assert_eq!(made, (201, r#"{"name":"demo","role":"owner"}"#.to_owned()));
         assert_eq!(
             status("POST", "/projects/", None, r#"{"name": "demo"}"#).await,
             409
         );
-        assert_eq!(
-            status("POST", "/projects/", None, r#"{"name": "default"}"#).await,
-            409
-        );
+        // A name starting with `_` is the server's.
+        for theirs in [r#"{"name": "_"}"#, r#"{"name": "_mine"}"#] {
+            assert_eq!(
+                status("POST", "/projects/", None, theirs).await,
+                400,
+                "{theirs}"
+            );
+        }
         assert_eq!(
             status("POST", "/projects/", None, r#"{"name": "Demo"}"#).await,
             400
         );
         assert_eq!(
             send("GET", "/projects/", None, "").await.1,
-            owned(&["default", "demo"])
+            owned(&["_", "demo"])
         );
         assert_eq!(status("GET", "/projects/demo", None, "").await, 200);
         assert_eq!(status("GET", "/projects/nowhere", None, "").await, 403);
@@ -1013,21 +1015,18 @@ mod tests {
             403
         );
 
-        // A project goes with everything in it; `default` is there again, empty.
+        // A project goes with everything in it; the client's own is there again, empty.
         assert_eq!(status("DELETE", "/projects/demo", None, "").await, 204);
         assert!(!server.root.join("project/demo").exists());
         assert_eq!(status("GET", "/volumes/", Some("demo"), "").await, 403);
         assert_eq!(status("POST", "/volumes/", None, volume).await, 201);
-        assert_eq!(status("DELETE", "/projects/default", None, "").await, 204);
+        assert_eq!(status("DELETE", "/projects/_", None, "").await, 204);
         assert_eq!(send("GET", "/volumes/", None, "").await.1, "[]");
-        assert_eq!(
-            send("GET", "/projects/", None, "").await.1,
-            owned(&["default"])
-        );
+        assert_eq!(send("GET", "/projects/", None, "").await.1, owned(&["_"]));
     }
 
     #[test]
-    fn what_was_kept_before_projects_is_default_s() {
+    fn what_was_kept_before_projects_is_the_client_s_own() {
         let root = std::env::temp_dir().join(format!("virtx-stdio-adopt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("volume/data/files")).unwrap();
@@ -1035,7 +1034,7 @@ mod tests {
         fs::create_dir_all(root.join("virtx-stdio/0.1.0")).unwrap();
 
         adopt_unprojected(&root).unwrap();
-        let default = root.join("project/default");
+        let default = root.join("project/_");
         assert!(default.join("volume/data/files").is_dir());
         assert!(default.join("images/tag").is_dir());
         assert!(!root.join("volume").exists() && !root.join("images").exists());

@@ -447,7 +447,7 @@ class Client {
 
   // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
   // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
-  // request is in (the server's `default` without one), and `headers`, a name to a value,
+  // request is in (the user's own without one), and `headers`, a name to a value,
   // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
   // `virtx-project` names `project`, over one given as a header. Refused when a token would go
   // in the clear: over `http` to any host but this machine.
@@ -494,7 +494,7 @@ class Client {
   }
 
   // Name `project` in every request from now on, over either transport, or with null none, for
-  // the server's `default`. It is sent in place of a `virtx-project` among the headers given. A
+  // the user's own project. It is sent in place of a `virtx-project` among the headers given. A
   // name no header carries throws, the project unchanged.
   setProject(project) {
     const error = {}

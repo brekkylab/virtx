@@ -148,14 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客户机内核、`abin/` 和 `alib/`。
 解压到单独的目录后，`virtx-server-tcp` 会在自身旁边找到客户机内核，因此无需设置 `PATH` 或库路径即可直接运行。
 
-在服务器上写一份 `server.json`，指定 OpenID Connect 提供方以及每个项目可访问的用户，然后启动服务器：
+在服务器上写一份 `server.json`，指定 OpenID Connect 提供方，然后启动服务器：
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 

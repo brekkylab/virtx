@@ -85,7 +85,7 @@ impl Client {
     }
 
     /// Name `project` in every request from now on, over either transport, or with `None`
-    /// none, for the server's `default`. It is sent in place of a `virtx-project` among the
+    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
     /// headers given. Refused for a name no header carries, the project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         self.inner.set_project(project)
@@ -870,7 +870,7 @@ pub(crate) mod ffi {
     }
 
     /// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
-    /// transport, or with a null one none, for the server's `default`. Answers `VIRTX_OK`, or
+    /// transport, or with a null one none, for the user's own project. Answers `VIRTX_OK`, or
     /// `VIRTX_ERROR` with why it is refused written to `error`, the project unchanged.
     ///
     /// # Safety

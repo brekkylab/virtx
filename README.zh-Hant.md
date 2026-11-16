@@ -150,14 +150,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
 解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
 
-在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者以及每個專案可存取的使用者，然後啟動伺服器：
+在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者，然後啟動伺服器：
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 

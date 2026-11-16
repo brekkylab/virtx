@@ -110,7 +110,7 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
         get("/volumes/", Some("acme-key"), Some("other")).await.0,
         StatusCode::FORBIDDEN
     );
-    // Naming none, a request is in `default`, which is no tenant's.
+    // Naming none, a request is in its sender's own project, which a tenant has not.
     assert_eq!(
         get("/volumes/", Some("acme-key"), None).await.0,
         StatusCode::FORBIDDEN

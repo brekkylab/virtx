@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 /// The header a request names its project in.
 pub const PROJECT_HEADER: &str = "virtx-project";
 
-/// The project a request that names none belongs to.
-pub const DEFAULT_PROJECT: &str = "default";
+/// The project a request that names none belongs to on a server of one client, such as over
+/// stdio: the client's own. A server with users has one of each user's own, also named starting
+/// with `_`.
+pub const DEFAULT_PROJECT: &str = "_";
 
 /// What a member of a project may do there: an `Owner` all a `Member` may, and more, so it
 /// orders above it.

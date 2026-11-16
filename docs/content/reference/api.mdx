@@ -20,7 +20,7 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
 | `Client.connect(url, auth, project, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. A token is sent over plain `http` only to this machine's loopback. |
-| `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. Without a project, a request is in the server's `default`. |
+| `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. Without a project, a request is in its user's own, `_` over stdio. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
 | `ensure_virtx()` | `str`, its path | Fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it. Node.js calls it `ensureVirtx`. |

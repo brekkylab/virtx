@@ -296,8 +296,16 @@ async fn project_list(Extension(host): Extension<Arc<Host>>) -> Answer {
     Ok(json(&listed))
 }
 
+/// Make a project: refused for a name starting with `_`, which is the server's, for the
+/// client's own.
 async fn project_create(Extension(host): Extension<Arc<Host>>, request: Bytes) -> Answer {
     let args: ProjectCreateArgs = body(&request)?;
+    if args.name.starts_with('_') {
+        return Err(invalid(format!(
+            "{:?}: a name starting with '_' is the server's",
+            args.name
+        )));
+    }
     host.store().create(&args.name)?;
     let made = ProjectListOutputItem {
         name: args.name,
@@ -318,7 +326,7 @@ async fn project_get(
 }
 
 /// Remove a project and everything in it, its image jobs cancelled: refused while a sandbox
-/// lives in it. `default` is there again, empty.
+/// lives in it. The client's own, `_`, is there again, empty.
 async fn project_remove(
     Extension(host): Extension<Arc<Host>>,
     Segments(name): Segments<String>,

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Serialize};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
+use virtx_core::{PROJECT_HEADER, Role};
 use virtx_uvm::{ImageStore, Membership, ProjectError, ProjectStore, RegistryServer};
 
 use crate::config::Config;
@@ -72,27 +72,11 @@ impl Access {
         Ok(access)
     }
 
-    /// What `config` says. The projects it names are each made, once, with its members its
-    /// owners: from then on their members are the membership's, changed at `/projects/`.
-    pub async fn configured(config: &Config) -> anyhow::Result<Access> {
+    /// What `config` says: the users of its provider, each project's members kept in its
+    /// directory.
+    pub fn configured(config: &Config) -> anyhow::Result<Access> {
         let store = ProjectStore::new(config.home());
         let membership = FileMembership::new(store.clone());
-        for (name, named) in &config.projects {
-            let Some((owner, others)) = named.members.split_first() else {
-                continue;
-            };
-            match membership.create(name, owner).await {
-                Ok(()) => {
-                    for member in others {
-                        membership
-                            .set_member(name, member, Some(Role::Owner))
-                            .await?;
-                    }
-                }
-                Err(ProjectError::AlreadyExists(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
         Access::new(
             config.origins.clone(),
             Arc::new(Oidc::new(config.oidc.clone())),
@@ -142,15 +126,22 @@ impl Access {
     }
 
     /// Who a request with `headers` is sent by, and the home of the project it names, or of
-    /// [`DEFAULT_PROJECT`] where it names none: as [`user`](Access::user) refuses, `400` for a
-    /// project that is no string, and `403` for one its sender is no member of -- or that does
-    /// not exist, which is not told apart.
+    /// its sender's [own](Access::own_project) where it names none: as [`user`](Access::user)
+    /// refuses, `400` for a project that is no string, and `403` for one its sender is no
+    /// member of -- or that does not exist, which is not told apart.
     pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
         let user = self.user(headers).await?;
         let project = match headers.get(PROJECT_HEADER) {
-            Some(named) => named.to_str().map_err(|_| StatusCode::BAD_REQUEST)?,
-            None => DEFAULT_PROJECT,
+            Some(named) => named
+                .to_str()
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .to_owned(),
+            None => self.own_project(&user).await.map_err(|e| {
+                eprintln!("making {user}'s own project: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
         };
+        let project = project.as_str();
         match self.membership.role(&user, project).await {
             Ok(Some(_)) => {}
             Ok(None) => return Err(StatusCode::FORBIDDEN),
@@ -164,6 +155,28 @@ impl Access {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         Ok((user, home))
+    }
+
+    /// The project of `user`'s own, which a request of theirs that names none is in, made the
+    /// first time with them its owner. Its name is `_`, then `user` in lower case, each
+    /// character no name has, such as `@`, a `-`: `_alice-example.com` for `alice@example.com`.
+    /// No request makes a project of a name starting with `_`, so no one else's is named so.
+    pub async fn own_project(&self, user: &str) -> Result<String, ProjectError> {
+        let spelled: String = user
+            .chars()
+            .map(|c| match c.to_ascii_lowercase() {
+                c @ ('a'..='z' | '0'..='9' | '.' | '_' | '-') => c,
+                _ => '-',
+            })
+            .collect();
+        let name = format!("_{spelled}");
+        if self.membership.role(user, &name).await?.is_none() {
+            match self.membership.create(&name, user).await {
+                Ok(()) | Err(ProjectError::AlreadyExists(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(name)
     }
 
     /// Project `project`'s home, its images its own.
@@ -394,68 +407,21 @@ mod tests {
     }
 
     #[test]
-    fn a_config_names_its_provider_and_its_projects_in_lower_case() {
+    fn a_config_names_its_provider() {
         let refused = Config::parse(json!({ "listen": "127.0.0.1:0" }))
             .err()
             .unwrap();
         assert!(refused.to_string().contains("oidc"), "{refused}");
-        // Two names that differ in case alone would be one directory where case is ignored.
-        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let cased = json!({ "listen": "127.0.0.1:0", "oidc": oidc, "projects": { "Demo": {} } });
-        let refused = Config::parse(cased).err().unwrap();
-        assert!(refused.to_string().contains("lower-case"), "{refused}");
     }
 
     #[tokio::test]
-    async fn the_config_s_projects_are_made_once_with_its_members_their_owners() {
+    async fn a_member_reaches_their_project_and_none_other_and_their_own_by_no_name() {
         let dir = tempfile::tempdir().unwrap();
-        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let configured = async |projects: serde_json::Value| {
-            let config = json!({
-                "listen": "127.0.0.1:0",
-                "home": dir.path(),
-                "oidc": oidc,
-                "projects": projects,
-            });
-            Access::configured(&Config::parse(config).unwrap())
-                .await
-                .unwrap()
-        };
-
-        let access = configured(json!({
-            "demo": { "members": ["alice@example.com", "bob@example.com"] },
-            "nobody": {},
-        }))
-        .await;
-        assert_eq!(
-            access.membership().members("demo").await.unwrap(),
-            [
-                ("alice@example.com".to_owned(), Role::Owner),
-                ("bob@example.com".to_owned(), Role::Owner)
-            ]
-        );
-        // A project with no one to own it is not made.
-        assert!(access.membership().members("nobody").await.is_err());
-
-        // Once made, its members are the store's, whatever the config says after.
-        let again = configured(json!({ "demo": { "members": ["mallory@example.com"] } })).await;
-        assert_eq!(
-            again
-                .membership()
-                .role("mallory@example.com", "demo")
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn a_member_reaches_their_project_and_none_other_and_default_by_no_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let users = ["alice", "bob"].map(str::to_owned).into();
+        let users = ["alice@example.com", "bob@example.com"]
+            .map(str::to_owned)
+            .into();
         let projects = Arc::new(FileMembership::new(ProjectStore::new(dir.path())));
-        projects.create("demo", "alice").await.unwrap();
-        projects.create(DEFAULT_PROJECT, "bob").await.unwrap();
+        projects.create("demo", "alice@example.com").await.unwrap();
         let access = Access::new(
             Vec::new(),
             Arc::new(TokenIsUser(users)),
@@ -464,6 +430,7 @@ mod tests {
         )
         .unwrap();
         let home = async |token, project| access.home(&headers(token, project, None)).await;
+        let (alice, bob) = (Some("alice@example.com"), Some("bob@example.com"));
 
         assert_eq!(
             home(None, Some("demo")).await.err(),
@@ -473,29 +440,45 @@ mod tests {
             home(Some("mallory"), Some("demo")).await.err(),
             Some(StatusCode::UNAUTHORIZED)
         );
-        assert_eq!(home(Some("alice"), Some("demo")).await.unwrap().0, "alice");
         assert_eq!(
-            home(Some("bob"), Some("demo")).await.err(),
+            home(alice, Some("demo")).await.unwrap().0,
+            "alice@example.com"
+        );
+        assert_eq!(
+            home(bob, Some("demo")).await.err(),
             Some(StatusCode::FORBIDDEN)
         );
         assert_eq!(
-            home(Some("alice"), None).await.err(),
+            home(alice, Some("nowhere")).await.err(),
             Some(StatusCode::FORBIDDEN)
         );
-        let (_, reached) = home(Some("bob"), None).await.unwrap();
-        assert_eq!(
-            reached.snapshots.root(),
-            dir.path().join("project").join(DEFAULT_PROJECT).as_path()
-        );
-        assert_eq!(
-            home(Some("alice"), Some("nowhere")).await.err(),
-            Some(StatusCode::FORBIDDEN)
-        );
-        let elsewhere = headers(Some("alice"), Some("demo"), Some("https://evil.example"));
+        let elsewhere = headers(alice, Some("demo"), Some("https://evil.example"));
         assert_eq!(
             access.home(&elsewhere).await.err(),
             Some(StatusCode::FORBIDDEN)
         );
+
+        // Naming none, each reaches a project of their own, made as first reached, theirs alone.
+        let own = access.own_project("alice@example.com").await.unwrap();
+        assert_eq!(own, "_alice-example.com");
+        let (_, reached) = home(alice, None).await.unwrap();
+        assert_eq!(
+            reached.snapshots.root(),
+            dir.path().join("project").join(&own).as_path()
+        );
+        assert_eq!(
+            access.membership().members(&own).await.unwrap(),
+            [("alice@example.com".to_owned(), Role::Owner)]
+        );
+        assert_eq!(
+            home(bob, Some(&own)).await.err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let theirs = access.own_project("bob@example.com").await.unwrap();
+        assert_ne!(theirs, own);
+        // One local part at two domains is two users, and two projects.
+        let elsewhere = access.own_project("Alice@Other.example").await.unwrap();
+        assert_eq!(elsewhere, "_alice-other.example");
     }
 
     #[tokio::test]
@@ -504,7 +487,7 @@ mod tests {
         let home = root.path();
         let store = FileMembership::new(ProjectStore::new(home));
 
-        assert_eq!(store.role("alice", DEFAULT_PROJECT).await.unwrap(), None);
+        assert_eq!(store.role("alice", "demo").await.unwrap(), None);
         store.create("demo", "alice").await.unwrap();
         assert!(home.join("project/demo/members.json").is_file());
         assert!(matches!(

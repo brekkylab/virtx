@@ -142,14 +142,13 @@ Your machine must meet the [requirements](https://github.com/brekkylab/virtx#req
 Run `virtx-server-tcp` on the machine that should run the VMs.
 It keeps running, serves many users, and can sit on another machine.
 
-On the machine that should run the VMs, write a `server.json` naming your OpenID Connect provider and who may reach each project:
+On the machine that should run the VMs, write a `server.json` naming your OpenID Connect provider:
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -209,7 +208,7 @@ let client = Client::connect(
 
 `virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
 
-Every request is in the project `default`, which `server.json` names; a client names another with `project`.
+A client's requests are in a project of its user's own, which the server makes the first time; a client names another with `project`.
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Next

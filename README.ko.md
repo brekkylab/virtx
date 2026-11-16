@@ -150,14 +150,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 안에는 `virtx-server-tcp`, 게스트 커널, `abin/`, `alib/`이 있습니다.
 별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
 
-서버 머신에서 OpenID Connect 제공자와 프로젝트마다 접근할 수 있는 사용자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
+서버 머신에서 OpenID Connect 제공자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 

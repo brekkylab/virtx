@@ -148,14 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 中身は `virtx-server-tcp`、ゲストカーネル、`abin/`、`alib/` です。
 専用のディレクトリに展開すると、`virtx-server-tcp` は隣にあるゲストカーネルを見つけるので、`PATH` やライブラリパスを設定せずにそのまま実行できます。
 
-サーバーマシンで、OpenID Connectプロバイダーと各プロジェクトにアクセスできるユーザーを指定した`server.json`を書き、サーバーを起動します。
+サーバーマシンで、OpenID Connectプロバイダーを指定した`server.json`を書き、サーバーを起動します。
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 

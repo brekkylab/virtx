@@ -492,7 +492,7 @@ export class Client {
   static spawn(program?: string | null, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
-   * it wants, `project`, the project every request is in (the server's `default` without one),
+   * it wants, `project`, the project every request is in (the user's own without one),
    * and `headers`, whatever else it asks of each request, with every request. `Authorization`
    * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
    * token would go in the clear: over `http` to any host but this machine.
@@ -513,7 +513,7 @@ export class Client {
   setHeaders(headers: Record<string, string>): void
   /**
    * Name `project` in every request from now on, over either transport, or with null none, for
-   * the server's `default`. It is sent in place of a `virtx-project` among the headers given. A
+   * the user's own project. It is sent in place of a `virtx-project` among the headers given. A
    * name no header carries throws, the project unchanged.
    */
   setProject(project: string | null): void

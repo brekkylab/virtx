@@ -149,14 +149,13 @@ Each [release](https://github.com/brekkylab/virtx/releases) carries the server a
 It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
 Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
 
-On the server machine, write a `server.json` naming your OpenID Connect provider and who may reach each project, and start the server:
+On the server machine, write a `server.json` naming your OpenID Connect provider, and start the server:
 
 ```json
 {
   "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "default": { "members": ["alice@example.com"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 

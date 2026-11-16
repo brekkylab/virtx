@@ -79,11 +79,11 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 Everything a server keeps, its images, snapshots, volumes and sandboxes, belongs to a project, and a project to its members, each in a role.
 A request names its project in the `virtx-project` header, the same over either transport.
-A request that names none belongs to the project `default`.
+A request that names none belongs to its sender's own project, which the server makes the first time, its sender its owner.
 
 - A project's name is lower-case letters, digits, `.`, `_` and `-`, up to 128 characters, and starts with neither `.` nor `-`.
 - Projects are apart: a name is one project's, so the volume `data` of one project is not that of another, and nothing in one is reached from another.
-- `default` is a project as any other, there once it is made.
+- A server keeps the names of its senders' own projects: it MAY keep a set of names for them, such as those starting with `_`, and refuse to make a project of one with `400`, `invalid`.
 - A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
 - A URL the server forms, such as a [port's](#ports), carries the project it was made in.
 
@@ -92,7 +92,7 @@ Each member of a project has a role:
 - `member` reaches everything in it, reads it and its members, and leaves it.
 - `owner` does what a member does, and also adds, changes and removes members, and removes the project.
 
-A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), has no members: its one client owns every project, `default` among them from the start.
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), has no members: its one client owns every project, and its own is `_`, there from the start.
 It answers a project's members as none, and refuses a change to them with `403`, `forbidden`.
 
 Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.

@@ -143,8 +143,8 @@ impl Client {
     }
 
     /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
-    /// credentials it wants, `project`, the project every request is in (the server's `default`
-    /// without one), and `headers`, each a name and a value, whatever else it asks of each
+    /// credentials it wants, `project`, the project every request is in (the user's own without
+    /// one), and `headers`, each a name and a value, whatever else it asks of each
     /// request, with every request. `Authorization` is `auth`'s, and `virtx-project` names
     /// `project`, over one given as a header. Refused when a token would go in the clear: over
     /// `http` to any host but this machine. Blocks until the client is made.
@@ -219,7 +219,7 @@ impl Client {
     }
 
     /// Name `project` in every request from now on, over either transport, or with `None`
-    /// none, for the server's `default`. It is sent in place of a `virtx-project` among the
+    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
     /// headers given. Refused for a name no header carries, the project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         let project = project.map(c_string).transpose()?;

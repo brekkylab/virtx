@@ -107,8 +107,8 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     assert_eq!(list(Some(bob), Some("other")), 200);
     assert_eq!(list(None, Some("demo")), 401);
     assert_eq!(list(Some("x"), Some("demo")), 401);
-    // Naming none, it is in `default`, which this server has not.
-    assert_eq!(list(Some(alice), None), 403);
+    // Naming none, it is in the sender's own project, made for them as it is first reached.
+    assert_eq!(list(Some(alice), None), 200);
     assert_eq!(list(Some(bob), Some("demo")), 403);
     assert_eq!(list(Some(alice), Some("other")), 403);
     assert_eq!(list(Some(alice), Some("nobody")), 403);
@@ -403,10 +403,6 @@ impl Own {
             "listen": "127.0.0.1:0",
             "home": dir.join("home"),
             "oidc": { "issuer": issuer, "client_id": CLIENT },
-            "projects": {
-                "demo": { "members": ["alice@example.com", "carol@example.com"] },
-                "other": { "members": ["bob@example.com"] },
-            },
         });
         let path = dir.join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
@@ -427,7 +423,7 @@ impl Own {
         let url = line.strip_prefix("serving at ").expect(&line).to_owned();
         thread::spawn(move || lines.for_each(drop));
 
-        Own {
+        let own = Own {
             served: Served {
                 url,
                 alice,
@@ -438,7 +434,25 @@ impl Own {
             _server: server,
             _dex: dex,
             dir,
-        }
+        };
+        // Its projects, as the fixture's: alice makes `demo` and adds carol, bob makes `other`.
+        let served = &own.served;
+        let send =
+            |method, path, token: &str, body| served.send(method, path, Some(token), None, body).0;
+        assert_eq!(
+            send("POST", "projects/", &served.alice, r#"{"name": "demo"}"#),
+            201
+        );
+        let carol = "projects/demo/members/carol@example.com";
+        assert_eq!(
+            send("PUT", carol, &served.alice, r#"{"role": "owner"}"#),
+            201
+        );
+        assert_eq!(
+            send("POST", "projects/", &served.bob, r#"{"name": "other"}"#),
+            201
+        );
+        own
     }
 }
 

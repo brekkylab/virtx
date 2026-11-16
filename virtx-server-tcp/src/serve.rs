@@ -55,8 +55,8 @@ pub fn become_machine_if_spawned() {
 /// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
 /// where a client signs in for its tokens, answered without any -- the provider and the client
 /// to sign in as.
-pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
-    let access = Arc::new(Access::configured(config).await?);
+pub fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
+    let access = Arc::new(Access::configured(config)?);
     let oidc = &config.oidc;
     let advertised = serde_json::json!({
         "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
@@ -309,7 +309,6 @@ mod tests {
     use std::sync::Arc;
 
     use futures_util::future::BoxFuture;
-    use virtx_core::DEFAULT_PROJECT;
 
     use virtx_uvm::{Membership as _, ProjectStore};
 
@@ -338,12 +337,12 @@ mod tests {
     }
 
     impl Served {
-        /// With every request the tester's, the owner of `demo`, `other` and `default`, from
+        /// With every request the tester's, the owner of `demo` and `other`, from
         /// `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
             Served::spawn_over(name, async |home| {
                 let projects = FileMembership::new(ProjectStore::new(home));
-                for project in ["demo", "other", DEFAULT_PROJECT] {
+                for project in ["demo", "other"] {
                     projects.create(project, "tester").await.unwrap();
                 }
                 let access = Access::new(
@@ -461,7 +460,6 @@ mod tests {
         let served = Served::spawn_over("advertised", async |home| {
             let config = json!({ "listen": "127.0.0.1:0", "home": home, "oidc": oidc });
             super::configured(&Config::parse(config).unwrap())
-                .await
                 .unwrap()
                 .1
         })
@@ -526,6 +524,10 @@ mod tests {
             status("POST", "projects/", "alice", demo.clone()).await,
             409
         );
+        for theirs in ["_alice", "_alice-example.com"] {
+            let made = status("POST", "projects/", "alice", json!({ "name": theirs })).await;
+            assert_eq!(made, 400, "{theirs}");
+        }
         assert_eq!(
             status("POST", "projects/", "alice", json!({ "name": "Demo" })).await,
             400

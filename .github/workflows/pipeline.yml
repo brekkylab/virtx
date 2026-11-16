@@ -29,8 +29,8 @@
 # What a job builds it tests in the same job where it can. Two things cross between jobs, as
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
 # Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
-# containers, can run; abin's C is cross-compiled by a shell script, and each part of alib is
-# built in the Linux containers its `images` names), and a Linux
+# containers, can run; abin's C is cross-compiled by a shell script, and alib is built in a
+# container of each C library's image), and a Linux
 # platform's build, which is made in a container and tried on the runner below its glibc. A
 # cache only ever saves time here: a miss builds the thing again.
 #
@@ -243,29 +243,18 @@ jobs:
           cargo xtask build abin
           ls -la target/release/abin
 
-      # alib is only `virtx-alibs/`, each part built again when its files change.
+      # alib is only its script, which pins what it builds.
       - uses: actions/cache@v6
         id: alib
         with:
           path: alib
-          key: alib-${{ matrix.arch }}-${{ hashFiles('virtx-alibs/**') }}
+          key: alib-${{ matrix.arch }}-${{ hashFiles('xtask/scripts/build-alib.sh') }}
 
-      # Each part's `build.sh`, built and installed into `alib/` in every image its `images`
-      # names, of this runner's architecture.
       - name: alib
         if: steps.alib.outputs.cache-hit != 'true'
-        run: |
-          for part in virtx-alibs/*/; do
-            grep -v '^#' "$part/images" | while read -r dir image; do
-              [ -n "$dir" ] || continue
-              image=$(echo "$image" | sed 's/{arch}/${{ matrix.arch }}/')
-              echo "::group::$part$dir in $image"
-              docker run --rm -v "$PWD:/src" -w /src "$image" \
-                sh -c "sh ${part}build.sh build && sh ${part}build.sh install /src/alib" </dev/null
-              echo "::endgroup::"
-            done
-          done
-          ls -laR alib
+        run: sh xtask/scripts/build-alib.sh "$PWD/alib"
+
+      - run: ls -laR alib
 
       - name: Hand the kernel, abin and alib on
         run: |

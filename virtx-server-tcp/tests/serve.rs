@@ -480,6 +480,7 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
         let manifest: Value = http
             .get(format!("{base}/{repository}/manifests/{tag}"))
             .bearer_auth("a-token")
+            .header("virtx-project", "demo")
             .send()
             .await
             .unwrap()
@@ -491,6 +492,7 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
             manifest["config"]["digest"].as_str().unwrap()
         ))
         .bearer_auth("a-token")
+        .header("virtx-project", "demo")
         .send()
         .await
         .unwrap()

@@ -230,10 +230,20 @@ pub fn spawn_loops(access: &Arc<Access>) {
 
 /// Serve `router` at `listen` until interrupted.
 pub async fn run(listen: std::net::SocketAddr, router: axum::Router) -> anyhow::Result<()> {
+    serve(bind(listen).await?, router).await
+}
+
+/// A listener at `listen`, where it says it serves.
+pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("listening at {listen}"))?;
     eprintln!("serving at http://{}/", listener.local_addr()?);
+    Ok(listener)
+}
+
+/// `router` served on `listener` until this process is interrupted.
+pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     // Each write sent at once: a job's log ends with two small ones, and Nagle's algorithm
     // would hold the second for the first's delayed ACK, some 40 ms.
     let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {

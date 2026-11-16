@@ -43,10 +43,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
     }
     let (projects, access, router) = serve::configured(&config)?;
     serve::spawn_loops(&access);
+    let listener = serve::bind(config.listen).await?;
     if projects.open() {
         eprintln!("without authentication: every request reaches every project");
     }
-    let served = serve::run(config.listen, router).await;
+    let served = serve::serve(listener, router).await;
     // Every sandbox stops with this server, what it wrote on its disk, kept for the next.
     tokio::task::spawn_blocking(move || {
         for home in access.homes() {

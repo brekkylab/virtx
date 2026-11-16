@@ -96,6 +96,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Not 0: a backtrace keeps its lines.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # The version the manifests say, which all of them say alike, and which a tag names. Every

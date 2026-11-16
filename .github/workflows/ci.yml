@@ -4,20 +4,23 @@
 # by hand is in full too. The docs are `docs`'s.
 name: ci
 
+# Markdown is left out, but for the READMEs the packages ship.
 on:
-  pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - docs/**
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - docs/**
+    paths: &paths
+      - "**"
+      - "!**/*.md"
+      - "!docs/**"
+      - virtx-py/README.md
+      - virtx-node/README.md
+  pull_request:
+    paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot. `main`'s runs are not cut short:
-# a merge after a merge would otherwise leave no run to save the caches.
+# A newer push to the pull request makes an older run moot. A run on `main` finishes once
+# started, or a merge after a merge would leave no run to save the caches; of the runs waiting
+# behind it, only the newest is kept.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

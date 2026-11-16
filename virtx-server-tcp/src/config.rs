@@ -11,13 +11,17 @@
 //! ```
 //!
 //! A project's snapshots, volumes and images are under its own root, `<home>/project/<name>/`
-//! (see [`virtx_uvm::project_root`]). Without `home`, it is [`virtx_uvm::cache_root`].
+//! (see [`virtx_uvm::ProjectStore`]). Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! A request's token is an ID token `oidc`'s issuer signed for `client_id`, and the user is its
-//! `username_claim` (`email` unless given): a project's members are users of the provider's.
+//! `username_claim` (`email` unless given): a project's members are users of the provider's,
+//! kept beside its root and changed at `/projects/`, where anyone signed in makes a project and
+//! owns it. `projects` are made as the server starts, each with its members its owners, where a
+//! project of the name is not there already: from then on its members are its own, and the
+//! config's are not read again.
 //!
-//! A request that names no project is in `default`, there only if the config names it. Without
-//! authentication, a client reaches its projects through `virtx-stdio` instead.
+//! A request that names no project is in `default`, a project as any other, there once it is
+//! made. Without authentication, a client reaches its projects through `virtx-stdio` instead.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -56,13 +60,13 @@ impl Config {
     }
 
     /// The config `value` is, refused when it names a project by a name that
-    /// [is no project's](virtx_uvm::is_project_name).
+    /// [is no project's](virtx_uvm::ProjectStore::is_name).
     pub fn parse(value: serde_json::Value) -> anyhow::Result<Config> {
         let config: Config = serde_json::from_value(value)?;
         if let Some(name) = config
             .projects
             .keys()
-            .find(|name| !virtx_uvm::is_project_name(name))
+            .find(|name| !virtx_uvm::ProjectStore::is_name(name))
         {
             bail!("project {name:?}: a name is lower-case letters, digits, '.', '_' and '-'");
         }

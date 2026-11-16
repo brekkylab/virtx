@@ -1,5 +1,6 @@
 //! Projects: what everything a server keeps belongs to, named by each request in
-//! [`PROJECT_HEADER`], as the Projects section of `PROTOCOL.md` has it.
+//! [`PROJECT_HEADER`], and made, read and removed at `/projects/`, with their members at
+//! `/projects/{name}/members/`, as the Projects section of `PROTOCOL.md` has it.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,37 @@ pub enum Role {
     Member,
     /// Also adds, removes and changes members, and deletes the project.
     Owner,
+}
+
+/// A project, as the server answers it, with the role of whoever asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectListOutputItem {
+    pub name: String,
+    pub role: Role,
+}
+
+/// What making a project takes: `POST /projects/`'s body. Its maker is its owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreateArgs {
+    pub name: String,
+}
+
+/// A member of a project, as the server answers it: the user as the server names them, such as
+/// an email address, and their role.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemberListOutputItem {
+    pub user: String,
+    pub role: Role,
+}
+
+/// What giving a user a role in a project takes: `PUT /projects/{name}/members/{user}`'s body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemberSetArgs {
+    pub role: Role,
 }
 
 #[cfg(test)]

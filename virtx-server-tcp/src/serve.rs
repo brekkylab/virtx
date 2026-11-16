@@ -11,10 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::access::{self, Access, Homes, Projects};
+use crate::access::{self, Access};
 use crate::config::Config;
 use crate::endpoints::{self, Tunnel};
 use anyhow::Context as _;
+use axum::Extension;
 use axum::extract::Path;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -51,12 +52,11 @@ pub fn become_machine_if_spawned() {
     }
 }
 
-/// The server `config` alone makes: its [`Projects`] behind [`router`], and beside it where a
-/// client signs in for its tokens, answered without any -- the provider and the client to
-/// sign in as.
-pub fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
-    let homes = Arc::new(Homes::new(config.home()));
-    let projects = Arc::new(Projects::new(config, &homes)?);
+/// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
+/// where a client signs in for its tokens, answered without any -- the provider and the client
+/// to sign in as.
+pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
+    let access = Arc::new(Access::configured(config).await?);
     let oidc = &config.oidc;
     let advertised = serde_json::json!({
         "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
@@ -69,15 +69,14 @@ pub fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)
         "/auth",
         axum::routing::get(move || async move { advertised }),
     );
-    let access = Arc::new(Access::new(config.origins.clone(), projects, homes));
     let router = router(Arc::clone(&access), own);
     Ok((access, router))
 }
 
 /// Everything served, each request checked against `access`: the endpoints, in the home a
-/// request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
-/// browser at one of its origins has -- with `own` beside them, routes that take no home and
-/// check for themselves.
+/// request reaches, the projects themselves, the images' registry at `/images/oci/v2/`, the
+/// ports, and the CORS a browser at one of its origins has -- with `own` beside them, routes
+/// that take no home and check for themselves.
 pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
     let registry = format!("{}/v2", access::REGISTRY_PATH);
     let cors = cors(access.origins());
@@ -92,7 +91,7 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                     .await
                     .map(axum::body::Body::new)
                     .into_response(),
-                Err(status) => refusal(status),
+                Err(status) => endpoints::refusal(status).into_response(),
             }
         }
     };
@@ -108,11 +107,12 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                             request.extensions_mut().insert(home);
                             next.run(request).await
                         }
-                        Err(status) => refusal(status),
+                        Err(status) => endpoints::refusal(status).into_response(),
                     }
                 }
             },
         ))
+        .merge(endpoints::projects().layer(Extension(Arc::clone(&access))))
         .merge(own)
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
@@ -212,19 +212,6 @@ fn cors(origins: &[String]) -> CorsLayer {
         .max_age(Duration::from_secs(3600))
 }
 
-/// A request [`Access`] refused with `status`, as the endpoints refuse one.
-fn refusal(status: StatusCode) -> Response {
-    let (code, message) = match status {
-        StatusCode::UNAUTHORIZED => ("unauthorized", "no token this server knows"),
-        StatusCode::FORBIDDEN => ("forbidden", "not a member of the project, or not from here"),
-        _ => (
-            "invalid",
-            "the virtx-project header is not a project's name",
-        ),
-    };
-    endpoints::refused(status, code, message).into_response()
-}
-
 /// A request to the port `capability` opens: `403` from an `Origin` not let in, `426` unless it
 /// opens a WebSocket, `400` unless of the subprotocol `virtx.tcp`, and `404` for a capability no
 /// sandbox here has -- one never answered, or of a sandbox gone.
@@ -235,7 +222,7 @@ fn port(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if let Err(status) = access.origin(headers) {
-        return refusal(status);
+        return endpoints::refusal(status).into_response();
     }
     let Ok(upgrade) = upgrade else {
         return StatusCode::UPGRADE_REQUIRED.into_response();
@@ -304,10 +291,10 @@ async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
 
 #[cfg(test)]
 mod tests {
-    //! The app, served on the loopback with every request let into the project it names, and
-    //! called over HTTP as a client would: each request to an endpoint in a project -- by
-    //! hand, and through `virtx-core`'s client given it at connect. Who reaches which project
-    //! is `virtx-rs`'s `tests/projects.rs`, against the fixture's provider.
+    //! The app, served on the loopback over an identity of the test's own, and called over HTTP
+    //! as a client would: each request to an endpoint in a project -- by hand, and through
+    //! `virtx-core`'s client given it at connect -- and to the projects themselves. Who a
+    //! provider's token is, is `virtx-rs`'s `tests/projects.rs`, against the fixture's.
 
     use std::path::{Path, PathBuf};
 
@@ -321,20 +308,20 @@ mod tests {
 
     use std::sync::Arc;
 
-    use crate::access::{Access, Authenticator, Checked, Homes};
+    use futures_util::future::BoxFuture;
+    use virtx_core::DEFAULT_PROJECT;
+
+    use virtx_uvm::{Membership as _, ProjectStore};
+
+    use crate::access::{Access, FileMembership, Identity, TokenIsUser};
     use crate::config::Config;
 
-    /// Every request a member of the project it names, or of `default`.
-    struct Everyone;
+    /// Every request the tester's, whatever it carries.
+    struct Tester;
 
-    impl Authenticator for Everyone {
-        fn authenticate<'a>(
-            &'a self,
-            _token: Option<&'a str>,
-            named: Option<&'a str>,
-        ) -> Checked<'a, (String, String)> {
-            let project = named.unwrap_or(virtx_core::DEFAULT_PROJECT).to_owned();
-            Box::pin(async move { Ok(("tester".to_owned(), project)) })
+    impl Identity for Tester {
+        fn identify<'a>(&'a self, _token: Option<&'a str>) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { Some("tester".to_owned()) })
         }
     }
 
@@ -351,24 +338,35 @@ mod tests {
     }
 
     impl Served {
-        /// With every request let into the project it names, from `https://allowed.example`.
+        /// With every request the tester's, the owner of `demo`, `other` and `default`, from
+        /// `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
-            Served::spawn_over(name, |home| {
-                let homes = Arc::new(Homes::new(home.to_owned()));
-                let origins = vec!["https://allowed.example".to_owned()];
-                let access = Arc::new(Access::new(origins, Arc::new(Everyone), homes));
-                super::router(access, axum::Router::new())
+            Served::spawn_over(name, async |home| {
+                let projects = FileMembership::new(ProjectStore::new(home));
+                for project in ["demo", "other", DEFAULT_PROJECT] {
+                    projects.create(project, "tester").await.unwrap();
+                }
+                let access = Access::new(
+                    vec!["https://allowed.example".to_owned()],
+                    Arc::new(Tester),
+                    Arc::new(projects),
+                    ProjectStore::new(home),
+                );
+                super::router(Arc::new(access.unwrap()), axum::Router::new())
             })
             .await
         }
 
         /// What `serving` makes over an empty home of its own.
-        async fn spawn_over(name: &str, serving: impl FnOnce(&Path) -> axum::Router) -> Served {
+        async fn spawn_over(
+            name: &str,
+            serving: impl AsyncFnOnce(&Path) -> axum::Router,
+        ) -> Served {
             let home =
                 std::env::temp_dir().join(format!("virtx-tcp-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
-            let router = serving(&home);
+            let router = serving(&home).await;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -460,9 +458,10 @@ mod tests {
     #[tokio::test]
     async fn a_server_says_where_to_sign_in_and_takes_no_request_without_a_token() {
         let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let served = Served::spawn_over("advertised", |home| {
+        let served = Served::spawn_over("advertised", async |home| {
             let config = json!({ "listen": "127.0.0.1:0", "home": home, "oidc": oidc });
             super::configured(&Config::parse(config).unwrap())
+                .await
                 .unwrap()
                 .1
         })
@@ -475,6 +474,129 @@ mod tests {
         );
         let list = served.send("GET", "volumes/", None, "").await;
         assert_eq!(list.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn members_make_read_and_remove_projects_as_their_roles_let_them() {
+        let served = Served::spawn_over("projects", async |home| {
+            let users = ["alice", "bob", "carol"].map(str::to_owned).into();
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(TokenIsUser(users)),
+                Arc::new(FileMembership::new(ProjectStore::new(home))),
+                ProjectStore::new(home),
+            );
+            super::router(Arc::new(access.unwrap()), axum::Router::new())
+        })
+        .await;
+        let send = async |method: &str, path: &str, token: &str, body: Value| {
+            let method = Method::from_bytes(method.as_bytes()).unwrap();
+            let mut request = reqwest::Client::new()
+                .request(method, format!("{}{path}", served.url))
+                .bearer_auth(token);
+            if !body.is_null() {
+                request = request.json(&body);
+            }
+            let response = request.send().await.unwrap();
+            let location = response.headers().get("location").cloned();
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap();
+            (
+                status,
+                serde_json::from_str(&text).unwrap_or(Value::Null),
+                location,
+            )
+        };
+        let status = async |method, path, token, body| send(method, path, token, body).await.0;
+        let none = Value::Null;
+
+        // Whoever signs in makes a project, and owns it: one of a name in use is refused.
+        let demo = json!({ "name": "demo" });
+        let (made, answer, location) = send("POST", "projects/", "alice", demo.clone()).await;
+        assert_eq!(
+            (made, &answer),
+            (201, &json!({ "name": "demo", "role": "owner" }))
+        );
+        assert_eq!(location.unwrap(), "/projects/demo");
+        assert_eq!(
+            status("POST", "projects/", "bob", json!({ "name": "his" })).await,
+            201
+        );
+        assert_eq!(
+            status("POST", "projects/", "alice", demo.clone()).await,
+            409
+        );
+        assert_eq!(
+            status("POST", "projects/", "alice", json!({ "name": "Demo" })).await,
+            400
+        );
+        assert_eq!(status("POST", "projects/", "nobody", demo).await, 401);
+        let listed = async |token| send("GET", "projects/", token, Value::Null).await.1;
+        assert_eq!(
+            listed("alice").await,
+            json!([{ "name": "demo", "role": "owner" }])
+        );
+        assert_eq!(
+            listed("bob").await,
+            json!([{ "name": "his", "role": "owner" }])
+        );
+
+        // Bob reaches it, and what is in it, once Alice adds him.
+        let volumes = async |token: &str| {
+            let request = reqwest::Client::new()
+                .get(format!("{}volumes/", served.url))
+                .bearer_auth(token)
+                .header("virtx-project", "demo");
+            request.send().await.unwrap().status().as_u16()
+        };
+        assert_eq!(
+            status("GET", "projects/demo", "bob", none.clone()).await,
+            403
+        );
+        assert_eq!(volumes("bob").await, 403);
+        let member = json!({ "role": "member" });
+        let bob = "projects/demo/members/bob";
+        let (added, answer, location) = send("PUT", bob, "alice", member.clone()).await;
+        assert_eq!(
+            (added, &answer),
+            (201, &json!({ "user": "bob", "role": "member" }))
+        );
+        assert_eq!(location.unwrap(), "/projects/demo/members/bob");
+        assert_eq!(status("PUT", bob, "alice", member.clone()).await, 200);
+        assert_eq!(
+            send("GET", "projects/demo", "bob", none.clone()).await.1,
+            json!({ "name": "demo", "role": "member" })
+        );
+        assert_eq!(volumes("bob").await, 200);
+        assert_eq!(
+            send("GET", "projects/demo/members/", "bob", none.clone())
+                .await
+                .1,
+            json!([{ "user": "alice", "role": "owner" }, { "user": "bob", "role": "member" }])
+        );
+
+        // A member neither changes the members nor removes the project; the last owner stays.
+        let (alice, carol) = ("projects/demo/members/alice", "projects/demo/members/carol");
+        assert_eq!(status("PUT", carol, "bob", member).await, 403);
+        assert_eq!(status("DELETE", alice, "bob", none.clone()).await, 403);
+        assert_eq!(
+            status("DELETE", "projects/demo", "bob", none.clone()).await,
+            403
+        );
+        assert_eq!(status("DELETE", alice, "alice", none.clone()).await, 409);
+        assert_eq!(status("DELETE", carol, "alice", none.clone()).await, 404);
+
+        // Bob leaves; Alice removes the project, and everything in it.
+        assert_eq!(status("DELETE", bob, "bob", none.clone()).await, 204);
+        assert_eq!(volumes("bob").await, 403);
+        assert!(served.home.join("project/demo").is_dir());
+        assert_eq!(
+            status("DELETE", "projects/demo", "alice", none.clone()).await,
+            204
+        );
+        assert!(!served.home.join("project/demo").exists());
+        assert_eq!(status("GET", "projects/demo", "alice", none).await, 403);
+        assert_eq!(listed("alice").await, json!([]));
     }
 
     #[tokio::test]

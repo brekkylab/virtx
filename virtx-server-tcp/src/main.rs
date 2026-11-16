@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn run(config: Config) -> anyhow::Result<()> {
-    let (access, router) = serve::configured(&config)?;
+    let (access, router) = serve::configured(&config).await?;
     serve::keep_pruned(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
     let served = serve::run(listener, router).await;

@@ -25,6 +25,9 @@ serde = { workspace = true }
 serde_json = "1"
 # A project store's answer, which one over a database awaits.
 futures-util = { version = "0.3", default-features = false }
+thiserror = "2"
+# A member's user, as a segment of the path its `Location` names.
+percent-encoding = "2"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
@@ -36,6 +39,8 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
+# A test's own root, removed when it is done.
+tempfile = "3"
 # A blob's digest, as a registry's client computes it.
 sha2 = "0.10"
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.

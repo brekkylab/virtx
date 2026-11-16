@@ -1,6 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, answered from the
-//! [`Home`] of the project a request names: one client is on the other end of stdio, so all of
-//! it is its.
+//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
+//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
+//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
+//! of stdio, so all of it is its, and a project has no members.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -23,17 +24,20 @@ use tokio::net::TcpListener;
 use tokio::task::{AbortHandle, JoinSet};
 
 use virtx_core::{
-    ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
-    ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
+    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxSignalArgs, SnapshotCreateArgs,
+    SnapshotListOutputItem, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListOutputItem,
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, ProjectError, Reference,
+    RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
+
+use crate::Host;
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -90,9 +94,17 @@ impl Home {
         &self.registry
     }
 
-    /// Close every sandbox here, as removing each does, side by side: blocks until each
+    /// Whether a sandbox lives here.
+    pub fn in_use(&self) -> bool {
+        !self.sandboxes.lock().unwrap().is_empty()
+    }
+
+    /// Cancel every image job here, and close every sandbox, as removing each does, side by side: blocks until each
     /// machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
+        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
+            cancel(&job, &task);
+        }
         let closed: Vec<_> = self
             .sandboxes
             .lock()
@@ -248,7 +260,104 @@ pub fn router() -> Router {
         .fallback(async || not_found("no endpoint here"))
 }
 
+/// The projects, each the client's to own, answered from the [`Host`] in each request's
+/// extensions.
+pub fn projects() -> Router {
+    Router::new()
+        .route("/projects/", get(project_list).post(project_create))
+        .route("/projects/{name}", get(project_get).delete(project_remove))
+        .route("/projects/{name}/members/", get(project_member_list))
+        .route(
+            "/projects/{name}/members/{user}",
+            put(project_member_change).delete(project_member_change),
+        )
+}
+
 type Answer = Result<Response, Refused>;
+
+/// `403` for a project that is not here.
+fn here(host: &Host, project: &str) -> Result<(), Refused> {
+    match host.store().exists(project) {
+        true => Ok(()),
+        false => Err(forbidden(format!("no project here is named {project}"))),
+    }
+}
+
+async fn project_list(Extension(host): Extension<Arc<Host>>) -> Answer {
+    let listed: Vec<_> = host
+        .store()
+        .list()?
+        .into_iter()
+        .map(|name| ProjectListOutputItem {
+            name,
+            role: Role::Owner,
+        })
+        .collect();
+    Ok(json(&listed))
+}
+
+async fn project_create(Extension(host): Extension<Arc<Host>>, request: Bytes) -> Answer {
+    let args: ProjectCreateArgs = body(&request)?;
+    host.store().create(&args.name)?;
+    let made = ProjectListOutputItem {
+        name: args.name,
+        role: Role::Owner,
+    };
+    Ok(created(format!("/projects/{}", made.name), &made))
+}
+
+async fn project_get(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(name): Segments<String>,
+) -> Answer {
+    here(&host, &name)?;
+    Ok(json(&ProjectListOutputItem {
+        name,
+        role: Role::Owner,
+    }))
+}
+
+/// Remove a project and everything in it, its image jobs cancelled: refused while a sandbox
+/// lives in it. `default` is there again, empty.
+async fn project_remove(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(name): Segments<String>,
+) -> Answer {
+    here(&host, &name)?;
+    if !host.close(&name) {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            "in_use",
+            format!("a sandbox lives in project {name}"),
+        ));
+    }
+    let store = host.store().clone();
+    tokio::task::spawn_blocking(move || {
+        store.remove(&name)?;
+        if name == DEFAULT_PROJECT {
+            store.create(&name)?;
+        }
+        Ok::<_, ProjectError>(())
+    })
+    .await
+    .map_err(internal)??;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// None: a project here has no members.
+async fn project_member_list(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(name): Segments<String>,
+) -> Answer {
+    here(&host, &name)?;
+    Ok(json(&Vec::<ProjectListOutputItem>::new()))
+}
+
+async fn project_member_change() -> Answer {
+    Err(forbidden(
+        "virtx-stdio has no members: its one client owns every project",
+    ))
+}
 
 async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let jobs = home.image_jobs.lock().unwrap();
@@ -437,6 +546,12 @@ async fn image_job_remove(
     let removed = home.image_jobs.lock().unwrap().remove(&id);
     let (job, task) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
+    cancel(&job, &task);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
+fn cancel(job: &ImageJobOf, task: &AbortHandle) {
     task.abort();
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
@@ -446,7 +561,6 @@ async fn image_job_remove(
         }),
     );
     job.remove();
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn image_job_events(
@@ -832,7 +946,11 @@ pub fn refused(status: StatusCode, code: &'static str, message: impl Display) ->
     Refused(status, code, message.to_string())
 }
 
-fn invalid(message: impl Display) -> Refused {
+pub fn forbidden(message: impl Display) -> Refused {
+    refused(StatusCode::FORBIDDEN, "forbidden", message)
+}
+
+pub fn invalid(message: impl Display) -> Refused {
     refused(StatusCode::BAD_REQUEST, "invalid", message)
 }
 
@@ -840,7 +958,7 @@ fn not_found(message: impl Display) -> Refused {
     refused(StatusCode::NOT_FOUND, "not_found", message)
 }
 
-fn internal(message: impl Display) -> Refused {
+pub fn internal(message: impl Display) -> Refused {
     refused(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
 }
 
@@ -858,6 +976,18 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
         std::io::ErrorKind::NotFound => not_found(message),
         std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", message),
         _ => internal(message),
+    }
+}
+
+impl From<ProjectError> for Refused {
+    fn from(e: ProjectError) -> Refused {
+        match &e {
+            ProjectError::InvalidName(_) => invalid(e),
+            ProjectError::Unknown(_) => forbidden(e),
+            ProjectError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            ProjectError::NoOwner(_) => refused(StatusCode::CONFLICT, "in_use", e),
+            ProjectError::Io { .. } | ProjectError::Other(_) => internal(e),
+        }
     }
 }
 

@@ -13,6 +13,8 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
+| `/projects/` | [HTTP](#projects) | Project CRUD |
+| `/projects/{name}/members/` | [HTTP](#projects) | Project member CRUD |
 | `/snapshots/` | [HTTP](#snapshots) | Snapshot CRUD |
 | `/snapshots/{name}/files/` | [WebDAV](#files) | The files in a snapshot |
 | `/volumes/` | [HTTP](#volumes) | Volume CRUD |
@@ -75,15 +77,45 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 ## Projects
 
-Everything a server keeps, its images, snapshots, volumes and sandboxes, belongs to a project.
+Everything a server keeps, its images, snapshots, volumes and sandboxes, belongs to a project, and a project to its members, each in a role.
 A request names its project in the `virtx-project` header, the same over either transport.
 A request that names none belongs to the project `default`.
 
 - A project's name is lower-case letters, digits, `.`, `_` and `-`, up to 128 characters, and starts with neither `.` nor `-`.
 - Projects are apart: a name is one project's, so the volume `data` of one project is not that of another, and nothing in one is reached from another.
-- A server that takes no credentials has `default`. A server that takes them has `default` only if it names it among its projects.
+- `default` is a project as any other, there once it is made.
 - A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
 - A URL the server forms, such as a [port's](#ports), carries the project it was made in.
+
+Each member of a project has a role:
+
+- `member` reaches everything in it, reads it and its members, and leaves it.
+- `owner` does what a member does, and also adds, changes and removes members, and removes the project.
+
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), has no members: its one client owns every project, `default` among them from the start.
+It answers a project's members as none, and refuses a change to them with `403`, `forbidden`.
+
+Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
+They name the project in their path, and take no `virtx-project`.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /projects/` | | `200`, array of `{name, role}` |
+| `POST /projects/` | `{name}` | `201`, `{name, role}` |
+| `GET /projects/{name}` | | `200`, `{name, role}` |
+| `DELETE /projects/{name}` | | `204` |
+| `GET /projects/{name}/members/` | | `200`, array of `{user, role}` |
+| `PUT /projects/{name}/members/{user}` | `{role}` | `201` or `200`, `{user, role}` |
+| `DELETE /projects/{name}/members/{user}` | | `204` |
+
+- `role` in a project's answer is the role of who asked; `GET /projects/` answers each project they have one in.
+- `POST` makes a project whose one member, its owner, is who asked. A name in use is refused with `409`, `exists`.
+- `DELETE` of a project removes everything in it, its image jobs cancelled, and is refused with `409`, `in_use`, while a sandbox lives in it.
+- `{user}` is a user as the server names them, such as an email address.
+- `PUT` gives `user` the role: `201` adds them, `200` changes theirs.
+- `DELETE` of a member takes their role away. A user who is no member is refused with `404`, `not_found`.
+- Only an owner adds, changes and removes members, and removes the project, but a member removes themself, leaving it. Anyone else is refused with `403`, `forbidden`.
+- A change that would leave a project with no owner is refused with `409`, `in_use`.
 
 ## Resources
 

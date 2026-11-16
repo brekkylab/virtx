@@ -35,7 +35,5 @@ jobs:
     uses: ./.github/workflows/pipeline.yml
     with:
       full: ${{ github.event_name != 'pull_request' }}
-    # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read
-      id-token: write

@@ -30,10 +30,8 @@ jobs:
     with:
       full: true
       release: true
-    # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
     permissions:
       contents: read
-      id-token: write
 
   # What each platform packed and tried, and `@brekkylab/virtx`, packed once here for all of
   # them: it names every platform's package and carries no library of its own. Every

@@ -114,7 +114,8 @@ fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
 pub struct Host {
     store: ProjectStore,
     /// Each project's home, by name.
-    homes: Mutex<HashMap<String, Arc<Home>>>,
+    /// `None` for a project being removed, which no request reaches until it is gone.
+    homes: Mutex<HashMap<String, Option<Arc<Home>>>>,
 }
 
 impl Host {
@@ -152,41 +153,59 @@ impl Host {
         if !self.store.exists(project) {
             return Err(forbidden(format!("no project here is named {project}")));
         }
-        self.home_of(project)
-            .map_err(|e| endpoints::internal(format!("making project {project}'s home: {e:#}")))
+        let home = self
+            .home_of(project)
+            .map_err(|e| endpoints::internal(format!("making project {project}'s home: {e:#}")))?;
+        home.ok_or_else(|| forbidden(format!("project {project} is being removed")))
     }
 
-    /// Project `project`'s home, its images its own.
-    fn home_of(&self, project: &str) -> anyhow::Result<Arc<Home>> {
+    /// Project `project`'s home, its images its own: `None` while it is being removed.
+    fn home_of(&self, project: &str) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
         if let Some(home) = homes.get(project) {
-            return Ok(Arc::clone(home));
+            return Ok(home.clone());
         }
         let dir = self.store.path(project)?;
         let images = ImageStore::new(dir.join("images"))?;
         let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
         let home = Arc::new(Home::new(images, registry, &dir)?);
-        homes.insert(project.to_owned(), Arc::clone(&home));
-        Ok(home)
+        homes.insert(project.to_owned(), Some(Arc::clone(&home)));
+        Ok(Some(home))
     }
 
-    /// Take project `project`'s home away, its image jobs cancelled, for its directory to be
-    /// removed: `false`, and nothing taken, while a sandbox in it lives.
+    /// Take project `project`'s home away, its image jobs cancelled, for it to be removed: no
+    /// request reaches it from now until [`release`](Host::release). `false`, and nothing
+    /// taken, while a sandbox in it lives or it is being removed already.
     pub fn close(&self, project: &str) -> bool {
         let mut homes = self.homes.lock().unwrap();
-        if homes.get(project).is_some_and(|home| home.in_use()) {
-            return false;
+        match homes.get(project) {
+            Some(None) => return false,
+            Some(Some(home)) if home.in_use() => return false,
+            _ => {}
         }
-        if let Some(home) = homes.remove(project) {
+        if let Some(Some(home)) = homes.insert(project.to_owned(), None) {
             home.close_all();
         }
         true
     }
 
+    /// Let requests reach project `project` again, once its removal is over: as made anew, if
+    /// it is there still.
+    pub fn release(&self, project: &str) {
+        self.homes.lock().unwrap().remove(project);
+    }
+
     /// Close every sandbox of every home, as removing each does: blocks until each machine has
     /// stopped and synced what it wrote.
     fn close_all(&self) {
-        let homes: Vec<_> = self.homes.lock().unwrap().values().cloned().collect();
+        let homes: Vec<_> = self
+            .homes
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
         for home in homes {
             home.close_all();
         }

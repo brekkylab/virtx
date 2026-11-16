@@ -46,7 +46,8 @@ pub struct Access {
     membership: Arc<dyn Membership>,
     store: ProjectStore,
     /// Each project's home, by name, made as it is first reached.
-    homes: Mutex<HashMap<String, Arc<Home>>>,
+    /// `None` for a project being removed, which no request reaches until it is gone.
+    homes: Mutex<HashMap<String, Option<Arc<Home>>>>,
 }
 
 impl Access {
@@ -99,7 +100,13 @@ impl Access {
 
     /// Every home made.
     pub fn homes(&self) -> Vec<Arc<Home>> {
-        self.homes.lock().unwrap().values().cloned().collect()
+        self.homes
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// `403` for a request with `headers` from an `Origin` not let in.
@@ -154,7 +161,7 @@ impl Access {
             eprintln!("making project {project}'s home: {e:#}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        Ok((user, home))
+        Ok((user, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
     /// The project of `user`'s own, which a request of theirs that names none is in, made the
@@ -179,31 +186,40 @@ impl Access {
         Ok(name)
     }
 
-    /// Project `project`'s home, its images its own.
-    fn home_of(&self, project: &str) -> anyhow::Result<Arc<Home>> {
+    /// Project `project`'s home, its images its own: `None` while it is being removed.
+    fn home_of(&self, project: &str) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
         if let Some(home) = homes.get(project) {
-            return Ok(Arc::clone(home));
+            return Ok(home.clone());
         }
         let dir = self.store.path(project)?;
         let images = ImageStore::new(dir.join("images"))?;
         let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
         let home = Arc::new(Home::new(images, registry, &dir)?);
-        homes.insert(project.to_owned(), Arc::clone(&home));
-        Ok(home)
+        homes.insert(project.to_owned(), Some(Arc::clone(&home)));
+        Ok(Some(home))
     }
 
-    /// Take project `project`'s home away, its image jobs cancelled, for its directory to be
-    /// removed: `false`, and nothing taken, while a sandbox in it lives.
+    /// Take project `project`'s home away, its image jobs cancelled, for it to be removed: no
+    /// request reaches it from now until [`release`](Access::release). `false`, and nothing
+    /// taken, while a sandbox in it lives or it is being removed already.
     pub fn close(&self, project: &str) -> bool {
         let mut homes = self.homes.lock().unwrap();
-        if homes.get(project).is_some_and(|home| home.in_use()) {
-            return false;
+        match homes.get(project) {
+            Some(None) => return false,
+            Some(Some(home)) if home.in_use() => return false,
+            _ => {}
         }
-        if let Some(home) = homes.remove(project) {
+        if let Some(Some(home)) = homes.insert(project.to_owned(), None) {
             home.close_all();
         }
         true
+    }
+
+    /// Let requests reach project `project` again, once its removal is over: as made anew, if
+    /// it is there still.
+    pub fn release(&self, project: &str) {
+        self.homes.lock().unwrap().remove(project);
     }
 }
 
@@ -312,13 +328,10 @@ impl Membership for FileMembership {
         owner: &'a str,
     ) -> BoxFuture<'a, Result<(), ProjectError>> {
         Box::pin(async move {
-            let dir = self.store.path(project)?;
             let _changing = self.changing.lock().unwrap();
-            if self.read(project)?.is_some() {
-                return Err(ProjectError::AlreadyExists(project.to_owned()));
-            }
-            fs::create_dir_all(&dir)
-                .map_err(|e| ProjectError::io(format!("making {}", dir.display()), e))?;
+            // Its directory made anew: one already there is another project's, or what one
+            // left, and no new owner takes it.
+            self.store.create(project)?;
             let members = Members {
                 members: BTreeMap::from([(owner.to_owned(), Role::Owner)]),
             };

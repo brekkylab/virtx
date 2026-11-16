@@ -339,16 +339,17 @@ async fn project_remove(
             format!("a sandbox lives in project {name}"),
         ));
     }
-    let store = host.store().clone();
-    tokio::task::spawn_blocking(move || {
-        store.remove(&name)?;
-        if name == DEFAULT_PROJECT {
-            store.create(&name)?;
+    let (store, project) = (host.store().clone(), name.clone());
+    let removed = tokio::task::spawn_blocking(move || {
+        store.remove(&project)?;
+        if project == DEFAULT_PROJECT {
+            store.create(&project)?;
         }
         Ok::<_, ProjectError>(())
     })
-    .await
-    .map_err(internal)??;
+    .await;
+    host.release(&name);
+    removed.map_err(internal)??;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

@@ -396,11 +396,17 @@ async fn project_remove(
             format!("a sandbox lives in project {name}"),
         ));
     }
-    access.membership().remove(&name).await?;
-    let store = access.store().clone();
-    tokio::task::spawn_blocking(move || store.remove(&name))
-        .await
-        .map_err(internal)??;
+    let removed = async {
+        access.membership().remove(&name).await?;
+        let (store, project) = (access.store().clone(), name.clone());
+        tokio::task::spawn_blocking(move || store.remove(&project))
+            .await
+            .map_err(internal)??;
+        Ok::<_, Refused>(())
+    }
+    .await;
+    access.release(&name);
+    removed?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

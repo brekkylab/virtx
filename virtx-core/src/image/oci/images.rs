@@ -127,6 +127,10 @@ mod tests {
     };
     use serde_json::json;
 
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::Request;
+
     use super::{list, remove, tag, untag};
     use crate::transport::testing::piped;
 
@@ -182,22 +186,58 @@ mod tests {
 
     /// An image the server does not hold is refused `404`, `not_found`, by the reference it was
     /// asked for, by each call that takes one: what to branch on, as for a sandbox or a volume.
+    /// Each call asks the registry for the image it was given, and nothing else.
     #[tokio::test]
     async fn an_image_the_server_does_not_hold_is_refused_404_by_its_reference() {
-        let unknown = || async {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"errors": [{"code": "MANIFEST_UNKNOWN", "message": "unknown"}]})),
-            )
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&asked);
+        let unknown = move |request: Request| {
+            let log = Arc::clone(&log);
+            async move {
+                let sent = format!("{} {}", request.method(), request.uri().path());
+                log.lock().unwrap().push(sent);
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"errors": [{"code": "MANIFEST_UNKNOWN", "message": "unknown"}]})),
+                )
+            }
         };
         let client = piped(Router::new().fallback(unknown));
-        let digest = format!("nope@sha256:{}", "0".repeat(64));
-        for (call, reference, result) in [
-            ("untag", "nope:1", untag(&client, "nope:1").await),
-            ("remove", "nope:1", remove(&client, "nope:1").await),
-            ("remove", digest.as_str(), remove(&client, &digest).await),
-            ("tag", "nope:1", tag(&client, "nope:1", "other:1").await),
+        let sent = || std::mem::take(&mut *asked.lock().unwrap());
+        let digest = format!("sha256:{}", "0".repeat(64));
+        let by_digest = format!("nope@{digest}");
+        let by_digest_path = format!("DELETE /images/oci/v2/nope/manifests/{digest}");
+        for (call, reference, result, sent, asked) in [
+            (
+                "untag",
+                "nope:1",
+                untag(&client, "nope:1").await,
+                sent(),
+                vec!["DELETE /images/oci/v2/nope/manifests/1"],
+            ),
+            (
+                "remove",
+                "nope:1",
+                remove(&client, "nope:1").await,
+                sent(),
+                vec!["HEAD /images/oci/v2/nope/manifests/1"],
+            ),
+            (
+                "remove",
+                by_digest.as_str(),
+                remove(&client, &by_digest).await,
+                sent(),
+                vec![by_digest_path.as_str()],
+            ),
+            (
+                "tag",
+                "nope:1",
+                tag(&client, "nope:1", "other:1").await,
+                sent(),
+                vec!["GET /images/oci/v2/nope/manifests/1"],
+            ),
         ] {
+            assert_eq!(sent, asked, "{call} {reference}");
             let refused = result.unwrap_err();
             assert_eq!(refused.status(), Some(404), "{call} {reference}: {refused}");
             assert_eq!(

@@ -24,8 +24,10 @@
 //! more than [`FRESH_FOR`] left: one refresh serves them all. Run with `VIRTX_TOKEN_REFUSED`
 //! set, as an SDK runs it once a server refused the token it had, it refreshes whatever it has.
 //!
-//! With an access token, a client names its organization as well -- `VIRTX_ORG`, its UUID --
-//! and its cell's endpoint, `VIRTX_URL`: unlike an API key, a person's token names neither.
+//! A cell takes a person's token for one organization: `virtx token --org <its UUID>`, or with
+//! `VIRTX_ORG` set, exchanges the session's for that organization's (`/auth/token/org`), from
+//! which the cell's gateway learns the organization. Its cell's endpoint is `VIRTX_URL`, or the
+//! nearest: unlike an API key, a person's token names no cell.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -59,6 +61,10 @@ pub(crate) enum CloudCommand {
         /// Print `{"token": ..., "expires_in": <seconds>}`, as the SDKs read it.
         #[arg(long)]
         json: bool,
+        /// The organization the token is for, by its UUID: what a cell takes. Without one, the
+        /// session's own, which virtx cloud's console API takes.
+        #[arg(long, env = "VIRTX_ORG")]
+        org: Option<String>,
     },
     /// Say who is signed in to virtx cloud.
     Whoami,
@@ -79,8 +85,11 @@ pub(crate) async fn run(domain: &str, command: CloudCommand) -> anyhow::Result<(
     };
     match command {
         CloudCommand::Login => cloud.login().await,
-        CloudCommand::Token { json } => {
-            let tokens = cloud.token().await?;
+        CloudCommand::Token { json, org } => {
+            let tokens = match org.as_deref().filter(|o| !o.is_empty()) {
+                Some(org) => cloud.org_token(org).await?,
+                None => cloud.token().await?,
+            };
             if json {
                 let printed = json!({
                     "token": tokens.access_token,
@@ -261,6 +270,35 @@ impl Cloud {
         }
         self.keep_access(&tokens)?;
         Ok(tokens)
+    }
+
+    /// An access token for organization `org`, exchanged for the session's ([`token`]): one
+    /// refused `401` -- kept, though its session ended or it was revoked since -- is refreshed
+    /// once and exchanged again.
+    ///
+    /// [`token`]: Self::token
+    async fn org_token(&self, org: &str) -> anyhow::Result<Tokens> {
+        for retried in [false, true] {
+            let session = self.token().await?;
+            let answer = self
+                .http
+                .post(format!("{}/auth/token/org", self.api))
+                .bearer_auth(&session.access_token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(serde_json::to_vec(&json!({ "org": org }))?)
+                .send()
+                .await
+                .context("reaching virtx cloud")?;
+            if answer.status() == reqwest::StatusCode::UNAUTHORIZED && !retried {
+                let _ = self.forget_access();
+                continue;
+            }
+            if answer.status() == reqwest::StatusCode::NOT_FOUND {
+                bail!("{org} is no organization of yours");
+            }
+            return json_of(checked(answer)?).await;
+        }
+        bail!("the session has ended; run virtx login")
     }
 
     /// The tokens `refresh` is replaced with -- or none, `401`, for a session that has ended.

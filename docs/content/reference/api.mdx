@@ -20,7 +20,7 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
 | `Client.connect(url, auth, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request. A token is sent over plain `http` only to this machine's loopback. |
-| `Client.from_env()` | `Client` | Reaches virtx cloud, or the server `VIRTX_URL` names, as its [environment variables](#environment-variables) say: with `VIRTX_API_KEY`, as that key; with `VIRTX_ORG` and no key, as the person `virtx login` signed in, running `virtx token --json` for each token. Node.js calls it `fromEnv`. |
+| `Client.from_env()` | `Client` | Reaches virtx cloud, or the server `VIRTX_URL` names, as its [environment variables](#environment-variables) say: with `VIRTX_API_KEY`, as that key; with `VIRTX_ORG` and no key, as the person `virtx login` signed in, running `virtx token --json --org <VIRTX_ORG>` for each token. Node.js calls it `fromEnv`. |
 | `set_auth(auth)`, `set_headers(headers)` | `None` | Replace what every later request sends. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
@@ -202,7 +202,7 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_TOKEN` | CLI | The bearer token sent to `VIRTX_HOST`. |
 | `VIRTX_URL` | `from_env` | A server's base URL, reached in place of virtx cloud. |
 | `VIRTX_API_KEY` | `from_env` | An API key of virtx cloud, sent as the bearer token. |
-| `VIRTX_ORG` | `from_env` | An organization's ID, sent with every request as the `virtx-org` header. Without `VIRTX_API_KEY`, the client signs in as the person `virtx login` signed in. |
+| `VIRTX_ORG` | `from_env` | An organization's ID. Without `VIRTX_API_KEY`, the client signs in as the person `virtx login` signed in, with a token for that organization. An API key names its own. |
 | `VIRTX_REGION` | `from_env` | Without `VIRTX_URL`, the cell of virtx cloud to reach, such as `apne2`. Without it, the cell nearest this machine, when `VIRTX_API_KEY` or `VIRTX_ORG` is set. |
 | `VIRTX_DOMAIN` | `from_env`, CLI | Where virtx cloud is; `virtx.sh` by default. |
 | `VIRTX_MINUTE_MS` | Server | How long a minute of a sandbox's `auto_stop_minutes` lasts, in milliseconds, and so a day of its `auto_delete_days`, 1440 of them. A minute by default; for tests that wait on a sandbox stopping. |

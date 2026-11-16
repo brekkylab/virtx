@@ -515,9 +515,10 @@ export class Client {
    */
   static spawn(program?: string | null, args?: string[]): Client
   /**
-   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
-   * `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
-   * `virtx token --json` prints, again as it runs out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
+   * organization: with `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose
+   * token for that organization `virtx token --json --org <VIRTX_ORG>` prints, again as it runs
+   * out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
    * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
    * nearest this machine.
    */

@@ -217,9 +217,10 @@ class Client:
 
     @classmethod
     def from_env(cls) -> Client:
-        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` and ``VIRTX_ORG`` if set:
-        with ``VIRTX_ORG`` and no key, as the person signed in with ``virtx login``, whose token
-        ``virtx token --json`` prints, again as it runs out.
+        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` if set, which names its
+        organization: with ``VIRTX_ORG`` and no key, as the person signed in with ``virtx login``,
+        whose token for that organization ``virtx token --json --org <VIRTX_ORG>`` prints, again
+        as it runs out.
 
         Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
         cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
@@ -240,8 +241,9 @@ class Client:
         if key:
             auth = BearerAuth(key)
         elif org:
-            auth = CommandAuth(*SIGNED_IN)
-        return cls.connect(url, auth, {ORG_HEADER: org} if org else None)
+            program, args = SIGNED_IN
+            auth = CommandAuth(program, (*args, "--org", org))
+        return cls.connect(url, auth)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
@@ -588,10 +590,6 @@ DOMAIN = "virtx.sh"
 """Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and
 ``<cell>.api.<DOMAIN>`` for one."""
 
-ORG_HEADER = "virtx-org"
-"""The header a request names its organization in, on a server that keeps organizations apart
-(PROTOCOL.md, Authentication)."""
-
 SIGNED_IN = ("virtx", ("token", "--json"))
 """The command that prints the token of the person signed in with ``virtx login``, and its
-arguments."""
+arguments, to which ``--org`` and the organization are added."""

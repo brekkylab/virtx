@@ -516,9 +516,10 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` and `VIRTX_ORG` if set: with
-  // `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose token
-  // `virtx token --json` prints, again as it runs out.
+  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
+  // organization: with `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose
+  // token for that organization `virtx token --json --org <VIRTX_ORG>` prints, again as it runs
+  // out.
   // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
   // `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers
   // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
@@ -531,8 +532,12 @@ class Client {
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
     if (!url && (key || org)) url = `https://run.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
-    const auth = key ? { type: 'bearer', token: key } : org ? SIGNED_IN : null
-    return Client.connect(url, auth, org ? { [ORG_HEADER]: org } : {})
+    const auth = key
+      ? { type: 'bearer', token: key }
+      : org
+        ? { ...SIGNED_IN, args: [...SIGNED_IN.args, '--org', org] }
+        : null
+    return Client.connect(url, auth, {})
   }
 
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
@@ -1187,11 +1192,8 @@ if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prot
 // for one.
 const DOMAIN = 'virtx.sh'
 
-// The header a request names its organization in, on a server that keeps organizations apart
-// (PROTOCOL.md, Authentication).
-const ORG_HEADER = 'virtx-org'
-
-// The token of the person signed in with `virtx login`, as `virtx token --json` prints it.
+// The token of the person signed in with `virtx login`, as `virtx token --json` prints it; for
+// an organization, `--org` and its id added.
 const SIGNED_IN = { type: 'command', program: 'virtx', args: ['token', '--json'] }
 
 module.exports = {

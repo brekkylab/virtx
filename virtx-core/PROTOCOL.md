@@ -71,9 +71,8 @@ How the client obtains the token is outside this protocol.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
-A server that keeps organizations apart, each with its own images, volumes and sandboxes, takes the organization a request is for in the `virtx-org` header.
-A credential that is an organization's own, such as an API key, names its organization already, and the header MAY be left out.
-A server answers `400 Bad Request` to a request that names no organization when it needs one, and `403 Forbidden` to one naming an organization the credentials do not reach.
+A server that keeps organizations apart, each with its own images, volumes and sandboxes, takes the organization a request is for from its credentials: an organization's own, such as an API key, or a person's issued for one organization.
+A server answers `400 Bad Request` to a request whose credentials are for no organization when it needs one, and `403 Forbidden` to one whose credentials do not reach the organization they name.
 
 ## Resources
 

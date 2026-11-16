@@ -10,7 +10,6 @@ mod volume;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -43,20 +42,23 @@ impl Files {
         }
     }
 
-    /// Answer `request`, one to `/volumes/{name}/files` and what is under it; anything else is
-    /// `404`.
-    pub async fn handle(&self, request: Request<Body>) -> Response {
-        let Some(rest) = request.uri().path().strip_prefix("/volumes/") else {
-            return StatusCode::NOT_FOUND.into_response();
-        };
-        let name = name(rest);
+    /// Answer `request`, one to `/volumes/{name}/files` and what is under it, from the volume
+    /// `name`: `400` for a name that cannot be one, `404` for no volume by it.
+    pub async fn volume(&self, name: &str, request: Request<Body>) -> Response {
         let handler = match handler(format!("/volumes/{name}/files"), &request) {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
-        let volume = match self.volumes.open(&name) {
+        let volume = match self.volumes.open(name) {
             Ok(volume) => Arc::new(volume),
-            Err(e) => return refused(status(&e), e).into_response(),
+            Err(e) => {
+                let status = match e {
+                    VolumeError::InvalidName(_) => StatusCode::BAD_REQUEST,
+                    VolumeError::Unknown(_) => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                return refused(status, e).into_response();
+            }
         };
         let handler = handler
             .filesystem(Box::new(volume::Fs(volume)))
@@ -64,7 +66,13 @@ impl Files {
         let conditional = request.headers().contains_key(http::header::IF_MATCH);
         let _serial = match conditional {
             true => {
-                let serial = Arc::clone(self.serial.lock().unwrap().entry(name).or_default());
+                let serial = Arc::clone(
+                    self.serial
+                        .lock()
+                        .unwrap()
+                        .entry(name.to_owned())
+                        .or_default(),
+                );
                 Some(serial.lock_owned().await)
             }
             false => None,
@@ -244,11 +252,6 @@ fn destination(request: &Request<Body>) -> Option<String> {
     }
 }
 
-/// The first segment of `rest`, what follows a root's kind in a path.
-fn name(rest: &str) -> String {
-    rest.split('/').next().unwrap_or("").to_owned()
-}
-
 /// A request refused: the status, and a line saying why.
 pub(crate) struct Refusal(StatusCode, String);
 
@@ -261,29 +264,6 @@ impl IntoResponse for Refusal {
 /// `status`, saying why.
 fn refused(status: StatusCode, why: impl fmt::Display) -> Refusal {
     Refusal(status, why.to_string())
-}
-
-/// The status a request on a volume's files is refused with when it fails with `e`, as a
-/// WebDAV request would be: `404` for nothing there, `409` for a parent that is not a
-/// directory, `403` for a change a mount or the volume will not take.
-fn status(e: &VolumeError) -> StatusCode {
-    match e {
-        VolumeError::InvalidName(_) | VolumeError::InvalidPath(_) => StatusCode::BAD_REQUEST,
-        VolumeError::Unknown(_) | VolumeError::NoMount { .. } => StatusCode::NOT_FOUND,
-        VolumeError::AlreadyExists(_) | VolumeError::MountExists(_) => StatusCode::CONFLICT,
-        VolumeError::InUse(_) => StatusCode::LOCKED,
-        VolumeError::Refused(_) => StatusCode::FORBIDDEN,
-        VolumeError::Io { source, .. } => match source.kind() {
-            io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
-            io::ErrorKind::NotADirectory | io::ErrorKind::IsADirectory => StatusCode::CONFLICT,
-            io::ErrorKind::AlreadyExists => StatusCode::CONFLICT,
-            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
-                StatusCode::FORBIDDEN
-            }
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        },
-        VolumeError::Source(_) | VolumeError::Origins(..) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
 }
 
 #[cfg(test)]

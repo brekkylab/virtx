@@ -229,9 +229,9 @@ pub fn router() -> Router {
             "/volumes/{name}/mounts/{*path}",
             put(volume_mount_create).delete(volume_mount_remove),
         )
-        .route("/volumes/{name}/files", any(files))
-        .route("/volumes/{name}/files/", any(files))
-        .route("/volumes/{name}/files/{*path}", any(files))
+        .route("/volumes/{name}/files", any(volume_files))
+        .route("/volumes/{name}/files/", any(volume_files))
+        .route("/volumes/{name}/files/{*path}", any(volume_files))
         .route("/sandboxes/{id}/files", any(sandbox_files))
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
@@ -568,8 +568,12 @@ async fn volume_mount_remove(
 }
 
 /// A request to the files of a volume, over WebDAV.
-async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Request) -> Response {
-    home.files.handle(request).await
+async fn volume_files(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(segments): Segments<HashMap<String, String>>,
+    request: axum::extract::Request,
+) -> Response {
+    home.files.volume(&segments["name"], request).await
 }
 
 /// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it

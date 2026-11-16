@@ -527,6 +527,32 @@ impl Volume {
         Ok(Place::Local)
     }
 
+    /// Whether these files answer for `path` as a machine that mounts the volume sees it: a name
+    /// they take, in the volume's own files rather than a mount, with no symbolic link on the
+    /// way to it or at it, and nothing there but a file or a directory, or nothing. A machine
+    /// follows a link these files leave out, and takes a name they refuse; for such a path, ask
+    /// the machine. Nothing on the way is answered here too: neither has it.
+    pub fn answers(&self, path: &str) -> bool {
+        let Ok(at) = relative(path) else {
+            return false;
+        };
+        if self.local(&at).is_err() {
+            return false;
+        }
+        let mut prefix = PathBuf::new();
+        for part in at.components() {
+            prefix.push(part);
+            match self.root.symlink_metadata(&prefix) {
+                Ok(meta) if meta.is_symlink() => return false,
+                Ok(meta) if meta.is_file() || meta.is_dir() => {}
+                Ok(_) => return false,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
     /// Refused unless `at` is in the volume's own files: a mount takes no changes.
     fn local(&self, at: &Path) -> io::Result<()> {
         let mounted = self
@@ -893,6 +919,26 @@ mod tests {
             matches!(&refused, Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound),
             "{refused:?}"
         );
+    }
+
+    /// What the volume's files answer for, as a machine mounting it sees the path: a file, a
+    /// directory, or nothing, there or on the way; not a path through a link or at one, nor a
+    /// name they refuse.
+    #[cfg(unix)]
+    #[test]
+    fn the_files_answer_for_what_they_see_as_a_machine_does() {
+        let scratch = Scratch::new("answers");
+        let volume = scratch.0.create("v").unwrap();
+        volume.create_dir("real", false).unwrap();
+        volume.write("real/f", b"f", None).unwrap();
+        std::os::unix::fs::symlink("real", volume.files().join("link")).unwrap();
+
+        for path in ["", "real", "real/f", "real/none", "none/f"] {
+            assert!(volume.answers(path), "{path}");
+        }
+        for path in ["link", "link/f", "link/none", "a\\b", "a//b"] {
+            assert!(!volume.answers(path), "{path}");
+        }
     }
 
     #[test]

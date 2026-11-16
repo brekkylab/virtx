@@ -82,7 +82,9 @@ async fn done(machine: &Arc<Machine>, request: IoReq) -> Result<(), FsError> {
 /// What is at `path` now, or nothing: what a conditional write is checked against as it lands.
 /// In a volume the sandbox mounts writable, the volume's own files on this host are asked, not
 /// the guest: the guest may still hold what it saw at the path a moment ago, before a write
-/// through the volume's files or another sandbox's moved another file there.
+/// through the volume's files or another sandbox's moved another file there. A path those files
+/// do not [answer for](crate::Volume::answers), through a link in the volume or by a name they
+/// refuse, is asked of the guest, which sees it.
 async fn there(
     machine: &Arc<Machine>,
     mounts: &[(String, PathBuf)],
@@ -90,7 +92,9 @@ async fn there(
 ) -> Result<Option<Meta>, FsError> {
     if let Some((dir, within)) = mounted(mounts, path) {
         let volume = crate::Volume::open(&dir).map_err(|_| FsError::GeneralFailure)?;
-        return super::volume::there(&volume, &within).await;
+        if volume.answers(&within) {
+            return super::volume::there(&volume, &within).await;
+        }
     }
     match stat(machine, path).await {
         Ok(meta) => Ok(Some(meta)),

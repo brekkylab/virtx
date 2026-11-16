@@ -18,10 +18,11 @@
 //! up no other writer. Any other write with either condition is held while `dav-server` answers
 //! it. A sandbox's write holds each volume the sandbox mounts writable too, after the sandbox
 //! and in the order of their directories, so one through a mount and one through the volume's
-//! own files are held against each other. One to a path in such a mount is checked against the
-//! volume's own files on this host, not as the guest sees them: the guest may hold what it saw
-//! there for a few seconds after a change made outside it. One a symlink in the guest leads into
-//! a mount is checked as the guest sees it.
+//! own files are held against each other. A `PUT` to a path in such a mount is checked against
+//! the volume's own files on this host as it lands, not as the guest sees them: the guest may
+//! hold what it saw there for a few seconds after a change made outside it. The rest is checked
+//! as the guest sees it: a `PUT` before its body is read, the condition of any other write, and
+//! a path the volume's files do not answer for, through a link or by a name they refuse.
 
 mod sandbox;
 mod snapshot;

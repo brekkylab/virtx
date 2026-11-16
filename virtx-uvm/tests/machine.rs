@@ -376,10 +376,9 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
 /// against what the second wrote, is refused `412`. For `If-None-Match: *` to a new file, and
 /// for one `If-Match` to a file there.
 async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home) {
-    use axum::body::{Body, Bytes};
+    use axum::body::Body;
     use http::{Request, header};
     use http_body_util::BodyExt as _;
-    use tokio::sync::oneshot;
 
     let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
     let files = Arc::new(Files::new(home.snapshots.clone(), home.volumes.clone()));
@@ -410,24 +409,8 @@ async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home
                 .unwrap()
         };
         // The first's body: a part, then the rest once let go.
-        let (sending, read) = oneshot::channel();
-        let (go, let_go) = oneshot::channel::<()>();
-        let slow =
-            futures_util::stream::unfold((Some(sending), Some(let_go)), |state| async move {
-                match state {
-                    (Some(sending), let_go) => {
-                        let _ = sending.send(());
-                        let part = Ok::<_, std::io::Error>(Bytes::from("first, "));
-                        Some((part, (None, let_go)))
-                    }
-                    (None, Some(let_go)) => {
-                        let _ = let_go.await;
-                        Some((Ok(Bytes::from("whole")), (None, None)))
-                    }
-                    (None, None) => None,
-                }
-            });
-        let first = tokio::spawn(send(put(Body::from_stream(slow))));
+        let (slow, read, go) = stalled();
+        let first = tokio::spawn(send(put(slow)));
         read.await.unwrap();
         let second = send(put(Body::from("second"))).await.status();
         assert!(
@@ -449,10 +432,9 @@ async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home
 /// is refused `412`, whichever path the first took. Both paths answer the file one tag, so an
 /// `If-Match` taken from either is checked as it lands, not refused before.
 async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Home) {
-    use axum::body::{Body, Bytes};
+    use axum::body::Body;
     use http::{Request, header};
     use http_body_util::BodyExt as _;
-    use tokio::sync::oneshot;
 
     home.volumes.create("data").unwrap();
     let mounting = SandboxCreateArgs {
@@ -518,24 +500,8 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
                     .unwrap()
             };
             // The first's body: a part, then the rest once let go.
-            let (sending, read) = oneshot::channel();
-            let (go, let_go) = oneshot::channel::<()>();
-            let slow =
-                futures_util::stream::unfold((Some(sending), Some(let_go)), |state| async move {
-                    match state {
-                        (Some(sending), let_go) => {
-                            let _ = sending.send(());
-                            let part = Ok::<_, std::io::Error>(Bytes::from("first, "));
-                            Some((part, (None, let_go)))
-                        }
-                        (None, Some(let_go)) => {
-                            let _ = let_go.await;
-                            Some((Ok(Bytes::from("whole")), (None, None)))
-                        }
-                        (None, None) => None,
-                    }
-                });
-            let first = put(first_in_sandbox, Body::from_stream(slow));
+            let (slow, read, go) = stalled();
+            let first = put(first_in_sandbox, slow);
             let first = tokio::spawn(send(first_in_sandbox, first));
             read.await.unwrap();
             let second = put(!first_in_sandbox, Body::from("second"));
@@ -552,6 +518,42 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
             assert_eq!(read.to_bytes(), "second", "{how}");
         }
     }
+
+    // Paths the volume's own files do not answer for, which the guest does: through a link in
+    // the volume, and by a name with a backslash, which the volume refuses. Each is checked as
+    // the guest sees it, so a tag the guest answered is taken, and of two at once one lands.
+    let made = ["sh", "-c", "mkdir /data/real && ln -s real /data/link"];
+    assert_eq!(run(&sandbox, &made, None).await.unwrap().1, 0);
+    for name in ["link/f", "a%5Cb"] {
+        let put = Request::put(at(true, name)).body(Body::from("one"));
+        assert_eq!(send(true, put.unwrap()).await.status(), 201, "{name}");
+        let etag = tag(true, name.to_owned()).await;
+        let put = Request::put(at(true, name))
+            .header(header::IF_MATCH, &etag)
+            .body(Body::from("two"));
+        assert_eq!(send(true, put.unwrap()).await.status(), 204, "{name}");
+    }
+    let fresh = |name: &str, body: Body| {
+        Request::put(at(true, name))
+            .header(header::IF_NONE_MATCH, "*")
+            .body(body)
+            .unwrap()
+    };
+    assert_eq!(
+        send(true, fresh("c%5Cd", Body::from("c"))).await.status(),
+        201
+    );
+    let (slow, read, go) = stalled();
+    let first = tokio::spawn(send(true, fresh("link/g", slow)));
+    read.await.unwrap();
+    assert_eq!(
+        send(true, fresh("link/g", Body::from("second")))
+            .await
+            .status(),
+        201
+    );
+    go.send(()).unwrap();
+    assert_eq!(first.await.unwrap().status(), 412, "link/g");
 
     // A conditional write through the sandbox lands only once it holds the volume too: while
     // its `writing` file is held from here, as another server over the home would hold it, the
@@ -585,6 +587,33 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
     writing.unlock().unwrap();
     assert_eq!(held.await.unwrap().status(), 201);
     close(sandbox).await;
+}
+
+/// A body still arriving: a part, said so on the first receiver once it is read, then the rest
+/// once the sender is let go.
+fn stalled() -> (
+    axum::body::Body,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    use axum::body::Bytes;
+    let (sending, read) = tokio::sync::oneshot::channel();
+    let (go, let_go) = tokio::sync::oneshot::channel::<()>();
+    let slow = futures_util::stream::unfold((Some(sending), Some(let_go)), |state| async move {
+        match state {
+            (Some(sending), let_go) => {
+                let _ = sending.send(());
+                let part = Ok::<_, std::io::Error>(Bytes::from("first, "));
+                Some((part, (None, let_go)))
+            }
+            (None, Some(let_go)) => {
+                let _ = let_go.await;
+                Some((Ok(Bytes::from("whole")), (None, None)))
+            }
+            (None, None) => None,
+        }
+    });
+    (axum::body::Body::from_stream(slow), read, go)
 }
 
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor

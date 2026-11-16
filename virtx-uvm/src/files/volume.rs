@@ -277,13 +277,7 @@ impl DavFile for File {
                 None => land.await?,
                 Some(landing) => {
                     let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
-                    let there = async move {
-                        match volume.stat(&path).await {
-                            Ok(stat) => Ok(Some(described(&stat))),
-                            Err(e) if refused(&e) == FsError::NotFound => Ok(None),
-                            Err(e) => Err(refused(&e)),
-                        }
-                    };
+                    let there = async move { there(&volume, &path).await };
                     landing.land(there, land).await?
                 }
             }
@@ -340,6 +334,16 @@ fn beside(path: &str) -> String {
     match dir {
         "" => format!(".{name}.{id}.saving"),
         dir => format!("{dir}/.{name}.{id}.saving"),
+    }
+}
+
+/// What is at `path` in `volume` now, or nothing: what a conditional write is checked against
+/// as it lands.
+pub(super) async fn there(volume: &Volume, path: &str) -> Result<Option<Meta>, FsError> {
+    match volume.stat(path).await {
+        Ok(stat) => Ok(Some(described(&stat))),
+        Err(e) if refused(&e) == FsError::NotFound => Ok(None),
+        Err(e) => Err(refused(&e)),
     }
 }
 

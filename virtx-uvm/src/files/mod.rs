@@ -16,7 +16,12 @@
 //! write moved over it in the same hold, or let go and refused `412`. Of two that checked one
 //! state, the second is checked against what the first wrote, and a slow or stalled sender holds
 //! up no other writer. Any other write with either condition is held while `dav-server` answers
-//! it.
+//! it. A sandbox's write holds each volume the sandbox mounts writable too, after the sandbox
+//! and in the order of their directories, so one through a mount and one through the volume's
+//! own files are held against each other. One to a path in such a mount is checked against the
+//! volume's own files on this host, not as the guest sees them: the guest may hold what it saw
+//! there for a few seconds after a change made outside it. One a symlink in the guest leads into
+//! a mount is checked as the guest sees it.
 
 mod sandbox;
 mod snapshot;
@@ -25,7 +30,7 @@ mod volume;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -55,7 +60,8 @@ pub struct Files {
     volumes: VolumeStore,
     /// Each snapshot's requests one at a time, by name, since each reads or writes it whole;
     /// and each volume's [conditional writes](conditional), by `volume:` and its name, before
-    /// its [lock file](writing) too. A sandbox's are held by its machine's own.
+    /// its [lock file](writing) too, through its own files or a sandbox that mounts it. A
+    /// sandbox's are held by the sandbox's own first.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -114,11 +120,30 @@ impl Files {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
-        let writing = Arc::clone(&machine.writing);
+        let sandbox = activity.sandbox();
+        let mounts: Arc<[(String, PathBuf)]> = sandbox.mounts().into();
         let hold = || -> Hold {
+            let writing = Arc::clone(sandbox.writing());
+            let mut dirs: Vec<PathBuf> = mounts.iter().map(|(_, dir)| dir.clone()).collect();
+            dirs.sort();
+            dirs.dedup();
+            let volumes: Vec<_> = dirs
+                .into_iter()
+                .map(|dir| {
+                    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+                    (self.serial(format!("volume:{name}")), dir)
+                })
+                .collect();
             Arc::new(move || {
-                let writing = Arc::clone(&writing);
-                Box::pin(async move { Ok(Box::new(writing.lock_owned().await) as Guard) })
+                let (writing, volumes) = (Arc::clone(&writing), volumes.clone());
+                Box::pin(async move {
+                    let sandbox = writing.lock_owned().await;
+                    let mut held = Vec::with_capacity(volumes.len());
+                    for (serial, dir) in volumes {
+                        held.push(held_volume(serial, &dir).await?);
+                    }
+                    Ok(Box::new((sandbox, held)) as Guard)
+                })
             })
         };
         let (request, landing, _held) = match conditioned(request, hold).await {
@@ -128,6 +153,7 @@ impl Files {
         let fs = sandbox::Fs {
             machine,
             landing: landing.clone(),
+            mounts: Arc::clone(&mounts),
         };
         let handler = handler.filesystem(Box::new(fs)).build_handler();
         let response = lingering(request, |request| handler.handle(request)).await;
@@ -158,22 +184,12 @@ impl Files {
                 };
                 let hold = || -> Hold {
                     let serial = self.serial(format!("volume:{name}"));
-                    let (dir, name) = (volume.path().to_owned(), name.clone());
+                    let dir = volume.path().to_owned();
                     Arc::new(move || {
-                        let (serial, dir, name) = (Arc::clone(&serial), dir.clone(), name.clone());
-                        Box::pin(async move {
-                            match writing(serial, &dir).await {
-                                Ok(held) => Ok(Box::new(held) as Guard),
-                                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                                    let gone = VolumeError::Unknown(name);
-                                    Err(refused(status(&gone), gone))
-                                }
-                                Err(e) => Err(refused(
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    format!("holding {name} for a write: {e}"),
-                                )),
-                            }
-                        })
+                        let (serial, dir) = (Arc::clone(&serial), dir.clone());
+                        Box::pin(
+                            async move { Ok(Box::new(held_volume(serial, &dir).await?) as Guard) },
+                        )
                     })
                 };
                 let (request, landing, _held) = match conditioned(request, hold).await {
@@ -431,6 +447,23 @@ async fn writing(
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
+}
+
+/// The volume whose own directory is `dir` held, under `serial`, for one conditional write, as
+/// [`writing`] holds it; or why not: `404` for a volume that is not there any more.
+async fn held_volume(
+    serial: Arc<tokio::sync::Mutex<()>>,
+    dir: &Path,
+) -> Result<(std::fs::File, tokio::sync::OwnedMutexGuard<()>), Refusal> {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    writing(serial, dir).await.map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            let gone = VolumeError::Unknown(name.into_owned());
+            return refused(status(&gone), gone);
+        }
+        let why = format!("holding {name} for a write: {e}");
+        refused(StatusCode::INTERNAL_SERVER_ERROR, why)
+    })
 }
 
 /// `request` made ready to answer under the [`Hold`] `hold` makes: a conditional `PUT` with the

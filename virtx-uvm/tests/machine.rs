@@ -443,6 +443,150 @@ async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home
     close(sandbox).await;
 }
 
+/// Two conditional writes at once to one file of a volume a sandbox mounts, one through the
+/// sandbox's files and one through the volume's: the second, sent while the first is still
+/// sending its body, lands, and the first, checked as it lands against what the second wrote,
+/// is refused `412`, whichever path the first took. Both paths answer the file one tag, so an
+/// `If-Match` taken from either is checked as it lands, not refused before.
+async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Home) {
+    use axum::body::{Body, Bytes};
+    use http::{Request, header};
+    use http_body_util::BodyExt as _;
+    use tokio::sync::oneshot;
+
+    home.volumes.create("data").unwrap();
+    let mounting = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "data".into(),
+            path: "/data".into(),
+            readonly: false,
+        }],
+        ..SandboxCreateArgs::new(ALPINE)
+    };
+    let sandbox = home.sandbox(&mounting, None).await;
+    let files = Arc::new(Files::new(home.snapshots.clone(), home.volumes.clone()));
+    let send = |in_sandbox: bool, request: Request<Body>| {
+        let (files, sandbox) = (Arc::clone(&files), Arc::clone(&sandbox));
+        async move {
+            match in_sandbox {
+                true => {
+                    let machine = sandbox.machine().await.unwrap();
+                    files
+                        .sandbox("s", machine, sandbox.activity(), request)
+                        .await
+                }
+                false => files.handle(request, &|_| false).await,
+            }
+        }
+    };
+    let at = |in_sandbox: bool, path: &str| match in_sandbox {
+        true => format!("/sandboxes/s/files/data/{path}"),
+        false => format!("/volumes/data/files/{path}"),
+    };
+    let tag = |in_sandbox: bool, path: String| {
+        let head = Request::head(at(in_sandbox, &path)).body(Body::empty());
+        let answer = send(in_sandbox, head.unwrap());
+        async move {
+            let answer = answer.await;
+            answer.headers()[header::ETAG].to_str().unwrap().to_owned()
+        }
+    };
+
+    for (round, first_in_sandbox) in [true, false].into_iter().enumerate() {
+        let there = format!("there-{round}");
+        let put = Request::put(at(false, &there)).body(Body::from("there"));
+        assert_eq!(send(false, put.unwrap()).await.status(), 201);
+        let etag = tag(false, there.clone()).await;
+        assert_eq!(
+            tag(true, there.clone()).await,
+            etag,
+            "{there}: one file, one tag"
+        );
+
+        for (path, condition, value) in [
+            (
+                format!("new-{round}"),
+                header::IF_NONE_MATCH,
+                "*".to_owned(),
+            ),
+            (there, header::IF_MATCH, etag),
+        ] {
+            let put = |in_sandbox: bool, body: Body| {
+                Request::put(at(in_sandbox, &path))
+                    .header(condition.clone(), &value)
+                    .body(body)
+                    .unwrap()
+            };
+            // The first's body: a part, then the rest once let go.
+            let (sending, read) = oneshot::channel();
+            let (go, let_go) = oneshot::channel::<()>();
+            let slow =
+                futures_util::stream::unfold((Some(sending), Some(let_go)), |state| async move {
+                    match state {
+                        (Some(sending), let_go) => {
+                            let _ = sending.send(());
+                            let part = Ok::<_, std::io::Error>(Bytes::from("first, "));
+                            Some((part, (None, let_go)))
+                        }
+                        (None, Some(let_go)) => {
+                            let _ = let_go.await;
+                            Some((Ok(Bytes::from("whole")), (None, None)))
+                        }
+                        (None, None) => None,
+                    }
+                });
+            let first = put(first_in_sandbox, Body::from_stream(slow));
+            let first = tokio::spawn(send(first_in_sandbox, first));
+            read.await.unwrap();
+            let second = put(!first_in_sandbox, Body::from("second"));
+            let second = send(!first_in_sandbox, second).await.status();
+            let how = format!("{path}, the first through the sandbox: {first_in_sandbox}");
+            assert!(
+                matches!(second.as_u16(), 201 | 204),
+                "{how}: the second answered {second}"
+            );
+            go.send(()).unwrap();
+            assert_eq!(first.await.unwrap().status(), 412, "{how}");
+            let get = Request::get(at(false, &path)).body(Body::empty()).unwrap();
+            let read = send(false, get).await.into_body().collect().await.unwrap();
+            assert_eq!(read.to_bytes(), "second", "{how}");
+        }
+    }
+
+    // A conditional write through the sandbox lands only once it holds the volume too: while
+    // its `writing` file is held from here, as another server over the home would hold it, the
+    // write neither lands nor is answered; let go, it lands.
+    let writing = home.volumes.open("data").unwrap().path().join("writing");
+    let writing = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(writing)
+        .unwrap();
+    writing.lock().unwrap();
+    let put = Request::put(at(true, "held"))
+        .header(header::IF_NONE_MATCH, "*")
+        .body(Body::from("held"))
+        .unwrap();
+    let held = tokio::spawn(send(true, put));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !held.is_finished(),
+        "it was answered while the volume was held"
+    );
+    let get = Request::head(at(false, "held"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        send(false, get).await.status(),
+        404,
+        "it landed while the volume was held"
+    );
+    writing.unlock().unwrap();
+    assert_eq!(held.await.unwrap().status(), 201);
+    close(sandbox).await;
+}
+
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
 /// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
 /// nothing, not by `1`.
@@ -509,6 +653,7 @@ fn main() -> ExitCode {
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_parked_sandbox_holds_its_volume_against_removal,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
+        of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ];
     let filter = filter(env::args().skip(1));
     let mut failed = 0;

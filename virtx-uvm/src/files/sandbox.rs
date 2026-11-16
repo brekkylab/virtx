@@ -2,6 +2,7 @@
 //! its machine, over the I/O channel ([`Machine::io`]), as the guest's processes see the files.
 
 use std::io::SeekFrom;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,8 @@ use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 pub(super) struct Fs {
     pub(super) machine: Arc<Machine>,
     pub(super) landing: Option<Arc<Landing>>,
+    /// Each volume the sandbox mounts writable: where in the guest, and its own directory.
+    pub(super) mounts: Arc<[(String, PathBuf)]>,
 }
 
 /// A file open for reading, or for writing from its start.
@@ -35,6 +38,8 @@ struct File {
     saving: Option<String>,
     /// What a whole write is checked by as it lands, with a condition.
     landing: Option<Arc<Landing>>,
+    /// The sandbox's writable mounts, as [`Fs`] has them.
+    mounts: Arc<[(String, PathBuf)]>,
     /// What has arrived and is not yet written, sent a [`MAX_DATA`] at a time.
     pending: Vec<u8>,
     offset: u64,
@@ -72,6 +77,39 @@ async fn io(
 /// Ask `request`, which changes something and answers nothing but that it did.
 async fn done(machine: &Arc<Machine>, request: IoReq) -> Result<(), FsError> {
     io(machine, request, Vec::new()).await.map(drop)
+}
+
+/// What is at `path` now, or nothing: what a conditional write is checked against as it lands.
+/// In a volume the sandbox mounts writable, the volume's own files on this host are asked, not
+/// the guest: the guest may still hold what it saw at the path a moment ago, before a write
+/// through the volume's files or another sandbox's moved another file there.
+async fn there(
+    machine: &Arc<Machine>,
+    mounts: &[(String, PathBuf)],
+    path: &str,
+) -> Result<Option<Meta>, FsError> {
+    if let Some((dir, within)) = mounted(mounts, path) {
+        let volume = crate::Volume::open(&dir).map_err(|_| FsError::GeneralFailure)?;
+        return super::volume::there(&volume, &within).await;
+    }
+    match stat(machine, path).await {
+        Ok(meta) => Ok(Some(meta)),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The volume of `mounts` that `path`, absolute in the guest, is in: its own directory, and
+/// `path` in its files. The deepest mount `path` is under, so a volume mounted in another's
+/// mount is the one its paths are in. A mount's own place is the guest's, not a path in the
+/// volume, and a path a symlink in the guest leads into a mount is not seen as in it.
+fn mounted(mounts: &[(String, PathBuf)], path: &str) -> Option<(PathBuf, String)> {
+    mounts
+        .iter()
+        .filter_map(|(at, dir)| Some((path.strip_prefix(at.as_str())?.strip_prefix('/')?, dir)))
+        .filter(|(within, _)| !within.is_empty())
+        .min_by_key(|(within, _)| within.len())
+        .map(|(within, dir)| (dir.clone(), within.to_owned()))
 }
 
 async fn stat(machine: &Arc<Machine>, path: &str) -> Result<Meta, FsError> {
@@ -127,6 +165,7 @@ impl DavFileSystem for Fs {
                 machine: Arc::clone(&self.machine),
                 path,
                 landing: saving.as_ref().and(self.landing.clone()),
+                mounts: Arc::clone(&self.mounts),
                 saving,
                 pending: Vec::new(),
                 offset: 0,
@@ -285,13 +324,8 @@ impl DavFile for File {
                 None => land.await?,
                 Some(landing) => {
                     let (machine, path) = (Arc::clone(&self.machine), self.path.clone());
-                    let there = async move {
-                        match stat(&machine, &path).await {
-                            Ok(meta) => Ok(Some(meta)),
-                            Err(FsError::NotFound) => Ok(None),
-                            Err(e) => Err(e),
-                        }
-                    };
+                    let mounts = Arc::clone(&self.mounts);
+                    let there = async move { there(&machine, &mounts, &path).await };
                     landing.land(there, land).await?
                 }
             }
@@ -350,5 +384,37 @@ fn refused(failure: &IoFailure) -> FsError {
         IoFailure::IsADirectory | IoFailure::Forbidden => FsError::Forbidden,
         IoFailure::Full => FsError::InsufficientStorage,
         IoFailure::Other(_) => FsError::GeneralFailure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_is_in_the_deepest_mount_it_is_under() {
+        let mounts = vec![
+            ("/data".to_owned(), PathBuf::from("/home/volume/data")),
+            ("/data/sub".to_owned(), PathBuf::from("/home/volume/sub")),
+        ];
+        let at = |path| mounted(&mounts, path);
+        assert_eq!(
+            at("/data/a.txt"),
+            Some((PathBuf::from("/home/volume/data"), "a.txt".to_owned()))
+        );
+        assert_eq!(
+            at("/data/dir/a.txt"),
+            Some((PathBuf::from("/home/volume/data"), "dir/a.txt".to_owned()))
+        );
+        assert_eq!(
+            at("/data/sub/a.txt"),
+            Some((PathBuf::from("/home/volume/sub"), "a.txt".to_owned()))
+        );
+        // A name that only begins with a mount's is not in it, and a mount's own place is the
+        // guest's, not a path in the volume.
+        assert_eq!(at("/database/a.txt"), None);
+        assert_eq!(at("/data"), None);
+        assert_eq!(at("/data/"), None);
+        assert_eq!(at("/tmp/a.txt"), None);
     }
 }

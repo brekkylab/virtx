@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from ._library import VirtxError, args
 from .files import Files
@@ -19,8 +19,6 @@ from .job import LogEntry, StartedJob, Truncated
 from .volume import Volume
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
-
     from .client import Client
 
 

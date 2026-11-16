@@ -5,7 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use oci_spec::image::Config;
@@ -116,6 +116,9 @@ pub struct Machine {
     io: mpsc::Sender<IoJob>,
     /// Where on this host's loopback each of its [`ports`](MachineConfig::ports) is reached.
     pub published: Vec<(u16, SocketAddr)>,
+    /// What a conditional write to its files holds as it lands (see [`Files`](crate::Files)):
+    /// here, so it goes with the machine.
+    pub(crate) writing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Drop for Machine {
@@ -177,6 +180,7 @@ impl Machine {
                         ctrlout: Mutex::new(ctrlout),
                         io: files(ioin, ioout),
                         published,
+                        writing: Arc::default(),
                     });
                 }
                 Some(CtrlResp::Log { message, .. }) => {

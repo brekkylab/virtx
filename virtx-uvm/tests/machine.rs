@@ -20,7 +20,7 @@ use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::{
-    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
+    Files, FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
     VolumeStore,
 };
 
@@ -343,6 +343,78 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
+/// Two conditional writes to one file in a sandbox at once: the second, sent while the first is
+/// still sending its body, is not held up by it and lands, and the first, checked as it lands
+/// against what the second wrote, is refused `412`. For `If-None-Match: *` to a new file, and
+/// for one `If-Match` to a file there.
+async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home) {
+    use axum::body::{Body, Bytes};
+    use http::{Request, header};
+    use http_body_util::BodyExt as _;
+    use tokio::sync::oneshot;
+
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let files = Arc::new(Files::new(home.snapshots.clone(), home.volumes.clone()));
+    let send = |request: Request<Body>| {
+        let (files, sandbox) = (Arc::clone(&files), Arc::clone(&sandbox));
+        async move {
+            let machine = sandbox.machine().await.unwrap();
+            files
+                .sandbox("s", machine, sandbox.activity(), request)
+                .await
+        }
+    };
+    let at = |path: &str| format!("/sandboxes/s/files/tmp/{path}");
+    let put = Request::put(at("there")).body(Body::from("there")).unwrap();
+    assert_eq!(send(put).await.status(), 201);
+    let head = Request::head(at("there")).body(Body::empty()).unwrap();
+    let head = send(head).await;
+    let etag = head.headers()[header::ETAG].to_str().unwrap().to_owned();
+
+    for (path, condition, value) in [
+        ("new", header::IF_NONE_MATCH, "*".to_owned()),
+        ("there", header::IF_MATCH, etag),
+    ] {
+        let put = |body: Body| {
+            Request::put(at(path))
+                .header(condition.clone(), &value)
+                .body(body)
+                .unwrap()
+        };
+        // The first's body: a part, then the rest once let go.
+        let (sending, read) = oneshot::channel();
+        let (go, let_go) = oneshot::channel::<()>();
+        let slow =
+            futures_util::stream::unfold((Some(sending), Some(let_go)), |state| async move {
+                match state {
+                    (Some(sending), let_go) => {
+                        let _ = sending.send(());
+                        let part = Ok::<_, std::io::Error>(Bytes::from("first, "));
+                        Some((part, (None, let_go)))
+                    }
+                    (None, Some(let_go)) => {
+                        let _ = let_go.await;
+                        Some((Ok(Bytes::from("whole")), (None, None)))
+                    }
+                    (None, None) => None,
+                }
+            });
+        let first = tokio::spawn(send(put(Body::from_stream(slow))));
+        read.await.unwrap();
+        let second = send(put(Body::from("second"))).await.status();
+        assert!(
+            matches!(second.as_u16(), 201 | 204),
+            "{path}: the second answered {second}"
+        );
+        go.send(()).unwrap();
+        assert_eq!(first.await.unwrap().status(), 412, "{path}");
+        let get = Request::get(at(path)).body(Body::empty()).unwrap();
+        let read = send(get).await.into_body().collect().await.unwrap();
+        assert_eq!(read.to_bytes(), "second", "{path}");
+    }
+    close(sandbox).await;
+}
+
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
 /// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
 /// nothing, not by `1`.
@@ -407,6 +479,7 @@ fn main() -> ExitCode {
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
+        of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
     ];
     let filter = filter(env::args().skip(1));
     let mut failed = 0;

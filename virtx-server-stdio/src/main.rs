@@ -891,13 +891,15 @@ mod tests {
         assert_eq!(saving(&dir.join("files")), Vec::<String>::new());
     }
 
-    /// A conditional write whose condition does not hold is refused `412`, as `dav-server`
-    /// refuses one, and leaves nothing behind: over a file whose etag has gone stale, over a
-    /// directory, and under a directory that is not there. One to a path with a `..` is refused
-    /// `400`, as any request is.
+    /// A conditional write whose condition does not hold is refused `412`, and leaves nothing
+    /// behind: over a file whose etag has gone stale, over a directory, and under a directory
+    /// that is not there; with `If-Match` over the file, but a WebDAV `If` or an
+    /// `If-Unmodified-Since` that does not hold; and with `If-None-Match` naming the file by its
+    /// tag marked weak, which names it all the same. One to a path with a `..` is refused `400`,
+    /// as any request is.
     #[tokio::test]
     async fn a_conditional_write_whose_condition_fails_is_refused_and_leaves_nothing() {
-        use http::header::{IF_MATCH, IF_NONE_MATCH};
+        use http::header::{IF_MATCH, IF_NONE_MATCH, IF_UNMODIFIED_SINCE};
 
         let server = Server::spawn("conditional-refused");
         let client = &server.client;
@@ -907,21 +909,43 @@ mod tests {
             .write_file(&volume, "there", "there", None)
             .await
             .unwrap();
+        let etag = client
+            .stat_file(&volume, "there")
+            .await
+            .unwrap()
+            .etag
+            .unwrap();
         client.create_dir(&volume, "dir").await.unwrap();
         let (app, _) = app(&server.home).unwrap();
 
-        for (path, condition, value) in [
-            ("there", IF_MATCH, "\"stale\""),
-            ("dir", IF_NONE_MATCH, "*"),
-            ("dir", IF_MATCH, "\"stale\""),
-            ("none/file", IF_MATCH, "*"),
+        let long_ago = "Mon, 01 Jan 2001 00:00:00 GMT";
+        let weak = format!("W/{etag}");
+        let if_ = http::HeaderName::from_static("if");
+        for (path, conditions) in [
+            ("there", vec![(IF_MATCH, "\"stale\"")]),
+            ("dir", vec![(IF_NONE_MATCH, "*")]),
+            ("dir", vec![(IF_MATCH, "\"stale\"")]),
+            ("none/file", vec![(IF_MATCH, "*")]),
+            (
+                "there",
+                vec![(IF_MATCH, etag.as_str()), (if_, "([\"stale\"])")],
+            ),
+            (
+                "there",
+                vec![
+                    (IF_NONE_MATCH, "\"other\""),
+                    (IF_UNMODIFIED_SINCE, long_ago),
+                ],
+            ),
+            ("there", vec![(IF_NONE_MATCH, weak.as_str())]),
         ] {
-            let request = http::Request::put(format!("/volumes/data/files/{path}"))
-                .header(condition.clone(), value)
-                .body(axum::body::Body::from("written"))
-                .unwrap();
+            let mut request = http::Request::put(format!("/volumes/data/files/{path}"));
+            for (condition, value) in &conditions {
+                request = request.header(condition, *value);
+            }
+            let request = request.body(axum::body::Body::from("written")).unwrap();
             let Ok(response) = app.clone().oneshot(request).await;
-            assert_eq!(response.status(), 412, "{path} with {condition}: {value}");
+            assert_eq!(response.status(), 412, "{path} with {conditions:?}");
         }
         // A path with a `..` in it is refused before any of it is read, as any request's is.
         let request = http::Request::put("/volumes/data/files/dir/../there")

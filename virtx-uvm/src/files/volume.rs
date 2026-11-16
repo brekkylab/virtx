@@ -13,13 +13,18 @@ use dav_server::fs::{
 };
 use futures_util::stream;
 
+use super::Landing;
 use crate::volume::{DirentKind, Error, Stat, Volume};
 
 /// How much a `GET` reads at a time: each read opens the file again.
 pub(super) const READ: usize = 1 << 20;
 
+/// A volume's files for one request, with the [`Landing`] of a conditional `PUT`.
 #[derive(Clone)]
-pub(super) struct Fs(pub(super) Arc<Volume>);
+pub(super) struct Fs {
+    pub(super) volume: Arc<Volume>,
+    pub(super) landing: Option<Arc<Landing>>,
+}
 
 /// A file open for reading, or for writing from its start.
 struct File {
@@ -29,6 +34,8 @@ struct File {
     /// then, and removed if this drops first. So nothing is at `path` but what was there
     /// until all of the write has arrived.
     saving: Option<String>,
+    /// What a whole write is checked by as it lands, with a condition.
+    landing: Option<Arc<Landing>>,
     offset: u64,
     meta: Meta,
 }
@@ -59,7 +66,7 @@ impl DavFileSystem for Fs {
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         Box::pin(async move {
             let path = at(path);
-            let there = match self.0.stat(&path).await {
+            let there = match self.volume.stat(&path).await {
                 Ok(stat) => Some(described(&stat)),
                 Err(e) if refused(&e) == FsError::NotFound => None,
                 Err(e) => return Err(refused(&e)),
@@ -80,7 +87,7 @@ impl DavFileSystem for Fs {
                     if options.truncate {
                         saving = Some(beside(&path));
                     }
-                    self.0
+                    self.volume
                         .write(
                             saving.as_deref().unwrap_or(&path),
                             &[],
@@ -95,8 +102,9 @@ impl DavFileSystem for Fs {
                 }
             };
             Ok(Box::new(File {
-                volume: Arc::clone(&self.0),
+                volume: Arc::clone(&self.volume),
                 path,
+                landing: saving.as_ref().and(self.landing.clone()),
                 saving,
                 offset: 0,
                 meta,
@@ -110,7 +118,11 @@ impl DavFileSystem for Fs {
         _: ReadDirMeta,
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         Box::pin(async move {
-            let entries = self.0.read_dir(&at(path)).await.map_err(|e| refused(&e))?;
+            let entries = self
+                .volume
+                .read_dir(&at(path))
+                .await
+                .map_err(|e| refused(&e))?;
             let entries: Vec<_> = entries
                 .iter()
                 .filter_map(|entry| {
@@ -127,22 +139,30 @@ impl DavFileSystem for Fs {
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
-            let stat = self.0.stat(&at(path)).await.map_err(|e| refused(&e))?;
+            let stat = self.volume.stat(&at(path)).await.map_err(|e| refused(&e))?;
             Ok(Box::new(described(&stat)) as Box<dyn DavMetaData>)
         })
     }
 
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { self.0.create_dir(&at(path), false).map_err(|e| refused(&e)) })
+        Box::pin(async move {
+            self.volume
+                .create_dir(&at(path), false)
+                .map_err(|e| refused(&e))
+        })
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { self.0.remove_file(&at(path), true).map_err(|e| refused(&e)) })
+        Box::pin(async move {
+            self.volume
+                .remove_file(&at(path), true)
+                .map_err(|e| refused(&e))
+        })
     }
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            self.0
+            self.volume
                 .remove_file(&at(path), false)
                 .map_err(|e| refused(&e))
         })
@@ -152,7 +172,7 @@ impl DavFileSystem for Fs {
     /// request when told not to overwrite.
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            self.0
+            self.volume
                 .rename(&at(from), &at(to), true)
                 .map_err(|e| refused(&e))
         })
@@ -161,7 +181,7 @@ impl DavFileSystem for Fs {
     /// One file, as `dav-server` copies a directory file by file.
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            self.0
+            self.volume
                 .copy(&at(from), &at(to), true)
                 .await
                 .map_err(|e| refused(&e))
@@ -218,15 +238,30 @@ impl DavFile for File {
         })
     }
 
-    /// A whole write, all here now, goes over the path.
+    /// A whole write, all here now, goes over the path: with a condition, as its [`Landing`]
+    /// lets it.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
-            if let Some(saving) = &self.saving {
-                self.volume
-                    .rename(saving, &self.path, true)
-                    .map_err(|e| refused(&e))?;
-                self.saving = None;
+            let Some(saving) = self.saving.clone() else {
+                return Ok(());
+            };
+            let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
+            let land = async move { volume.rename(&saving, &path, true).map_err(|e| refused(&e)) };
+            match &self.landing {
+                None => land.await?,
+                Some(landing) => {
+                    let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
+                    let there = async move {
+                        match volume.stat(&path).await {
+                            Ok(stat) => Ok(Some(described(&stat))),
+                            Err(e) if refused(&e) == FsError::NotFound => Ok(None),
+                            Err(e) => Err(refused(&e)),
+                        }
+                    };
+                    landing.land(there, land).await?
+                }
             }
+            self.saving = None;
             Ok(())
         })
     }
@@ -333,10 +368,13 @@ mod tests {
     async fn a_whole_write_lands_at_once_or_not_at_all() {
         let scratch = tempfile::tempdir().unwrap();
         let store = Store::new(scratch.path().join("volumes")).unwrap();
-        let fs = Fs(Arc::new(store.create("v").unwrap()));
-        let files = fs.0.files();
-        fs.0.create_dir("dir", false).unwrap();
-        fs.0.write("dir/a.txt", b"old", None).unwrap();
+        let fs = Fs {
+            volume: Arc::new(store.create("v").unwrap()),
+            landing: None,
+        };
+        let files = fs.volume.files();
+        fs.volume.create_dir("dir", false).unwrap();
+        fs.volume.write("dir/a.txt", b"old", None).unwrap();
         let whole = || OpenOptions {
             write: true,
             create: true,
@@ -348,7 +386,7 @@ mod tests {
         // Dropped before it is flushed: what was there stays, and nothing else is left.
         let mut file = fs.open(&path, whole()).await.unwrap();
         file.write_bytes(Bytes::from_static(b"half")).await.unwrap();
-        assert_eq!(fs.0.read("dir/a.txt", 0, None).await.unwrap(), b"old");
+        assert_eq!(fs.volume.read("dir/a.txt", 0, None).await.unwrap(), b"old");
         assert_eq!(names(&files.join("dir")).len(), 2);
         drop(file);
         assert_eq!(names(&files.join("dir")), ["a.txt"]);
@@ -357,7 +395,7 @@ mod tests {
         file.write_bytes(Bytes::from_static(b"new")).await.unwrap();
         file.flush().await.unwrap();
         drop(file);
-        assert_eq!(fs.0.read("dir/a.txt", 0, None).await.unwrap(), b"new");
+        assert_eq!(fs.volume.read("dir/a.txt", 0, None).await.unwrap(), b"new");
         assert_eq!(names(&files.join("dir")), ["a.txt"]);
 
         // At the root, and new.

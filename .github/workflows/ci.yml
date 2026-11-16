@@ -16,7 +16,8 @@ on:
     paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot; a merge into `main` never is.
+# A newer push to the pull request makes an older run moot. A run on `main` finishes once
+# started; of the runs waiting behind it, only the newest is kept.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

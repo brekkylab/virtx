@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Extension, FromRequest, FromRequestParts, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
+use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
@@ -266,7 +267,6 @@ pub fn router() -> Router {
             )
         })
         .fallback(async || not_found("no endpoint here"))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
 type Answer = Result<Response, Refused>;
@@ -815,24 +815,46 @@ const BODY_LIMIT: usize = 2 << 20;
 
 /// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
 /// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+///
+/// A body past the limit is still read to its end, and what comes after the limit let go of as
+/// it comes, before it is refused: answered with its body unread, the connection is closed with
+/// it unread, and Windows resets it, so a client still sending sees the reset and never the
+/// `413`. The files endpoints read the rest of a body for the same reason.
 struct Whole(Bytes);
 
 impl<S: Send + Sync> FromRequest<S> for Whole {
     type Rejection = Refused;
 
-    async fn from_request(request: Request, state: &S) -> Result<Self, Refused> {
-        match Bytes::from_request(request, state).await {
-            Ok(bytes) => Ok(Whole(bytes)),
-            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => Err(refused(
+    async fn from_request(request: Request, _: &S) -> Result<Self, Refused> {
+        let mut body = request.into_body();
+        let mut whole = Vec::new();
+        let mut over = false;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| invalid(format!("the body broke off: {e}")))?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            if over {
+                continue;
+            }
+            if whole.len() + data.len() > BODY_LIMIT {
+                over = true;
+                whole = Vec::new();
+                continue;
+            }
+            whole.extend_from_slice(&data);
+        }
+        if over {
+            return Err(refused(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "too_large",
                 format!(
                     "the body is over the server's limit of {} MiB",
                     BODY_LIMIT >> 20
                 ),
-            )),
-            Err(e) => Err(invalid(format!("the body: {}", e.body_text()))),
+            ));
         }
+        Ok(Whole(Bytes::from(whole)))
     }
 }
 

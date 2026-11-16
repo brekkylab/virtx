@@ -13,7 +13,7 @@ usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
-       cargo xtask archive  [--with-abin]
+       cargo xtask archive  [<server>...] [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
        cargo xtask fixture  -- <command>...
@@ -25,8 +25,10 @@ usage: cargo xtask init     [--force]
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
             of the client always and of the servers once `init` has run
-  archive   archives the stdio server and the guest kernel, for this platform, as a release
-            carries them: target/release/dist/virtx-stdio-<os>-<arch>.tar.gz
+  archive   archives each <server> named (server-stdio, server-tcp; both when none is) with
+            the guest kernel, for this platform, as a release carries them:
+            target/release/dist/virtx-stdio-<os>-<arch>.tar.gz and
+            virtx-server-tcp-<os>-<arch>.tar.gz
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
@@ -44,7 +46,7 @@ components:
   server-stdio  the server a client spawns, as the `virtx-stdio` binary; also the VM process
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
-  abin          the executables every VM gets at /abin
+  abin          the executables a sandbox gets at /abin, those it names
 
   --force         (init) resets every submodule to its pinned commit first, discarding
                   any local changes in it
@@ -56,8 +58,9 @@ components:
                       built for this host and its guest only
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
-  --with-abin     (archive) puts the abin that was built in the archive too; without it
-                  the archive has no abin, and sessions from the release no /abin";
+  --with-abin     (archive) puts the abin and alib that were built in the archives too;
+                  without it the archives have neither, and sessions from the release no
+                  /abin and no /alib";
 
 /// The client's packages, which `check` checks before `init` has run.
 const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
@@ -70,14 +73,18 @@ const SERVER_PACKAGES: &[&str] = &[
     "virtx-server-tcp",
     "xtask",
 ];
-/// Each server: its component, the package it is built from, and the binary it builds. The
-/// stdio server's binary is `virtx-stdio`, which is what a release archive carries
-/// and what a client spawns.
+/// Each server: its component, the package it is built from, and the binary it builds, which
+/// also names its release archive. The stdio server's binary is `virtx-stdio`, which a client
+/// spawns.
 const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
 ];
-const ABINS: &[(&str, &str)] = &[("virtx-exec-index", "index"), ("virtx-exec-mem", "mem")];
+const ABINS: &[(&str, &str)] = &[
+    ("virtx-exec-index", "index"),
+    ("virtx-exec-docread", "docread"),
+    ("virtx-exec-display", "display"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Component {
@@ -168,16 +175,17 @@ fn main() -> anyhow::Result<()> {
             check(client_only)
         }
         Some("archive") => {
-            let abin = match args.next() {
-                None => false,
-                Some(arg) if arg == "--with-abin" => true,
-                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
-            };
-            ensure!(
-                args.next().is_none(),
-                "archive takes only --with-abin\n\n{USAGE}"
-            );
-            archive(abin)
+            let mut abin = false;
+            let mut servers = Vec::new();
+            for arg in args {
+                match arg.to_str() {
+                    Some("--with-abin") => abin = true,
+                    Some("server-stdio") => servers.push(Component::ServerStdio),
+                    Some("server-tcp") => servers.push(Component::ServerTcp),
+                    _ => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+                }
+            }
+            archive(abin, &servers)
         }
         Some("run") => run_target(args.collect(), false, &[]),
         Some("test") => {
@@ -455,7 +463,7 @@ fn build(options: &Options) -> anyhow::Result<()> {
         build_servers(options)?;
     }
     if options.has(Component::Abin) {
-        build_abin(options)?;
+        build_abin(options.debug, &options.out().join("abin"))?;
     }
     if options.has(Component::Kernel) {
         build_kernel()?;
@@ -540,15 +548,21 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
-/// looks, and the entitlement on it.
+/// looks, `alib/` beside it, where a machine's `/alib` is shared from, when there is one to
+/// take, and the entitlement on it. `abin/` is not built here: `build abin`
+/// puts it there, and the fixture before it serves.
 fn ready(exe: &Path) -> anyhow::Result<()> {
     let kernel = kernel_library()?;
-    let beside = exe
+    let dir = exe
         .parent()
-        .context("the server binary is in a directory")?
-        .join(kernel.file_name().expect("the kernel is a file"));
+        .context("the server binary is in a directory")?;
+    let beside = dir.join(kernel.file_name().expect("the kernel is a file"));
     if !beside.is_file() {
         place(&kernel, &beside)?;
+    }
+    let alib = alib_dir();
+    if alib.is_dir() {
+        place_dir(&alib, &dir.join("alib"))?;
     }
     sign(exe)
 }
@@ -678,7 +692,9 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
     Ok(())
 }
 
-fn build_abin(options: &Options) -> anyhow::Result<()> {
+/// Build the `/abin` programs for the guest, in the debug or release profile, and place them
+/// and their `SKILL.md` in `out`.
+fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
     let arch = target.split('-').next().unwrap_or_default();
@@ -692,10 +708,32 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
         ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
     }
 
+    // What `musl-cc.sh` and `musl-ar.sh` run, asked for here rather than failing deep in
+    // cc-rs's output. Not where `CC_<triple>` names a compiler of the caller's own, which
+    // `virtx-abins/.cargo/config.toml` leaves to win.
+    let own_cc = env::var_os(format!("CC_{}", target.replace('-', "_"))).is_some();
+    let llvm_ar = [
+        "llvm-ar",
+        "/opt/homebrew/opt/llvm/bin/llvm-ar",
+        "/usr/local/opt/llvm/bin/llvm-ar",
+    ];
+    let on_path = |name: &str| Command::new(name).arg("--version").output().is_ok();
+    if !own_cc && (!Path::new("/usr/bin/clang").is_file() || !llvm_ar.iter().any(|ar| on_path(ar)))
+    {
+        bail!(
+            "building abin needs /usr/bin/clang and llvm-ar -- {}",
+            if cfg!(target_os = "macos") {
+                "xcode-select --install, and brew install lld llvm"
+            } else {
+                "install the clang, lld and llvm packages (apt-get install clang lld llvm)"
+            }
+        );
+    }
+
     let crate_dir = root.join("virtx-abins");
     let mut cargo = cross_cargo(&crate_dir);
     cargo.args(["build", "--target", target]);
-    if !options.debug {
+    if !debug {
         cargo.arg("--release");
     }
     for (package, _) in ABINS {
@@ -703,25 +741,30 @@ fn build_abin(options: &Options) -> anyhow::Result<()> {
     }
     run(cargo, &format!("abin for {target}"))?;
 
-    let out = options.out().join("abin");
-    fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    let profile = if debug { "debug" } else { "release" };
+    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let built = target_path().join(format!("{target}/{profile}"));
     for (_, program) in ABINS {
-        place(
-            &target_path().join(format!("{target}/{}/{program}", options.profile())),
-            &out.join(program),
-        )?;
+        place(&built.join(program), &out.join(program))?;
 
-        let skill = crate_dir.join(program).join("SKILLS.md");
+        let skill = crate_dir.join(program).join("SKILL.md");
         let at = out.join("skills").join(program);
         if skill.is_file() {
             fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
-            place(&skill, &at.join("SKILLS.md"))?;
+            place(&skill, &at.join("SKILL.md"))?;
         } else {
-            let _ = fs::remove_file(at.join("SKILLS.md"));
+            let _ = fs::remove_file(at.join("SKILL.md"));
             let _ = fs::remove_dir(&at);
         }
     }
+
     Ok(())
+}
+
+/// Where `/alib` is taken from: `alib/` in virtx's cache, where `virtx-alibs/*/build.sh install`
+/// puts it.
+fn alib_dir() -> PathBuf {
+    cache_root().join("alib")
 }
 
 /// Where the guest kernel is built to, and what it is called there.
@@ -792,39 +835,66 @@ fn dist_platform() -> anyhow::Result<String> {
     Ok(format!("{os}-{arch}"))
 }
 
-/// Archive the set `install` would put in `bin/`, as a release carries it:
-/// `target/release/dist/virtx-stdio-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
-/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about
-/// which commit that was.
-fn archive(abin: bool) -> anyhow::Result<()> {
+/// Archive each of `servers`, every server when it is empty, with the set `install` would put
+/// beside it in `bin/`, as a release carries them:
+/// `target/release/dist/<binary>-<os>-<arch>.tar.gz`, which the `release` workflow attaches to
+/// the tag's GitHub release. It archives whatever `build` left, and checks nothing about which
+/// commit that was.
+fn archive(abin: bool, servers: &[Component]) -> anyhow::Result<()> {
     let platform = dist_platform()?;
-
-    // Staged under the release profile's own directory, and emptied first: a file a
-    // previous build had and this one does not must not ride along.
     let dist = target_path().join("release").join("dist");
-    let name = format!("virtx-stdio-{platform}");
-    let stage = dist.join(&name);
-    if stage.exists() {
-        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
-    }
     let built = target_path().join("release");
     ensure!(
         !abin || built.join("abin").is_dir(),
         "--with-abin, but no abin in {} -- run `cargo xtask build abin` first",
         built.display()
     );
-    let stdio = format!("{}{}", SERVERS[0].2, env::consts::EXE_SUFFIX);
     ensure!(
-        built.join(&stdio).is_file(),
-        "no {stdio} in {} -- run `cargo xtask build server-stdio` first",
-        built.display()
+        !abin || alib_dir().is_dir(),
+        "--with-abin, but no alib in {}",
+        alib_dir().display()
     );
-    stage_bin(&built, &stage, &[stdio], abin)?;
-    if !abin {
-        eprintln!(
-            "xtask: leaving abin out; sessions from this release get no /abin (--with-abin puts it in)"
+    let servers: Vec<_> = SERVERS
+        .iter()
+        .filter(|(component, _, _)| servers.is_empty() || servers.contains(component))
+        .collect();
+    // Each one named is checked before any is archived, so a missing one leaves nothing half done.
+    for (_, package, binary) in &servers {
+        let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+        ensure!(
+            built.join(&file).is_file(),
+            "no {file} in {} -- run `cargo xtask build {}` first",
+            built.display(),
+            package.trim_start_matches("virtx-")
         );
     }
+    for (_, _, binary) in &servers {
+        archive_server(&built, &dist, binary, &platform, abin)?;
+    }
+    if !abin {
+        eprintln!(
+            "xtask: leaving abin and alib out; sessions from this release get no /abin and no /alib (--with-abin puts them in)"
+        );
+    }
+    Ok(())
+}
+
+fn archive_server(
+    built: &Path,
+    dist: &Path,
+    binary: &str,
+    platform: &str,
+    abin: bool,
+) -> anyhow::Result<()> {
+    // Staged under the release profile's own directory, and emptied first: a file a
+    // previous build had and this one does not must not ride along.
+    let name = format!("{binary}-{platform}");
+    let stage = dist.join(&name);
+    if stage.exists() {
+        fs::remove_dir_all(&stage).with_context(|| format!("emptying {}", stage.display()))?;
+    }
+    let file = format!("{binary}{}", env::consts::EXE_SUFFIX);
+    stage_bin(built, &stage, &[file], abin)?;
 
     // Relative paths only, run from `dist`: Git Bash's GNU tar reads `C:` in a path as a
     // remote host, and Windows' own bsdtar has no `--force-local` to say otherwise.
@@ -835,7 +905,7 @@ fn archive(abin: bool) -> anyhow::Result<()> {
         .collect::<Result<_, _>>()?;
     entries.sort();
     let status = Command::new("tar")
-        .current_dir(&dist)
+        .current_dir(dist)
         // macOS' bsdtar otherwise adds an AppleDouble `._` file for any file with xattrs.
         .env("COPYFILE_DISABLE", "1")
         .arg("-czf")
@@ -876,7 +946,8 @@ fn install(options: &Options) -> anyhow::Result<()> {
 }
 
 /// Put the set a `bin/` holds -- the `files` named, the guest kernel when a server is among
-/// them, and abin if it was built and `abin` asks for it -- from `built` into `bin`. What
+/// them, and abin from `built` and alib from virtx's cache if they are there and `abin` asks
+/// for them -- into `bin`. What
 /// `install` does, and what `archive` archives.
 fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::Result<()> {
     // The guest kernel goes with a server. libkrun resolves it by leaf name, and every
@@ -904,6 +975,10 @@ fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::
     }
     if abin && built.join("abin").is_dir() {
         place_dir(&built.join("abin"), &bin.join("abin"))?;
+    }
+    let alib = alib_dir();
+    if abin && alib.is_dir() {
+        place_dir(&alib, &bin.join("alib"))?;
     }
     Ok(())
 }
@@ -1128,6 +1203,8 @@ impl Fixture {
             locked: false,
         };
         build_servers(&options)?;
+        // The programs as they stand, for the tests that make a sandbox with them.
+        build_abin(options.debug, &options.out().join("abin"))?;
         let built = |name: &str| {
             options
                 .out()

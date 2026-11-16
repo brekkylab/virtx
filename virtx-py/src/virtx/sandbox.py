@@ -3,12 +3,15 @@ and the processes run in one, each a job whose log is its output."""
 
 from __future__ import annotations
 
+import builtins
+import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ._library import args
+from ._library import VirtxError, args
 from .files import Files
 from .job import LogEntry, StartedJob, Truncated
 from .volume import Volume
@@ -65,6 +68,9 @@ class Sandbox(Files):
     ports: list[SandboxPort] = field(default_factory=list)
     """Its opened ports: answered by ``create_sandbox`` only."""
 
+    abins: list[str] = field(default_factory=list)
+    """virtx's own programs it has at ``/abin``."""
+
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Sandbox:
         return cls(
@@ -74,6 +80,7 @@ class Sandbox(Files):
             value.get("snapshot"),
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
+            list(value.get("abins", ())),
         )
 
     @property
@@ -85,7 +92,8 @@ class Sandbox(Files):
     ) -> StartedJob[SandboxJob, SandboxJobEntry]:
         """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
         after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
-        ended, as ``SandboxJob.log``'s. Sent when first awaited or iterated."""
+        ended, as ``SandboxJob.log``'s; ``complete``, its exit code, as
+        ``SandboxJob.complete``'s. Sent when first awaited, iterated or completed."""
         request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:
@@ -185,6 +193,25 @@ class SandboxJob:
             "virtx_client_sandbox_job_log", self._args(after=after)
         ):
             yield sandbox_job_entry(item)
+
+    async def complete(self, print: bool = False) -> int:
+        """Follow it to its end, printing what its process writes to stdout and stderr as it
+        wrote them if ``print``: its exit code, ``128 + signal`` for one a signal ended."""
+        async with aclosing(self.log()) as log:
+            async for item in log:
+                match item.entry:
+                    case Stdout(line) if print:
+                        builtins.print(line)
+                    case Stderr(line) if print:
+                        builtins.print(line, file=sys.stderr)
+                    case Truncated() if print:
+                        builtins.print(
+                            "(the log reached the server's limit; the rest is not kept)",
+                            file=sys.stderr,
+                        )
+                    case SandboxJobEnd(code):
+                        return code
+        raise VirtxError("the job was removed before it ended", source="job")
 
     async def remove(self) -> None:
         """Cancel it if it runs, killing its process, and forget it."""

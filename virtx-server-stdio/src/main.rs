@@ -780,4 +780,67 @@ mod tests {
         assert!(!store.contains_layer(&layer));
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
+
+    /// A file's `getetag`, as a `PROPFIND` answers it, is the entity-tag its `ETag` header is,
+    /// quotes and all, so a client that sends it as `If-Match` writes over the file it read: the
+    /// write lands, and the same tag again, gone stale, is refused `412`. A tag sent without its
+    /// quotes is taken as the same tag.
+    #[tokio::test]
+    async fn a_file_s_getetag_is_its_etag_and_is_taken_as_if_match() {
+        use axum::body::Body;
+        use http::header::{ETAG, IF_MATCH};
+
+        let server = Server::spawn("getetag");
+        server.client.create_volume(Some("data")).await.unwrap();
+        let (app, _) = app(&server.home).unwrap();
+        let path = "/volumes/data/files/a.txt";
+        let send = |request: http::Request<Body>| {
+            let app = app.clone();
+            async move {
+                let Ok(response) = app.oneshot(request).await;
+                let status = response.status().as_u16();
+                let etag = response
+                    .headers()
+                    .get(ETAG)
+                    .map(|etag| etag.to_str().unwrap().to_owned());
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, etag, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+        let put = |if_match: Option<&str>, body: &'static str| {
+            let mut request = http::Request::put(path);
+            if let Some(tag) = if_match {
+                request = request.header(IF_MATCH, tag);
+            }
+            request.body(Body::from(body)).unwrap()
+        };
+        let getetag = async || {
+            let propfind = http::Request::builder()
+                .method("PROPFIND")
+                .uri(path)
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap();
+            let (status, _, xml) = send(propfind).await;
+            assert_eq!(status, 207, "{xml}");
+            let start = xml.find("getetag>").expect("a getetag") + "getetag>".len();
+            xml[start..start + xml[start..].find('<').unwrap()].to_owned()
+        };
+
+        assert_eq!(send(put(None, "one")).await.0, 201);
+        let head = http::Request::head(path).body(Body::empty()).unwrap();
+        let header = send(head).await.1.expect("an ETag");
+        let tag = getetag().await;
+        assert_eq!(tag, header, "the getetag and the ETag header");
+
+        assert_eq!(send(put(Some(&tag), "three")).await.0, 204);
+        assert_eq!(send(put(Some(&tag), "stale")).await.0, 412);
+
+        let fresh = getetag().await;
+        let bare = fresh.trim_matches('"');
+        assert_ne!(bare, fresh);
+        assert_eq!(send(put(Some(bare), "bare")).await.0, 204);
+    }
 }

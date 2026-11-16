@@ -125,6 +125,11 @@ impl DavFileSystem for Fs {
         })
     }
 
+    /// A link is not told from what it points at here, as `metadata` does not tell it.
+    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        self.metadata(path)
+    }
+
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
             let stat = self.0.stat(&at(path)).await.map_err(|e| refused(&e))?;
@@ -253,6 +258,11 @@ impl DavDirEntry for Entry {
 impl DavMetaData for Meta {
     fn len(&self) -> u64 {
         self.len
+    }
+
+    /// Never: what these roots answer of a path is what it leads to.
+    fn is_symlink(&self) -> bool {
+        false
     }
 
     fn modified(&self) -> Result<SystemTime, FsError> {

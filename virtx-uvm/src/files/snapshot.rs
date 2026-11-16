@@ -259,6 +259,11 @@ impl DavFileSystem for Fs {
         })
     }
 
+    /// A link is not told from what it points at here, as `metadata` does not tell it.
+    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        self.metadata(path)
+    }
+
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
             let meta = self.seen(&at(path))?.ok_or(FsError::NotFound)?;

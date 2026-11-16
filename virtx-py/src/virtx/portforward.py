@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import ctypes
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from ._library import Library, _Bytes
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
-
     from .client import Client
 
 

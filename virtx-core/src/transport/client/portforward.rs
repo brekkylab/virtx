@@ -15,7 +15,7 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Mutex, PoisonError},
 };
 
@@ -111,29 +111,27 @@ pub struct PortForwarder {
 impl PortForwarder {
     /// The port making a sandbox answered `url` for, at an address on this machine's loopback,
     /// reached over `client`'s connection. `port`, its number in the sandbox where the caller
-    /// knows it, names it in what a connection that fails says.
+    /// knows it, names it in what a connection that fails says. Called inside a tokio runtime,
+    /// which the port's connections are carried on.
     ///
     /// Over stdio the server is on this machine, and its loopback address is the forwarder's.
     /// Over HTTP `url` is resolved against the server's base, and each connection to a loopback
     /// port of the forwarder's own is carried to it in a WebSocket of `virtx.tcp`.
-    pub async fn open(
+    pub fn open(
         client: &TransportClient,
         url: &str,
         port: Option<u16>,
     ) -> Result<PortForwarder, Error> {
         match &client.connection {
-            Connection::Stdio(_) => PortForwarder::direct(url).await,
+            Connection::Stdio(_) => PortForwarder::direct(url),
             Connection::Tcp(tcp) => match tcp.base.join(url) {
-                Ok(url) => {
-                    PortForwarder::tunnel(
-                        tcp.http.clone(),
-                        Arc::clone(&tcp.credentials),
-                        Arc::clone(&tcp.headers),
-                        url,
-                        port,
-                    )
-                    .await
-                }
+                Ok(url) => PortForwarder::tunnel(
+                    tcp.http.clone(),
+                    Arc::clone(&tcp.credentials),
+                    Arc::clone(&tcp.headers),
+                    url,
+                    port,
+                ),
                 // Its message would quote the URL, which is secret.
                 Err(e) => Err(Error::Client(format!(
                     "a port's URL that does not read as one: {e}"
@@ -165,13 +163,13 @@ impl PortForwarder {
     }
 
     /// The loopback address a server on this machine answered, as `http://127.0.0.1:54123`.
-    async fn direct(url: &str) -> Result<PortForwarder, Error> {
+    fn direct(url: &str) -> Result<PortForwarder, Error> {
         let parsed = reqwest::Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
         let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
             return Err(Error::Client(format!("{url} names no host and port")));
         };
-        let address = tokio::net::lookup_host((host, port))
-            .await
+        let address = (host, port)
+            .to_socket_addrs()
             .map_err(|e| Error::Transport(format!("{url}: {e}")))?
             .next()
             .ok_or_else(|| Error::Transport(format!("{url} is no address")))?;
@@ -186,7 +184,7 @@ impl PortForwarder {
 
     /// A loopback port of this client's own, each connection to it carried to `url` in a
     /// WebSocket that `http` opens with the token and `headers` current then.
-    async fn tunnel(
+    fn tunnel(
         http: reqwest::Client,
         credentials: Arc<Credentials>,
         headers: Shared<HeaderMap>,
@@ -194,9 +192,9 @@ impl PortForwarder {
         port: Option<u16>,
     ) -> Result<PortForwarder, Error> {
         let opening = |e: std::io::Error| Error::Client(format!("opening a loopback port: {e}"));
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(opening)?;
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(opening)?;
+        listener.set_nonblocking(true).map_err(opening)?;
+        let listener = TcpListener::from_std(listener).map_err(opening)?;
         let address = listener.local_addr().map_err(opening)?;
         let failures = Arc::new(Failures {
             port: match port {
@@ -480,9 +478,7 @@ mod tests {
     async fn each_connection_is_carried_in_a_websocket_to_the_url_under_the_base() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None)
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
         assert!(forward.address().ip().is_loopback());
 
         // Two at once, each its own WebSocket.
@@ -523,9 +519,7 @@ mod tests {
     async fn a_connection_the_server_refuses_is_closed_and_says_why() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/shut", Some(7000))
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/shut", Some(7000)).unwrap();
         assert_eq!(forward.last_error(), None);
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
@@ -549,9 +543,7 @@ mod tests {
     async fn a_websocket_closed_before_the_port_sent_a_byte_says_nothing_listens() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/deaf", Some(7000))
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/deaf", Some(7000)).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         // Sent or not before the server closes it, the line goes nowhere.
         let _ = stream.write_all(b"hello\n").await;
@@ -577,9 +569,7 @@ mod tests {
     async fn a_port_named_by_no_number_is_named_by_where_it_is_forwarded() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/deaf", None)
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/deaf", None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let _ = stream.read_to_end(&mut Vec::new()).await;
         let named = format!("the port forwarded at {}: ", forward.address());
@@ -592,9 +582,7 @@ mod tests {
         let client =
             TransportClient::connect(&serve(Some("later")).await, Auth::None, HeaderMap::new())
                 .unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None)
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
         assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0, "refused");
@@ -614,20 +602,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_loopback_address_is_reached_as_it_is() {
-        let forward = PortForwarder::direct("http://127.0.0.1:54123")
-            .await
-            .unwrap();
+        let forward = PortForwarder::direct("http://127.0.0.1:54123").unwrap();
         assert_eq!(forward.address(), "127.0.0.1:54123".parse().unwrap());
-        assert!(PortForwarder::direct("ports/abc").await.is_err());
+        assert!(PortForwarder::direct("ports/abc").is_err());
     }
 
     #[tokio::test]
     async fn completed_connection_tasks_are_reaped() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None)
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
 
         for i in 0..10 {
             let mut stream = TcpStream::connect(forward.address()).await.unwrap();
@@ -651,9 +635,7 @@ mod tests {
     async fn refused_connection_tasks_are_reaped() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/shut", None)
-            .await
-            .unwrap();
+        let forward = PortForwarder::open(&client, "ports/shut", None).unwrap();
 
         for _ in 0..5 {
             let mut stream = TcpStream::connect(forward.address()).await.unwrap();
@@ -706,7 +688,8 @@ mod ffi {
     /// Forward the port a sandbox answered `url` for, given `{"url": "...", "port"?: n}` as
     /// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
     /// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
-    /// the error's message. Returns once its local address is open, which takes no request of the server.
+    /// the error's message. Returns once its local address is open, which takes no request of
+    /// the server.
     ///
     /// It runs on `client`'s runtime, so the client's last release stops it, and is freed with
     /// `virtx_port_forwarder_free`.
@@ -714,8 +697,7 @@ mod ffi {
     /// # Safety
     ///
     /// `client` is as in `virtx_client_list_volume`, and `args` as in
-    /// `virtx_client_build_image`. `forwarder` and `out` are writable. Not called from a `wake`,
-    /// which runs on the runtime this blocks on.
+    /// `virtx_client_build_image`. `forwarder` and `out` are writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_port_forwarder_open(
         client: *mut VirtxClient,
@@ -725,9 +707,9 @@ mod ffi {
         out: *mut VirtxBytes,
     ) -> c_int {
         let args = unsafe { json::<PortForwarderArgs>(args, args_len) };
-        let opened = unsafe { &(*client).0 }.block_on(|client| async move {
+        let opened = unsafe { &(*client).0 }.inside(|client| {
             let args = args?;
-            PortForwarder::open(&client.inner, &args.url, args.port).await
+            PortForwarder::open(&client.inner, &args.url, args.port)
         });
         let output = opened.map(|opened| {
             let address = opened.address().to_string();

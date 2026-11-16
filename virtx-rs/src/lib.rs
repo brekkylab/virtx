@@ -31,7 +31,7 @@ mod sandbox;
 mod volume;
 
 pub use call::{Call, Events};
-pub use client::{Client, DOMAIN, ensure_virtx};
+pub use client::{Client, DOMAIN, Opening, ensure_virtx};
 pub use error::Error;
 pub use files::Files;
 pub use image::ImageJob;

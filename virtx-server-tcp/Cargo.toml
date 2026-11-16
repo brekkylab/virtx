@@ -50,3 +50,7 @@ tokio = { workspace = true, features = ["io-util", "process"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+# Ctrl-break sent to a server, as an operator interrupts it on Windows.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Threading"] }

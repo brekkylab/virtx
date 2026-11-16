@@ -98,6 +98,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Ioctl",
     # A volume's root opened sharing deletion.
     "Win32_Storage_FileSystem",
+    # A machine's process started in a process group of its own.
+    "Win32_System_Threading",
 ] }
 # A Unix socket, which std has on Unix alone: the agent's, a port is reached through.
 uds_windows = "1.2"

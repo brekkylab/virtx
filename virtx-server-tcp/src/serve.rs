@@ -250,11 +250,23 @@ pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> a
         let _ = tcp.set_nodelay(true);
     });
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
+}
+
+/// Once this process is interrupted: by ctrl-c, or on Windows by ctrl-break too, the one
+/// console event a process group of its own can be sent.
+async fn interrupted() {
+    #[cfg(windows)]
+    if let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = ctrl_break.recv() => {}
+        }
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Before any runtime: if this process was spawned by itself to be a machine, become it and

@@ -69,14 +69,17 @@ impl Served {
     /// A server over `home`, as its `config.json` says.
     async fn start(home: PathBuf) -> Served {
         let path = home.join("config.json");
-        let mut process = Command::new(env!("CARGO_BIN_EXE_virtx-server-tcp"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-server-tcp"));
+        command
             .arg("serve")
             .arg("--config")
             .arg(&path)
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .kill_on_drop(true);
+        // A process group of its own, which ctrl-break can be sent to alone (`again`).
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        let mut process = command.spawn().unwrap();
         // Where it listens is the port it was given, which it says first.
         let mut said = BufReader::new(process.stderr.take().unwrap()).lines();
         let line = said
@@ -100,9 +103,20 @@ impl Served {
 
     /// This server interrupted, as its operator stops it, and another started over its home.
     async fn again(mut self) -> Served {
-        let pid = self.process.id().unwrap().to_string();
-        let interrupted = Command::new("kill").args(["-INT", &pid]).status().await;
-        assert!(interrupted.unwrap().success());
+        let pid = self.process.id().unwrap();
+        #[cfg(unix)]
+        {
+            let pid = pid.to_string();
+            let interrupted = Command::new("kill").args(["-INT", &pid]).status().await;
+            assert!(interrupted.unwrap().success());
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+            // SAFETY: a plain call, naming the group the server leads.
+            let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+            assert_ne!(sent, 0, "{}", std::io::Error::last_os_error());
+        }
         self.process.wait().await.unwrap();
         // Not removed: the next is over it.
         let home = std::mem::take(&mut self.home);

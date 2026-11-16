@@ -88,7 +88,12 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         let access = Arc::clone(&reading);
         async move {
             match access.home(request.headers()).await {
-                Ok((_, home)) => home.registry().handle(request).await,
+                Ok((_, home)) => home
+                    .registry()
+                    .handle(request)
+                    .await
+                    .map(axum::body::Body::new)
+                    .into_response(),
                 Err(status) => refusal(status),
             }
         }

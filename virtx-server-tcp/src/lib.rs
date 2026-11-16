@@ -3,8 +3,6 @@
 //!
 //! - [`access::Tenants`]: whose the tokens are, and the homes they reach. The binary's are
 //!   [`access::Projects`].
-//! - [`endpoints::Images`]: what answers a home's registry. The binary's is a
-//!   [`virtx_uvm::RegistryServer`].
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
 
 pub mod access;

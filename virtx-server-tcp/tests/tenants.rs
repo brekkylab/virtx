@@ -3,15 +3,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use axum::response::{IntoResponse as _, Response};
 use http::StatusCode;
 use serde_json::json;
 use virtx_server_tcp::access::{Access, Checked, REGISTRY_PATH, Tenants};
 use virtx_server_tcp::config::Config;
-use virtx_server_tcp::endpoints::{Home, Images};
+use virtx_server_tcp::endpoints::Home;
 use virtx_server_tcp::serve;
 use virtx_uvm::{ImageStore, RegistryServer};
 
@@ -40,8 +38,7 @@ impl Tenants for Keys {
                 let dir = self.root.join(project);
                 let images = ImageStore::new(dir.join("images")).unwrap();
                 let registry = RegistryServer::new(images.clone(), REGISTRY_PATH).unwrap();
-                let registry = Arc::new(Kept(Arc::new(registry)));
-                Arc::new(Home::new(images, registry, &dir).unwrap())
+                Arc::new(Home::new(images, Arc::new(registry), &dir).unwrap())
             });
             Ok((project.to_owned(), Arc::clone(home)))
         })
@@ -49,25 +46,6 @@ impl Tenants for Keys {
 
     fn homes(&self) -> Vec<Arc<Home>> {
         self.made.lock().unwrap().values().cloned().collect()
-    }
-}
-
-/// A registry answered around: a manifest it has not is one kept elsewhere.
-struct Kept(Arc<RegistryServer>);
-
-impl Images for Kept {
-    fn handle(
-        &self,
-        request: axum::extract::Request,
-    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
-        Box::pin(async move {
-            let manifest = request.uri().path().contains("/manifests/");
-            let answered = Images::handle(&*self.0, request).await;
-            match answered.status() == StatusCode::NOT_FOUND && manifest {
-                true => "kept elsewhere".into_response(),
-                false => answered,
-            }
-        })
     }
 }
 
@@ -135,13 +113,6 @@ async fn a_server_of_its_own_tenants_and_routes_is_built_from_the_library() {
         get("/images/oci/v2/", None, None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let kept = get(
-        "/images/oci/v2/alpine/manifests/3.21",
-        Some("acme-key"),
-        None,
-    )
-    .await;
-    assert_eq!(kept, (StatusCode::OK, "kept elsewhere".to_owned()));
     assert_eq!(
         get("/images/oci/v2/alpine/tags/list", Some("acme-key"), None)
             .await

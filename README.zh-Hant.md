@@ -150,57 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
 解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
 
-在伺服器那台機器上寫一份 `server.json`，然後啟動伺服器：
-
-```json
-{
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-在用戶端，改為連線到這台伺服器，取代 `Client.spawn()`。
-其餘部分和本機範例完全相同。
-
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-監聽回送位址的伺服器不需要驗證。
-要提供給其他機器使用，請指定你的 OpenID Connect 提供者，以及每個專案允許存取的使用者：
+在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者以及每個專案可存取的使用者，然後啟動伺服器：
 
 ```json
 {
@@ -210,6 +160,13 @@ let client = Client::connect(
   "projects": { "demo": { "members": ["alice@example.com"] } }
 }
 ```
+
+```sh
+virtx-server-tcp serve --config server.json
+```
+
+在用戶端，改為連線到這台伺服器，取代 `Client.spawn()`。
+其餘部分和本機範例完全相同。
 
 使用者就是提供者核發給 `client_id` 所指用戶端的 ID 權杖中的 `email`，該用戶端須是使用裝置流程的公開用戶端。
 用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖和專案名稱連線：

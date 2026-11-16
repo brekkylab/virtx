@@ -3,8 +3,8 @@
 //! project it reaches, and takes that project's home from its [`Homes`].
 //!
 //! The server's own authenticator is [`Projects`]: the projects its config names, each to its
-//! members among the users of the config's OpenID Connect provider ([`Oidc`]) -- or, of a
-//! config that names no provider, to [`ANYONE`]. A server built on this one gives its own.
+//! members among the users of the config's OpenID Connect provider ([`Oidc`]). A server built on
+//! this one gives its own.
 //!
 //! [`MemberProjects`] keeps each project's members beside its root, in
 //! `<home>/project/<name>/members.json`.
@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use anyhow::bail;
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Serialize};
@@ -27,10 +26,7 @@ use virtx_uvm::{
     project_root,
 };
 
-/// Who a request is sent by where no one is authenticated.
-pub const ANYONE: &str = "anyone";
-
-use crate::config::{Auth, Config};
+use crate::config::Config;
 use crate::endpoints::Home;
 use crate::oidc::Oidc;
 
@@ -169,65 +165,41 @@ pub fn project_named(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
 
 /// The projects a config names.
 pub struct Projects {
-    /// Who a token is, if the config names a provider: without one, requests are let
-    /// through without credentials.
-    oidc: Option<Oidc>,
+    /// Who a token is.
+    oidc: Oidc,
     /// Each project's members.
     members: HashMap<String, HashSet<String>>,
 }
 
 impl Projects {
-    /// The projects `config` names, each one's home made in `homes`. Naming no provider, it
-    /// authenticates no one, and has the project [`DEFAULT_PROJECT`] beside those it names:
-    /// refused listening off the loopback, unless the config says so.
+    /// The projects `config` names, each one's home made in `homes`.
     pub fn new(config: &Config, homes: &Homes) -> anyhow::Result<Projects> {
-        match (&config.auth, &config.oidc) {
-            (Some(Auth::None), Some(_)) => bail!("auth is none, with oidc to authenticate"),
-            (None, None) if !config.listen.ip().is_loopback() => bail!(
-                "listening at {} for other machines with no oidc: \
-                 say `\"auth\": \"none\"` to serve them without authentication",
-                config.listen
-            ),
-            _ => {}
-        }
-        let mut members: HashMap<String, HashSet<String>> = config
+        let members: HashMap<String, HashSet<String>> = config
             .projects
             .iter()
             .map(|(name, named)| (name.clone(), named.members.iter().cloned().collect()))
             .collect();
-        if config.oidc.is_none() {
-            members.entry(DEFAULT_PROJECT.to_owned()).or_default();
-        }
         // Made now, not as first reached: a project's sandboxes left from before are swept as
         // the server starts.
         for name in members.keys() {
             homes.home(name)?;
         }
         Ok(Projects {
-            oidc: config.oidc.clone().map(Oidc::new),
+            oidc: Oidc::new(config.oidc.clone()),
             members,
         })
     }
 
-    /// Whether requests are let through without credentials.
-    pub fn open(&self) -> bool {
-        self.oidc.is_none()
-    }
-
     /// The user `token` is: `401` unless the provider signed it.
     async fn user(&self, token: Option<&str>) -> Result<String, StatusCode> {
-        let Some(oidc) = &self.oidc else {
-            return Ok(ANYONE.to_owned());
-        };
         let token = token.ok_or(StatusCode::UNAUTHORIZED)?;
-        oidc.user(token).await.ok_or(StatusCode::UNAUTHORIZED)
+        self.oidc.user(token).await.ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 
 impl Authenticator for Projects {
     /// `403` for a project the user is not a member of -- or none at all, which is not told
-    /// apart. Where no one is authenticated, everyone is a member. A request naming no project
-    /// reaches [`DEFAULT_PROJECT`].
+    /// apart. A request naming no project reaches [`DEFAULT_PROJECT`].
     fn authenticate<'a>(
         &'a self,
         token: Option<&'a str>,
@@ -237,9 +209,7 @@ impl Authenticator for Projects {
             let user = self.user(token).await?;
             let project = named.unwrap_or(DEFAULT_PROJECT);
             match self.members.get(project) {
-                Some(members) if self.open() || members.contains(&user) => {
-                    Ok((user, project.to_owned()))
-                }
+                Some(members) if members.contains(&user) => Ok((user, project.to_owned())),
                 _ => Err(StatusCode::FORBIDDEN),
             }
         })
@@ -406,14 +376,6 @@ mod tests {
 
     use super::*;
 
-    /// The access the config at `path` makes, over its own projects.
-    fn configured(path: &std::path::Path) -> anyhow::Result<Access> {
-        let config = Config::read(path)?;
-        let homes = Arc::new(Homes::new(config.home()));
-        let projects = Arc::new(Projects::new(&config, &homes)?);
-        Ok(Access::new(config.origins, projects, homes))
-    }
-
     fn headers(token: Option<&str>, project: Option<&str>, origin: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         if let Some(token) = token {
@@ -430,68 +392,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_authentication_anyone_reaches_every_project_and_default_by_no_name() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-open-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        // `default` is there beside the projects the config names.
-        let config = json!({ "listen": "127.0.0.1:0", "home": dir, "projects": { "demo": {} } });
-        std::fs::write(&path, config.to_string()).unwrap();
-        let access = configured(&path).unwrap();
-        let home = async |token, project| access.home(&headers(token, project, None)).await;
+    async fn a_request_carries_a_provider_s_token_from_where_a_browser_is_let_in() {
+        let dir = std::env::temp_dir().join(format!("virtx-tcp-access-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let config = Config::parse(json!({
+            "listen": "127.0.0.1:0",
+            "home": dir,
+            "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+            "projects": { "demo": { "members": ["alice@example.com"] } },
+        }))
+        .unwrap();
+        let homes = Arc::new(Homes::new(config.home()));
+        let projects = Arc::new(Projects::new(&config, &homes).unwrap());
+        let access = Access::new(config.origins, projects, homes);
+        // The config's projects are made as the server starts.
+        assert!(dir.join("project/demo").is_dir());
 
-        let (user, reached) = home(None, None).await.unwrap();
-        assert_eq!(user, ANYONE);
+        let home = async |token, origin| {
+            access
+                .home(&headers(token, Some("demo"), origin))
+                .await
+                .err()
+        };
+        assert_eq!(home(None, None).await, Some(StatusCode::UNAUTHORIZED));
         assert_eq!(
-            reached.snapshots.root(),
-            dir.join("project").join(DEFAULT_PROJECT).as_path()
+            home(Some("not a token"), None).await,
+            Some(StatusCode::UNAUTHORIZED)
         );
-        assert!(home(Some("whatever"), Some(DEFAULT_PROJECT)).await.is_ok());
-        assert!(home(None, Some("demo")).await.is_ok());
         assert_eq!(
-            home(None, Some("other")).await.err(),
+            home(None, Some("https://evil.example")).await,
             Some(StatusCode::FORBIDDEN)
         );
-        let elsewhere = headers(None, None, Some("https://evil.example"));
-        assert_eq!(
-            access.home(&elsewhere).await.err(),
-            Some(StatusCode::FORBIDDEN)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn without_a_provider_it_is_open_on_the_loopback_alone_unless_it_says_so() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-rule-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let projects = |mut config: serde_json::Value| {
-            config["home"] = json!(dir);
-            let path = dir.join("config.json");
-            std::fs::write(&path, config.to_string()).unwrap();
-            let config = Config::read(&path).unwrap();
-            Projects::new(&config, &Homes::new(config.home()))
-        };
-
-        let local = projects(json!({ "listen": "127.0.0.1:0" })).unwrap();
-        assert!(local.open());
-        assert!(local.members.contains_key(DEFAULT_PROJECT));
-
-        let refused = projects(json!({ "listen": "0.0.0.0:0" })).err().unwrap();
-        assert!(refused.to_string().contains("auth"), "{refused}");
-        let said = projects(json!({ "listen": "0.0.0.0:0", "auth": "none" })).unwrap();
-        assert!(said.open());
-
-        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let checked = projects(json!({ "listen": "0.0.0.0:0", "oidc": oidc })).unwrap();
-        assert!(!checked.open());
-        assert!(checked.members.is_empty());
-        let both = json!({ "listen": "127.0.0.1:0", "oidc": oidc, "auth": "none" });
-        assert!(projects(both).is_err());
+    fn a_config_names_its_provider_and_its_projects_in_lower_case() {
+        let refused = Config::parse(json!({ "listen": "127.0.0.1:0" }))
+            .err()
+            .unwrap();
+        assert!(refused.to_string().contains("oidc"), "{refused}");
         // Two names that differ in case alone would be one directory where case is ignored.
-        let cased = json!({ "listen": "127.0.0.1:0", "projects": { "Demo": {} } });
+        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
+        let cased = json!({ "listen": "127.0.0.1:0", "oidc": oidc, "projects": { "Demo": {} } });
         let refused = Config::parse(cased).err().unwrap();
         assert!(refused.to_string().contains("lower-case"), "{refused}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

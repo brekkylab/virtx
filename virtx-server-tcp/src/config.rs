@@ -13,14 +13,11 @@
 //! A project's snapshots, volumes and images are under its own root, `<home>/project/<name>/`
 //! (see [`virtx_uvm::project_root`]). Without `home`, it is [`virtx_uvm::cache_root`].
 //!
-//! With `oidc`, a request's token is an ID token its issuer signed for `client_id`, and the
-//! user is its `username_claim` (`email` unless given): a project's members are users of the
-//! provider's.
+//! A request's token is an ID token `oidc`'s issuer signed for `client_id`, and the user is its
+//! `username_claim` (`email` unless given): a project's members are users of the provider's.
 //!
-//! A request that names no project is in `default`. Without `oidc` the server authenticates no
-//! one, every request let into every project, `default` among them whether the config names it
-//! or not. So only on the loopback: listening elsewhere, it is refused unless it says
-//! `"auth": "none"`. With `oidc`, `default` is there only if the config names it.
+//! A request that names no project is in `default`, there only if the config names it. Without
+//! authentication, a client reaches its projects through `virtx-stdio` instead.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,19 +36,9 @@ pub struct Config {
     /// through with the token and the project as any other caller.
     #[serde(default)]
     pub origins: Vec<String>,
-    #[serde(default)]
-    pub oidc: Option<crate::oidc::Config>,
-    #[serde(default)]
-    pub(crate) auth: Option<Auth>,
+    pub oidc: crate::oidc::Config,
     #[serde(default)]
     pub projects: HashMap<String, Project>,
-}
-
-/// What the config says of authentication, beyond naming a provider.
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Auth {
-    None,
 }
 
 #[derive(Deserialize)]

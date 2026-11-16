@@ -4,9 +4,7 @@
 use std::sync::Arc;
 
 use http::StatusCode;
-use serde_json::json;
 use virtx_server_tcp::access::{Access, Authenticator, Checked, Homes};
-use virtx_server_tcp::config::Config;
 use virtx_server_tcp::serve;
 
 /// Each token `<project>-key` is its project's.
@@ -34,11 +32,8 @@ impl Authenticator for Keys {
 async fn a_server_of_its_own_authenticator_and_routes_is_built_from_the_library() {
     let root = std::env::temp_dir().join(format!("virtx-tcp-tenants-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    // Off the loopback and naming no provider: what the config's own projects refuse is not
-    // asked of a server whose authenticator checks tokens.
-    let config = Config::parse(json!({ "listen": "0.0.0.0:0", "home": root })).unwrap();
-    let homes = Arc::new(Homes::new(config.home()));
-    let access = Arc::new(Access::new(config.origins.clone(), Arc::new(Keys), homes));
+    let homes = Arc::new(Homes::new(root.clone()));
+    let access = Arc::new(Access::new(Vec::new(), Arc::new(Keys), homes));
     let counting = Arc::clone(&access);
     let own = axum::Router::new().route(
         "/node/homes",

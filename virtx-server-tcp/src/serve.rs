@@ -53,16 +53,14 @@ pub fn become_machine_if_spawned() {
 
 /// The server `config` alone makes: its [`Projects`] behind [`router`], and beside it where a
 /// client signs in for its tokens, answered without any -- the provider and the client to
-/// sign in as, or nothing where no one signs in.
-pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>, axum::Router)> {
+/// sign in as.
+pub fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
     let homes = Arc::new(Homes::new(config.home()));
     let projects = Arc::new(Projects::new(config, &homes)?);
-    let advertised = match &config.oidc {
-        Some(oidc) => serde_json::json!({
-            "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
-        }),
-        None => serde_json::json!({}),
-    };
+    let oidc = &config.oidc;
+    let advertised = serde_json::json!({
+        "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
+    });
     let advertised = (
         [(header::CONTENT_TYPE, "application/json")],
         advertised.to_string(),
@@ -71,9 +69,9 @@ pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>
         "/auth",
         axum::routing::get(move || async move { advertised }),
     );
-    let access = Arc::new(Access::new(config.origins.clone(), projects.clone(), homes));
+    let access = Arc::new(Access::new(config.origins.clone(), projects, homes));
     let router = router(Arc::clone(&access), own);
-    Ok((projects, access, router))
+    Ok((access, router))
 }
 
 /// Everything served, each request checked against `access`: the endpoints, in the home a
@@ -306,12 +304,12 @@ async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
 
 #[cfg(test)]
 mod tests {
-    //! The app, served on the loopback over a config of its own that authenticates no one, and
+    //! The app, served on the loopback with every request let into the project it names, and
     //! called over HTTP as a client would: each request to an endpoint in a project -- by
     //! hand, and through `virtx-core`'s client given it at connect. Who reaches which project
-    //! is `virtx-rs`'s `tests/projects.rs`, against the fixture.
+    //! is `virtx-rs`'s `tests/projects.rs`, against the fixture's provider.
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use reqwest::{Method, StatusCode, Url};
     use serde_json::{Value, json};
@@ -321,7 +319,24 @@ mod tests {
     use virtx_core::{Auth, Client, DirEntry, FileRoot, SandboxCreateArgs};
     use virtx_uvm::{Entry, FsTree, ImageStore};
 
+    use std::sync::Arc;
+
+    use crate::access::{Access, Authenticator, Checked, Homes};
     use crate::config::Config;
+
+    /// Every request a member of the project it names, or of `default`.
+    struct Everyone;
+
+    impl Authenticator for Everyone {
+        fn authenticate<'a>(
+            &'a self,
+            _token: Option<&'a str>,
+            named: Option<&'a str>,
+        ) -> Checked<'a, (String, String)> {
+            let project = named.unwrap_or(virtx_core::DEFAULT_PROJECT).to_owned();
+            Box::pin(async move { Ok(("tester".to_owned(), project)) })
+        }
+    }
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -336,30 +351,24 @@ mod tests {
     }
 
     impl Served {
-        /// Of the projects `demo` and `other`.
+        /// With every request let into the project it names, from `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
-            Served::spawn_with(name, json!({ "projects": { "demo": {}, "other": {} } })).await
+            Served::spawn_over(name, |home| {
+                let homes = Arc::new(Homes::new(home.to_owned()));
+                let origins = vec!["https://allowed.example".to_owned()];
+                let access = Arc::new(Access::new(origins, Arc::new(Everyone), homes));
+                super::router(access, axum::Router::new())
+            })
+            .await
         }
 
-        /// With `who` in the config, for who is let in and to which projects.
-        async fn spawn_with(name: &str, who: Value) -> Served {
+        /// What `serving` makes over an empty home of its own.
+        async fn spawn_over(name: &str, serving: impl FnOnce(&Path) -> axum::Router) -> Served {
             let home =
                 std::env::temp_dir().join(format!("virtx-tcp-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
-            let mut config = json!({
-                "listen": "127.0.0.1:0",
-                "home": home,
-                "origins": ["https://allowed.example"],
-            });
-            for (name, value) in who.as_object().unwrap() {
-                config[name] = value.clone();
-            }
-            let path = home.join("config.json");
-            std::fs::write(&path, config.to_string()).unwrap();
-            let config = Config::read(&path).unwrap();
-
-            let (_, _, router) = super::configured(&config).unwrap();
+            let router = serving(&home);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -449,23 +458,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_says_where_to_sign_in_and_without_authentication_takes_any_request() {
-        let asked = async |served: &Served| {
-            let (status, body) = served.send("GET", "auth", None, "").await;
-            assert_eq!(status, StatusCode::OK);
-            serde_json::from_str::<Value>(&body).unwrap()
-        };
-
+    async fn a_server_says_where_to_sign_in_and_takes_no_request_without_a_token() {
         let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let signed_in = Served::spawn_with("advertised", json!({ "oidc": oidc })).await;
-        assert_eq!(asked(&signed_in).await, json!({ "oidc": oidc }));
-        let list = signed_in.send("GET", "volumes/", None, "").await;
+        let served = Served::spawn_over("advertised", |home| {
+            let config = json!({ "listen": "127.0.0.1:0", "home": home, "oidc": oidc });
+            super::configured(&Config::parse(config).unwrap())
+                .unwrap()
+                .1
+        })
+        .await;
+        let (status, body) = served.send("GET", "auth", None, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "oidc": oidc })
+        );
+        let list = served.send("GET", "volumes/", None, "").await;
         assert_eq!(list.0, StatusCode::UNAUTHORIZED);
-
-        let open = Served::spawn_with("open", json!({})).await;
-        assert_eq!(asked(&open).await, json!({}));
-        let list = open.send("GET", "volumes/", None, "").await;
-        assert_eq!((list.0, list.1.as_str()), (StatusCode::OK, "[]"));
     }
 
     #[tokio::test]

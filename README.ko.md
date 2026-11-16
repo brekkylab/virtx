@@ -150,57 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 안에는 `virtx-server-tcp`, 게스트 커널, `abin/`, `alib/`이 있습니다.
 별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
 
-서버 머신에서 `server.json`을 작성하고 서버를 시작합니다.
-
-```json
-{
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-클라이언트에서는 `Client.spawn()` 대신 서버에 접속합니다.
-나머지는 로컬 예제와 같습니다.
-
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-루프백 주소에서 듣는 서버는 인증을 요구하지 않습니다.
-다른 머신에 서비스하려면 OpenID Connect 제공자와, 프로젝트마다 접근할 수 있는 사용자를 지정합니다.
+서버 머신에서 OpenID Connect 제공자와 프로젝트마다 접근할 수 있는 사용자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
 
 ```json
 {
@@ -210,6 +160,13 @@ let client = Client::connect(
   "projects": { "demo": { "members": ["alice@example.com"] } }
 }
 ```
+
+```sh
+virtx-server-tcp serve --config server.json
+```
+
+클라이언트에서는 `Client.spawn()` 대신 서버에 접속합니다.
+나머지는 로컬 예제와 같습니다.
 
 사용자는 제공자가 `client_id`의 클라이언트에 발급한 ID 토큰의 `email`입니다. 이 클라이언트는 device flow를 쓰는 공개 클라이언트여야 합니다.
 `virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰과 프로젝트를 지정해 접속합니다.

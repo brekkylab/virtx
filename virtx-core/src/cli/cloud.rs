@@ -77,12 +77,7 @@ pub(crate) async fn run(domain: &str, command: CloudCommand) -> anyhow::Result<(
     let config = std::env::home_dir()
         .context("no home directory to keep the session under")?
         .join(".config/virtx");
-    let cloud = Cloud {
-        api: format!("https://api.{domain}"),
-        domain: domain.to_owned(),
-        config,
-        http: http()?,
-    };
+    let cloud = Cloud::at(domain, config)?;
     match command {
         CloudCommand::Login => cloud.login().await,
         CloudCommand::Token { json, project } => {
@@ -143,9 +138,40 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// Where virtx cloud is, as `--domain` or `VIRTX_DOMAIN` names it: a host's name -- labels of
+/// letters, digits and hyphens, joined by dots -- with a port or without. The control plane's
+/// URL and the session's files are both made of it: with a path in it, the URL would name one
+/// host and the files another domain's session.
+#[derive(Debug)]
+struct Domain(String);
+
+impl Domain {
+    fn named(domain: &str) -> anyhow::Result<Domain> {
+        let (host, port) = match domain.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (domain, None),
+        };
+        let label = |label: &str| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        let numbered =
+            |port: &str| port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok();
+        if !host.split('.').all(label) || !port.is_none_or(numbered) {
+            bail!(
+                "{domain:?} is not a domain: --domain and VIRTX_DOMAIN take a host's name, \
+                 with a port or without"
+            );
+        }
+        Ok(Domain(domain.to_owned()))
+    }
+}
+
 struct Cloud {
     api: String,
-    domain: String,
+    domain: Domain,
     /// Where the session is kept: `~/.config/virtx`.
     config: PathBuf,
     http: reqwest::Client,
@@ -183,6 +209,17 @@ async fn json_of<T: serde::de::DeserializeOwned>(answer: reqwest::Response) -> a
 }
 
 impl Cloud {
+    /// virtx cloud at `domain`, its session kept under `config`.
+    fn at(domain: &str, config: PathBuf) -> anyhow::Result<Cloud> {
+        let domain = Domain::named(domain)?;
+        Ok(Cloud {
+            api: format!("https://api.{}", domain.0),
+            domain,
+            config,
+            http: http()?,
+        })
+    }
+
     /// `POST <api><path>` with `body` as JSON.
     async fn post(&self, path: &str, body: &Value) -> anyhow::Result<reqwest::Response> {
         Ok(self
@@ -357,7 +394,7 @@ impl Cloud {
 
     /// `~/.config/virtx/<domain>.<extension>`.
     fn config(&self, extension: &str) -> PathBuf {
-        self.config.join(format!("{}.{extension}", self.domain))
+        self.config.join(format!("{}.{extension}", self.domain.0))
     }
 
     /// Held until dropped: no other run of `virtx token` reads or replaces the session meanwhile.
@@ -415,7 +452,7 @@ impl Cloud {
     /// server's OpenID Connect provider too, keeps a provider's, and takes a command that names
     /// neither to be of the one there.
     fn keep_signed_in(&self) -> anyhow::Result<()> {
-        let signed_in = json!({ "domain": self.domain });
+        let signed_in = json!({ "domain": self.domain.0 });
         write_private(
             &self.config.join("signed-in.json"),
             &serde_json::to_vec(&signed_in)?,
@@ -491,7 +528,7 @@ mod tests {
     fn cloud(api: &str, config: PathBuf) -> Cloud {
         Cloud {
             api: api.to_owned(),
-            domain: "qa.invalid".into(),
+            domain: Domain::named("qa.invalid").unwrap(),
             config,
             http: http().unwrap(),
         }
@@ -520,6 +557,46 @@ mod tests {
             stream.write_all(answer.as_bytes()).unwrap();
             line
         })
+    }
+
+    #[test]
+    fn a_domain_is_a_host_s_name_with_a_port_or_without() {
+        for taken in ["virtx.sh", "staging-2.virtx.sh", "localhost:8443"] {
+            assert!(Domain::named(taken).is_ok(), "{taken}");
+        }
+        for refused in [
+            "",
+            "virtx.sh.",
+            "qa.invalid/../../virtx/virtx.sh",
+            "qa.invalid\\virtx.sh",
+            "someone@virtx.sh",
+            "virtx.sh?to=elsewhere",
+            " virtx.sh",
+            "virtx.sh:",
+            "virtx.sh:https",
+            "virtx.sh:+443",
+            "virtx.sh:65536",
+            "virtx.sh:443:443",
+        ] {
+            let refusal = Domain::named(refused).unwrap_err().to_string();
+            assert!(
+                refusal.contains("--domain") && refusal.contains("VIRTX_DOMAIN"),
+                "{refused:?}: {refusal}"
+            );
+        }
+    }
+
+    /// The control plane's URL and the session's files are made of the one name, and of
+    /// nothing a domain is not: one with a path in it would name `api.qa.invalid` in the URL
+    /// and `virtx.sh`'s session on disk.
+    #[test]
+    fn virtx_cloud_is_reached_and_its_session_kept_under_the_one_domain() {
+        let dir = scratch("domain");
+        let cloud = Cloud::at("dev.virtx.sh", dir.clone()).unwrap();
+        assert_eq!(cloud.api, "https://api.dev.virtx.sh");
+        assert_eq!(cloud.config("token"), dir.join("dev.virtx.sh.token"));
+        assert!(Cloud::at("qa.invalid/../../virtx/virtx.sh", dir.clone()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A token file left readable by others is its owner's alone once written again (issue #170).

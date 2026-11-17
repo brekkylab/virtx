@@ -98,7 +98,7 @@ An upper disk is what makes one of those machines writable: an ext4 of its own, 
 /dev/vda  erofs, read-only   the image's disk              ─┘
 ```
 
-Each sandbox makes an upper disk of its own, gone with it. A sandbox's machine is
+Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
 stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
 unless it says otherwise, `0` for never) and booted again over the same upper disk when something
 does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
@@ -989,7 +989,7 @@ Without `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that di
 Without a GPU it adds neither: there is no driver to give, and the loader would only shadow one the image brings.
 
 A sandbox gets the programs it is made with, by its `abins`, from the `abin/` directory beside the server's binary, and every machine gets the `alib/` directory there.
-The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under `sandbox/`, deleted with the sandbox or by the next server's sweep.
+The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into a directory under `sandbox/abin/`, shared by every sandbox made with the same programs and deleted by the next server's sweep once none holds it.
 That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
 A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
 On Windows each file directly in them, the programs `/abin` runs by path, is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report; what is in their directories is read, not run, and left as it is.
@@ -1027,7 +1027,8 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
   bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
                         beside them, libvirtx_core, abin/, alib/
   images/               the image store, shared by both servers
-  sandbox/              the stdio server's sandboxes' upper disks, one ext4 each
+  sandbox/              the stdio server's sandboxes' upper disks, <id>.ext4 each, beside
+                        the <id>.ext4.lock a sandbox holds while it is there
   volume/               the stdio server's volumes
   project/<name>/       the HTTP server's, a sandbox/ and a volume/ per project; its config's
                         `home` moves the whole of it

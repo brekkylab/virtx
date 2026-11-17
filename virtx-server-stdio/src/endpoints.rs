@@ -541,8 +541,8 @@ async fn sandbox_files(
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
     let listed: Vec<_> = sandboxes
-        .iter()
-        .map(|(id, held)| held.sandbox.answer(id.clone()))
+        .values()
+        .map(|held| held.sandbox.answer())
         .collect();
     Ok(json(&listed))
 }
@@ -592,19 +592,15 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -
             }
         });
     }
-    let id = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let id = pick(|id| sandboxes.contains_key(id));
-        let held = Held {
-            sandbox: Arc::clone(&sandbox),
-            _listening: listening,
-        };
-        sandboxes.insert(id.clone(), held);
-        id
+    let id = sandbox.id().to_owned();
+    let held = Held {
+        sandbox: Arc::clone(&sandbox),
+        _listening: listening,
     };
+    home.sandboxes.lock().unwrap().insert(id.clone(), held);
     let answer = virtx_core::Sandbox {
         ports: opened,
-        ..sandbox.answer(id.clone())
+        ..sandbox.answer()
     };
     Ok(created(format!("/sandboxes/{id}"), &answer))
 }
@@ -613,7 +609,7 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.answer(id)))
+    Ok(json(&home.sandbox(&id)?.answer()))
 }
 
 async fn sandbox_remove(

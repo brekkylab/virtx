@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
 
+use super::upper::Upper;
 use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
@@ -27,6 +28,9 @@ pub const DEFAULT_MEMORY_MIB: u32 = 4096;
 pub const DEFAULT_DISK_GIB: u32 = 2;
 /// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
 const MIN_MEMORY_MIB: u32 = 64;
+
+/// The directory under a server's root its sandboxes keep what they make on the host in.
+const SANDBOX: &str = "sandbox";
 
 /// The directory beside the server's program its own programs for `/abin` are in, and where each
 /// one's `SKILL.md` is in that.
@@ -112,6 +116,8 @@ enum State {
 /// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
 /// it is closed; what ran in it is not.
 pub struct Sandbox {
+    /// Its upper disk's name, and so its own.
+    id: String,
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
@@ -274,9 +280,16 @@ impl Sandbox {
         // Merging the layers' metadata, and formatting an upper disk, are blocking work.
         let store = images.clone();
         let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
-        let dir = Upper::dir(root);
+        let dir = root.join(SANDBOX);
         let gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
-        let upper = tokio::task::spawn_blocking(move || Upper::create(&dir, gib)).await??;
+        let upper = tokio::task::spawn_blocking(move || {
+            loop {
+                if let Some(upper) = Upper::create(&dir, &pick(|_| false), gib)? {
+                    break Ok::<_, Error>(upper);
+                }
+            }
+        })
+        .await??;
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
@@ -305,6 +318,7 @@ impl Sandbox {
             ports: args.ports.clone(),
         };
         let sandbox = Arc::new(Sandbox {
+            id: upper.id.clone(),
             image: digest,
             _held: held_image,
             abins: args.abins.clone(),
@@ -328,11 +342,15 @@ impl Sandbox {
         Ok(sandbox)
     }
 
-    /// The sandbox as the server answers it under `id`, with no ports: only its making
-    /// answers those.
-    pub fn answer(&self, id: String) -> virtx_core::Sandbox {
+    /// What it is named by, which no other sandbox over the same root has while it is there.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The sandbox as the server answers it, with no ports: only its making answers those.
+    pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
-            id,
+            id: self.id.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
@@ -636,72 +654,6 @@ impl Drop for Activity {
     }
 }
 
-/// The upper disk a sandbox makes for itself, deleted when the sandbox is closed, or by the next
-/// [`Sandbox::sweep`] once the process that made it has ended.
-///
-/// Each is `<name>.ext4` in `<root>/sandbox/`, beside `<name>.owner`, which the process that
-/// made it holds a lock on for as long as it runs.
-struct Upper {
-    path: PathBuf,
-    owner: PathBuf,
-    _held: File,
-}
-
-impl Upper {
-    fn dir(root: &Path) -> PathBuf {
-        root.join("sandbox")
-    }
-
-    fn create(dir: &Path, gib: u32) -> Result<Upper, Error> {
-        let io = |context: String| move |source| Error::Io { context, source };
-        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
-        let (name, held) = loop {
-            let name = pick(|name| dir.join(format!("{name}.owner")).exists());
-            if let Some(held) = Upper::claim(dir, &name)? {
-                break (name, held);
-            }
-        };
-        // Owned from here, so the owner goes with a disk that failed to be made.
-        let upper = Upper {
-            path: dir.join(format!("{name}.ext4")),
-            owner: dir.join(format!("{name}.owner")),
-            _held: held,
-        };
-        crate::machine::create_upper(&upper.path, gib)?;
-        Ok(upper)
-    }
-
-    /// Hold `<name>.owner` under `dir`, or `None` for one another holds: a sandbox's, or a
-    /// sweep's for the moment it takes to find it nobody's and remove it.
-    fn claim(dir: &Path, name: &str) -> Result<Option<File>, Error> {
-        let io = |context: String| move |source| Error::Io { context, source };
-        let owner = dir.join(format!("{name}.owner"));
-        let held = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&owner)
-            .map_err(io(format!("creating {}", owner.display())))?;
-        match held.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(fs::TryLockError::Error(e)) => {
-                return Err(io(format!("locking {}", owner.display()))(e));
-            }
-        }
-        // A sweep that had it first has removed it: this is a lock on nothing.
-        Ok(owner.exists().then_some(held))
-    }
-}
-
-impl Drop for Upper {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.owner);
-    }
-}
-
 /// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
 /// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
 ///
@@ -716,7 +668,7 @@ struct Abin {
 
 impl Abin {
     fn dir(root: &Path) -> PathBuf {
-        Upper::dir(root).join(ABIN_HOST)
+        root.join(SANDBOX).join(ABIN_HOST)
     }
 
     /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
@@ -833,27 +785,7 @@ impl Sandbox {
     /// Delete what sandboxes made under `root` by processes that have since ended left: a
     /// server that was killed closed none of its own.
     pub fn sweep(root: &Path) {
-        let dir = Upper::dir(root);
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let owner = entry.path();
-            if owner.extension().is_none_or(|e| e != "owner") {
-                continue;
-            }
-            let Ok(file) = File::open(&owner) else {
-                continue;
-            };
-            if file.try_lock().is_err() {
-                continue;
-            }
-            let Some(name) = owner.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            let _ = fs::remove_file(dir.join(format!("{name}.ext4")));
-            let _ = fs::remove_file(&owner);
-        }
+        Upper::sweep(&root.join(SANDBOX));
         Abin::sweep(&Abin::dir(root));
     }
 }
@@ -910,28 +842,5 @@ mod tests {
         Abin::sweep(&dir);
         assert!(!made.exists());
         assert!(programs.join("index").is_file(), "the server's own stay");
-    }
-
-    #[test]
-    fn a_name_another_holds_is_not_claimed() {
-        let dir = std::env::temp_dir().join(format!("virtx-uvm-upper-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let owner = dir.join("0badf00d.owner");
-
-        // A sweep's, for the moment it takes to find it nobody's.
-        let sweep = File::create(&owner).unwrap();
-        sweep.lock().unwrap();
-        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
-
-        drop(sweep);
-        fs::remove_file(&owner).unwrap();
-        let held = Upper::claim(&dir, "0badf00d").unwrap();
-        assert!(held.is_some());
-        assert!(owner.is_file());
-        assert!(Upper::claim(&dir, "0badf00d").unwrap().is_none());
-
-        drop(held);
-        let _ = fs::remove_dir_all(&dir);
     }
 }

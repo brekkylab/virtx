@@ -248,7 +248,7 @@ async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
     let cmd = ["sleep", "30"].map(String::from).to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
     tokio::join!(close(Arc::clone(&sandbox)), close(Arc::clone(&sandbox)));
-    assert!(!sandbox.answer(String::new()).running);
+    assert!(!sandbox.answer().running);
     assert!(!job.get().running);
     assert!(sandbox.jobs().is_empty());
     let after = run(&sandbox, &["true"], None).await;

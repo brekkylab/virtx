@@ -208,7 +208,8 @@ let client = Client::connect(
 
 `virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
 
-A client's requests are in a project of its user's own, which the server makes the first time; a client names another with `project`.
+A client's requests are in a project of its user's own, `default`, which the server makes the first time; a client names another with `project`, a project of the user's by its name or any by its id.
+The `virtx` command names one with `--project`, beside `--host` and `$VIRTX_TOKEN`; see [CLI](/docs/reference/cli/#which-server).
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Next

@@ -23,7 +23,6 @@ pub enum Role {
 
 /// A project, as the server answers it, with the role of whoever asked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectListOutputItem {
     /// What names it on any server, given it once, as a UUID.
     pub id: String,
@@ -46,7 +45,6 @@ pub struct ProjectCreateArgs {
 /// A member of a project, as the server answers it: the user as the server names them, such as
 /// an email address, and their role.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectMemberListOutputItem {
     pub user: String,
     pub role: Role,
@@ -61,7 +59,21 @@ pub struct ProjectMemberSetArgs {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn a_project_and_a_member_are_read_past_members_they_do_not_know() {
+        let value = json!({"id": "i", "name": "demo", "role": "owner", "cell": "c1"});
+        let project: ProjectListOutputItem = serde_json::from_value(value).unwrap();
+        assert_eq!((project.name.as_str(), project.owner), ("demo", None));
+        let value = json!({"user": "alice", "role": "member", "cell": "c1"});
+        let member: ProjectMemberListOutputItem = serde_json::from_value(value).unwrap();
+        assert_eq!(member.role, Role::Member);
+        let value = json!({"name": "demo", "cell": "c1"});
+        assert!(serde_json::from_value::<ProjectCreateArgs>(value).is_err());
+    }
 
     #[test]
     fn a_role_is_spelled_in_lower_case_and_an_owner_outranks_a_member() {

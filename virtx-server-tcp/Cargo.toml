@@ -17,6 +17,7 @@ anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
 http = "1"
+http-body-util = "0.1"
 # An OpenID Connect provider's tokens, checked against its keys.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 # The provider's discovery document and keys. Its TLS is the one `virtx-uvm` picks for the host.

@@ -1285,4 +1285,355 @@ mod tests {
         assert!(root.join("volume").is_dir());
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// Two conditional writes to one file at once, from two apps over one home as two server
+    /// processes are, each with its own requests in memory: the second, sent while the first is
+    /// still sending its body, is not held up by it and lands, and the first, checked once its
+    /// body has arrived, is refused `412` over a file no longer the one its condition named. For
+    /// `If-None-Match: *` to a new file, and for one `If-Match` to a file there.
+    #[tokio::test]
+    async fn of_two_conditional_writes_to_one_file_from_two_servers_one_lands() {
+        use axum::body::{Body, Bytes};
+        use futures_util::stream;
+        use http::header;
+        use tokio::sync::oneshot;
+
+        let server = Server::spawn("conditional-writes").await;
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        let etag = client
+            .stat_file(&volume, "there")
+            .await
+            .unwrap()
+            .etag
+            .unwrap();
+        let (one, _) = app(&server.root).await.unwrap();
+        let (two, _) = app(&server.root).await.unwrap();
+
+        for (path, condition, value) in [
+            ("new", header::IF_NONE_MATCH, "*".to_owned()),
+            ("there", header::IF_MATCH, etag),
+        ] {
+            let put = |app: axum::Router, body: Body| {
+                let request = http::Request::put(format!("/volumes/data/files/{path}"))
+                    .header(condition.clone(), &value)
+                    .body(body)
+                    .unwrap();
+                async move {
+                    let Ok(response) = app.oneshot(request).await;
+                    response.status().as_u16()
+                }
+            };
+            // The first's body: a part, then the rest once let go. Once its first part is
+            // read the first is still sending, and the second goes meanwhile.
+            let (sending, read) = oneshot::channel();
+            let (go, let_go) = oneshot::channel::<()>();
+            let slow = stream::unfold((Some(sending), Some(let_go)), |state| async move {
+                match state {
+                    (Some(sending), let_go) => {
+                        let _ = sending.send(());
+                        Some((
+                            Ok::<_, std::io::Error>(Bytes::from("first, ")),
+                            (None, let_go),
+                        ))
+                    }
+                    (None, Some(let_go)) => {
+                        let _ = let_go.await;
+                        Some((Ok(Bytes::from("whole")), (None, None)))
+                    }
+                    (None, None) => None,
+                }
+            });
+            let first = tokio::spawn(put(one.clone(), Body::from_stream(slow)));
+            read.await.unwrap();
+            let second = put(two.clone(), Body::from("second")).await;
+            assert!(
+                matches!(second, 201 | 204),
+                "{path}: the second answered {second}"
+            );
+            go.send(()).unwrap();
+            assert_eq!(first.await.unwrap(), 412, "{path}");
+            assert_eq!(client.read_text(&volume, path).await.unwrap(), "second");
+        }
+    }
+
+    /// A conditional write to a volume lands only once it holds the volume's `writing` file,
+    /// which another server over the home holds as its own lands: held from here, the write's
+    /// body is all in and it has not landed, nor been answered; let go, it lands.
+    #[tokio::test]
+    async fn a_conditional_write_lands_only_once_it_holds_its_volume() {
+        let server = Server::spawn("conditional-held").await;
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        let dir = server.home.join("volume").join("data");
+        assert!(
+            dir.join("files").is_dir(),
+            "{} is not the volume",
+            dir.display()
+        );
+        let writing = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("writing"))
+            .unwrap();
+        writing.lock().unwrap();
+
+        let (app, _) = app(&server.root).await.unwrap();
+        let request = http::Request::put("/volumes/data/files/new")
+            .header(http::header::IF_NONE_MATCH, "*")
+            .body(axum::body::Body::from("held"))
+            .unwrap();
+        let put = tokio::spawn(async move {
+            let Ok(response) = app.oneshot(request).await;
+            response.status().as_u16()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !put.is_finished(),
+            "it was answered while the volume was held"
+        );
+        assert!(
+            !dir.join("files").join("new").exists(),
+            "it landed while the volume was held"
+        );
+        assert_eq!(
+            saving(&dir.join("files")).len(),
+            1,
+            "its body is not beside the path while the volume is held"
+        );
+
+        writing.unlock().unwrap();
+        assert_eq!(put.await.unwrap(), 201);
+        assert_eq!(client.read_text(&volume, "new").await.unwrap(), "held");
+        assert_eq!(saving(&dir.join("files")), Vec::<String>::new());
+    }
+
+    /// A conditional write whose condition does not hold is refused `412`, and leaves nothing
+    /// behind: over a file whose etag has gone stale, over a directory, and under a directory
+    /// that is not there; with `If-Match` over the file, but a WebDAV `If` or an
+    /// `If-Unmodified-Since` that does not hold; and with `If-None-Match` naming the file by its
+    /// tag marked weak, which names it all the same. One to a path with a `..` is refused `400`,
+    /// as any request is.
+    #[tokio::test]
+    async fn a_conditional_write_whose_condition_fails_is_refused_and_leaves_nothing() {
+        use http::header::{IF_MATCH, IF_NONE_MATCH, IF_UNMODIFIED_SINCE};
+
+        let server = Server::spawn("conditional-refused").await;
+        let client = &server.client;
+        client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        client
+            .write_file(&volume, "there", "there", None)
+            .await
+            .unwrap();
+        let etag = client
+            .stat_file(&volume, "there")
+            .await
+            .unwrap()
+            .etag
+            .unwrap();
+        client.create_dir(&volume, "dir").await.unwrap();
+        let (app, _) = app(&server.root).await.unwrap();
+
+        let long_ago = "Mon, 01 Jan 2001 00:00:00 GMT";
+        let weak = format!("W/{etag}");
+        let if_ = http::HeaderName::from_static("if");
+        for (path, conditions) in [
+            ("there", vec![(IF_MATCH, "\"stale\"")]),
+            ("dir", vec![(IF_NONE_MATCH, "*")]),
+            ("dir", vec![(IF_MATCH, "\"stale\"")]),
+            ("none/file", vec![(IF_MATCH, "*")]),
+            (
+                "there",
+                vec![(IF_MATCH, etag.as_str()), (if_, "([\"stale\"])")],
+            ),
+            (
+                "there",
+                vec![
+                    (IF_NONE_MATCH, "\"other\""),
+                    (IF_UNMODIFIED_SINCE, long_ago),
+                ],
+            ),
+            ("there", vec![(IF_NONE_MATCH, weak.as_str())]),
+        ] {
+            let mut request = http::Request::put(format!("/volumes/data/files/{path}"));
+            for (condition, value) in &conditions {
+                request = request.header(condition, *value);
+            }
+            let request = request.body(axum::body::Body::from("written")).unwrap();
+            let Ok(response) = app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 412, "{path} with {conditions:?}");
+        }
+        // A path with a `..` in it is refused before any of it is read, as any request's is.
+        let request = http::Request::put("/volumes/data/files/dir/../there")
+            .header(IF_MATCH, "*")
+            .body(axum::body::Body::from("written"))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(request).await;
+        assert_eq!(response.status(), 400);
+        assert_eq!(client.read_text(&volume, "there").await.unwrap(), "there");
+        let files = server.home.join("volume").join("data").join("files");
+        assert_eq!(saving(&files), Vec::<String>::new());
+        assert_eq!(saving(&files.join("dir")), Vec::<String>::new());
+    }
+
+    /// The names in `dir` of writes on their way, beside the paths they are going to.
+    fn saving(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".saving"))
+            .collect()
+    }
+
+    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
+    /// and a path whose segment does not read as one is `400` `invalid`. A file's body has no
+    /// such limit.
+    #[tokio::test]
+    async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
+        let server = Server::spawn("envelope").await;
+        let (app, _) = app(&server.root).await.unwrap();
+        let refusal = |response: http::Response<axum::body::Body>| async move {
+            let status = response.status().as_u16();
+            let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (status, kind, body["error"].clone())
+        };
+
+        let over = http::Request::post("/sandboxes/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(vec![b' '; 3 << 20]))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(over).await;
+        let (status, kind, error) = refusal(response).await;
+        assert_eq!((status, kind.to_str().unwrap()), (413, "application/json"));
+        assert_eq!(error["code"], "too_large", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("2 MiB"),
+            "{error}"
+        );
+
+        let unreadable = http::Request::get("/sandboxes/%FF")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(unreadable).await;
+        let (status, kind, error) = refusal(response).await;
+        assert_eq!((status, kind.to_str().unwrap()), (400, "application/json"));
+        assert_eq!(error["code"], "invalid", "{error}");
+
+        // A file's body is streamed, and has no limit.
+        server.client.create_volume(Some("data")).await.unwrap();
+        let file = http::Request::put("/volumes/data/files/big")
+            .body(axum::body::Body::from(vec![b'x'; 3 << 20]))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(file).await;
+        assert_eq!(response.status(), 201);
+    }
+
+    /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
+    /// `too_large`, one at the limit is not, and one that breaks off is `400` `invalid`, each in
+    /// the envelope. The body is refused before the handler looks anything up, so no sandbox,
+    /// volume or job has to be there.
+    #[tokio::test]
+    async fn every_route_that_takes_a_body_holds_it_to_the_limit() {
+        use axum::body::{Body, Bytes};
+
+        let server = Server::spawn("limit").await;
+        let (app, _) = app(&server.root).await.unwrap();
+        let answer = |method: &'static str, path: &'static str, body: Body| {
+            let app = app.clone();
+            async move {
+                let request = http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap();
+                let Ok(response) = app.oneshot(request).await;
+                let status = response.status().as_u16();
+                let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                (status, kind, body["error"]["code"].clone())
+            }
+        };
+        let limit = 2 << 20;
+        for (method, path) in [
+            ("POST", "/images/jobs/pull/"),
+            ("POST", "/images/jobs/push/"),
+            ("POST", "/images/jobs/build/"),
+            ("POST", "/snapshots/"),
+            ("POST", "/volumes/"),
+            ("PUT", "/volumes/nobody/mounts/m"),
+            ("POST", "/sandboxes/"),
+            ("POST", "/sandboxes/nobody/jobs/exec/"),
+            ("POST", "/sandboxes/nobody/jobs/j/signal"),
+        ] {
+            let over = Body::from(vec![b' '; limit + 1]);
+            let (status, kind, code) = answer(method, path, over).await;
+            assert_eq!(
+                (status, code.as_str()),
+                (413, Some("too_large")),
+                "{method} {path}"
+            );
+            assert_eq!(kind, "application/json", "{method} {path}");
+            let at = Body::from(vec![b' '; limit]);
+            let (status, kind, code) = answer(method, path, at).await;
+            assert_eq!(
+                (status, code.as_str()),
+                (400, Some("invalid")),
+                "{method} {path}"
+            );
+            assert_eq!(kind, "application/json", "{method} {path}");
+        }
+
+        let broken = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"{")),
+            Err(std::io::Error::other("the client went")),
+        ]);
+        let (status, _, code) = answer("POST", "/sandboxes/", Body::from_stream(broken)).await;
+        assert_eq!((status, code.as_str()), (400, Some("invalid")));
+    }
+
+    /// A body over the limit is read to its end before it is refused, though only what fits the
+    /// limit is kept: answered with it unread, a client on a connection still sending it would
+    /// see the connection reset, not the `413`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_read_to_its_end_before_it_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use futures_util::StreamExt as _;
+
+        let server = Server::spawn("read-to-end").await;
+        let (app, _) = app(&server.root).await.unwrap();
+        let read = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&read);
+        let chunks =
+            (0..48).map(|_| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b' '; 64 << 10])));
+        let stream = futures_util::stream::iter(chunks).inspect(move |chunk| {
+            if let Ok(chunk) = chunk {
+                counted.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        });
+        let request = http::Request::post("/sandboxes/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(request).await;
+        assert_eq!(response.status().as_u16(), 413);
+        assert_eq!(read.load(Ordering::SeqCst), 48 * (64 << 10));
+    }
 }

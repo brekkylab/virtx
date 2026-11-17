@@ -79,7 +79,7 @@ pub(crate) async fn run(domain: &str, command: CloudCommand) -> anyhow::Result<(
         .join(".config/virtx");
     let cloud = Cloud::at(domain, config)?;
     match command {
-        CloudCommand::Login => cloud.login().await,
+        CloudCommand::Login => cloud.login(open).await,
         CloudCommand::Token { json, project } => {
             let tokens = match project.as_deref().filter(|p| !p.is_empty()) {
                 Some(project) => cloud.project_token(project).await?,
@@ -167,6 +167,19 @@ impl Domain {
         }
         Ok(Domain(domain.to_owned()))
     }
+
+    /// Whether `page` is an `https` page of this domain's: at its host, or at a name under it.
+    fn serves(&self, page: &str) -> bool {
+        let host = self.0.split(':').next().unwrap_or_default();
+        let host = host.to_ascii_lowercase();
+        reqwest::Url::parse(page).is_ok_and(|page| {
+            page.scheme() == "https"
+                && page.host_str().is_some_and(|at| {
+                    at.strip_suffix(&host)
+                        .is_some_and(|under| under.is_empty() || under.ends_with('.'))
+                })
+        })
+    }
 }
 
 struct Cloud {
@@ -231,16 +244,28 @@ impl Cloud {
             .await?)
     }
 
-    async fn login(&self) -> anyhow::Result<()> {
+    /// Sign in. The page to approve the code on is shown, and given to `open` where it is the
+    /// domain's ([`Domain::serves`]): virtx cloud's answer names it, and the system opens a
+    /// file or a program as readily as a page.
+    async fn login(&self, open: impl FnOnce(&str)) -> anyhow::Result<()> {
         let codes: Codes = json_of(checked(self.post("/auth/device", &json!({})).await?)?).await?;
+        let page = &codes.verification_uri_complete;
         eprintln!(
             "To sign in, open this page and approve the code {}:",
             codes.user_code
         );
         eprintln!();
-        eprintln!("    {}", codes.verification_uri_complete);
+        eprintln!("    {page}");
         eprintln!();
-        open(&codes.verification_uri_complete);
+        if self.domain.serves(page) {
+            open(page);
+        } else {
+            eprintln!(
+                "virtx did not open it: it is not an https page of {}.",
+                self.domain.0
+            );
+            eprintln!();
+        }
 
         let mut interval = Duration::from_secs(codes.interval.max(1));
         let deadline = Instant::now() + Duration::from_secs(codes.expires_in);
@@ -596,6 +621,78 @@ mod tests {
         assert_eq!(cloud.api, "https://api.dev.virtx.sh");
         assert_eq!(cloud.config("token"), dir.join("dev.virtx.sh.token"));
         assert!(Cloud::at("qa.invalid/../../virtx/virtx.sh", dir.clone()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_is_a_domain_s_over_https_at_its_host_or_at_a_name_under_it() {
+        for (domain, page, serves) in [
+            (
+                "virtx.sh",
+                "https://app.virtx.sh/device?code=ABCD-EFGH",
+                true,
+            ),
+            ("virtx.sh", "https://virtx.sh/device", true),
+            ("localhost:8443", "https://app.localhost:5173/device", true),
+            ("Virtx.SH", "https://app.virtx.sh/device", true),
+            ("virtx.sh", "http://app.virtx.sh/device", false),
+            ("virtx.sh", "https://notvirtx.sh/device", false),
+            (
+                "virtx.sh",
+                "https://app.virtx.sh.elsewhere.example/device",
+                false,
+            ),
+            (
+                "virtx.sh",
+                "https://virtx.sh@elsewhere.example/device",
+                false,
+            ),
+            ("dev.virtx.sh", "https://app.virtx.sh/device", false),
+            ("virtx.sh", "file:///etc/hosts", false),
+            ("virtx.sh", "/etc/hosts", false),
+            ("virtx.sh", "", false),
+        ] {
+            let domain = Domain::named(domain).unwrap();
+            assert_eq!(domain.serves(page), serves, "{domain:?} {page:?}");
+        }
+    }
+
+    /// `virtx login`, against virtx cloud answering the page to approve the code on, opens the
+    /// one that is its domain's and not the other. The code answered has run out, so signing
+    /// in ends there.
+    #[tokio::test]
+    async fn signing_in_opens_the_page_to_approve_on_only_where_it_is_the_domain_s() {
+        let dir = scratch("login");
+        for (page, opens) in [
+            ("https://app.qa.invalid/device?code=ABCD-EFGH", true),
+            ("file:///etc/hosts", false),
+        ] {
+            let api = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = format!("http://{}", api.local_addr().unwrap());
+            let body = json!({
+                "device_code": "made-up-device-code",
+                "user_code": "ABCD-EFGH",
+                "verification_uri_complete": page,
+                "expires_in": 0,
+                "interval": 1,
+            })
+            .to_string();
+            let asked = answer_once(
+                api,
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+            let mut opened = None;
+            let signed_in = cloud(&at, dir.clone())
+                .login(|page| opened = Some(page.to_owned()))
+                .await;
+            assert!(signed_in.is_err(), "the code had run out");
+            assert!(asked.join().unwrap().starts_with("POST /auth/device "));
+            assert_eq!(opened.as_deref(), opens.then_some(page), "{page}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -9,44 +9,70 @@ use tokio::process::Command;
 
 use crate::{Auth, Client, ensure_virtx};
 
-/// The bearer token a server at `--host` wants, taken from the environment alone so it is never
-/// on a command line.
+/// The bearer token the server reached over HTTP wants, taken from the environment alone so it
+/// is never on a command line.
 const TOKEN: &str = "VIRTX_TOKEN";
+
+/// The server's base URL when neither `--host` nor `--server` is given.
+const HOST: &str = "VIRTX_HOST";
+
+/// The project when `--project` is not given.
+const PROJECT: &str = "VIRTX_PROJECT";
+
+/// The header a request to the server reached over HTTP names its project in.
+const PROJECT_HEADER: &str = "virtx-project";
 
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct ServerArgs {
     /// The server's base URL, reached over HTTP with `$VIRTX_TOKEN` as its bearer token if set;
-    /// a server started here if absent.
-    #[arg(
-        short = 'H',
-        long,
-        env = "VIRTX_HOST",
-        global = true,
-        value_name = "URL"
-    )]
+    /// if absent, `$VIRTX_HOST`, unless `--server` names a server to start.
+    #[arg(short = 'H', long, global = true, value_name = "URL")]
     pub(crate) host: Option<String>,
 
-    /// The server to start; if absent, `virtx-stdio` of this version, fetched into the cache the
-    /// first time.
-    #[arg(
-        long,
-        env = "VIRTX_STDIO",
-        global = true,
-        conflicts_with = "host",
-        value_name = "PROGRAM"
-    )]
+    /// The project the requests belong to, by its name in the server's config, sent to a host as
+    /// the `virtx-project` header; if absent, `$VIRTX_PROJECT`. A server started here takes none.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub(crate) project: Option<String>,
+
+    /// The server to start; if absent, the one `$VIRTX_STDIO` names, or else `virtx-stdio` of
+    /// this version, fetched into the cache the first time. A host, from `--host` or
+    /// `$VIRTX_HOST`, is reached in place of `$VIRTX_STDIO`'s.
+    #[arg(long, global = true, conflicts_with = "host", value_name = "PROGRAM")]
     pub(crate) server: Option<PathBuf>,
+}
+
+/// The base URL of the server to reach over HTTP, if `args` and the environment name one:
+/// `--host`, or `$VIRTX_HOST` when `--server` names no server to start.
+pub(crate) fn host(args: &ServerArgs) -> Option<String> {
+    if args.host.is_some() || args.server.is_some() {
+        return args.host.clone();
+    }
+    std::env::var(HOST).ok().filter(|url| !url.is_empty())
+}
+
+/// The project the requests to a host belong to, if `args` and the environment name one:
+/// `--project`, or else `$VIRTX_PROJECT`.
+pub(crate) fn project(args: &ServerArgs) -> Option<String> {
+    args.project
+        .clone()
+        .or_else(|| std::env::var(PROJECT).ok().filter(|name| !name.is_empty()))
 }
 
 /// A client of the server `args` names.
 pub(crate) async fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
-    if let Some(url) = &args.host {
+    if let Some(url) = host(args) {
         let auth = match std::env::var(TOKEN) {
             Ok(token) if !token.is_empty() => Auth::Bearer { token },
             _ => Auth::None,
         };
-        return Client::connect(url, auth, http::HeaderMap::new())
-            .with_context(|| format!("reaching {url}"));
+        let mut headers = http::HeaderMap::new();
+        if let Some(project) = project(args) {
+            let value = http::HeaderValue::from_str(&project).with_context(|| {
+                format!("the project {project:?} cannot be sent in the {PROJECT_HEADER} header")
+            })?;
+            headers.insert(PROJECT_HEADER, value);
+        }
+        return Client::connect(&url, auth, headers).with_context(|| format!("reaching {url}"));
     }
     let program = match &args.server {
         Some(program) => program.clone(),
@@ -64,12 +90,52 @@ pub(crate) async fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
 
 #[cfg(test)]
 mod tests {
+    use axum::{Json, Router, routing::get};
+    use tokio::net::TcpListener;
+
     use super::*;
+    use crate::transport::http;
+
+    #[tokio::test]
+    async fn a_host_is_sent_the_project_in_the_virtx_project_header() {
+        // `/project` answers the project its request names, and `400` for none, as
+        // `virtx-server-tcp` refuses one.
+        let named = async |headers: ::http::HeaderMap| {
+            let project = headers.get(PROJECT_HEADER).and_then(|v| v.to_str().ok());
+            project
+                .map(|name| Json(name.to_owned()))
+                .ok_or(::http::StatusCode::BAD_REQUEST)
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let router = Router::new().route("/project", get(named));
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let args = ServerArgs {
+            host: Some(url),
+            project: Some("demo".into()),
+            server: None,
+        };
+        let client = connect(&args).await.unwrap();
+        let sent = http::get::<String>(&client.inner, "/project").await;
+        assert_eq!(sent.unwrap(), "demo");
+
+        let args = ServerArgs {
+            project: Some("a\nb".into()),
+            ..args
+        };
+        let error = connect(&args).await.err().unwrap();
+        assert!(
+            format!("{error:#}").contains(r#"the project "a\nb" cannot be sent"#),
+            "{error:#}"
+        );
+    }
 
     #[tokio::test]
     async fn a_server_named_but_missing_says_so() {
         let args = ServerArgs {
             host: None,
+            project: None,
             server: Some("/nonexistent/virtx-stdio".into()),
         };
         let error = connect(&args).await.err().unwrap();

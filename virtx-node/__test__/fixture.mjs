@@ -21,8 +21,9 @@ const library =
 execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })
 virtx.load(process.env[virtx.LIBRARY_ENV] || path.join(target, 'debug', library))
 
-// What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`, and
-// `url`, `token` and `project`, the `virtx-server-tcp` it serves.
+// What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`;
+// `url`, `token` and `project`, the `virtx-server-tcp` it serves; and `users`, a token of each
+// of the members of its other projects (alice, bob, carol) by user, as JSON.
 export function fixture() {
   const named = {}
   for (const [key, name] of [
@@ -30,6 +31,7 @@ export function fixture() {
     ['url', 'VIRTX_TEST_URL'],
     ['token', 'VIRTX_TEST_TOKEN'],
     ['project', 'VIRTX_TEST_PROJECT'],
+    ['users', 'VIRTX_TEST_USERS'],
   ]) {
     assert.ok(
       process.env[name],

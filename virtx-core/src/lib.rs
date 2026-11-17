@@ -23,6 +23,7 @@ mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
 mod image;
+mod project;
 mod sandbox;
 mod transport;
 mod volume;
@@ -36,6 +37,7 @@ pub use ensure::{cache_root, ensure_virtx};
 pub use error::Error;
 pub use error::Source;
 pub use image::*;
+pub use project::*;
 pub use sandbox::*;
 pub use transport::*;
 pub use volume::*;

@@ -1158,8 +1158,9 @@ const FIXTURE_CLIENT: &str = "virtx-test";
 /// The key the fixture's provider signs with, made up and no one's.
 const FIXTURE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2VGrzT1wOXvQVtaT\nL+shE0n9BR9/rn3Qn7RrXiJOcHKhRANCAAQCHMHdyNbFbHDPyRIdE7zhyTcL7XuZ\nlymVLSds5EVclDhHznH6nXaR6DUzWH+gad5rKfYNLAnnobLUNbrydOJS\n-----END PRIVATE KEY-----";
 const FIXTURE_KEY_ID: &str = "fixture";
-/// The projects of the fixture's server, and the members of each: [`FIXTURE_PROJECT`] for
-/// every suite, and two that share nothing for the tests of who reaches what.
+/// The projects of the fixture's server, each made by its first member, who adds the others:
+/// [`FIXTURE_PROJECT`] for every suite, and two that share nothing for the tests of who reaches
+/// what.
 const FIXTURE_PROJECTS: &[(&str, &[&str])] = &[
     (FIXTURE_PROJECT, &[FIXTURE_USER]),
     ("demo", &["alice", "carol"]),
@@ -1635,20 +1636,9 @@ impl Fixture {
         let home = scratch.join("home");
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         let provider = FixtureProvider::serve()?;
-        let projects: serde_json::Map<_, _> = FIXTURE_PROJECTS
-            .iter()
-            .map(|(name, members)| {
-                let members: Vec<_> = members.iter().map(|user| fixture_email(user)).collect();
-                (
-                    (*name).to_owned(),
-                    serde_json::json!({ "members": members }),
-                )
-            })
-            .collect();
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
             "oidc": { "issuer": provider.issuer, "client_id": FIXTURE_CLIENT },
-            "projects": projects,
         });
         let config_path = scratch.join("config.json");
         fs::write(&config_path, config.to_string())
@@ -1685,12 +1675,58 @@ impl Fixture {
             .with_context(|| format!("virtx-server-tcp said {line:?}, not where it serves"))?
             .to_owned();
         std::thread::spawn(move || lines.for_each(drop));
+        for (name, members) in FIXTURE_PROJECTS {
+            let (owner, others) = members.split_first().expect("a project has a member");
+            let token = provider.token(owner, DAY)?;
+            let project = serde_json::json!({ "name": name });
+            fixture.send(&token, "POST", "/projects/", &project)?;
+            for member in others {
+                let path = format!("/projects/{name}/members/{}", fixture_email(member));
+                let role = serde_json::json!({ "role": "owner" });
+                fixture.send(&token, "PUT", &path, &role)?;
+            }
+        }
         eprintln!(
             "xtask: the fixture is served at {}, over {}",
             fixture.url,
             home.display()
         );
         Ok(fixture)
+    }
+
+    /// `method` sent to `path` on its `virtx-server-tcp` with `body`, as the user `token` is:
+    /// refused unless the server answers `2xx`. Plain HTTP/1.1, as its provider is served.
+    fn send(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        use std::io::{Read as _, Write as _};
+
+        let address = self.url.trim_start_matches("http://").trim_end_matches('/');
+        let mut stream = std::net::TcpStream::connect(address)
+            .with_context(|| format!("reaching virtx-server-tcp at {address}"))?;
+        let body = body.to_string();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n\
+             {body}",
+            body.len()
+        )?;
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer)?;
+        let status = answer.lines().next().unwrap_or_default();
+        ensure!(
+            status
+                .split(' ')
+                .nth(1)
+                .is_some_and(|code| code.starts_with('2')),
+            "{method} {path}: virtx-server-tcp answered {status:?}"
+        );
+        Ok(())
     }
 
     /// What it names to a command in its environment: the home both servers keep, where

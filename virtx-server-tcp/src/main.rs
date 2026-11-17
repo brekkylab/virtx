@@ -32,12 +32,9 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn run(config: Config) -> anyhow::Result<()> {
-    let (projects, access, router) = serve::configured(&config)?;
+    let (access, router) = serve::configured(&config).await?;
     serve::keep_pruned(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
-    if projects.open() {
-        eprintln!("without authentication: every request reaches every project");
-    }
     let served = serve::run(listener, router).await;
     tokio::task::spawn_blocking(move || {
         for home in access.homes() {

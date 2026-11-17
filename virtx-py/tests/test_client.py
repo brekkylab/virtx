@@ -1,7 +1,9 @@
+import json
+
 import pytest
 import virtx
 from conftest import fixture, unique
-from virtx import Client, VirtxError
+from virtx import BearerAuth, Client, Project, ProjectMemberListOutputItem, Role, VirtxError
 
 
 def test_a_second_library_is_refused() -> None:
@@ -41,11 +43,57 @@ async def test_a_client_over_http_sends_its_token_and_project(tcp_client: Client
     volume = await tcp_client.create_volume(unique("over-http"))
     assert volume in await tcp_client.list_volume()
     await volume.remove()
-    project = {"virtx-project": fixture("VIRTX_TEST_PROJECT")}
+    project = fixture("VIRTX_TEST_PROJECT")
     with Client.connect(fixture("VIRTX_TEST_URL"), None, project) as anonymous:
         with pytest.raises(VirtxError) as refused:
             await anonymous.list_volume()
         assert refused.value.status == 401
+
+
+async def test_a_project_is_made_its_members_set_and_removed() -> None:
+    users = json.loads(fixture("VIRTX_TEST_USERS"))
+    name = unique("project")
+    with Client.connect(fixture("VIRTX_TEST_URL"), BearerAuth(users["alice"])) as alice:
+        made = await alice.create_project(name)
+        assert made == Project(alice, made.id, name, "alice@example.com", Role.OWNER)
+        assert made in await alice.list_project()
+        got = await alice.get_project(name)
+        assert (got, got.client) == (made, alice)
+        assert await alice.get_project(made.id) == made
+
+        owner = ProjectMemberListOutputItem("alice@example.com", Role.OWNER)
+        added = await made.set_member("bob@example.com", Role.MEMBER)
+        assert added == ProjectMemberListOutputItem("bob@example.com", Role.MEMBER)
+        assert await made.members() == [owner, added]
+        await made.remove_member("bob@example.com")
+        assert await made.members() == [owner]
+
+        with pytest.raises(VirtxError) as refused:
+            await alice.create_project(name)
+        assert (refused.value.source, refused.value.status) == ("server", 409)
+        await made.remove()
+        with pytest.raises(VirtxError) as refused:
+            await alice.get_project(name)
+        assert refused.value.status == 403
+
+
+async def test_set_project_changes_what_a_request_reaches(client: Client) -> None:
+    name = unique("elsewhere")
+    await client.create_project(name)
+    in_default = await client.create_volume(unique("in-default"))
+    client.set_project(name)
+    in_project = await client.create_volume(unique("in-project"))
+    assert await client.list_volume() == [in_project]
+    client.set_project(None)
+    assert in_default in await client.list_volume()
+    assert in_project not in await client.list_volume()
+
+
+def test_a_project_no_header_carries_is_refused(client: Client) -> None:
+    with pytest.raises(VirtxError):
+        client.set_project("bad\nname")
+    with pytest.raises(VirtxError):
+        Client.connect(fixture("VIRTX_TEST_URL"), project="bad\nname")
 
 
 def test_virtx_error_keeps_body() -> None:

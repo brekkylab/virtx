@@ -13,7 +13,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use virtx::{Auth, Client, Files, SandboxCreateArgs, SandboxVolume};
+use virtx::{Auth, Client, Files, Role, SandboxCreateArgs, SandboxVolume};
 
 mod common;
 
@@ -64,7 +64,7 @@ impl Served {
         let auth = Auth::Bearer {
             token: token.into(),
         };
-        Client::connect(&self.url, auth, [("virtx-project", project)]).unwrap()
+        Client::connect(&self.url, auth, Some(project), [] as [(&str, &str); 0]).unwrap()
     }
 
     /// `method` sent to `path` as `token` in `project`: the status, and the body.
@@ -107,7 +107,8 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     assert_eq!(list(Some(bob), Some("other")), 200);
     assert_eq!(list(None, Some("demo")), 401);
     assert_eq!(list(Some("x"), Some("demo")), 401);
-    assert_eq!(list(Some(alice), None), 400);
+    // Naming none, it is in the sender's own project, made for them as it is first reached.
+    assert_eq!(list(Some(alice), None), 200);
     assert_eq!(list(Some(bob), Some("demo")), 403);
     assert_eq!(list(Some(alice), Some("other")), 403);
     assert_eq!(list(Some(alice), Some("nobody")), 403);
@@ -119,9 +120,13 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     let told: Value = serde_json::from_str(&told).unwrap();
     assert_eq!((status, &told["oidc"]["client_id"]), (200, &json!(CLIENT)));
 
+    // Alice names `demo` by its name; carol, whose it is not, by its id.
     let alice = served.client(alice, "demo");
-    let carol = served.client(carol, "demo");
-    let intruder = served.client(bob, "demo");
+    let demo = alice.get_project("demo").wait().unwrap();
+    let id = demo.id().to_owned();
+    assert_eq!(demo.owner(), Some("alice@example.com"));
+    let carol = served.client(carol, &id);
+    let intruder = served.client(bob, &id);
     let bob = served.client(bob, "other");
 
     // A volume one member makes is the other's too, and its files.
@@ -165,9 +170,9 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
             .0
     };
     assert_eq!(put(None, "demo"), 401);
-    assert_eq!(put(Some(&served.bob), "demo"), 403);
+    assert_eq!(put(Some(&served.bob), &id), 403);
     assert_eq!(put(Some(&served.bob), "other"), 404);
-    assert_eq!(put(Some(&served.carol), "demo"), 201);
+    assert_eq!(put(Some(&served.carol), &id), 201);
     let got = served.send("GET", &file, Some(&served.alice), Some("demo"), "");
     assert_eq!(got, (200, "over dav".to_owned()));
     let dir = format!("volumes/{name}/files/");
@@ -187,19 +192,19 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         served.send("GET", &path, token, Some(project), "")
     };
     assert_eq!(registry("", None, "demo").0, 401);
-    assert_eq!(registry("", Some(&served.bob), "demo").0, 403);
-    assert_eq!(registry("", Some(&served.carol), "demo").0, 200);
+    assert_eq!(registry("", Some(&served.bob), &id).0, 403);
+    assert_eq!(registry("", Some(&served.carol), &id).0, 200);
     let repositories = |token, project| -> Vec<String> {
         let (status, catalog) = registry("_catalog", Some(token), project);
         assert_eq!(status, 200, "{catalog}");
         let catalog: Value = serde_json::from_str(&catalog).unwrap();
         serde_json::from_value(catalog["repositories"].clone()).unwrap()
     };
-    let repos = repositories(&served.carol, "demo");
+    let repos = repositories(&served.carol, &id);
     let repository = repos.iter().find(|name| name.ends_with("alpine"));
     let repository = repository.unwrap_or_else(|| panic!("no alpine among {repos:?}"));
     let manifest = format!("{repository}/manifests/3.20");
-    assert_eq!(registry(&manifest, Some(&served.carol), "demo").0, 200);
+    assert_eq!(registry(&manifest, Some(&served.carol), &id).0, 200);
     assert_eq!(repositories(&served.bob, "other"), [] as [&str; 0]);
     assert_eq!(registry(&manifest, Some(&served.bob), "other").0, 404);
 
@@ -256,6 +261,52 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
 #[test]
 fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provider() {
     members_share_a_project_and_no_one_else_reaches_it(&Served::fixture());
+}
+
+/// A user makes a project, owns it, and brings another in, who reaches what is in it while a
+/// member and no longer once they leave; the project goes with what is in it.
+#[test]
+fn a_user_makes_a_project_brings_another_in_and_removes_it() {
+    let served = Served::fixture();
+    common::open();
+    let name = common::unique("made");
+    let alice = served.client(&served.alice, &name);
+
+    let made = alice.create_project(&name).wait().unwrap();
+    assert_eq!((made.name(), made.role()), (name.as_str(), Role::Owner));
+    assert_eq!(made.owner(), Some("alice@example.com"));
+    let listed = alice.list_project().wait().unwrap();
+    assert!(listed.iter().any(|project| project.id() == made.id()));
+    assert_eq!(refused(alice.create_project(&name).wait()), Some(409));
+    // Another user names theirs by its id; by its name, they name a project of their own.
+    let bob = served.client(&served.bob, made.id());
+    assert_eq!(refused(bob.get_project(made.id()).wait()), Some(403));
+    assert_eq!(refused(bob.get_project(&name).wait()), Some(403));
+    assert_eq!(refused(bob.list_volume().wait()), Some(403));
+
+    let added = made
+        .set_member("bob@example.com", Role::Member)
+        .wait()
+        .unwrap();
+    assert_eq!(added.role, Role::Member);
+    let members = made.members().wait().unwrap();
+    let users: Vec<_> = members.iter().map(|member| member.user.as_str()).collect();
+    assert_eq!(users, ["alice@example.com", "bob@example.com"]);
+    let theirs = bob.get_project(made.id()).wait().unwrap();
+    assert_eq!(theirs.role(), Role::Member);
+    let volume = alice.create_volume(Some("data")).wait().unwrap();
+    assert!(bob.get_volume(volume.name()).wait().is_ok());
+    assert_eq!(refused(theirs.remove().wait()), Some(403));
+    assert_eq!(
+        refused(theirs.set_member("carol@example.com", Role::Member).wait()),
+        Some(403)
+    );
+
+    theirs.remove_member("bob@example.com").wait().unwrap();
+    assert_eq!(refused(bob.list_volume().wait()), Some(403));
+    made.remove().wait().unwrap();
+    assert_eq!(refused(alice.get_project(made.id()).wait()), Some(403));
+    assert_eq!(refused(alice.list_volume().wait()), Some(403));
 }
 
 /// The provider's keys are asked for again for a token of a key the server has not, and not
@@ -343,10 +394,6 @@ impl Own {
             "listen": "127.0.0.1:0",
             "home": dir.join("home"),
             "oidc": { "issuer": issuer, "client_id": CLIENT },
-            "projects": {
-                "demo": { "members": ["alice@example.com", "carol@example.com"] },
-                "other": { "members": ["bob@example.com"] },
-            },
         });
         let path = dir.join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
@@ -367,7 +414,7 @@ impl Own {
         let url = line.strip_prefix("serving at ").expect(&line).to_owned();
         thread::spawn(move || lines.for_each(drop));
 
-        Own {
+        let own = Own {
             served: Served {
                 url,
                 alice,
@@ -378,7 +425,25 @@ impl Own {
             _server: server,
             _dex: dex,
             dir,
-        }
+        };
+        // Its projects, as the fixture's: alice makes `demo` and adds carol, bob makes `other`.
+        let served = &own.served;
+        let send =
+            |method, path, token: &str, body| served.send(method, path, Some(token), None, body).0;
+        assert_eq!(
+            send("POST", "projects/", &served.alice, r#"{"name": "demo"}"#),
+            201
+        );
+        let carol = "projects/demo/members/carol@example.com";
+        assert_eq!(
+            send("PUT", carol, &served.alice, r#"{"role": "owner"}"#),
+            201
+        );
+        assert_eq!(
+            send("POST", "projects/", &served.bob, r#"{"name": "other"}"#),
+            201
+        );
+        own
     }
 }
 

@@ -155,6 +155,20 @@ int virtx_client_set_headers(struct VirtxClient *client,
                              size_t headers_len,
                              struct VirtxBytes *error);
 
+// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
+// transport, in place of a `virtx-project` among the headers given. With a null one, that
+// header names it where there is one, and otherwise none is named, for the user's own
+// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+// the project unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+// `project` is null or NUL-terminated. `error` is null or writable.
+int virtx_client_set_project(struct VirtxClient *client,
+                             const char *project,
+                             struct VirtxBytes *error);
+
 // Hold `client` once more, for another holder to release.
 //
 // # Safety
@@ -324,6 +338,76 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
+
+// Answers with each project the client has a role in, as
+// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+// `owner` for one of no user's, such as one made over stdio.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_volume`.
+struct VirtxFuture *virtx_client_list_project(struct VirtxClient *client);
+
+// Makes the project `name`, the client its owner, given `{"name": "..."}`. Answers with
+// the project, as `virtx_client_list_project` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_project(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Answers with the project `name` names, a project of the user's by name or any by its id,
+// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_project(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Deletes the project `name` and everything in it, given `{"name": "..."}`. Answers with
+// `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_project(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Given `{"project": "..."}`, answers with the project's members, as
+// `[{"user": "...", "role": "owner" or "member"}, ...]`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_project_member(struct VirtxClient *client,
+                                                     const uint8_t *args,
+                                                     size_t args_len);
+
+// Given `{"project": "...", "user": "...", "role": "owner" or "member"}`, gives the user
+// the role in the project. Answers with the member, as `virtx_client_list_project_member`
+// answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_set_project_member(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
+
+// Given `{"project": "...", "user": "..."}`, takes the user's role in the project away.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_project_member(struct VirtxClient *client,
+                                                       const uint8_t *args,
+                                                       size_t args_len);
 
 // Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //

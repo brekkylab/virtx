@@ -17,14 +17,15 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
-    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxJob as SandboxJobInfo,
-    SandboxJobEntry, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
-    VolumeMountListOutputItem,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
+    ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
+    RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
+    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Sandbox, SandboxJob, Volume,
+    Error, ImageJob, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -140,14 +141,16 @@ impl Client {
         })
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL sending
-    /// `auth`, the credentials it wants, and `headers`, each a name and a value, whatever else
-    /// it asks of each request, with every request. `Authorization` is `auth`'s, over one given
-    /// as a header. Refused when a token would go in the clear: over `http` to any host but
-    /// this machine. Blocks until the client is made.
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
+    /// credentials it wants, `project`, the project every request is in (the user's own without
+    /// one), and `headers`, each a name and a value, whatever else it asks of each
+    /// request, with every request. `Authorization` is `auth`'s, and `virtx-project` names
+    /// `project`, over one given as a header. Refused when a token would go in the clear: over
+    /// `http` to any host but this machine. Blocks until the client is made.
     pub fn connect(
         url: impl AsRef<str>,
         auth: Auth,
+        project: Option<&str>,
         headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     ) -> Result<Client, Error> {
         let api = api()?;
@@ -168,7 +171,9 @@ impl Client {
                 &mut error,
             )
         };
-        unsafe { opened(api, status, raw, error) }
+        let client = unsafe { opened(api, status, raw, error) }?;
+        client.set_project(project)?;
+        Ok(client)
     }
 
     /// Send `auth` with every request from now on, in place of what was given at
@@ -206,6 +211,20 @@ impl Client {
                 &mut error,
             )
         };
+        if status == VIRTX_OK {
+            return Ok(());
+        }
+        unsafe { take(self.api, status, error) }
+    }
+
+    /// Name `project` in every request from now on, over either transport, or with `None`
+    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
+    /// headers given. Refused for a name no header carries, the project unchanged.
+    pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
+        let project = project.map(c_string).transpose()?;
+        let pointer = project.as_ref().map_or(ptr::null(), |name| name.as_ptr());
+        let mut error = VirtxBytes::empty();
+        let status = unsafe { (self.api.virtx_client_set_project)(self.raw, pointer, &mut error) };
         if status == VIRTX_OK {
             return Ok(());
         }
@@ -405,6 +424,78 @@ impl Client {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_prune_image)(self.raw)
         })
+    }
+
+    /// Every project the client has a role in.
+    pub fn list_project(&self) -> Call<Vec<Project>> {
+        let client = self.clone();
+        let call: Call<Vec<ProjectInfo>> = Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_project)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Project::new(client.clone(), info))
+                .collect()
+        })
+    }
+
+    /// Make the project `name`, the client its owner.
+    pub fn create_project(&self, name: impl Into<String>) -> Call<Project> {
+        let args = ProjectCreateArgs { name: name.into() };
+        let client = self.clone();
+        let call: Call<ProjectInfo> = self.call(self.api.virtx_client_create_project, args);
+        call.map(move |info| Project::new(client.clone(), info))
+    }
+
+    /// The project `info` describes, reached through this client, without asking the server.
+    pub fn project(&self, info: ProjectInfo) -> Project {
+        Project::new(self.clone(), info)
+    }
+
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
+    pub fn get_project(&self, name: impl AsRef<str>) -> Call<Project> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<ProjectInfo> = self.call(self.api.virtx_client_get_project, args);
+        call.map(move |info| Project::new(client.clone(), info))
+    }
+
+    /// Delete the project `name` names and everything in it.
+    pub(crate) fn remove_project(&self, name: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "name": name.as_ref() });
+        self.call(self.api.virtx_client_remove_project, args)
+    }
+
+    /// The members of `project`, with their roles.
+    pub(crate) fn list_project_member(
+        &self,
+        project: impl AsRef<str>,
+    ) -> Call<Vec<ProjectMemberInfo>> {
+        let args = json!({ "project": project.as_ref() });
+        self.call(self.api.virtx_client_list_project_member, args)
+    }
+
+    /// Give `user` `role` in `project`, adding them if they are no member.
+    pub(crate) fn set_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+        role: Role,
+    ) -> Call<ProjectMemberInfo> {
+        let args = json!({ "project": project.as_ref(), "user": user.as_ref(), "role": role });
+        self.call(self.api.virtx_client_set_project_member, args)
+    }
+
+    /// Take `user`'s role in `project` away.
+    pub(crate) fn remove_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+    ) -> Call<()> {
+        let args = json!({ "project": project.as_ref(), "user": user.as_ref() });
+        self.call(self.api.virtx_client_remove_project_member, args)
     }
 
     /// Every volume the server holds.

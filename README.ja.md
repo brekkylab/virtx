@@ -148,12 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 中身は `virtx-server-tcp`、ゲストカーネル、`abin/`、`alib/` です。
 専用のディレクトリに展開すると、`virtx-server-tcp` は隣にあるゲストカーネルを見つけるので、`PATH` やライブラリパスを設定せずにそのまま実行できます。
 
-サーバーマシンで`server.json`を書き、サーバーを起動します。
+サーバーマシンで、OpenID Connectプロバイダーを指定した`server.json`を書き、サーバーを起動します。
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -163,53 +164,8 @@ virtx-server-tcp serve --config server.json
 
 クライアント側では、`Client.spawn()`の代わりにサーバーへ接続します。それ以外はローカルの例と同じです。
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-ループバックで待ち受けるサーバーは認証を求めません。
-他のマシンに提供するには、OpenID Connectプロバイダーと、各プロジェクトにアクセスできるユーザーを指定します。
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 ユーザーは、プロバイダーが`client_id`のクライアントに発行するIDトークンの`email`です。このクライアントはデバイスフローを使う公開クライアントである必要があります。
-`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンとプロジェクトを指定して接続します。
+`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンで接続します。
 
 ```sh
 virtx login https://virtx.example
@@ -224,7 +180,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -236,8 +191,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -250,7 +204,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

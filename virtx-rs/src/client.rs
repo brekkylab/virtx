@@ -2,8 +2,12 @@
 
 use std::{
     ffi::{CString, c_void},
+    future::Future,
+    mem::ManuallyDrop,
     path::PathBuf,
+    pin::Pin,
     ptr,
+    task::{Context, Poll},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -41,41 +45,61 @@ unsafe impl Send for Client {}
 unsafe impl Sync for Client {}
 
 /// Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is
-/// not there, and give its path: what [`Client::spawn_virtx`] starts. Blocks for the fetch.
+/// not there, and answer its path: what [`Client::spawn_virtx`] starts.
 ///
 /// The server is kept one directory per version, so a library that is upgraded fetches its
 /// own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 /// `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-pub fn ensure_virtx() -> Result<PathBuf, Error> {
+pub fn ensure_virtx() -> Result<Call<PathBuf>, Error> {
     let api = api()?;
-    let mut out = VirtxBytes::empty();
-    let status = unsafe { (api.virtx_ensure_virtx)(&mut out) };
-    unsafe { take::<String>(api, status, out) }.map(PathBuf::from)
+    Ok(Call::<String>::new(api, unsafe { (api.virtx_ensure_virtx)() }).map(PathBuf::from))
+}
+
+/// `virtx-stdio` being started by [`Client::spawn_virtx`]: awaited, or waited for without a
+/// runtime with [`wait`](Opening::wait), it answers the client. The fetch runs from when this
+/// is made; dropping it cancels it.
+#[must_use = "an opening dropped is cancelled"]
+pub struct Opening {
+    /// The fetch, or why none could start, answered once.
+    fetch: Result<Call<PathBuf>, Option<Error>>,
+    args: Vec<String>,
+}
+
+impl Opening {
+    /// Block this thread until the server has started, for a caller without an async runtime.
+    pub fn wait(self) -> Result<Client, Error> {
+        let path = match self.fetch {
+            Ok(fetch) => fetch.wait()?,
+            Err(error) => return Err(error.expect("waited for once")),
+        };
+        Client::spawn(path.to_string_lossy(), &self.args)
+    }
+}
+
+impl Future for Opening {
+    type Output = Result<Client, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let path = match &mut self.fetch {
+            Ok(fetch) => match Pin::new(fetch).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(path)) => path,
+            },
+            Err(error) => return Poll::Ready(Err(error.take().expect("polled after ready"))),
+        };
+        Poll::Ready(Client::spawn(path.to_string_lossy(), &self.args))
+    }
 }
 
 impl Client {
     /// Start `program` with `args` as the server, and talk to it over its stdin and stdout.
-    /// Blocks until it has started.
     pub fn spawn(
         program: impl AsRef<str>,
         args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Client, Error> {
-        let program = c_string(program.as_ref())?;
-        Self::spawn_program(program.as_ptr(), args)
-    }
-
-    /// Start `virtx-stdio`, the server of the library's version, with `args`, fetching it first
-    /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone. Blocks
-    /// until it has started.
-    pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Client, Error> {
-        Self::spawn_program(ptr::null(), args)
-    }
-
-    fn spawn_program(
-        program: *const std::ffi::c_char,
-        args: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Result<Client, Error> {
         let api = api()?;
+        let program = c_string(program.as_ref())?;
         let args = args
             .into_iter()
             .map(|arg| c_string(arg.as_ref()))
@@ -84,9 +108,36 @@ impl Client {
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
         let status = unsafe {
-            (api.virtx_client_spawn)(program, argv.as_ptr(), argv.len(), &mut raw, &mut error)
+            (api.virtx_client_spawn)(
+                program.as_ptr(),
+                argv.as_ptr(),
+                argv.len(),
+                &mut raw,
+                &mut error,
+            )
         };
         unsafe { opened(api, status, raw, error) }
+    }
+
+    /// Start `virtx-stdio`, the server of the library's version, with `args`, fetching it first
+    /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone.
+    pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Opening {
+        Opening {
+            fetch: ensure_virtx().map_err(Some),
+            args: args
+                .into_iter()
+                .map(|arg| arg.as_ref().to_owned())
+                .collect(),
+        }
+    }
+
+    /// Let go of this hold of the session, and answer once it is let go of: for the last
+    /// hold, once the session has ended. Dropping a client does the same, blocking for it.
+    pub fn close(self) -> Call<()> {
+        let this = ManuallyDrop::new(self);
+        Call::new(this.api, unsafe {
+            (this.api.virtx_client_release)(this.raw)
+        })
     }
 
     /// Reach the server at `url`, its base `http` or `https` URL sending
@@ -815,9 +866,12 @@ impl Clone for Client {
 }
 
 impl Drop for Client {
-    /// The last one ends the session, blocking until it has.
+    /// The last one ends the session, blocking until it has: as [`Client::close`], waited for.
     fn drop(&mut self) {
-        unsafe { (self.api.virtx_client_release)(self.raw) };
+        let _ = Call::<()>::new(self.api, unsafe {
+            (self.api.virtx_client_release)(self.raw)
+        })
+        .wait();
     }
 }
 

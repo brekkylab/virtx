@@ -66,7 +66,10 @@ The client starts the server as a child process, and the server's stdin and stdo
 Over [TCP](#tcp), a server reachable from other machines SHOULD require credentials on every request, to every endpoint.
 A server on the local machine MAY take none, and a server over [stdio](#stdio) takes none.
 The credentials SHOULD be an OAuth 2.1 access token, sent as `Authorization: Bearer <token>`.
-How the client obtains the token is outside this protocol.
+How the client obtains the token is outside this protocol, but a server MAY say where: `GET /auth` is answered without credentials, `200` with a JSON object.
+
+- `oidc`, if the tokens are an OpenID Connect provider's, is `{"issuer": "...", "client_id": "..."}`: the provider, and the public client to sign in to it as. The token is then the ID token the provider issues that client.
+- Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
@@ -74,6 +77,7 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 Everything but images and files is made, read and removed with the requests below.
 A request body is JSON, sent with `Content-Type: application/json`, and so is every response body but an [event stream](#events).
+A client ignores a member of a response body it does not know, so a server can add one without breaking a client already released.
 `{name}`, `{id}` and `{job}` are each one path segment, percent-encoded.
 
 A `POST` or `PUT` that makes something answers `201 Created` with it, and with its path in `Location`.
@@ -90,12 +94,12 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member. |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. |
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
-| `413 Content Too Large` | `too_large` | The body is over the server's limit. |
+| `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
 

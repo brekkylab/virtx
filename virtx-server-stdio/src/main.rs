@@ -843,4 +843,148 @@ mod tests {
         assert_ne!(bare, fresh);
         assert_eq!(send(put(Some(bare), "bare")).await.0, 204);
     }
+
+    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
+    /// and a path whose segment does not read as one is `400` `invalid`. A file's body has no
+    /// such limit.
+    #[tokio::test]
+    async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
+        let server = Server::spawn("envelope");
+        let (app, _) = app(&server.home).unwrap();
+        let refusal = |response: http::Response<axum::body::Body>| async move {
+            let status = response.status().as_u16();
+            let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (status, kind, body["error"].clone())
+        };
+
+        let over = http::Request::post("/sandboxes/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(vec![b' '; 3 << 20]))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(over).await;
+        let (status, kind, error) = refusal(response).await;
+        assert_eq!((status, kind.to_str().unwrap()), (413, "application/json"));
+        assert_eq!(error["code"], "too_large", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("2 MiB"),
+            "{error}"
+        );
+
+        let unreadable = http::Request::get("/sandboxes/%FF")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(unreadable).await;
+        let (status, kind, error) = refusal(response).await;
+        assert_eq!((status, kind.to_str().unwrap()), (400, "application/json"));
+        assert_eq!(error["code"], "invalid", "{error}");
+
+        // A file's body is streamed, and has no limit.
+        server.client.create_volume(Some("data")).await.unwrap();
+        let file = http::Request::put("/volumes/data/files/big")
+            .body(axum::body::Body::from(vec![b'x'; 3 << 20]))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(file).await;
+        assert_eq!(response.status(), 201);
+    }
+
+    /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
+    /// `too_large`, one at the limit is not, and one that breaks off is `400` `invalid`, each in
+    /// the envelope. The body is refused before the handler looks anything up, so no sandbox,
+    /// volume or job has to be there.
+    #[tokio::test]
+    async fn every_route_that_takes_a_body_holds_it_to_the_limit() {
+        use axum::body::{Body, Bytes};
+
+        let server = Server::spawn("limit");
+        let (app, _) = app(&server.home).unwrap();
+        let answer = |method: &'static str, path: &'static str, body: Body| {
+            let app = app.clone();
+            async move {
+                let request = http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap();
+                let Ok(response) = app.oneshot(request).await;
+                let status = response.status().as_u16();
+                let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                (status, kind, body["error"]["code"].clone())
+            }
+        };
+        let limit = 2 << 20;
+        for (method, path) in [
+            ("POST", "/images/jobs/pull/"),
+            ("POST", "/images/jobs/push/"),
+            ("POST", "/images/jobs/build/"),
+            ("POST", "/snapshots/"),
+            ("POST", "/volumes/"),
+            ("PUT", "/volumes/nobody/mounts/m"),
+            ("POST", "/sandboxes/"),
+            ("POST", "/sandboxes/nobody/jobs/exec/"),
+            ("POST", "/sandboxes/nobody/jobs/j/signal"),
+        ] {
+            let over = Body::from(vec![b' '; limit + 1]);
+            let (status, kind, code) = answer(method, path, over).await;
+            assert_eq!(
+                (status, code.as_str()),
+                (413, Some("too_large")),
+                "{method} {path}"
+            );
+            assert_eq!(kind, "application/json", "{method} {path}");
+            let at = Body::from(vec![b' '; limit]);
+            let (status, kind, code) = answer(method, path, at).await;
+            assert_eq!(
+                (status, code.as_str()),
+                (400, Some("invalid")),
+                "{method} {path}"
+            );
+            assert_eq!(kind, "application/json", "{method} {path}");
+        }
+
+        let broken = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"{")),
+            Err(std::io::Error::other("the client went")),
+        ]);
+        let (status, _, code) = answer("POST", "/sandboxes/", Body::from_stream(broken)).await;
+        assert_eq!((status, code.as_str()), (400, Some("invalid")));
+    }
+
+    /// A body over the limit is read to its end before it is refused, though only what fits the
+    /// limit is kept: answered with it unread, a client on a connection still sending it would
+    /// see the connection reset, not the `413`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_read_to_its_end_before_it_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use futures_util::StreamExt as _;
+
+        let server = Server::spawn("read-to-end");
+        let (app, _) = app(&server.home).unwrap();
+        let read = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&read);
+        let chunks =
+            (0..48).map(|_| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b' '; 64 << 10])));
+        let stream = futures_util::stream::iter(chunks).inspect(move |chunk| {
+            if let Ok(chunk) = chunk {
+                counted.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        });
+        let request = http::Request::post("/sandboxes/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+        let Ok(response) = app.clone().oneshot(request).await;
+        assert_eq!(response.status().as_u16(), 413);
+        assert_eq!(read.load(Ordering::SeqCst), 48 * (64 << 10));
+    }
 }

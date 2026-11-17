@@ -35,6 +35,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Not 0: a backtrace keeps its lines.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   suites:
@@ -57,6 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: suites
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # What building the servers takes on this host: the guest init's cross-linker, bindgen's
       # libclang, and meson with Vulkan's headers for virglrenderer.

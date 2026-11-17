@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Path as Segments};
+use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
+use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
@@ -31,8 +32,8 @@ use virtx_core::{
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
-    RegistryClient, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -49,6 +50,7 @@ const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 /// from them, which are theirs together.
 pub struct Home {
     images: ImageStore,
+    registry: Arc<RegistryServer>,
     pub snapshots: SnapshotStore,
     volumes: VolumeStore,
     /// The files of the snapshots and volumes, over WebDAV.
@@ -63,24 +65,38 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, shared with every other project, and the snapshots and volumes
+    /// The images in `images`, which `registry` answers for, and the snapshots and volumes
     /// under `root`.
-    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
+    pub fn new(
+        images: ImageStore,
+        registry: Arc<RegistryServer>,
+        root: &Path,
+    ) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         Sandbox::sweep(&snapshots);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
+            registry,
             files: Files::new(snapshots.clone(), volumes.clone()),
             snapshots,
             volumes,
             vm: vec![
                 std::env::current_exe()?.into(),
-                crate::MACHINE_SUBCOMMAND.into(),
+                crate::serve::MACHINE_SUBCOMMAND.into(),
             ],
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
         })
+    }
+
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// What answers this home's `/images/oci/v2/`.
+    pub fn registry(&self) -> &Arc<RegistryServer> {
+        &self.registry
     }
 
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
@@ -333,7 +349,7 @@ where
     created(format!("/images/jobs/{id}"), &*job.job.lock().unwrap())
 }
 
-async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
@@ -351,7 +367,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
     ))
 }
 
-async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
@@ -366,7 +382,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
     ))
 }
 
-async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImageBuildArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     if args.recipe.base != "scratch" {
@@ -506,7 +522,7 @@ async fn snapshot_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     Ok(json(&listed))
 }
 
-async fn snapshot_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn snapshot_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SnapshotCreateArgs = body(&request)?;
     if args.disk_gib == Some(0) {
         return Err(invalid("disk_gib: 0 is a disk nothing fits on"));
@@ -561,7 +577,7 @@ async fn volume_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     Ok(json(&listed))
 }
 
-async fn volume_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn volume_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: VolumeCreateArgs = body(&request)?;
     let name = args
         .name
@@ -604,7 +620,7 @@ async fn volume_mount_list(
 async fn volume_mount_create(
     Extension(home): Extension<Arc<Home>>,
     Segments((name, path)): Segments<(String, String)>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: VolumeMountCreateArgs = body(&request)?;
     let mount_type = args.source.mount_type();
@@ -654,7 +670,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     Ok(json(&listed))
 }
 
-async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
     let sandbox = Sandbox::create(
         &home.images,
@@ -729,7 +745,7 @@ async fn sandbox_job_list(
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
     if args.cmd.is_empty() {
@@ -767,7 +783,7 @@ async fn sandbox_job_remove(
 async fn sandbox_job_signal(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: SandboxSignalArgs = body(&request)?;
     let signal = signal_number(&args.signal)
@@ -807,6 +823,79 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
     reference
         .parse()
         .map_err(|e| invalid(format!("{reference}: {e}")))
+}
+
+/// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
+const BODY_LIMIT: usize = 2 << 20;
+
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
+/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+///
+/// A body past the limit is still read to its end, and what comes after the limit let go of as
+/// it comes, before it is refused: answered with its body unread, the connection is closed with
+/// it unread and reset, on any system, so a client still sending sees the reset and never the
+/// `413`. The files endpoints read the rest of a body for the same reason. What is read has no
+/// bound: a client that sends a JSON body here has been let in already, and may write a file of
+/// any size.
+struct Whole(Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for Whole {
+    type Rejection = Refused;
+
+    async fn from_request(request: Request, _: &S) -> Result<Self, Refused> {
+        let mut body = request.into_body();
+        let mut whole = Vec::new();
+        let mut over = false;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| invalid(format!("the body broke off: {e}")))?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            if over {
+                continue;
+            }
+            if whole.len() + data.len() > BODY_LIMIT {
+                over = true;
+                whole = Vec::new();
+                continue;
+            }
+            whole.extend_from_slice(&data);
+        }
+        if over {
+            return Err(refused(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                format!(
+                    "the body is over the server's limit of {} MiB",
+                    BODY_LIMIT >> 20
+                ),
+            ));
+        }
+        Ok(Whole(Bytes::from(whole)))
+    }
+}
+
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
+/// they do not read as one, in PROTOCOL.md's envelope rather than as text.
+struct Segments<T>(T);
+
+impl<T, S> FromRequestParts<S> for Segments<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = Refused;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Refused> {
+        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(segments)) => Ok(Segments(segments)),
+            Err(e) if e.status().is_server_error() => Err(internal(e.body_text())),
+            Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
+        }
+    }
 }
 
 /// `request` read as a `T`.

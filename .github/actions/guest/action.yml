@@ -1,0 +1,41 @@
+# The guest parts `guest` built for this run -- its kernel, abin and alib, as `guest-<arch>.tar`
+# in the working directory -- from the run's artifact. A job that does not wait for `guest`
+# (`tests (windows-x86_64)`, which compiles its tests meanwhile) waits here instead, and ends if
+# `guest` does not end well rather than leaving it to time out.
+name: guest
+description: The guest parts this run's `guest` job built, from its artifact
+
+inputs:
+  arch:
+    description: x86_64 or aarch64
+    required: true
+  wait:
+    description: Wait for `guest` to end first, for a job that does not wait for it
+    default: "false"
+  token:
+    description: To read this run's jobs while waiting (github.token, with actions read)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for guest
+      if: inputs.wait == 'true'
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        while :; do
+          guest=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --paginate --jq ".jobs[] | select(.name | endswith(\"guest ($ARCH)\")) | .conclusion")
+          case "$guest" in
+            success) break ;;
+            failure | cancelled | skipped) echo "::error::guest ($ARCH) ended $guest"; exit 1 ;;
+          esac
+          sleep 5
+        done
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: guest-${{ inputs.arch }}

@@ -7,9 +7,8 @@
 //!
 //! Vulkan, through [venus](https://docs.mesa3d.org/drivers/venus.html): the guest runs
 //! Mesa's venus driver, virglrenderer serves it on the host, and the host's own driver --
-//! MoltenVK on macOS, the vendor's on Windows -- does the work. The image has to carry
-//! the guest half; on Alpine that is `mesa-vulkan-virtio vulkan-loader`, and a session
-//! without it boots fine and finds no device.
+//! MoltenVK on macOS, the vendor's on Windows -- does the work. The guest half, the loader
+//! and venus, is `/alib`'s, which the agent points the guest's programs at.
 //!
 //! # The display nobody looks at
 //!

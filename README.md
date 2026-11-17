@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
@@ -12,12 +14,13 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <b>English</b> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -25,7 +28,7 @@
 virtx lets you run tasks in disposable Linux VMs from your own code.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
-Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a snapshot or a volume you kept.
+Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
 
 > [!TIP]
 > Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
@@ -56,28 +59,19 @@ pip install virtx
 ```python
 import asyncio
 
-from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdout
+from virtx import Client, Recipe
 
 
 async def main() -> None:
     with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
-        async for entry in client.build_image(recipe, "jq:latest"):
-            match entry.entry:
-                case Log(line):
-                    print(line)
-                case ImageJobEnd(error=str(error)):
-                    raise RuntimeError(error)
+        await client.build_image(recipe, "jq:latest").complete(print=True)
 
         sandbox = await client.create_sandbox("jq:latest")
         try:
             cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-            async for entry in sandbox.exec(cmd):
-                match entry.entry:
-                    case Stdout(line) | Stderr(line):
-                        print(line)
-                    case SandboxJobEnd(code):
-                        print("exited", code)
+            code = await sandbox.exec(cmd).complete(print=True)
+            print("exited", code)
         finally:
             await sandbox.remove()
 
@@ -101,19 +95,13 @@ async function main() {
   const client = Client.spawn()
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
-    for await (const entry of client.buildImage(recipe, 'jq:latest')) {
-      if ('log' in entry) console.log(entry.log)
-      else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
-    }
+    await client.buildImage(recipe, 'jq:latest').complete({ print: true })
 
     const sandbox = await client.createSandbox('jq:latest')
     try {
       const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
-      for await (const entry of sandbox.exec(cmd)) {
-        if ('stdout' in entry) console.log(entry.stdout)
-        else if ('stderr' in entry) console.error(entry.stderr)
-        else if ('end' in entry) console.log('exited', entry.end.code)
-      }
+      const code = await sandbox.exec(cmd).complete({ print: true })
+      console.log('exited', code)
     } finally {
       await sandbox.remove()
     }
@@ -131,42 +119,26 @@ main()
 <summary><b>Rust</b></summary>
 
 ```sh
-cargo add virtx futures
+cargo add virtx
 cargo add tokio --features macros,rt-multi-thread
 ```
 
 ```rust
-use futures::StreamExt;
-use virtx::{
-    Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
-};
+use virtx::{Client, Recipe, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
-    let mut log = client.build_image(recipe, "jq:latest").log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            ImageJobEntry::Log(line) => println!("{line}"),
-            ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
-            _ => {}
-        }
-    }
+    client.build_image(recipe, "jq:latest").complete(true).await?;
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .await?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
-            SandboxJobEntry::End(end) => println!("exited {}", end.code),
-            _ => {}
-        }
-    }
+    let code = sandbox.exec(&SandboxExecArgs::new(cmd)).complete(true).await?;
+    println!("exited {code}");
     sandbox.remove().await?;
     Ok(())
 }
@@ -176,18 +148,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Remote
 
-On the server machine, make a token and write a `server.json` that lets its user into a project:
+Each [release](https://github.com/brekkylab/virtx/releases) carries the server as `virtx-server-tcp-<os>-<arch>.tar.gz`, for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64`.
+It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
+Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
 
-```sh
-virtx-server-tcp token   # prints a token and its token_sha256
-```
+On the server machine, write a `server.json` naming your OpenID Connect provider, and start the server:
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
+  "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -195,17 +166,25 @@ virtx-server-tcp token   # prints a token and its token_sha256
 virtx-server-tcp serve --config server.json
 ```
 
-On the client, connect with the token and the project in place of `Client.spawn()`.
+On the client, connect to it in place of `Client.spawn()`.
 The rest is the same as the local example.
+
+A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
+Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints:
+
+```sh
+virtx login https://virtx.example
+```
 
 <details open>
 <summary><b>Python</b></summary>
 
 ```python
-from virtx import BearerAuth, Client
+from virtx import Client, CommandAuth
 
 client = Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
 )
 ```
 
@@ -216,9 +195,8 @@ client = Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
-  { 'virtx-project': 'demo' }
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -229,13 +207,16 @@ const client = Client.connect(
 
 ```rust
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
-    [("virtx-project", "demo")],
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
 </details>
+
+`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
 
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
@@ -250,7 +231,7 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 - **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
 - **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
 - **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
-- **Pick up where you left off:** keep what a sandbox wrote in a snapshot for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
+- **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
 - **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
 
 ## Requirements
@@ -259,8 +240,8 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 
 Pick the one for the language you use.
 
-- **Python:** 3.10 or later.
-- **Node:** 18 or later.
+- **Python:** 3.11 or later.
+- **Node:** 22 or later.
 - **Rust:** 1.89 or later.
 
 ### Server
@@ -284,7 +265,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host, plus the guest's half of Vulkan in the image. See [Using GPUs](docs/content/guides/using-gpus.mdx).
+Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](docs/content/guides/using-gpus.mdx).
 
 ## How it works
 
@@ -316,27 +297,25 @@ Code in it is separated from your machine by a hypervisor, not just by namespace
 The main resource is the **sandbox**: a VM you run commands in.
 
 <p align="center">
-  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable snapshot over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
+  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable layer over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
 </p>
 
-A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **snapshot** above, where its writes go.
+A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **writable layer** above, where its writes go.
 
 The image is what every sandbox on it starts from.
 Images are OCI images, the format Docker uses, so `alpine:latest` or any image from a registry works.
 
-The snapshot is where a sandbox's changes pile up.
-A new snapshot starts empty; a sandbox made on it later starts with everything the last one wrote, so what one installed the next one finds.
-One sandbox holds a snapshot at a time.
-A sandbox made without a snapshot has its own, which goes when the sandbox is removed.
+The writable layer is where a sandbox's changes pile up.
+Each sandbox has its own, which starts empty and goes when the sandbox is removed.
 
 When a sandbox needs storage apart from its root filesystem, use a **volume**.
-Unlike a snapshot, a volume is mounted at a path, read-write or read-only, and can be mounted into several sandboxes at once.
+Unlike the writable layer, a volume is mounted at a path, read-write or read-only, and can be mounted into several sandboxes at once.
 It stays when they are removed, and its files can be read and written from your code without a sandbox at all.
 Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a volume too, read-only, so a sandbox sees them as files.
 
 ## Documentation
 
-See the [documentation](docs/) for guides and the API reference.
+See the [documentation](https://virtx.sh/docs) for guides and the API reference.
 Each package documents the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
 ## Building from source

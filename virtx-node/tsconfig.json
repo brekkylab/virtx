@@ -1,0 +1,12 @@
+{
+  // What `cargo xtask check` type-checks: the declarations TypeScript users import, which are
+  // written by hand beside index.js and checked by nothing else.
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "nodenext",
+    "types": ["node"]
+  },
+  "files": ["index.d.ts"]
+}

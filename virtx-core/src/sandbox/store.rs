@@ -6,17 +6,12 @@ use crate::image::ImageName;
 
 /// A sandbox, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Sandbox {
     /// The sandbox's id, which every request about it names it by.
     pub id: String,
 
     /// The digest of the image it booted, as `algorithm:hex`.
     pub image: String,
-
-    /// The snapshot it stands on, by name, if it was given one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
 
     /// Whether it takes processes: `false` once its VM has exited on its own. One whose VM the
     /// server stopped for want of use is booted again by the next job, and is `true`; one that
@@ -27,11 +22,15 @@ pub struct Sandbox {
     /// answers only, since the URLs carry credentials.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
+
+    /// virtx's own programs it has at `/abin`, as it was made with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abins: Vec<String>,
 }
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.
 ///
-/// The machine members (`vcpus`, `memory_mib`, `gpu`, `gpu_memory_mib`) each leave
+/// The machine members (`vcpus`, `memory_mib`, `disk_gib`, `gpu`, `gpu_memory_mib`) each leave
 /// it to the server without one. A server gives exactly what is asked or refuses; `0` for a
 /// number is refused, not another way to leave it out.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,11 +38,6 @@ pub struct Sandbox {
 pub struct SandboxCreateArgs {
     /// The image its root filesystem is built on.
     pub image: ImageName,
-
-    /// The snapshot, by name, that is its root filesystem's upper layer: it starts with the
-    /// changes in it, and its writes go into it. Without one its writes go when it does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
 
     /// Whether its processes reach a network at all: the way out, which `ports` do not need.
     #[serde(default = "on", skip_serializing_if = "is_on")]
@@ -62,6 +56,11 @@ pub struct SandboxCreateArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
 
+    /// How much it may write over its image, in GiB, at most 1024: the size of its writable
+    /// layer, which goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
+
     /// Whether it gets a GPU. `false` forbids one on a server that would attach one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<bool>,
@@ -74,6 +73,12 @@ pub struct SandboxCreateArgs {
     /// Two at one path are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<SandboxVolume>,
+
+    /// virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at
+    /// `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program
+    /// by is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abins: Vec<String>,
 }
 
 impl SandboxCreateArgs {
@@ -83,31 +88,26 @@ impl SandboxCreateArgs {
     /// ```
     /// # use virtx_core::SandboxCreateArgs;
     /// let args = SandboxCreateArgs::new("jq:latest")
-    ///     .snapshot("dev")
     ///     .port(8000)
-    ///     .readonly_volume("data", "/data");
+    ///     .readonly_volume("data", "/data")
+    ///     .abin("index");
     ///
-    /// assert_eq!(args.snapshot.as_deref(), Some("dev"));
     /// assert!(args.volumes[0].readonly);
+    /// assert_eq!(args.abins, ["index"]);
     /// ```
     pub fn new(image: impl Into<ImageName>) -> Self {
         Self {
             image: image.into(),
-            snapshot: None,
             network: true,
             ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
+            disk_gib: None,
             gpu: None,
             gpu_memory_mib: None,
             volumes: Vec::new(),
+            abins: Vec::new(),
         }
-    }
-
-    /// Stand on the snapshot `name`.
-    pub fn snapshot(mut self, name: impl Into<String>) -> Self {
-        self.snapshot = Some(name.into());
-        self
     }
 
     /// Whether its processes reach a network at all.
@@ -129,6 +129,11 @@ impl SandboxCreateArgs {
 
     pub fn memory_mib(mut self, mib: u32) -> Self {
         self.memory_mib = Some(mib);
+        self
+    }
+
+    pub fn disk_gib(mut self, gib: u32) -> Self {
+        self.disk_gib = Some(gib);
         self
     }
 
@@ -159,6 +164,12 @@ impl SandboxCreateArgs {
         args.volumes.last_mut().unwrap().readonly = true;
         args
     }
+
+    /// Give it virtx's program `name` at `/abin`, beside those given before.
+    pub fn abin(mut self, name: impl Into<String>) -> Self {
+        self.abins.push(name.into());
+        self
+    }
 }
 
 fn on() -> bool {
@@ -171,7 +182,6 @@ fn is_on(flag: &bool) -> bool {
 
 /// A TCP port opened in a sandbox, and where it is reached from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SandboxPort {
     /// The port in the sandbox.
     pub port: u16,
@@ -200,7 +210,40 @@ pub struct SandboxVolume {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn a_sandbox_is_read_past_members_it_does_not_know() {
+        let value = json!({
+            "id": "s",
+            "image": "sha256:00",
+            "running": true,
+            "ports": [{"port": 80, "url": "http://127.0.0.1:1/", "address": "10.0.0.2:80"}],
+            "cell": "c1",
+        });
+        let sandbox: Sandbox = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            sandbox.ports,
+            [SandboxPort {
+                port: 80,
+                url: "http://127.0.0.1:1/".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_create_with_a_member_it_does_not_take_is_refused() {
+        let mut value = serde_json::to_value(SandboxCreateArgs::new("img:latest")).unwrap();
+        value["cell"] = json!("c1");
+        assert!(serde_json::from_value::<SandboxCreateArgs>(value).is_err());
+
+        let mut value =
+            serde_json::to_value(SandboxCreateArgs::new("img:latest").volume("a", "/a")).unwrap();
+        value["volumes"][0]["cell"] = json!("c1");
+        assert!(serde_json::from_value::<SandboxCreateArgs>(value).is_err());
+    }
 
     #[test]
     fn a_create_says_only_what_it_asked_for() {
@@ -217,22 +260,22 @@ mod tests {
     #[test]
     fn each_method_sets_its_field() {
         let args = SandboxCreateArgs::new("img:latest")
-            .snapshot("s")
             .network(false)
             .port(80)
             .port(443)
             .vcpus(2)
             .memory_mib(512)
+            .disk_gib(8)
             .gpu(true)
             .gpu_memory_mib(256)
             .volume("a", "/a")
             .readonly_volume("b", "/a/b");
         let mut expected = SandboxCreateArgs::new("img:latest");
-        expected.snapshot = Some("s".into());
         expected.network = false;
         expected.ports = vec![80, 443];
         expected.vcpus = Some(2);
         expected.memory_mib = Some(512);
+        expected.disk_gib = Some(8);
         expected.gpu = Some(true);
         expected.gpu_memory_mib = Some(256);
         expected.volumes = vec![

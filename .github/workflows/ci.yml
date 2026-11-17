@@ -1,32 +1,41 @@
-# A pull request is built as a release would be, and tested; nothing is published. The docs
-# are `docs`'s.
+# A pull request is linted and tested platform by platform; nothing is published. `main` is
+# too, after each merge, and in full: built, packed and tried as a release would be (see
+# `pipeline`), and that run is what saves the Rust caches every other ref reads. A run started
+# by hand is in full too. The docs are `docs`'s.
 name: ci
 
+# Markdown is left out, but for the READMEs the packages ship.
 on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      - "!**/*.md"
+      - "!docs/**"
+      - virtx-py/README.md
+      - virtx-node/README.md
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - docs/**
+    paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request makes an older run moot.
+# A newer push to the pull request makes an older run moot. A run on `main` finishes once
+# started, or a merge after a merge would leave no run to save the caches; of the runs waiting
+# behind it, only the newest is kept.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
-
-  test:
-    needs: build
-    uses: ./.github/workflows/test.yml
-    # `id-token`, for the AWS role `windows-runner` starts the Windows runner with.
+  pipeline:
+    # The checks are named `ci / <job>`.
+    name: ci
+    uses: ./.github/workflows/pipeline.yml
+    with:
+      full: ${{ github.event_name != 'pull_request' }}
+    # `actions` read, for the tests jobs to see whether `guest` failed while they wait for it.
     permissions:
       contents: read
-      id-token: write
-    with:
-      version: ${{ needs.build.outputs.version }}
+      actions: read

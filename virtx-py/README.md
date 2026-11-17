@@ -4,26 +4,30 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
-A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it. The method that starts one answers a `StartedJob`, sent when it is first awaited or iterated: iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job. Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it.
+The method that starts one answers a `StartedJob`, sent when it is first awaited, iterated or completed: `complete` follows the job to its end and answers what it ended with; iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job.
+Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
 
 ```python
 import asyncio
-from virtx import Client, ImageJobEnd, Log, Recipe
+from virtx import Client, Recipe, VirtxError
+
 
 async def main():
     with Client.spawn() as client:
         recipe = Recipe("alpine:3.20").run("apk add jq")
-        async for entry in client.build_image(recipe, "jq:latest"):
-            match entry.entry:
-                case Log(line):
-                    print(line)
-                case ImageJobEnd(error=None, digest=digest):
-                    print("built", digest)
-                case ImageJobEnd(error=error):
-                    print("failed", error)
+        try:
+            digest = await client.build_image(recipe, "jq:latest").complete(print=True)
+            print("built", digest)
+        except VirtxError as failed:
+            print("failed", failed)
+
 
 asyncio.run(main())
 ```
+
+`complete(print=True)` prints each line of the log as it is read.
+An image job that fails raises its `VirtxError`, from `complete` and from its log alike, in place of an `ImageJobEnd`.
 
 Awaited, the same call answers the job, an `ImageJob` that carries its client, and its log is read after with its `log`, from its start or `after` an entry: by another reader, or after a reconnect.
 
@@ -33,12 +37,15 @@ async for entry in job.log(after=1):  # from its second entry
     ...
 ```
 
-A sandbox runs commands as jobs the same way: `create_sandbox` answers a `Sandbox` that carries its client, and its `exec` starts one, and iterated it yields its output, a line as it is written, then how it ended. Awaited, it is a `SandboxJob` that carries its client too: what signals the process, writes to its stdin and reads its log again. One value awaited and then iterated reads the log of the one job it started.
+A sandbox runs commands as jobs the same way: `create_sandbox` answers a `Sandbox` that carries its client, and its `exec` starts one: completed, it answers the exit code; iterated, it yields its output, a line as it is written, then how it ended.
+Awaited, it is a `SandboxJob` that carries its client too: what signals the process, writes to its stdin and reads its log again.
+One value awaited and then iterated reads the log of the one job it started.
 
 ```python
 from virtx import SandboxJobEnd, Stderr, Stdout
 
 sandbox = await client.create_sandbox("alpine:3.20")
+print("exited", await sandbox.exec(["uname", "-a"]).complete(print=True))
 run = sandbox.exec(["echo", "hi"])
 job = await run
 print("started", job.id)
@@ -68,7 +75,7 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
-A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python
 volume = await client.create_volume("data")
@@ -79,7 +86,7 @@ for entry in await volume.read_dir("in"):
 print(await volume.read_file("in/notes.txt"))
 ```
 
-What acts on a sandbox, a volume, a snapshot or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume`, `get_snapshot` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
+What acts on a sandbox, a volume or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
 
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 

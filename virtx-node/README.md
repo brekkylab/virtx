@@ -8,17 +8,23 @@ The package also installs the `virtx` command, the one in `libvirtx_core`: `npx 
 const { Client, Recipe } = require('@brekkylab/virtx')
 
 const client = Client.spawn()
-for await (const entry of client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest')) {
-  if ('log' in entry) console.log(entry.log)
-  else if ('end' in entry) console.log('ended', entry.end)
-}
+const digest = await client.buildImage(new Recipe('alpine:3.20').run('apk add jq'), 'jq:latest').complete({ print: true })
+console.log('built', digest)
 await client.close()
 ```
 
-A build, pull or push is a job the server runs. Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job. Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again. Leaving a loop leaves the job running; its `remove` cancels it. A command in a sandbox is a job of the sandbox's, its output read the same way. Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
+A build, pull or push is a job the server runs.
+Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job.
+Its `complete` follows the job to its end and answers what it ended with, printing the log as it is read with `{ print: true }`.
+An image job that fails throws its `VirtxError`, from `complete` and from its log alike, in place of the `end` entry.
+Awaited, it gives an `ImageJob` that carries its client, whose `log` reads its log again, or from after an entry's `id` to pick it up again.
+Leaving a loop leaves the job running; its `remove` cancels it.
+A command in a sandbox is a job of the sandbox's, completed or read the same way.
+Awaited, it is a `SandboxJob` that carries its client: `signal`, `writeStdin`, `log` and `remove` act on it.
 
 ```js
 const sandbox = await client.createSandbox('alpine:3.20')
+console.log('exited', await sandbox.exec(['uname', '-a']).complete({ print: true }))
 const run = sandbox.exec(['echo', 'hi'])
 const job = await run
 console.log('started', job.id)
@@ -46,7 +52,7 @@ console.log('reach it at', forwarder.address)
 forwarder.close()
 ```
 
-A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```js
 const volume = await client.createVolume('data')
@@ -56,7 +62,7 @@ for (const entry of await volume.readDir('in')) console.log(entry.name, entry.me
 console.log((await volume.readFile('in/notes.txt')).toString())
 ```
 
-What acts on a sandbox, a volume, a snapshot or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
+What acts on a sandbox, a volume or a job is its handle: code that holds only a name or an id gets the handle first, as `await client.getVolume('data')` or `await (await client.getSandbox(id)).job(jobId)`.
 
 The library is the one given to `load(file)`, or `$VIRTX_CORE_LIB`, or a copy beside `index.js`, or the one in the platform's package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `libraryPath()` and takes the pointer from `client.clone().intoRaw()`.
 

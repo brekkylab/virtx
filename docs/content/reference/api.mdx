@@ -9,7 +9,8 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is iterated for its log or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+In Rust, `complete` is the job's, after awaiting the call.
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
 
@@ -18,11 +19,31 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
-| `Client.connect(url, auth, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request. A token is sent over plain `http` only to this machine's loopback. |
-| `set_auth(auth)`, `set_headers(headers)` | `None` | Replace what every later request sends. |
+| `Client.connect(url, auth, project, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. A token is sent over plain `http` only to this machine's loopback. |
+| `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. Without a project, a request is in its user's own, `default`. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
 | `ensure_virtx()` | `str`, its path | Fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it. Node.js calls it `ensureVirtx`. |
+
+## Projects
+
+Everything on a server belongs to a project, which a client names at `connect`, or with `set_project`: a project of the user's by its name, or any by its id.
+See [Projects](https://github.com/brekkylab/virtx/blob/main/virtx-core/PROTOCOL.md#projects).
+
+| Call | Returns | What it does |
+| --- | --- | --- |
+| `create_project(name)` | `Project` | Makes a project, its maker its owner. |
+| `list_project()`, `get_project(name)` | `list[Project]`, `Project` | The projects the client has a role in; `get_project` takes a name of the user's or an id. |
+
+A `Project` has its `id`, its `name`, its `owner` (none for one made over stdio) and the client's `role` in it, `owner` or `member`.
+Over stdio it has no members, and the calls on them are refused with `404`:
+
+| Call | Returns | What it does |
+| --- | --- | --- |
+| `members()` | `list[ProjectMemberListOutputItem]` | Its members, each a `user` and a `role`. |
+| `set_member(user, role)` | `ProjectMemberListOutputItem` | Gives `user` the role, adding them if they are no member: an owner's to do. |
+| `remove_member(user)` | `None` | Takes `user`'s role away: an owner's to do, or the user's own, leaving it. |
+| `remove()` | `None` | Deletes it and everything in it: an owner's to do, refused with `409` while a sandbox lives in it. |
 
 ## Images
 
@@ -50,7 +71,7 @@ See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `cre
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, with the options given. |
+| `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, with the options given. `image` has to be on the server already, pulled or built: this does not pull it. |
 | `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, without their ports. |
 
 A `Sandbox` carries its client, and acts on itself:
@@ -59,11 +80,11 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
-| `remove()` | `None` | Stops it, ends its jobs, and forgets it, keeping its snapshot and volumes. |
+| `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `snapshot`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
 
 ## Jobs
 
@@ -76,6 +97,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `get()` | `SandboxJob` | The job as the server has it now. |
+| `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
 | `log(after)` | `LogEntry`s | Its output, from its start or after entry `after`, until its end. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
 | `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
@@ -96,22 +118,26 @@ It has its `id`, its `kind`, the `reference` it points or pushes, whether it is 
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `get()` | `ImageJob` | The job as the server has it now. |
-| `log(after)` | `LogEntry`s | Its log, from its start or after entry `after`, until its end. |
+| `complete(print)` | `str` | Follows it to its end, printing its log if `print`, and answers the digest it made. Raises the error it failed with. |
+| `log(after)` | `LogEntry`s | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. |
 | `remove()` | `None` | Cancels it if it runs, and forgets the job. |
 
 In Rust, `ImageJob` answers `id()` and `info()`.
 
-## Snapshots
+## Errors
 
-See [Keeping work in snapshots](/docs/guides/keeping-snapshots/).
+A call that fails raises a `VirtxError`, thrown in Node.js and an `Error` in Rust.
+Its `source` says where it failed, and `status` the HTTP status when the server refused the request:
 
-| Call | Returns | What it does |
+| `source` | `status` | When |
 | --- | --- | --- |
-| `create_snapshot(name, disk_gib)` | `Snapshot` | Makes an empty snapshot holding at most `disk_gib` GiB. Without a name, the server picks one. |
-| `list_snapshot()`, `get_snapshot(name)` | `list[Snapshot]`, `Snapshot` | The server's snapshots. |
+| `server` | the HTTP status | The server refused the request, such as `404` for what does not exist and `409` for what is in use. |
+| `job` | none | The job the call started failed, such as a build whose step exited nonzero. |
+| `transport` | none | The request or its answer did not get through: the connection failed or the session ended. |
+| `client` | none | This side failed: an argument, a file on this machine, or an answer it could not read. |
 
-A `Snapshot` has its `name`, `size` and whether it is `in_use`, and its [files](#files).
-Its `remove()` deletes it and everything in it; refused with `409` while a sandbox holds it.
+Tell errors apart by `source` and `status`, not by the message.
+In Rust, `source_kind()` answers the `Source` and `status()` the status.
 
 ## Volumes
 
@@ -133,7 +159,7 @@ A `Volume` has its `name` and `size`, and its [files](#files):
 
 ## Files
 
-A `Sandbox`, a `Snapshot` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
+A `Sandbox` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -168,6 +194,7 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_STDIO_VERSION` | `spawn`, CLI | Another version of `virtx-stdio` to fetch. |
 | `VIRTX_DIST_URL` | `spawn`, CLI | Where releases are fetched from. |
 | `VIRTX_HOME` | `spawn`, CLI | Where virtx keeps what it fetches on this machine. |
-| `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP in place of a server started here. |
-| `VIRTX_TOKEN` | CLI | The bearer token sent to `VIRTX_HOST`. |
+| `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
+| `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
+| `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
 | `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |

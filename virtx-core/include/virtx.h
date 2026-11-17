@@ -27,8 +27,8 @@
 // Succeeded: the output, as JSON, is written.
 #define VIRTX_OK 0
 
-// Failed: the error is written, as `{"message": "...", "status": 404}`, `status` only for a
-// request the server refused with that HTTP status.
+// Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
+// `source` where it failed, `status` only for a request the server refused with it.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.
@@ -79,14 +79,14 @@ extern "C" {
 int virtx_cli_main(const char *const *argv, size_t argc);
 
 // Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
-// the server of this library's version, fetched first if this host has none -- see
-// `virtx_ensure_virtx`, which does that fetch alone.
+// stdout, and write the client, held once, to `client`. `virtx_ensure_virtx` answers the
+// path of `virtx-stdio`, the server of this library's version.
 //
 // # Safety
 //
-// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
-// is. `client` is writable. `error` is null or writable.
+// `program` is NUL-terminated UTF-8, as each of the `args_len` pointers in `args` is; a
+// null one is refused.
+// `client` is writable. `error` is null or writable.
 int virtx_client_spawn(const char *program,
                        const char *const *args,
                        size_t args_len,
@@ -94,22 +94,18 @@ int virtx_client_spawn(const char *program,
                        struct VirtxBytes *error);
 
 // Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
-// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
-// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
-// why written to `out`.
+// is not there, and answer its path as a JSON string: what `virtx_client_spawn` is given
+// to start it. Answered off any client's runtime, so this is called before one is opened.
 //
 // The server is kept one directory per version, so a library that is upgraded fetches
 // its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
 // version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-//
-// # Safety
-//
-// `out` is writable.
-int virtx_ensure_virtx(struct VirtxBytes *out);
+struct VirtxFuture *virtx_ensure_virtx(void);
 
 // Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, and
+// the `headers_len` headers in `headers` -- each its name
 // then its value, so `2 * headers_len` strings -- with every request, and write the
 // client, held once, to `client`. The headers are whatever else the server asks of each
 // request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
@@ -159,6 +155,20 @@ int virtx_client_set_headers(struct VirtxClient *client,
                              size_t headers_len,
                              struct VirtxBytes *error);
 
+// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
+// transport, in place of a `virtx-project` among the headers given. With a null one, that
+// header names it where there is one, and otherwise none is named, for the user's own
+// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+// the project unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+// `project` is null or NUL-terminated. `error` is null or writable.
+int virtx_client_set_project(struct VirtxClient *client,
+                             const char *project,
+                             struct VirtxBytes *error);
+
 // Hold `client` once more, for another holder to release.
 //
 // # Safety
@@ -166,15 +176,16 @@ int virtx_client_set_headers(struct VirtxClient *client,
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 void virtx_client_retain(struct VirtxClient *client);
 
-// Let go of `client`. The last holder's release answers every request not yet answered
-// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
-// polled and freed. Null does nothing.
+// Let go of `client`, and answer, with `VIRTX_OK` and nothing, once it is let go of. The
+// last holder's release answers every request not yet answered with `VIRTX_ERROR`, ends
+// the session, and frees it, answering once that is done; its futures and streams stay to
+// be polled and freed. Any other release answers at once. Freeing the future does not
+// stop the ending. Null is let go of at once.
 //
 // # Safety
 //
-// `client` is null, or held by the caller, who does not use it again. Not called from a
-// `wake`, which runs on the runtime this may stop.
-void virtx_client_release(struct VirtxClient *client);
+// `client` is null, or held by the caller, who does not use it again.
+struct VirtxFuture *virtx_client_release(struct VirtxClient *client);
 
 // Starts building `recipe`, to point `reference` (`name:tag`) at it, given
 // `{"recipe": {"v": 1, "base": "alpine:3.20", "steps": [{"run": "..."}]}, "reference": "name:tag"}`.
@@ -184,8 +195,8 @@ void virtx_client_release(struct VirtxClient *client);
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
-// read after this returns.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+// is `args_len` readable bytes, not read after this returns.
 struct VirtxFuture *virtx_client_build_image(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
@@ -219,7 +230,7 @@ struct VirtxFuture *virtx_client_push_image(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image_job(struct VirtxClient *client);
 
 // Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
@@ -245,8 +256,8 @@ struct VirtxFuture *virtx_client_remove_image_job(struct VirtxClient *client,
 // The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
 // its start, or after its `after`th entry. Its items are the entries, each with its number
 // beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
-// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
-// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` last, or, if the
+// job failed, its error in that entry's place. Freeing it leaves the job as it is.
 //
 // # Safety
 //
@@ -260,7 +271,7 @@ struct VirtxStream *virtx_client_image_job_log(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
 // Points the tag `target` at the image `source` names, given
@@ -325,10 +336,80 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 
-// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
+// Answers with each project the client has a role in, as
+// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+// `owner` for one of no user's, such as one made over stdio.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_volume`.
+struct VirtxFuture *virtx_client_list_project(struct VirtxClient *client);
+
+// Makes the project `name`, the client its owner, given `{"name": "..."}`. Answers with
+// the project, as `virtx_client_list_project` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_project(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Answers with the project `name` names, a project of the user's by name or any by its id,
+// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_project(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Deletes the project `name` and everything in it, given `{"name": "..."}`. Answers with
+// `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_project(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Given `{"project": "..."}`, answers with the project's members, as
+// `[{"user": "...", "role": "owner" or "member"}, ...]`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_project_member(struct VirtxClient *client,
+                                                     const uint8_t *args,
+                                                     size_t args_len);
+
+// Given `{"project": "...", "user": "...", "role": "owner" or "member"}`, gives the user
+// the role in the project. Answers with the member, as `virtx_client_list_project_member`
+// answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_set_project_member(struct VirtxClient *client,
+                                                    const uint8_t *args,
+                                                    size_t args_len);
+
+// Given `{"project": "...", "user": "..."}`, takes the user's role in the project away.
+// Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_project_member(struct VirtxClient *client,
+                                                       const uint8_t *args,
+                                                       size_t args_len);
+
+// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //
 // Every value here is JSON. A request that takes arguments takes them as `args`, the
 // `args_len` bytes of one object.
@@ -336,44 +417,6 @@ struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 // # Safety
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
-
-// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
-// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
-// with the snapshot, as `virtx_client_list_snapshot` answers each.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client,
-                                                 const uint8_t *args,
-                                                 size_t args_len);
-
-// Answers with the snapshot `name`, given `{"name": "..."}`, as
-// `virtx_client_list_snapshot` answers each.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_get_snapshot(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
-
-// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
-// `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
-                                                 const uint8_t *args,
-                                                 size_t args_len);
-
-// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
-//
-// # Safety
-//
-// `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client);
 
 // Keeps a new, empty volume under `name`, or a name the server picks if there is none,
@@ -440,9 +483,8 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
                                                      const uint8_t *args,
                                                      size_t args_len);
 
-// The files of a volume or a snapshot: what is at `path`, given
-// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
-// `{"sandbox": "...", "path": "..."}`, the path
+// The files of a volume or a sandbox: what is at `path`, given
+// `{"volume": "...", "path": "..."}` or `{"sandbox": "...", "path": "..."}`, the path
 // relative to its root as `dir/file.txt`. Answers with
 // `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
 // the Unix epoch and `etag` as the server spells it, each only if the server says.
@@ -565,7 +607,7 @@ struct VirtxFuture *virtx_client_remove_file(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
 
-// Moves what is at `from` to `to` in the same volume or snapshot, given
+// Moves what is at `from` to `to` in the same volume or sandbox, given
 // `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
 // and false without it: whether to replace what is at `to`, which is otherwise refused.
 // Answers with `null`.
@@ -588,19 +630,18 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
-// `snapshot` only for one that has one.
+// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
-// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-// `{"type": "tag", "tag": "name:tag"}` or
+// `{"image": {...}, "network": bool, "ports": [n],
+// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
+// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
+// the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
 // sandbox as `virtx_client_list_sandbox` answers each, and
 // `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
@@ -773,16 +814,15 @@ void virtx_stream_free(struct VirtxStream *stream);
 
 // Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
 // `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
-// `{"address": "127.0.0.1:n"}`, or the error's message. Blocks until it is open.
+// `{"address": "127.0.0.1:n"}`, or the error's message.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`, and `args` as in
-// `virtx_client_build_image`. `forwarder` and `out` are writable. Not called from a `wake`,
-// which runs on the runtime this blocks on.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held, and
+// `args` as in `virtx_client_build_image`. `forwarder` and `out` are writable.
 int virtx_port_forwarder_open(struct VirtxClient *client,
                               const uint8_t *args,
                               size_t args_len,

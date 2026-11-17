@@ -1,7 +1,7 @@
 //! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
-//! made by the module of what it names: [`image`](crate::image), [`snapshot`](crate::snapshot),
-//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a snapshot
-//! over WebDAV.
+//! made by the module of what it names: [`project`](crate::project), [`image`](crate::image),
+//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a
+//! sandbox over WebDAV.
 
 use std::{io, path::PathBuf};
 
@@ -17,11 +17,14 @@ use crate::{
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
     },
+    project::{
+        self, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
+        ProjectMemberSetArgs, Role,
+    },
     sandbox::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
         SandboxSignalArgs, SandboxStdinArgs,
     },
-    snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
@@ -60,7 +63,7 @@ impl Client {
     /// credentials it wants, and `headers`, whatever else it asks of each request, with every
     /// request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
     /// would go in the clear: over `http` to any host but this machine.
-    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Client> {
+    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> Result<Client, Error> {
         let inner = TransportClient::connect(url, auth, headers)?;
         Ok(Client { inner })
     }
@@ -69,7 +72,7 @@ impl Client {
     /// [`connect`](Self::connect): a new token, when the server's are short-lived. A forwarder
     /// already open sends it with its next connection. Over stdio, where none is sent, nothing
     /// changes. Refused as at `connect`, the auth unchanged.
-    pub fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+    pub fn set_auth(&self, auth: Auth) -> Result<(), Error> {
         self.inner.set_auth(auth)
     }
 
@@ -78,6 +81,69 @@ impl Client {
     /// connection. Over stdio, where none are sent, nothing changes.
     pub fn set_headers(&self, headers: HeaderMap) {
         self.inner.set_headers(headers);
+    }
+
+    /// Name `project` in every request from now on, over either transport -- a project of the
+    /// user's by name, or any by its id -- in place of a `virtx-project` among the headers given.
+    /// With `None`, that header names it where there is one, and otherwise none is named, for
+    /// the user's own project, [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). Refused for a name no
+    /// header carries, the project unchanged.
+    pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
+        self.inner.set_project(project)
+    }
+
+    /// Every project the client has a role in, with the role.
+    pub async fn list_project(&self) -> Result<Vec<ProjectListOutputItem>, Error> {
+        project::client::list(&self.inner).await
+    }
+
+    /// Make the project `name`, the client its owner.
+    pub async fn create_project(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ProjectListOutputItem, Error> {
+        let args = ProjectCreateArgs { name: name.into() };
+        project::client::create(&self.inner, &args).await
+    }
+
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
+    pub async fn get_project(&self, name: impl AsRef<str>) -> Result<ProjectListOutputItem, Error> {
+        project::client::get(&self.inner, name.as_ref()).await
+    }
+
+    /// Delete the project `name` names, as [`get_project`](Self::get_project) reads it, and
+    /// everything in it.
+    pub async fn remove_project(&self, name: impl AsRef<str>) -> Result<(), Error> {
+        project::client::remove(&self.inner, name.as_ref()).await
+    }
+
+    /// The members of `project`, with their roles.
+    pub async fn list_project_member(
+        &self,
+        project: impl AsRef<str>,
+    ) -> Result<Vec<ProjectMemberListOutputItem>, Error> {
+        project::client::list_member(&self.inner, project.as_ref()).await
+    }
+
+    /// Give `user` `role` in `project`, adding them if they are no member.
+    pub async fn set_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+        role: Role,
+    ) -> Result<ProjectMemberListOutputItem, Error> {
+        let args = ProjectMemberSetArgs { role };
+        project::client::set_member(&self.inner, project.as_ref(), user.as_ref(), &args).await
+    }
+
+    /// Take `user`'s role in `project` away.
+    pub async fn remove_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+    ) -> Result<(), Error> {
+        project::client::remove_member(&self.inner, project.as_ref(), user.as_ref()).await
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
@@ -139,7 +205,8 @@ impl Client {
     }
 
     /// The log of the image job `id`, from its start or after its `after`th entry, until its
-    /// `end` entry. Dropping it leaves the job as it is.
+    /// `end` entry, or [`Error::Job`] in its place if the job failed. Dropping it leaves the
+    /// job as it is.
     pub fn image_job_log(
         &self,
         id: &str,
@@ -204,38 +271,6 @@ impl Client {
     /// Delete each image no tag points at and no sandbox uses, and what only such images held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
         image::client::prune(&self.inner).await
-    }
-
-    /// Every snapshot the server holds.
-    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
-        snapshot::client::list(&self.inner).await
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub async fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        snapshot::client::create(&self.inner, &args).await
-    }
-
-    /// The snapshot `name`.
-    pub async fn get_snapshot(
-        &self,
-        name: impl AsRef<str>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        snapshot::client::get(&self.inner, name.as_ref()).await
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub async fn remove_snapshot(&self, name: impl AsRef<str>) -> Result<(), Error> {
-        snapshot::client::remove(&self.inner, name.as_ref()).await
     }
 
     /// Every volume the server holds.
@@ -401,6 +436,9 @@ impl Client {
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
+    ///
+    /// The image has to be on the server already, pulled or built: this does not pull it, and a
+    /// tag the server has no image by is refused with `404`.
     pub async fn create_sandbox(&self, args: &SandboxCreateArgs) -> Result<Sandbox, Error> {
         sandbox::client::create(&self.inner, args).await
     }
@@ -410,7 +448,8 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
@@ -514,26 +553,36 @@ pub(crate) mod ffi {
 
     use super::Client;
     use crate::{
-        Auth,
+        Auth, Error,
         ffi::{
-            Failure, Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure,
-            json, release, retain, share, write,
+            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, done, encode, failure, json,
+            release, retain, share, start_on_thread, write,
         },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
+        project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs},
-        snapshot::SnapshotCreateArgs,
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
 
-    /// What names a snapshot or a volume: `{"name": "..."}`.
+    /// What names a project or a volume: `{"name": "..."}`.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Name {
         name: String,
+    }
+
+    /// What names a project's members, or one of them, and the role to give them:
+    /// `{"project": "...", "user": "...", "role": "owner" or "member"}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Member {
+        project: String,
+        user: Option<String>,
+        role: Option<Role>,
     }
 
     /// What names a sandbox or an image job: `{"id": "..."}`.
@@ -588,18 +637,23 @@ pub(crate) mod ffi {
         after: Option<u64>,
     }
 
+    /// The argument that names no `field`, which the call takes.
+    fn missing(field: &str) -> Error {
+        Error::Client(format!("missing field `{field}`"))
+    }
+
     /// A `Client`, as C holds it.
     pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
-    /// the server of this library's version, fetched first if this host has none -- see
-    /// `virtx_ensure_virtx`, which does that fetch alone.
+    /// stdout, and write the client, held once, to `client`. `virtx_ensure_virtx` answers the
+    /// path of `virtx-stdio`, the server of this library's version.
     ///
     /// # Safety
     ///
-    /// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
-    /// is. `client` is writable. `error` is null or writable.
+    /// `program` is NUL-terminated UTF-8, as each of the `args_len` pointers in `args` is; a
+    /// null one is refused.
+    /// `client` is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_spawn(
         program: *const c_char,
@@ -609,74 +663,50 @@ pub(crate) mod ffi {
         error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
-            let utf8 = |ptr| {
-                unsafe { CStr::from_ptr(ptr) }
-                    .to_str()
-                    .map_err(|e| e.to_string())
-            };
-            let program = if program.is_null() {
-                None
-            } else {
-                Some(utf8(program)?.to_string())
-            };
+            let program = unsafe { utf8(program) }?.to_string();
             let args = (0..args_len)
-                .map(|i| utf8(unsafe { *args.add(i) }).map(str::to_string))
+                .map(|i| unsafe { utf8(*args.add(i)) }.map(str::to_string))
                 .collect::<Result<Vec<_>, _>>()?;
             Runtime::open(|| {
-                let mut command = match program {
-                    Some(program) => Command::new(program),
-                    // On the runtime being opened, which this thread is not a worker of.
-                    None => Command::new(
-                        tokio::runtime::Handle::current()
-                            .block_on(crate::ensure_virtx())
-                            .map_err(|e| format!("fetching the server: {e:#}"))?,
-                    ),
-                };
+                let mut command = Command::new(program);
                 command.args(args);
-                Client::spawn(command).map_err(|e| format!("starting the server: {e}"))
+                Client::spawn(command)
+                    .map_err(|e| Error::Client(format!("starting the server: {e}")))
             })
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
 
     /// Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
-    /// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
-    /// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
-    /// why written to `out`.
+    /// is not there, and answer its path as a JSON string: what `virtx_client_spawn` is given
+    /// to start it. Answered off any client's runtime, so this is called before one is opened.
     ///
     /// The server is kept one directory per version, so a library that is upgraded fetches
     /// its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
     /// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-    ///
-    /// # Safety
-    ///
-    /// `out` is writable.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_ensure_virtx(out: *mut VirtxBytes) -> c_int {
-        let fetched = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())
-            .and_then(|runtime| {
-                runtime
-                    .block_on(crate::ensure_virtx())
-                    .map_err(|e| format!("{e:#}"))
-            })
-            .map(|path| path.to_string_lossy().into_owned());
-        let (status, bytes) = encode(fetched);
-        unsafe { write(out, bytes) };
-        status
+    pub extern "C" fn virtx_ensure_virtx() -> *mut VirtxFuture {
+        start_on_thread(async {
+            encode(
+                crate::ensure_virtx()
+                    .await
+                    .map(|path| path.to_string_lossy().into_owned()),
+            )
+        })
     }
 
-    /// `ptr` as a `&str`.
+    /// `ptr` as a `&str`; a null one is refused.
     ///
     /// # Safety
     ///
-    /// `ptr` is NUL-terminated UTF-8, kept for `'a`.
-    unsafe fn utf8<'a>(ptr: *const c_char) -> Result<&'a str, String> {
+    /// `ptr` is null or NUL-terminated, kept for `'a`.
+    unsafe fn utf8<'a>(ptr: *const c_char) -> Result<&'a str, Error> {
+        if ptr.is_null() {
+            return Err(Error::Client("a string argument is null".into()));
+        }
         unsafe { CStr::from_ptr(ptr) }
             .to_str()
-            .map_err(|e| e.to_string())
+            .map_err(|e| Error::Client(e.to_string()))
     }
 
     /// The `headers_len` headers in `headers`, each its name then its value, so `2 *
@@ -688,26 +718,29 @@ pub(crate) mod ffi {
     unsafe fn header_map(
         headers: *const *const c_char,
         headers_len: usize,
-    ) -> Result<HeaderMap, String> {
+    ) -> Result<HeaderMap, Error> {
         let mut map = HeaderMap::with_capacity(headers_len);
         for i in 0..headers_len {
             let name = unsafe { utf8(*headers.add(2 * i)) }?;
             let value = unsafe { utf8(*headers.add(2 * i + 1)) }?;
             map.insert(
                 HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|e| format!("header {name}: {e}"))?,
-                HeaderValue::from_str(value).map_err(|e| format!("header {name}: {e}"))?,
+                    .map_err(|e| Error::Client(format!("header {name}: {e}")))?,
+                HeaderValue::from_str(value)
+                    .map_err(|e| Error::Client(format!("header {name}: {e}")))?,
             );
         }
         Ok(map)
     }
 
-    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, or null for none.
+    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, `{"type":
+    /// "command", "program": "...", "args": [...]}` for the token a command prints, or null for
+    /// none.
     ///
     /// # Safety
     ///
     /// `auth` is null, or `auth_len` readable bytes.
-    unsafe fn auth(auth: *const u8, auth_len: usize) -> Result<Auth, String> {
+    unsafe fn auth(auth: *const u8, auth_len: usize) -> Result<Auth, Error> {
         if auth.is_null() || auth_len == 0 {
             return Ok(Auth::None);
         }
@@ -716,7 +749,8 @@ pub(crate) mod ffi {
 
     /// Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
     /// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-    /// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+    /// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, and
+    /// the `headers_len` headers in `headers` -- each its name
     /// then its value, so `2 * headers_len` strings -- with every request, and write the
     /// client, held once, to `client`. The headers are whatever else the server asks of each
     /// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
@@ -741,7 +775,7 @@ pub(crate) mod ffi {
             let url = unsafe { utf8(url) }?;
             let auth = unsafe { self::auth(auth, auth_len) }?;
             let map = unsafe { header_map(headers, headers_len) }?;
-            Runtime::open(|| Client::connect(url, auth, map).map_err(|e| format!("{e:#}")))
+            Runtime::open(|| Client::connect(url, auth, map))
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
@@ -763,16 +797,12 @@ pub(crate) mod ffi {
         auth_len: usize,
         error: *mut VirtxBytes,
     ) -> c_int {
-        let set = unsafe { self::auth(auth, auth_len) }.and_then(|auth| {
-            unsafe { &(*client).0 }
-                .value()
-                .set_auth(auth)
-                .map_err(|e| format!("{e:#}"))
-        });
+        let set = unsafe { self::auth(auth, auth_len) }
+            .and_then(|auth| unsafe { &(*client).0 }.value().set_auth(auth));
         match set {
             Ok(()) => VIRTX_OK,
-            Err(message) => {
-                let (status, message) = failure(message);
+            Err(failed) => {
+                let (status, message) = failure(failed);
                 unsafe { write(error, message) };
                 status
             }
@@ -802,8 +832,39 @@ pub(crate) mod ffi {
                 unsafe { &(*client).0 }.value().set_headers(map);
                 VIRTX_OK
             }
-            Err(message) => {
-                let (status, message) = failure(message);
+            Err(failed) => {
+                let (status, message) = failure(failed);
+                unsafe { write(error, message) };
+                status
+            }
+        }
+    }
+
+    /// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
+    /// transport, in place of a `virtx-project` among the headers given. With a null one, that
+    /// header names it where there is one, and otherwise none is named, for the user's own
+    /// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+    /// the project unchanged.
+    ///
+    /// # Safety
+    ///
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+    /// `project` is null or NUL-terminated. `error` is null or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_project(
+        client: *mut VirtxClient,
+        project: *const c_char,
+        error: *mut VirtxBytes,
+    ) -> c_int {
+        let set = match project.is_null() {
+            true => Ok(None),
+            false => unsafe { utf8(project) }.map(Some),
+        }
+        .and_then(|project| unsafe { &(*client).0 }.value().set_project(project));
+        match set {
+            Ok(()) => VIRTX_OK,
+            Err(failed) => {
+                let (status, message) = failure(failed);
                 unsafe { write(error, message) };
                 status
             }
@@ -820,18 +881,20 @@ pub(crate) mod ffi {
         unsafe { retain(client) };
     }
 
-    /// Let go of `client`. The last holder's release answers every request not yet answered
-    /// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
-    /// polled and freed. Null does nothing.
+    /// Let go of `client`, and answer, with `VIRTX_OK` and nothing, once it is let go of. The
+    /// last holder's release answers every request not yet answered with `VIRTX_ERROR`, ends
+    /// the session, and frees it, answering once that is done; its futures and streams stay to
+    /// be polled and freed. Any other release answers at once. Freeing the future does not
+    /// stop the ending. Null is let go of at once.
     ///
     /// # Safety
     ///
-    /// `client` is null, or held by the caller, who does not use it again. Not called from a
-    /// `wake`, which runs on the runtime this may stop.
+    /// `client` is null, or held by the caller, who does not use it again.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) {
-        if let Some(VirtxClient(runtime)) = unsafe { release(client) } {
-            runtime.close(Client::close);
+    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) -> *mut VirtxFuture {
+        match unsafe { release(client) } {
+            Some(VirtxClient(runtime)) => runtime.close(Client::close),
+            None => done(),
         }
     }
 
@@ -843,8 +906,8 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
-    /// read after this returns.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+    /// is `args_len` readable bytes, not read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
         client: *mut VirtxClient,
@@ -854,10 +917,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<ImageBuildArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let ImageBuildArgs { recipe, reference } = args?;
-            client
-                .build_image(recipe, reference)
-                .await
-                .map_err(Failure::from)
+            client.build_image(recipe, reference).await
         })
     }
 
@@ -879,10 +939,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<ImagePullArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let ImagePullArgs { reference, auth } = args?;
-            client
-                .pull_image(reference, auth)
-                .await
-                .map_err(Failure::from)
+            client.pull_image(reference, auth).await
         })
     }
 
@@ -903,10 +960,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<ImagePushArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let ImagePushArgs { reference, auth } = args?;
-            client
-                .push_image(reference, auth)
-                .await
-                .map_err(Failure::from)
+            client.push_image(reference, auth).await
         })
     }
 
@@ -914,13 +968,12 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image_job(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_image_job().await.map_err(Failure::from) })
+        unsafe { &(*client).0 }.future(|client| async move { client.list_image_job().await })
     }
 
     /// Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
@@ -936,9 +989,7 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.get_image_job(args?.id).await.map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }.future(|client| async move { client.get_image_job(args?.id).await })
     }
 
     /// Cancels the image job `id` if it runs, and forgets it, given `{"id": "..."}`. Answers
@@ -954,19 +1005,15 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_image_job(args?.id)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_image_job(args?.id).await })
     }
 
     /// The log of the image job `id`, given `{"id": "...", "after": n}`, `after` optional: from
     /// its start, or after its `after`th entry. Its items are the entries, each with its number
     /// beside it: `{"id": n, "log": "..."}`, `{"id": n, "truncated": {}}` once if the log
-    /// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` or
-    /// `{"id": n, "end": {"error": "..."}}` last. Freeing it leaves the job as it is.
+    /// reached the server's limit, then `{"id": n, "end": {"digest": "..."}}` last, or, if the
+    /// job failed, its error in that entry's place. Freeing it leaves the job as it is.
     ///
     /// # Safety
     ///
@@ -983,13 +1030,13 @@ pub(crate) mod ffi {
                 let ImageJobLogArgs { id, after } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(Failure::from(error));
+                        yield Err(error);
                         return;
                     }
                 };
                 let mut log = client.image_job_log(&id, after);
                 while let Some(entry) = log.next().await {
-                    yield entry.map_err(Failure::from);
+                    yield entry;
                 }
             }
         })
@@ -1000,11 +1047,10 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_image().await.map_err(Failure::from) })
+        unsafe { &(*client).0 }.future(|client| async move { client.list_image().await })
     }
 
     /// Points the tag `target` at the image `source` names, given
@@ -1023,10 +1069,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<ImageTagArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let ImageTagArgs { source, target } = args?;
-            client
-                .tag_image(source, target)
-                .await
-                .map_err(Failure::from)
+            client.tag_image(source, target).await
         })
     }
 
@@ -1043,12 +1086,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<ImageUntagArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .untag_image(args?.reference)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.untag_image(args?.reference).await })
     }
 
     /// Removes the image `reference` names and every tag on it in that name, given
@@ -1064,12 +1103,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<ImageRemoveArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_image(args?.reference)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_image(args?.reference).await })
     }
 
     /// Writes the image `reference` names to `path` as an OCI image layout in a tar archive,
@@ -1093,13 +1128,13 @@ pub(crate) mod ffi {
                 let ImageDownloadArgs { reference, path } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(Failure::from(error));
+                        yield Err(error);
                         return;
                     }
                 };
                 let mut download = client.download_image(reference, path);
                 while let Some(event) = download.next().await {
-                    yield event.map_err(Failure::from);
+                    yield event;
                 }
             }
         })
@@ -1125,13 +1160,13 @@ pub(crate) mod ffi {
                 let ImageUploadArgs { path, reference } = match args {
                     Ok(args) => args,
                     Err(error) => {
-                        yield Err(Failure::from(error));
+                        yield Err(error);
                         return;
                     }
                 };
                 let mut upload = client.upload_image(path, reference);
                 while let Some(event) = upload.next().await {
-                    yield event.map_err(Failure::from);
+                    yield event;
                 }
             }
         })
@@ -1143,16 +1178,142 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_prune_image(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.prune_image().await.map_err(Failure::from) })
+        unsafe { &(*client).0 }.future(|client| async move { client.prune_image().await })
     }
 
-    /// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
+    /// Answers with each project the client has a role in, as
+    /// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+    /// `owner` for one of no user's, such as one made over stdio.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_volume`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_project(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }.future(|client| async move { client.list_project().await })
+    }
+
+    /// Makes the project `name`, the client its owner, given `{"name": "..."}`. Answers with
+    /// the project, as `virtx_client_list_project` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ProjectCreateArgs>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.create_project(args?.name).await })
+    }
+
+    /// Answers with the project `name` names, a project of the user's by name or any by its id,
+    /// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move { client.get_project(args?.name).await })
+    }
+
+    /// Deletes the project `name` and everything in it, given `{"name": "..."}`. Answers with
+    /// `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_project(args?.name).await })
+    }
+
+    /// Given `{"project": "..."}`, answers with the project's members, as
+    /// `[{"user": "...", "role": "owner" or "member"}, ...]`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_project_member(args?.project).await })
+    }
+
+    /// Given `{"project": "...", "user": "...", "role": "owner" or "member"}`, gives the user
+    /// the role in the project. Answers with the member, as `virtx_client_list_project_member`
+    /// answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Member {
+                project,
+                user,
+                role,
+            } = args?;
+            let user = user.ok_or_else(|| missing("user"))?;
+            let role = role.ok_or_else(|| missing("role"))?;
+            client.set_project_member(project, user, role).await
+        })
+    }
+
+    /// Given `{"project": "...", "user": "..."}`, takes the user's role in the project away.
+    /// Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Member { project, user, .. } = args?;
+            let user = user.ok_or_else(|| missing("user"))?;
+            client.remove_project_member(project, user).await
+        })
+    }
+
+    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
     ///
     /// Every value here is JSON. A request that takes arguments takes them as `args`, the
     /// `args_len` bytes of one object.
@@ -1161,86 +1322,10 @@ pub(crate) mod ffi {
     ///
     /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_snapshot(
-        client: *mut VirtxClient,
-    ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_snapshot().await.map_err(Failure::from) })
-    }
-
-    /// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
-    /// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
-    /// with the snapshot, as `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_create_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SnapshotCreateArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client
-                .create_snapshot(args.name, args.disk_gib)
-                .await
-                .map_err(Failure::from)
-        })
-    }
-
-    /// Answers with the snapshot `name`, given `{"name": "..."}`, as
-    /// `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_get_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.get_snapshot(args?.name).await.map_err(Failure::from)
-        })
-    }
-
-    /// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
-    /// `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_remove_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_snapshot(args?.name)
-                .await
-                .map_err(Failure::from)
-        })
-    }
-
-    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
-    ///
-    /// # Safety
-    ///
-    /// `client` is as in `virtx_client_list_snapshot`.
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_volume().await.map_err(Failure::from) })
+        unsafe { &(*client).0 }.future(|client| async move { client.list_volume().await })
     }
 
     /// Keeps a new, empty volume under `name`, or a name the server picks if there is none,
@@ -1257,12 +1342,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<VolumeCreateArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .create_volume(args?.name)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.create_volume(args?.name).await })
     }
 
     /// Answers with the volume `name`, given `{"name": "..."}`, as `virtx_client_list_volume`
@@ -1278,9 +1359,7 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.get_volume(args?.name).await.map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }.future(|client| async move { client.get_volume(args?.name).await })
     }
 
     /// Deletes the volume `name` and everything in it, given `{"name": "..."}`. Answers with
@@ -1296,12 +1375,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .remove_volume(args?.name)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_volume(args?.name).await })
     }
 
     /// Given `{"volume": "..."}`, answers with the volume's mounts, as
@@ -1317,12 +1392,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Mount>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .list_volume_mount(args?.volume)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_volume_mount(args?.volume).await })
     }
 
     /// Given `{"volume": "...", "path": "...", "source": {...}}`, the source as
@@ -1348,11 +1419,8 @@ pub(crate) mod ffi {
                 path,
                 source,
             } = args?;
-            let source = source.ok_or("missing field `source`")?;
-            client
-                .create_volume_mount(volume, path, source)
-                .await
-                .map_err(Failure::from)
+            let source = source.ok_or_else(|| missing("source"))?;
+            client.create_volume_mount(volume, path, source).await
         })
     }
 
@@ -1370,16 +1438,12 @@ pub(crate) mod ffi {
         let args = unsafe { json::<Mount>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let Mount { volume, path, .. } = args?;
-            client
-                .remove_volume_mount(volume, path)
-                .await
-                .map_err(Failure::from)
+            client.remove_volume_mount(volume, path).await
         })
     }
 
-    /// The files of a volume or a snapshot: what is at `path`, given
-    /// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
-    /// `{"sandbox": "...", "path": "..."}`, the path
+    /// The files of a volume or a sandbox: what is at `path`, given
+    /// `{"volume": "...", "path": "..."}` or `{"sandbox": "...", "path": "..."}`, the path
     /// relative to its root as `dir/file.txt`. Answers with
     /// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
     /// the Unix epoch and `etag` as the server spells it, each only if the server says.
@@ -1396,7 +1460,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.stat_file(&root, &path).await.map_err(Failure::from)
+            client.stat_file(&root, &path).await
         })
     }
 
@@ -1415,7 +1479,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.exists(&root, &path).await.map_err(Failure::from)
+            client.exists(&root, &path).await
         })
     }
 
@@ -1434,7 +1498,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.is_file(&root, &path).await.map_err(Failure::from)
+            client.is_file(&root, &path).await
         })
     }
 
@@ -1453,7 +1517,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.is_dir(&root, &path).await.map_err(Failure::from)
+            client.is_dir(&root, &path).await
         })
     }
 
@@ -1473,7 +1537,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.read_dir(&root, &path).await.map_err(Failure::from)
+            client.read_dir(&root, &path).await
         })
     }
 
@@ -1502,7 +1566,6 @@ pub(crate) mod ffi {
                 .read_file(&root, &path, offset, length)
                 .await
                 .map(|bytes| bytes.to_vec())
-                .map_err(Failure::from)
         })
     }
 
@@ -1521,7 +1584,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.read_text(&root, &path).await.map_err(Failure::from)
+            client.read_text(&root, &path).await
         })
     }
 
@@ -1558,7 +1621,6 @@ pub(crate) mod ffi {
             client
                 .write_file(&root, &path, content, if_match.as_deref())
                 .await
-                .map_err(Failure::from)
         })
     }
 
@@ -1577,7 +1639,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client.create_dir(&root, &path).await.map_err(Failure::from)
+            client.create_dir(&root, &path).await
         })
     }
 
@@ -1597,10 +1659,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<FilePathArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let FilePathArgs { root, path } = args?;
-            client
-                .create_dir_all(&root, &path)
-                .await
-                .map_err(Failure::from)
+            client.create_dir_all(&root, &path).await
         })
     }
 
@@ -1625,14 +1684,11 @@ pub(crate) mod ffi {
                 path,
                 missing_ok,
             } = args?;
-            client
-                .remove_file(&root, &path, missing_ok)
-                .await
-                .map_err(Failure::from)
+            client.remove_file(&root, &path, missing_ok).await
         })
     }
 
-    /// Moves what is at `from` to `to` in the same volume or snapshot, given
+    /// Moves what is at `from` to `to` in the same volume or sandbox, given
     /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
     /// and false without it: whether to replace what is at `to`, which is otherwise refused.
     /// Answers with `null`.
@@ -1654,10 +1710,7 @@ pub(crate) mod ffi {
                 to,
                 overwrite,
             } = args?;
-            client
-                .rename_file(&root, &from, &to, overwrite)
-                .await
-                .map_err(Failure::from)
+            client.rename_file(&root, &from, &to, overwrite).await
         })
     }
 
@@ -1681,33 +1734,28 @@ pub(crate) mod ffi {
                 to,
                 overwrite,
             } = args?;
-            client
-                .copy_file(&root, &from, &to, overwrite)
-                .await
-                .map_err(Failure::from)
+            client.copy_file(&root, &from, &to, overwrite).await
         })
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
-    /// `snapshot` only for one that has one.
+    /// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_sandbox(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.list_sandbox().await.map_err(Failure::from) })
+        unsafe { &(*client).0 }.future(|client| async move { client.list_sandbox().await })
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
-    /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
-    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}]}`, the image as
-    /// `{"type": "tag", "tag": "name:tag"}` or
+    /// `{"image": {...}, "network": bool, "ports": [n],
+    /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
+    /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
+    /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, and
     /// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
@@ -1722,9 +1770,7 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<SandboxCreateArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.create_sandbox(&args?).await.map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }.future(|client| async move { client.create_sandbox(&args?).await })
     }
 
     /// Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
@@ -1740,9 +1786,7 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.get_sandbox(args?.id).await.map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }.future(|client| async move { client.get_sandbox(args?.id).await })
     }
 
     /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
@@ -1758,9 +1802,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client.remove_sandbox(args?.id).await.map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_sandbox(args?.id).await })
     }
 
     /// Given `{"sandbox": "..."}`, answers with its jobs, each as `virtx_client_exec_sandbox`
@@ -1776,12 +1819,8 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Job>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            client
-                .list_sandbox_job(args?.sandbox)
-                .await
-                .map_err(Failure::from)
-        })
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_sandbox_job(args?.sandbox).await })
     }
 
     /// Starts a process, given `{"sandbox": "...", "cmd": ["..."], "stdin": bool,
@@ -1811,10 +1850,7 @@ pub(crate) mod ffi {
                 stdin,
                 timeout_ms,
             };
-            client
-                .exec_sandbox(sandbox, &args)
-                .await
-                .map_err(Failure::from)
+            client.exec_sandbox(sandbox, &args).await
         })
     }
 
@@ -1834,9 +1870,8 @@ pub(crate) mod ffi {
         unsafe { &(*client).0 }.future(|client| async move {
             let Job { sandbox, job, .. } = args?;
             client
-                .get_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
+                .get_sandbox_job(sandbox, job.ok_or_else(|| missing("job"))?)
                 .await
-                .map_err(Failure::from)
         })
     }
 
@@ -1856,9 +1891,8 @@ pub(crate) mod ffi {
         unsafe { &(*client).0 }.future(|client| async move {
             let Job { sandbox, job, .. } = args?;
             client
-                .remove_sandbox_job(sandbox, job.ok_or("missing field `job`")?)
+                .remove_sandbox_job(sandbox, job.ok_or_else(|| missing("job"))?)
                 .await
-                .map_err(Failure::from)
         })
     }
 
@@ -1885,11 +1919,10 @@ pub(crate) mod ffi {
             client
                 .signal_sandbox_job(
                     sandbox,
-                    job.ok_or("missing field `job`")?,
-                    signal.ok_or("missing field `signal`")?,
+                    job.ok_or_else(|| missing("job"))?,
+                    signal.ok_or_else(|| missing("signal"))?,
                 )
                 .await
-                .map_err(Failure::from)
         })
     }
 
@@ -1916,9 +1949,8 @@ pub(crate) mod ffi {
                 ..
             } = args?;
             client
-                .write_sandbox_job_stdin(sandbox, job.ok_or("missing field `job`")?, data, eof)
+                .write_sandbox_job_stdin(sandbox, job.ok_or_else(|| missing("job"))?, data, eof)
                 .await
-                .map_err(Failure::from)
         })
     }
 
@@ -1944,17 +1976,17 @@ pub(crate) mod ffi {
                 let (sandbox, job, after) = match args {
                     Ok(Job { sandbox, job: Some(job), after, .. }) => (sandbox, job, after),
                     Ok(_) => {
-                        yield Err(Failure::from("missing field `job`"));
+                        yield Err(missing("job"));
                         return;
                     }
                     Err(error) => {
-                        yield Err(Failure::from(error));
+                        yield Err(error);
                         return;
                     }
                 };
                 let mut log = client.sandbox_job_log(&sandbox, &job, after);
                 while let Some(entry) = log.next().await {
-                    yield entry.map_err(Failure::from);
+                    yield entry;
                 }
             }
         })

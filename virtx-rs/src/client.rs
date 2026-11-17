@@ -2,8 +2,12 @@
 
 use std::{
     ffi::{CString, c_void},
+    future::Future,
+    mem::ManuallyDrop,
     path::PathBuf,
+    pin::Pin,
     ptr,
+    task::{Context, Poll},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,14 +17,15 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, Recipe, RegistryAuth,
-    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxJob as SandboxJobInfo,
-    SandboxJobEntry, SnapshotCreateArgs, SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
+    ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
+    RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
     VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Sandbox, SandboxJob, Snapshot, Volume,
+    Error, ImageJob, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -41,41 +46,61 @@ unsafe impl Send for Client {}
 unsafe impl Sync for Client {}
 
 /// Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is
-/// not there, and give its path: what [`Client::spawn_virtx`] starts. Blocks for the fetch.
+/// not there, and answer its path: what [`Client::spawn_virtx`] starts.
 ///
 /// The server is kept one directory per version, so a library that is upgraded fetches its
 /// own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 /// `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-pub fn ensure_virtx() -> Result<PathBuf, Error> {
+pub fn ensure_virtx() -> Result<Call<PathBuf>, Error> {
     let api = api()?;
-    let mut out = VirtxBytes::empty();
-    let status = unsafe { (api.virtx_ensure_virtx)(&mut out) };
-    unsafe { take::<String>(api, status, out) }.map(PathBuf::from)
+    Ok(Call::<String>::new(api, unsafe { (api.virtx_ensure_virtx)() }).map(PathBuf::from))
+}
+
+/// `virtx-stdio` being started by [`Client::spawn_virtx`]: awaited, or waited for without a
+/// runtime with [`wait`](Opening::wait), it answers the client. The fetch runs from when this
+/// is made; dropping it cancels it.
+#[must_use = "an opening dropped is cancelled"]
+pub struct Opening {
+    /// The fetch, or why none could start, answered once.
+    fetch: Result<Call<PathBuf>, Option<Error>>,
+    args: Vec<String>,
+}
+
+impl Opening {
+    /// Block this thread until the server has started, for a caller without an async runtime.
+    pub fn wait(self) -> Result<Client, Error> {
+        let path = match self.fetch {
+            Ok(fetch) => fetch.wait()?,
+            Err(error) => return Err(error.expect("waited for once")),
+        };
+        Client::spawn(path.to_string_lossy(), &self.args)
+    }
+}
+
+impl Future for Opening {
+    type Output = Result<Client, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let path = match &mut self.fetch {
+            Ok(fetch) => match Pin::new(fetch).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(path)) => path,
+            },
+            Err(error) => return Poll::Ready(Err(error.take().expect("polled after ready"))),
+        };
+        Poll::Ready(Client::spawn(path.to_string_lossy(), &self.args))
+    }
 }
 
 impl Client {
     /// Start `program` with `args` as the server, and talk to it over its stdin and stdout.
-    /// Blocks until it has started.
     pub fn spawn(
         program: impl AsRef<str>,
         args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Client, Error> {
-        let program = c_string(program.as_ref())?;
-        Self::spawn_program(program.as_ptr(), args)
-    }
-
-    /// Start `virtx-stdio`, the server of the library's version, with `args`, fetching it first
-    /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone. Blocks
-    /// until it has started.
-    pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Client, Error> {
-        Self::spawn_program(ptr::null(), args)
-    }
-
-    fn spawn_program(
-        program: *const std::ffi::c_char,
-        args: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Result<Client, Error> {
         let api = api()?;
+        let program = c_string(program.as_ref())?;
         let args = args
             .into_iter()
             .map(|arg| c_string(arg.as_ref()))
@@ -84,19 +109,48 @@ impl Client {
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
         let status = unsafe {
-            (api.virtx_client_spawn)(program, argv.as_ptr(), argv.len(), &mut raw, &mut error)
+            (api.virtx_client_spawn)(
+                program.as_ptr(),
+                argv.as_ptr(),
+                argv.len(),
+                &mut raw,
+                &mut error,
+            )
         };
         unsafe { opened(api, status, raw, error) }
     }
 
-    /// Reach the server at `url`, its base `http` or `https` URL sending
-    /// `auth`, the credentials it wants, and `headers`, each a name and a value, whatever else
-    /// it asks of each request, with every request. `Authorization` is `auth`'s, over one given
-    /// as a header. Refused when a token would go in the clear: over `http` to any host but
-    /// this machine. Blocks until the client is made.
+    /// Start `virtx-stdio`, the server of the library's version, with `args`, fetching it first
+    /// if this host has none -- as [`ensure_virtx`] does, which does the fetch alone.
+    pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Opening {
+        Opening {
+            fetch: ensure_virtx().map_err(Some),
+            args: args
+                .into_iter()
+                .map(|arg| arg.as_ref().to_owned())
+                .collect(),
+        }
+    }
+
+    /// Let go of this hold of the session, and answer once it is let go of: for the last
+    /// hold, once the session has ended. Dropping a client does the same, blocking for it.
+    pub fn close(self) -> Call<()> {
+        let this = ManuallyDrop::new(self);
+        Call::new(this.api, unsafe {
+            (this.api.virtx_client_release)(this.raw)
+        })
+    }
+
+    /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
+    /// credentials it wants, `project`, the project every request is in (the user's own without
+    /// one), and `headers`, each a name and a value, whatever else it asks of each
+    /// request, with every request. `Authorization` is `auth`'s, and `virtx-project` names
+    /// `project`, over one given as a header. Refused when a token would go in the clear: over
+    /// `http` to any host but this machine. Blocks until the client is made.
     pub fn connect(
         url: impl AsRef<str>,
         auth: Auth,
+        project: Option<&str>,
         headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     ) -> Result<Client, Error> {
         let api = api()?;
@@ -117,7 +171,9 @@ impl Client {
                 &mut error,
             )
         };
-        unsafe { opened(api, status, raw, error) }
+        let client = unsafe { opened(api, status, raw, error) }?;
+        client.set_project(project)?;
+        Ok(client)
     }
 
     /// Send `auth` with every request from now on, in place of what was given at
@@ -155,6 +211,20 @@ impl Client {
                 &mut error,
             )
         };
+        if status == VIRTX_OK {
+            return Ok(());
+        }
+        unsafe { take(self.api, status, error) }
+    }
+
+    /// Name `project` in every request from now on, over either transport, or with `None`
+    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
+    /// headers given. Refused for a name no header carries, the project unchanged.
+    pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
+        let project = project.map(c_string).transpose()?;
+        let pointer = project.as_ref().map_or(ptr::null(), |name| name.as_ptr());
+        let mut error = VirtxBytes::empty();
+        let status = unsafe { (self.api.virtx_client_set_project)(self.raw, pointer, &mut error) };
         if status == VIRTX_OK {
             return Ok(());
         }
@@ -356,53 +426,76 @@ impl Client {
         })
     }
 
-    /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<Snapshot>> {
+    /// Every project the client has a role in.
+    pub fn list_project(&self) -> Call<Vec<Project>> {
         let client = self.clone();
-        let call: Call<Vec<SnapshotInfo>> = Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_snapshot)(self.raw)
+        let call: Call<Vec<ProjectInfo>> = Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_project)(self.raw)
         });
         call.map(move |infos| {
             infos
                 .into_iter()
-                .map(|info| Snapshot::new(client.clone(), info))
+                .map(|info| Project::new(client.clone(), info))
                 .collect()
         })
     }
 
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub fn create_snapshot(
+    /// Make the project `name`, the client its owner.
+    pub fn create_project(&self, name: impl Into<String>) -> Call<Project> {
+        let args = ProjectCreateArgs { name: name.into() };
+        let client = self.clone();
+        let call: Call<ProjectInfo> = self.call(self.api.virtx_client_create_project, args);
+        call.map(move |info| Project::new(client.clone(), info))
+    }
+
+    /// The project `info` describes, reached through this client, without asking the server.
+    pub fn project(&self, info: ProjectInfo) -> Project {
+        Project::new(self.clone(), info)
+    }
+
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
+    pub fn get_project(&self, name: impl AsRef<str>) -> Call<Project> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<ProjectInfo> = self.call(self.api.virtx_client_get_project, args);
+        call.map(move |info| Project::new(client.clone(), info))
+    }
+
+    /// Delete the project `name` names and everything in it.
+    pub(crate) fn remove_project(&self, name: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "name": name.as_ref() });
+        self.call(self.api.virtx_client_remove_project, args)
+    }
+
+    /// The members of `project`, with their roles.
+    pub(crate) fn list_project_member(
         &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Call<Snapshot> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_create_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
+        project: impl AsRef<str>,
+    ) -> Call<Vec<ProjectMemberInfo>> {
+        let args = json!({ "project": project.as_ref() });
+        self.call(self.api.virtx_client_list_project_member, args)
     }
 
-    /// The snapshot `info` describes, reached through this client, without asking the server.
-    pub fn snapshot(&self, info: SnapshotInfo) -> Snapshot {
-        Snapshot::new(self.clone(), info)
+    /// Give `user` `role` in `project`, adding them if they are no member.
+    pub(crate) fn set_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+        role: Role,
+    ) -> Call<ProjectMemberInfo> {
+        let args = json!({ "project": project.as_ref(), "user": user.as_ref(), "role": role });
+        self.call(self.api.virtx_client_set_project_member, args)
     }
 
-    /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<Snapshot> {
-        let args = json!({ "name": name.as_ref() });
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_get_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub(crate) fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
-        let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_remove_snapshot, args)
+    /// Take `user`'s role in `project` away.
+    pub(crate) fn remove_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+    ) -> Call<()> {
+        let args = json!({ "project": project.as_ref(), "user": user.as_ref() });
+        self.call(self.api.virtx_client_remove_project_member, args)
     }
 
     /// Every volume the server holds.
@@ -635,6 +728,9 @@ impl Client {
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
     /// here only.
+    ///
+    /// The image has to be on the server already, pulled or built: this does not pull it, and a
+    /// tag the server has no image by is refused with `404`.
     pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox> {
         let client = self.clone();
         let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_sandbox, args);
@@ -655,7 +751,8 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)
@@ -812,9 +909,12 @@ impl Clone for Client {
 }
 
 impl Drop for Client {
-    /// The last one ends the session, blocking until it has.
+    /// The last one ends the session, blocking until it has: as [`Client::close`], waited for.
     fn drop(&mut self) {
-        unsafe { (self.api.virtx_client_release)(self.raw) };
+        let _ = Call::<()>::new(self.api, unsafe {
+            (self.api.virtx_client_release)(self.raw)
+        })
+        .wait();
     }
 }
 

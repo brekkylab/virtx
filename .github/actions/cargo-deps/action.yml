@@ -1,0 +1,28 @@
+# What cargo downloads before it compiles anything -- the crates and the git dependencies'
+# repositories, libkrun's whole history (a quarter of a gigabyte) among them -- kept by
+# runs-on/cache in S3, beside our runners, by `Cargo.lock`. Without it each job fetched them from
+# crates.io and GitHub before its first build, `cargo xtask` included: 15 to 20 seconds. Only on
+# our runners: on GitHub's, runs-on/cache is GitHub's cache, which this would fill.
+name: cargo-deps
+description: Cargo's registry and git dependencies, restored from and saved to S3 by Cargo.lock
+
+runs:
+  using: composite
+  steps:
+    - id: home
+      shell: bash
+      run: |
+        home="${CARGO_HOME:-$HOME/.cargo}"
+        if [ "$RUNNER_OS" = Windows ]; then home=$(cygpath -m "$home"); fi
+        echo "dir=$home" >> "$GITHUB_OUTPUT"
+
+    # An older lockfile's still saves most of the fetching; what it lacks cargo fetches, and the
+    # job saves the whole under this lockfile's key.
+    - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
+      with:
+        path: |
+          ${{ steps.home.outputs.dir }}/registry/index
+          ${{ steps.home.outputs.dir }}/registry/cache
+          ${{ steps.home.outputs.dir }}/git/db
+        key: cargo-deps-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: cargo-deps-${{ runner.os }}-

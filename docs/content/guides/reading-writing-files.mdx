@@ -9,8 +9,8 @@ A sandbox's files can be read and written from your code directly, without a com
 A path is the path in the guest without its leading `/`: `etc/hostname` is `/etc/hostname`.
 
 <Aside type="note">
-A [snapshot](/docs/guides/keeping-snapshots/) and a [volume](/docs/guides/mounting-volumes/) share this file API with a sandbox.
-Every call on this page works on them the same way, each on its own files, and needs no sandbox running.
+A [volume](/docs/guides/mounting-volumes/) shares this file API with a sandbox.
+Every call on this page works on it the same way, on its own files, and needs no sandbox running.
 </Aside>
 
 ## Put a file in, and get one out
@@ -24,8 +24,7 @@ This writes an input file into the sandbox, runs a command on it, and reads what
 await sandbox.create_dir_all("work")
 await sandbox.write_file("work/input.txt", "one two three\n")
 
-async for _ in sandbox.exec(["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"]):
-    pass
+await sandbox.exec(["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"]).complete()
 
 print(await sandbox.read_text("work/count.txt"))
 ```
@@ -37,7 +36,7 @@ print(await sandbox.read_text("work/count.txt"))
 await sandbox.createDirAll('work')
 await sandbox.writeFile('work/input.txt', 'one two three\n')
 
-for await (const _ of sandbox.exec(['sh', '-c', 'wc -w < /work/input.txt > /work/count.txt'])) {}
+await sandbox.exec(['sh', '-c', 'wc -w < /work/input.txt > /work/count.txt']).complete()
 
 console.log(await sandbox.readText('work/count.txt'))
 ```
@@ -52,10 +51,7 @@ sandbox.create_dir_all("work").await?;
 sandbox.write_file("work/input.txt", "one two three\n", None).await?;
 
 let cmd = ["sh", "-c", "wc -w < /work/input.txt > /work/count.txt"];
-let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-while let Some(entry) = log.next().await {
-    entry?;
-}
+sandbox.exec(&SandboxExecArgs::new(cmd)).complete(false).await?;
 
 println!("{}", sandbox.read_text("work/count.txt").await?);
 ```
@@ -155,8 +151,10 @@ sandbox.remove_file("work", true).await?;
 
 Pass a file's `etag` from `stat_file` as `if_match` to `write_file`, and the write goes through only while the file still has that tag.
 If something changed it in between, the write is refused with `412`, and nothing is overwritten.
+Of two such writes sent at once with one tag, one goes through and the other is refused with `412`: read the file again and retry.
+The tag is checked before the content is written, and again once all of it has arrived, just before it replaces the file.
 
 ## Reading while the sandbox is stopped
 
 A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
-To read the output of a task that is done, keep it in a snapshot and read it from there instead, with no VM at all; see [Keeping work in snapshots](/docs/guides/keeping-snapshots/#read-what-it-made).
+To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/guides/mounting-volumes/).

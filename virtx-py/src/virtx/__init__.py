@@ -6,9 +6,9 @@ or the system loader's search for its file name. So every module in a process ca
 requests through the one library, and hand a ``Client`` between them as the ``VirtxClient*`` it
 is, with ``Client.as_raw``, ``Client.into_raw`` and ``Client.from_raw``.
 
-Requests take and answer the types of ``virtx.image``, ``virtx.snapshot``, ``virtx.volume``,
-``virtx.sandbox`` and ``virtx.files``, and plain values elsewhere: what the wire calls a map is a
-``dict``.
+Requests take and answer the types of ``virtx.image``, ``virtx.volume``, ``virtx.project``,
+``virtx.sandbox`` and ``virtx.files``, and plain values elsewhere: what the wire calls a map is
+a ``dict``.
 
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
 the request that started it. The method that starts one answers a ``StartedJob``, sent when first
@@ -17,19 +17,22 @@ yields the job's log, as ``ImageJob.log`` or ``SandboxJob.log`` does, each a ``L
 numbered for ``after`` to resume from, until its end entry. A download or upload of an image yields its
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
-A sandbox, a volume, a snapshot, a sandbox job and an image job are answered as a ``Sandbox``, a
-``Volume``, a ``Snapshot``, a ``SandboxJob`` and an ``ImageJob``, each carrying the client its
-requests go through: what acts on one is the handle, so it is all a caller hands on. The client
-lists, makes and gets them; one known by its id or name is had with ``get_sandbox``,
-``get_volume``, ``get_snapshot``, ``get_image_job`` or ``Sandbox.job``. The three with files read and write them as ``Files``:
+A sandbox, a volume, a sandbox job and an image job are answered as a ``Sandbox``, a ``Volume``,
+a ``SandboxJob`` and an ``ImageJob``, each carrying the client its requests go through: what acts
+on one is the handle, so it is all a caller hands on. The client lists, makes and gets them; one
+known by its id or name is had with ``get_sandbox``, ``get_volume``, ``get_image_job`` or
+``Sandbox.job``. The two with files read and write them as ``Files``:
 ``await volume.read_file("a.txt")``.
+
+A project is answered as a ``Project``, carrying its client the same way: its members, and its
+removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
 ``create_sandbox`` answered for it: an address on this machine's loopback.
 """
 
-from ._library import LIBRARY_ENV, VirtxError, library_path, load
-from .client import Client, Event, Output, Progress, ensure_virtx
+from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
+from .client import Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, Files, Metadata
 from .image import (
     BasicAuth,
@@ -52,6 +55,7 @@ from .image import (
 )
 from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
+from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
     Sandbox,
     SandboxJob,
@@ -63,7 +67,6 @@ from .sandbox import (
     Stderr,
     Stdout,
 )
-from .snapshot import Snapshot
 from .volume import (
     GdriveSource,
     MountSource,
@@ -76,9 +79,11 @@ from .volume import (
 
 __all__ = [
     "LIBRARY_ENV",
+    "Auth",
     "BasicAuth",
     "BearerAuth",
     "Client",
+    "CommandAuth",
     "DirEntry",
     "Event",
     "Files",
@@ -104,8 +109,11 @@ __all__ = [
     "Output",
     "PortForwarder",
     "Progress",
+    "Project",
+    "ProjectMemberListOutputItem",
     "Recipe",
     "RegistryAuth",
+    "Role",
     "Sandbox",
     "SandboxJob",
     "SandboxJobEnd",
@@ -113,7 +121,7 @@ __all__ = [
     "SandboxJobKind",
     "SandboxPort",
     "SandboxVolume",
-    "Snapshot",
+    "Source",
     "StartedJob",
     "Stderr",
     "Stdout",

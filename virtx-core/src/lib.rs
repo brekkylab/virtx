@@ -19,13 +19,12 @@ pub mod cli;
 mod client;
 #[cfg(feature = "client")]
 mod ensure;
-#[cfg(feature = "client")]
 mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
 mod image;
+mod project;
 mod sandbox;
-mod snapshot;
 mod transport;
 mod volume;
 
@@ -36,8 +35,9 @@ pub use client::Client;
 pub use ensure::{cache_root, ensure_virtx};
 #[cfg(feature = "client")]
 pub use error::Error;
+pub use error::Source;
 pub use image::*;
+pub use project::*;
 pub use sandbox::*;
-pub use snapshot::*;
 pub use transport::*;
 pub use volume::*;

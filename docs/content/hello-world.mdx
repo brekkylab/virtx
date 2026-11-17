@@ -29,7 +29,7 @@ npm install @brekkylab/virtx
 <TabItem label="Rust">
 
 ```sh
-cargo add virtx futures
+cargo add virtx
 cargo add tokio --features macros,rt-multi-thread
 ```
 
@@ -47,20 +47,15 @@ As written, it starts a server on your machine with `Client.spawn()`; [Run it](#
 ```python
 import asyncio
 
-from virtx import Client, Stdout
+from virtx import Client
 
 
 async def main() -> None:
     with Client.spawn() as client:
-        async for _ in client.pull_image("alpine:latest"):
-            pass
-
+        await client.pull_image("alpine:latest").complete()
         sandbox = await client.create_sandbox("alpine:latest")
         try:
-            async for entry in sandbox.exec(["echo", "Hello, world!"]):
-                match entry.entry:
-                    case Stdout(line):
-                        print(line)
+            await sandbox.exec(["echo", "Hello, world!"]).complete(print=True)
         finally:
             await sandbox.remove()
 
@@ -77,13 +72,10 @@ const { Client } = require('@brekkylab/virtx')
 async function main() {
   const client = Client.spawn()
   try {
-    for await (const _ of client.pullImage('alpine:latest')) {}
-
+    await client.pullImage('alpine:latest').complete()
     const sandbox = await client.createSandbox('alpine:latest')
     try {
-      for await (const entry of sandbox.exec(['echo', 'Hello, world!'])) {
-        if ('stdout' in entry) console.log(entry.stdout)
-      }
+      await sandbox.exec(['echo', 'Hello, world!']).complete({ print: true })
     } finally {
       await sandbox.remove()
     }
@@ -99,27 +91,16 @@ main()
 <TabItem label="Rust">
 
 ```rust
-use futures::StreamExt;
-use virtx::{Client, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry};
+use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::spawn_virtx([] as [&str; 0])?;
-
-    let mut log = client.pull_image("alpine:latest", None).log();
-    while let Some(entry) = log.next().await {
-        entry?;
-    }
-
+    client.pull_image("alpine:latest", None).complete(false).await?;
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
         .await?;
-    let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).log();
-    while let Some(entry) = log.next().await {
-        if let SandboxJobEntry::Stdout(line) = entry?.entry {
-            println!("{line}");
-        }
-    }
+    sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).complete(true).await?;
     sandbox.remove().await?;
     Ok(())
 }
@@ -161,21 +142,13 @@ Your machine must meet the [requirements](https://github.com/brekkylab/virtx#req
 Run `virtx-server-tcp` on the machine that should run the VMs.
 It keeps running, serves many users, and can sit on another machine.
 
-On the machine that should run the VMs, make a token.
-This prints the token and its `token_sha256`:
-
-```sh
-virtx-server-tcp token
-```
-
-Write a `server.json` that lets that token's user into a project:
+On the machine that should run the VMs, write a `server.json` naming your OpenID Connect provider:
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
+  "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -185,16 +158,24 @@ Start the server:
 virtx-server-tcp serve --config server.json
 ```
 
-In the program, connect with the token and the project in place of `Client.spawn()`:
+A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
+Sign in once with `virtx`, built from `virtx-cli/`:
+
+```sh
+virtx login https://virtx.example
+```
+
+Then, in the program, connect with the token it prints in place of `Client.spawn()`:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-from virtx import BearerAuth
+from virtx import CommandAuth
 
 with Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
 ) as client:
 ```
 
@@ -203,9 +184,8 @@ with Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
-  { 'virtx-project': 'demo' }
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -216,19 +196,23 @@ const client = Client.connect(
 use virtx::Auth;
 
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
-    [("virtx-project", "demo")],
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
 </TabItem>
 </Tabs>
 
-The `virtx-project` header names the project in `server.json` the requests belong to.
+`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
+
+A client's requests are in a project of its user's own, `default`, which the server makes the first time; a client names another with `project`, a project of the user's by its name or any by its id.
+The `virtx` command names one with `--project`, beside `--host` and `$VIRTX_TOKEN`; see [CLI](/docs/reference/cli/#which-server).
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Next
 
 - [Running commands](/docs/guides/running-commands/): how the command above is run, followed, and stopped.
-- [Keeping work in snapshots](/docs/guides/keeping-snapshots/): keep what a sandbox wrote for the next one.
+- [Mounting volumes](/docs/guides/mounting-volumes/): keep what a sandbox writes for the next one.

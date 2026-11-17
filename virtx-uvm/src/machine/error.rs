@@ -1,14 +1,10 @@
-use crate::{fstree, snapshot, volume};
+use crate::{fstree, volume};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A temporary snapshot that could not be formatted.
+    /// An upper disk that could not be formatted.
     #[error(transparent)]
     Fstree(#[from] fstree::Error),
-
-    /// The snapshot could not be held for this machine: another one runs over it.
-    #[error(transparent)]
-    Snapshot(#[from] snapshot::Error),
 
     /// A volume that could not be opened or held for this machine, or a store in it that
     /// could not be made.

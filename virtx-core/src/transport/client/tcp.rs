@@ -7,8 +7,8 @@ use http::{HeaderMap, header};
 use http_body_util::BodyExt;
 use reqwest::{RequestBuilder, Url};
 
-use super::Body;
-use crate::Auth;
+use super::{Body, credentials::Credentials};
+use crate::{Auth, Error};
 
 /// What is sent with every request, read as each is sent, so that a change reaches the next
 /// one: a forwarder opened before keeps a hold on it too.
@@ -27,19 +27,18 @@ pub(super) struct Tcp {
     pub(super) http: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
     pub(super) base: Url,
-    pub(super) auth: Shared<Auth>,
+    pub(super) credentials: Arc<Credentials>,
     pub(super) headers: Shared<HeaderMap>,
 }
 
 impl Tcp {
     /// The server whose base URL is `url`, an `http` or `https` URL, with `auth` and `headers`
     /// sent on every request to it. Nothing is sent until the first request.
-    pub(super) fn connect(url: &str, auth: Auth, headers: HeaderMap) -> anyhow::Result<Tcp> {
-        let mut base = Url::parse(url)?;
-        anyhow::ensure!(
-            matches!(base.scheme(), "http" | "https"),
-            "not an http or https URL: {base}"
-        );
+    pub(super) fn connect(url: &str, auth: Auth, headers: HeaderMap) -> Result<Tcp, Error> {
+        let mut base = Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(Error::Client(format!("not an http or https URL: {base}")));
+        }
         not_in_the_clear(&base, &auth)?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -47,15 +46,15 @@ impl Tcp {
         Ok(Tcp {
             http: reqwest::Client::new(),
             base,
-            auth: Arc::new(RwLock::new(auth)),
+            credentials: Arc::new(Credentials::new(auth)),
             headers: Arc::new(RwLock::new(headers)),
         })
     }
 
     /// Send `auth` with every request from now on, in place of what was sent until now.
-    pub(super) fn set_auth(&self, auth: Auth) -> anyhow::Result<()> {
+    pub(super) fn set_auth(&self, auth: Auth) -> Result<(), Error> {
         not_in_the_clear(&self.base, &auth)?;
-        *self.auth.write().unwrap_or_else(PoisonError::into_inner) = auth;
+        self.credentials.set(auth);
         Ok(())
     }
 
@@ -64,16 +63,16 @@ impl Tcp {
         *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
     }
 
-    /// Send `request`, whose URI is a path under the base, such as `/snapshots/`.
+    /// Send `request`, whose URI is a path under the base.
     pub(super) async fn send(
         &self,
         request: http::Request<Body>,
-    ) -> Result<http::Response<Body>, String> {
+    ) -> Result<http::Response<Body>, Error> {
         let (parts, body) = request.into_parts();
         let url = self
             .base
             .join(parts.uri.to_string().trim_start_matches('/'))
-            .map_err(|e| format!("{e:#}"))?;
+            .map_err(|e| Error::Client(format!("{}: {e}", parts.uri)))?;
         // The request's own headers win over the ones sent with every request.
         let mut headers = current(&self.headers);
         headers.extend(parts.headers);
@@ -81,24 +80,28 @@ impl Tcp {
             .http
             .request(parts.method, url)
             .body(reqwest::Body::wrap(body));
-        let response = authorized(request, headers, &current(&self.auth))
+        let token = self.credentials.token().await.map_err(Error::Client)?;
+        let response = authorized(request, headers, token.as_deref())
             .send()
             .await
-            .map_err(|e| format!("{e:#}"))?;
+            .map_err(|e| Error::Transport(format!("{e:#}")))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            self.credentials.refused();
+        }
         let response: http::Response<reqwest::Body> = response.into();
         Ok(response.map(|body| body.map_err(std::io::Error::other).boxed()))
     }
 }
 
-/// `request` with `headers`, and `auth`'s `Authorization` in place of any among them.
+/// `request` with `headers`, and `token` as its `Authorization` in place of any among them.
 pub(super) fn authorized(
     request: RequestBuilder,
     mut headers: HeaderMap,
-    auth: &Auth,
+    token: Option<&str>,
 ) -> RequestBuilder {
-    match auth {
-        Auth::None => request.headers(headers),
-        Auth::Bearer { token } => {
+    match token {
+        None => request.headers(headers),
+        Some(token) => {
             headers.remove(header::AUTHORIZATION);
             request.headers(headers).bearer_auth(token)
         }
@@ -107,7 +110,7 @@ pub(super) fn authorized(
 
 /// Refuses `auth` to `base` when its token would go in the clear: over `http` to any host but
 /// this machine's loopback, where a local server is (`PROTOCOL.md`) and no wire.
-fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
+fn not_in_the_clear(base: &Url, auth: &Auth) -> Result<(), Error> {
     if matches!(auth, Auth::None) || base.scheme() == "https" {
         return Ok(());
     }
@@ -118,10 +121,11 @@ fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
                 .parse::<IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     });
-    anyhow::ensure!(
-        loopback,
-        "a token would go in the clear to {base}: reach the server over https"
-    );
+    if !loopback {
+        return Err(Error::Client(format!(
+            "a token would go in the clear to {base}: reach the server over https"
+        )));
+    }
     Ok(())
 }
 
@@ -129,14 +133,14 @@ fn not_in_the_clear(base: &Url, auth: &Auth) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn sent(headers: &[(&str, &str)], auth: Auth) -> HeaderMap {
+    fn sent(headers: &[(&str, &str)], token: Option<&str>) -> HeaderMap {
         let mut given = HeaderMap::new();
         for (name, value) in headers {
             let name = header::HeaderName::from_bytes(name.as_bytes()).unwrap();
             given.append(name, value.parse().unwrap());
         }
         let request = reqwest::Client::new().get("http://127.0.0.1:9/");
-        authorized(request, given, &auth)
+        authorized(request, given, token)
             .build()
             .unwrap()
             .headers()
@@ -146,8 +150,7 @@ mod tests {
     #[test]
     fn a_token_takes_the_place_of_an_authorization_header_and_leaves_the_rest() {
         let given = [("authorization", "Bearer mine"), ("virtx-project", "p")];
-        let token = Auth::Bearer { token: "t".into() };
-        let headers = sent(&given, token);
+        let headers = sent(&given, Some("t"));
         let authorization: Vec<_> = headers.get_all(header::AUTHORIZATION).iter().collect();
         assert_eq!(authorization, ["Bearer t"]);
         assert_eq!(headers["virtx-project"], "p");
@@ -155,7 +158,7 @@ mod tests {
 
     #[test]
     fn without_a_token_the_headers_go_as_given() {
-        let headers = sent(&[("authorization", "Bearer mine")], Auth::None);
+        let headers = sent(&[("authorization", "Bearer mine")], None);
         assert_eq!(headers[header::AUTHORIZATION], "Bearer mine");
     }
 }

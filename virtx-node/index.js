@@ -40,9 +40,11 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null) {
+  constructor(message, status = null, body = null, source = 'client') {
     super(message)
     this.name = 'VirtxError'
+    // Where it failed: `server`, `job`, `transport` or `client`.
+    this.source = source
     // The HTTP status the server refused the request with, if it did.
     this.status = status
     // The server's response body, where it was not a JSON error.
@@ -66,7 +68,7 @@ const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
 // A request with a body of bytes beside its args.
 const WITH_DATA = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t', 'uint8_t *', 'size_t']]
 const SIGNATURES = {
-  virtx_ensure_virtx: ['int', [Out]],
+  virtx_ensure_virtx: ['uintptr_t', []],
   virtx_client_spawn: [
     'int',
     ['const char *', 'const char **', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
@@ -85,8 +87,9 @@ const SIGNATURES = {
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
   virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
+  virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
-  virtx_client_release: ['void', ['uintptr_t']],
+  virtx_client_release: ['uintptr_t', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
   virtx_client_pull_image: WITH_ARGS,
   virtx_client_push_image: WITH_ARGS,
@@ -101,10 +104,13 @@ const SIGNATURES = {
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_list_snapshot: PLAIN,
-  virtx_client_create_snapshot: WITH_ARGS,
-  virtx_client_get_snapshot: WITH_ARGS,
-  virtx_client_remove_snapshot: WITH_ARGS,
+  virtx_client_list_project: PLAIN,
+  virtx_client_create_project: WITH_ARGS,
+  virtx_client_get_project: WITH_ARGS,
+  virtx_client_remove_project: WITH_ARGS,
+  virtx_client_list_project_member: WITH_ARGS,
+  virtx_client_set_project_member: WITH_ARGS,
+  virtx_client_remove_project_member: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_get_volume: WITH_ARGS,
@@ -143,6 +149,7 @@ const SIGNATURES = {
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
+  virtx_future_wait: ['int', ['uintptr_t', Out]],
   virtx_future_free: ['void', ['uintptr_t']],
   virtx_stream_poll_next: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_stream_free: ['void', ['uintptr_t']],
@@ -192,7 +199,12 @@ class Library {
     if (status === ERROR) {
       if (!data.length) throw new VirtxError('the call failed')
       const failure = JSON.parse(data.toString('utf8'))
-      throw new VirtxError(failure.message, failure.status ?? null, failure.body ?? null)
+      throw new VirtxError(
+        failure.message,
+        failure.status ?? null,
+        failure.body ?? null,
+        failure.source,
+      )
     }
     throw new VirtxError(`unknown status ${status}`)
   }
@@ -204,6 +216,18 @@ class Library {
     const out = {}
     const status = poll(handle, { data: key, wake, release }, out)
     return { status, out, woken }
+  }
+
+  // Block until the future `handle` answers, freeing it after, for a caller off the event
+  // loop. Its answer is as `answer`'s.
+  wait(handle, raw = false) {
+    try {
+      const out = {}
+      const status = this.virtx_future_wait(handle, out)
+      return this.take(status, out, raw)
+    } finally {
+      this.virtx_future_free(handle)
+    }
   }
 
   // Await the future `handle`, freeing it after. Its answer is JSON, or a `Buffer` as it is
@@ -306,9 +330,7 @@ const DIGEST = /^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$/
 // string a tag. An object is taken as already named.
 function imageName(image) {
   if (typeof image !== 'string') return image
-  return DIGEST.test(image)
-    ? { type: 'digest', digest: image }
-    : { type: 'tag', tag: image }
+  return DIGEST.test(image) ? { type: 'digest', digest: image } : { type: 'tag', tag: image }
 }
 
 // A base and the steps over it, which the server builds: `new Recipe('alpine:3.20').run('apk add
@@ -339,9 +361,9 @@ class Recipe {
   }
 }
 
-// A job as it starts: a promise of the job, and an async iterable of its log's entries, read once
-// the job has started, until its `end` entry. The job starts when it is made, once however it is
-// used; leaving the loop leaves the job running.
+// A job as it starts: a promise of the job, an async iterable of its log's entries, read once the
+// job has started, until its `end` entry, and `complete`, the job's own once started. The job
+// starts when it is made, once however it is used; leaving the loop leaves the job running.
 class StartedJob extends Promise {
   // `then` and the rest answer plain promises.
   static get [Symbol.species]() {
@@ -358,36 +380,30 @@ class StartedJob extends Promise {
     return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
   }
 
+  async complete(options) {
+    return (await this).complete(options)
+  }
+
   async *[Symbol.asyncIterator]() {
     yield* this._log(await this)
   }
 }
 
-// Each hold not let go of, released when its client is collected.
+// Each hold not let go of, released when its client is collected; the ending is not waited
+// for.
 const holds = new FinalizationRegistry(({ lib, raw }) => {
-  lib.virtx_client_release.async(raw, () => {})
+  lib.virtx_future_free(lib.virtx_client_release(raw))
 })
 
 // Fetch `virtx-stdio`, the server of the library's version, into this host's cache if it is not
-// there, and give its path: what `Client.spawn()` without a program starts. The fetch runs on a
-// worker thread, off the event loop.
+// there, and give its path: what `Client.spawn()` without a program starts.
 //
 // The server is kept one directory per version, so a library that is upgraded fetches its own.
 // `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another version;
 // `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
 function ensureVirtx() {
   const lib = library()
-  const out = {}
-  return new Promise((resolve, reject) => {
-    lib.virtx_ensure_virtx.async(out, (error, status) => {
-      if (error) return reject(error)
-      try {
-        resolve(lib.take(status, out))
-      } catch (e) {
-        reject(e)
-      }
-    })
-  })
+  return lib.answer(lib.virtx_ensure_virtx())
 }
 
 // `auth` as `virtx_client_connect` takes it: JSON, or nothing for none.
@@ -417,22 +433,24 @@ class Client {
 
   // Start `program` with `args` as the server, and talk to it over its stdin and stdout.
   // Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
-  // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+  // this host has none -- blocking for the fetch; `ensureVirtx` does that fetch alone, on the
   // event loop.
   static spawn(program = null, args = []) {
     const lib = library()
+    if (program === null) program = lib.wait(lib.virtx_ensure_virtx())
     const raw = [0]
     const error = {}
     const status = lib.virtx_client_spawn(program, args, args.length, raw, error)
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL, sending
-  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
-  // `headers`, a name to a value, whatever else it asks of each request, with every request.
-  // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
-  // the clear: over `http` to any host but this machine.
-  static connect(url, auth = null, headers = {}) {
+  // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+  // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
+  // request is in (the user's own without one), and `headers`, a name to a value,
+  // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
+  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
+  // in the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, project = null, headers = {}) {
     const lib = library()
     const bytes = authBytes(auth)
     const strings = Object.entries(headers).flat()
@@ -447,7 +465,14 @@ class Client {
       raw,
       error,
     )
-    return opening(lib, status, raw, error)
+    const client = opening(lib, status, raw, error)
+    try {
+      client.setProject(project)
+    } catch (e) {
+      client.close()
+      throw e
+    }
+    return client
   }
 
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
@@ -468,7 +493,22 @@ class Client {
   setHeaders(headers) {
     const strings = Object.entries(headers).flat()
     const error = {}
-    const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
+    const status = this._lib.virtx_client_set_headers(
+      this._held(),
+      strings,
+      strings.length / 2,
+      error,
+    )
+    if (status !== OK) this._lib.take(status, error)
+  }
+
+  // Name `project` in every request from now on, over either transport, in place of a
+  // `virtx-project` among the headers given. With null, that header names it where there is one,
+  // and otherwise none is named, for the user's own project. A name no header carries throws,
+  // the project unchanged.
+  setProject(project) {
+    const error = {}
+    const status = this._lib.virtx_client_set_project(this._held(), project, error)
     if (status !== OK) this._lib.take(status, error)
   }
 
@@ -500,13 +540,11 @@ class Client {
 
   // Let go of this hold; the last ends the session, which the promise waits for. Closing twice
   // does nothing.
-  close() {
+  async close() {
     const raw = this._raw
-    if (raw === null) return Promise.resolve()
+    if (raw === null) return
     this._forget()
-    return new Promise((resolve, reject) => {
-      this._lib.virtx_client_release.async(raw, (error) => (error ? reject(error) : resolve()))
-    })
+    await this._lib.answer(this._lib.virtx_client_release(raw))
   }
 
   _forget() {
@@ -597,17 +635,21 @@ class Client {
     return this._call('virtx_client_prune_image')
   }
 
-  async listSnapshot() {
-    const infos = await this._call('virtx_client_list_snapshot')
-    return infos.map((info) => new Snapshot(this, info))
+  // Every project the client has a role in.
+  async listProject() {
+    const infos = await this._call('virtx_client_list_project')
+    return infos.map((info) => new Project(this, info))
   }
 
-  async createSnapshot(name, diskGib) {
-    return new Snapshot(this, await this._call('virtx_client_create_snapshot', { name, diskGib }))
+  // Makes the project `name`, the client its owner.
+  async createProject(name) {
+    return new Project(this, await this._call('virtx_client_create_project', { name }))
   }
 
-  async getSnapshot(name) {
-    return new Snapshot(this, await this._call('virtx_client_get_snapshot', { name }))
+  // The project `name` names -- a project of the user's by name, or any by its id -- with the
+  // client's role in it.
+  async getProject(name) {
+    return new Project(this, await this._call('virtx_client_get_project', { name }))
   }
 
   async listVolume() {
@@ -628,14 +670,15 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
-  // `snapshot` and each of `volumes`' `volume` are a handle or its name.
+  // Each of `volumes`' `volume` is a handle or its name.
   async createSandbox(image, options = {}) {
-    const { snapshot, volumes } = options
+    const { volumes } = options
     const info = await this._call('virtx_client_create_sandbox', {
       ...options,
       image: imageName(image),
-      snapshot: snapshot instanceof Snapshot ? snapshot.name : snapshot,
-      volumes: volumes?.map((v) => (v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v)),
+      volumes: volumes?.map((v) =>
+        v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
+      ),
     })
     return new Sandbox(this, info)
   }
@@ -706,8 +749,8 @@ function held(handle, client, info) {
   Object.assign(handle, info)
 }
 
-// The files of a volume, a snapshot or a sandbox, at its `_root`, the `{ volume }`,
-// `{ snapshot }` or `{ sandbox }` each request names. A path is relative to the root, as
+// The files of a volume or a sandbox, at its `_root`, the `{ volume }` or `{ sandbox }` each
+// request names. A path is relative to the root, as
 // `dir/file.txt`.
 class Files {
   _call(name, args, raw = false) {
@@ -754,7 +797,9 @@ class Files {
     const { _lib: lib } = this.client
     const bytes = encode({ ...this._root, path: at, ifMatch })
     const data = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    await lib.answer(lib.virtx_client_write_file(this.client._held(), bytes, bytes.length, data, data.length))
+    await lib.answer(
+      lib.virtx_client_write_file(this.client._held(), bytes, bytes.length, data, data.length),
+    )
   }
 
   async createDir(at) {
@@ -793,13 +838,27 @@ class ImageJob {
 
   // It as the server has it now.
   async get() {
-    return new ImageJob(this.client, await this.client._call('virtx_client_get_image_job', { id: this.id }))
+    return new ImageJob(
+      this.client,
+      await this.client._call('virtx_client_get_image_job', { id: this.id }),
+    )
   }
 
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
-  // entry.
+  // entry, or throwing the error it failed with in that entry's place.
   log(after) {
     return this.client._items('virtx_client_image_job_log', { id: this.id, after })
+  }
+
+  // Follows it to its end, each line of its log printed if `print`: the digest it ended with.
+  async complete({ print = false } = {}) {
+    for await (const entry of this.log()) {
+      if ('log' in entry && print) console.log(entry.log)
+      else if ('truncated' in entry && print)
+        console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('end' in entry) return entry.end.digest
+    }
+    throw new VirtxError('the job was removed before it ended', null, null, 'job')
   }
 
   // Cancels it if it runs, and forgets it.
@@ -827,7 +886,11 @@ class Volume extends Files {
 
   // Mounts `source` at `at` in it, a directory the mount creates.
   mount(at, source) {
-    return this.client._call('virtx_client_create_volume_mount', { volume: this.name, path: at, source })
+    return this.client._call('virtx_client_create_volume_mount', {
+      volume: this.name,
+      path: at,
+      source,
+    })
   }
 
   // Takes away the mount at `at`, leaving its source as it is.
@@ -841,26 +904,37 @@ class Volume extends Files {
   }
 }
 
-// A snapshot the server holds (`name`, `size`, `inUse`), and the client that reaches it: its
-// files, refused while a sandbox holds it. Dropping it leaves the snapshot; `remove` removes it.
-class Snapshot extends Files {
+// A project the client has a role in (`id`, `name`, `owner`, `role`), and the client that reaches it: its
+// members, and its removal. What is in it, a client reaches with the project set
+// (`setProject`). Dropping it leaves the project; `remove` removes it.
+class Project {
   constructor(client, info) {
-    super()
     held(this, client, info)
   }
 
-  get _root() {
-    return { snapshot: this.name }
+  // Its members, with their roles.
+  members() {
+    return this.client._call('virtx_client_list_project_member', { project: this.id })
   }
 
-  // Deletes it and its upper layer; refused with a `409` while a sandbox holds it.
+  // Gives `user` `role` in it, adding them if they are no member.
+  setMember(user, role) {
+    return this.client._call('virtx_client_set_project_member', { project: this.id, user, role })
+  }
+
+  // Takes `user`'s role in it away: theirs to do, leaving it, or an owner's.
+  async removeMember(user) {
+    await this.client._call('virtx_client_remove_project_member', { project: this.id, user })
+  }
+
+  // Deletes it and everything in it.
   async remove() {
-    await this.client._call('virtx_client_remove_snapshot', { name: this.name })
+    await this.client._call('virtx_client_remove_project', { name: this.id })
   }
 }
 
-// A sandbox the server holds, as making it or asking for it answered (`id`, `image`,
-// `snapshot`, `running`, `ports`), and the client that reaches it, to run processes in it and
+// A sandbox the server holds, as making it or asking for it answered (`id`, `image`, `running`,
+// `ports`), and the client that reaches it, to run processes in it and
 // read and write its files, its root as its processes see it. Dropping it leaves the sandbox;
 // `remove` removes it.
 class Sandbox extends Files {
@@ -892,11 +966,14 @@ class Sandbox extends Files {
 
   // The job `id` in it.
   async job(id) {
-    const info = await this.client._call('virtx_client_get_sandbox_job', { sandbox: this.id, job: id })
+    const info = await this.client._call('virtx_client_get_sandbox_job', {
+      sandbox: this.id,
+      job: id,
+    })
     return new SandboxJob(this.client, this.id, info)
   }
 
-  // Stops it, ends its jobs and forgets it, keeping its snapshot and volumes.
+  // Stops it, ends its jobs and forgets it, with everything it wrote outside its volumes.
   async remove() {
     await this.client._call('virtx_client_remove_sandbox', { id: this.id })
   }
@@ -916,7 +993,11 @@ class SandboxJob {
 
   // It as the server has it now.
   async get() {
-    return new SandboxJob(this.client, this.sandboxId, await this._call('virtx_client_get_sandbox_job'))
+    return new SandboxJob(
+      this.client,
+      this.sandboxId,
+      await this._call('virtx_client_get_sandbox_job'),
+    )
   }
 
   // Sends `signal`, a name such as `'SIGTERM'`, to its process and every one it started.
@@ -932,7 +1013,24 @@ class SandboxJob {
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
   // entry.
   log(after) {
-    return this.client._items('virtx_client_sandbox_job_log', { sandbox: this.sandboxId, job: this.id, after })
+    return this.client._items('virtx_client_sandbox_job_log', {
+      sandbox: this.sandboxId,
+      job: this.id,
+      after,
+    })
+  }
+
+  // Follows it to its end, what its process writes to stdout and stderr printed there if
+  // `print`: its exit code, `128 + signal` for one a signal ended.
+  async complete({ print = false } = {}) {
+    for await (const entry of this.log()) {
+      if ('stdout' in entry && print) console.log(entry.stdout)
+      else if ('stderr' in entry && print) console.error(entry.stderr)
+      else if ('truncated' in entry && print)
+        console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('end' in entry) return entry.end.code
+    }
+    throw new VirtxError('the job was removed before it ended', null, null, 'job')
   }
 
   // Cancels it if it runs, killing its process, and forgets it.
@@ -950,10 +1048,10 @@ module.exports = {
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
+  Project,
   Recipe,
   Sandbox,
   SandboxJob,
-  Snapshot,
   StartedJob,
   VirtxError,
   Volume,

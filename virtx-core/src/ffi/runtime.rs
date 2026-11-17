@@ -17,10 +17,11 @@ use tokio::task::JoinSet;
 
 use super::{
     VIRTX_OK,
-    bytes::{Failure, VirtxBytes, encode, failure, write},
+    bytes::{VirtxBytes, encode, failure, write},
     future::{self, VirtxFuture},
     stream::{self, VirtxStream},
 };
+use crate::Error;
 
 /// `T`, the runtime its requests run on (C calls in without one), and the tasks running them,
 /// which [`Runtime::close`] cancels.
@@ -32,11 +33,21 @@ pub(crate) struct Runtime<T> {
 
 impl<T: Send + Sync + 'static> Runtime<T> {
     /// What `make` makes, inside a runtime of its own.
-    pub(crate) fn open(make: impl FnOnce() -> Result<T, String>) -> Result<Self, String> {
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        let value = {
+    pub(crate) fn open(make: impl FnOnce() -> Result<T, Error>) -> Result<Self, Error> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| Error::Client(format!("starting a runtime: {e}")))?;
+        let made = {
             let _entered = runtime.enter();
-            make()?
+            make()
+        };
+        let value = match made {
+            Ok(value) => value,
+            Err(e) => {
+                // Not dropped: dropping blocks, which a thread of the program's tokio, the
+                // library linked in, refuses.
+                runtime.shutdown_background();
+                return Err(e);
+            }
         };
         Ok(Runtime {
             runtime,
@@ -50,22 +61,18 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         &self.value
     }
 
-    /// What `make` makes of the value, run to its end on the runtime, whose tasks what it starts
-    /// stay on.
-    ///
-    /// Blocks, so not called on the runtime's own threads.
-    pub(crate) fn block_on<R, F: Future<Output = R>>(&self, make: impl FnOnce(Arc<T>) -> F) -> R {
-        self.runtime.block_on(make(Arc::clone(&self.value)))
+    /// What `f` makes of the value, inside the runtime: for what needs one without waiting on
+    /// it, such as a listener whose connections it will carry.
+    pub(crate) fn inside<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        let _entered = self.runtime.enter();
+        f(&self.value)
     }
 
     /// Start what `make` makes of the value, and hand C the future, answered with its output
     /// as JSON.
-    pub(crate) fn future<R: Serialize, E: Into<Failure>, F>(
-        &self,
-        make: impl FnOnce(Arc<T>) -> F,
-    ) -> *mut VirtxFuture
+    pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
     where
-        F: Future<Output = Result<R, E>> + Send + 'static,
+        F: Future<Output = Result<R, Error>> + Send + 'static,
     {
         let future = make(Arc::clone(&self.value));
         future::start(self.runtime.handle(), &self.tasks, async move {
@@ -74,29 +81,23 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 
     /// As [`future`](Self::future), answered with its output's bytes as they are, not as JSON.
-    pub(crate) fn future_raw<E: Into<Failure>, F>(
-        &self,
-        make: impl FnOnce(Arc<T>) -> F,
-    ) -> *mut VirtxFuture
+    pub(crate) fn future_raw<F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
     where
-        F: Future<Output = Result<Vec<u8>, E>> + Send + 'static,
+        F: Future<Output = Result<Vec<u8>, Error>> + Send + 'static,
     {
         let future = make(Arc::clone(&self.value));
         future::start(self.runtime.handle(), &self.tasks, async move {
             match future.await {
                 Ok(bytes) => (VIRTX_OK, bytes),
-                Err(failed) => failure(failed),
+                Err(error) => failure(error),
             }
         })
     }
 
     /// Start what `make` makes of the value, and hand C the stream.
-    pub(crate) fn stream<R: Serialize, E: Into<Failure>, S>(
-        &self,
-        make: impl FnOnce(Arc<T>) -> S,
-    ) -> *mut VirtxStream
+    pub(crate) fn stream<R: Serialize, S>(&self, make: impl FnOnce(Arc<T>) -> S) -> *mut VirtxStream
     where
-        S: Stream<Item = Result<R, E>> + Send + 'static,
+        S: Stream<Item = Result<R, Error>> + Send + 'static,
     {
         stream::start(
             self.runtime.handle(),
@@ -106,23 +107,30 @@ impl<T: Send + Sync + 'static> Runtime<T> {
     }
 
     /// Answer every request not yet answered with `VIRTX_ERROR`, then end the value with
-    /// `close`.
+    /// `close`, and hand C the future that answers once it has ended. Freeing that future
+    /// does not stop the ending.
     ///
-    /// Not called on the runtime's own threads, which this stops.
-    pub(crate) fn close<F: Future<Output = ()>>(self, close: impl FnOnce(T) -> F) {
+    /// On a thread of its own: this is called from any thread, a runtime's among them, and
+    /// the runtime stops here.
+    pub(crate) fn close<F: Future<Output = ()>>(
+        self,
+        close: impl FnOnce(T) -> F + Send + 'static,
+    ) -> *mut VirtxFuture {
         let Runtime {
             runtime,
             value,
             tasks,
         } = self;
         let mut tasks = tasks.into_inner().unwrap_or_else(PoisonError::into_inner);
-        runtime.block_on(async move {
-            tasks.shutdown().await;
-            // Every request's clone went with its task.
-            if let Ok(value) = Arc::try_unwrap(value) {
-                close(value).await;
-            }
-        });
+        future::done_by(move || {
+            runtime.block_on(async move {
+                tasks.shutdown().await;
+                // Every request's clone went with its task.
+                if let Ok(value) = Arc::try_unwrap(value) {
+                    close(value).await;
+                }
+            });
+        })
     }
 }
 
@@ -132,7 +140,7 @@ impl<T: Send + Sync + 'static> Runtime<T> {
 ///
 /// `out` is writable. `error` is null or writable.
 pub(crate) unsafe fn share<H>(
-    opened: Result<H, String>,
+    opened: Result<H, Error>,
     out: *mut *mut H,
     error: *mut VirtxBytes,
 ) -> c_int {
@@ -141,8 +149,8 @@ pub(crate) unsafe fn share<H>(
             unsafe { *out = Arc::into_raw(Arc::new(opened)).cast_mut() };
             VIRTX_OK
         }
-        Err(message) => {
-            let (status, message) = failure(message);
+        Err(failed) => {
+            let (status, message) = failure(failed);
             unsafe { write(error, message) };
             status
         }
@@ -181,7 +189,8 @@ mod tests {
     use super::{
         super::{
             VIRTX_END, VIRTX_ERROR, virtx_bytes_free, virtx_future_free, virtx_future_wait,
-            virtx_stream_free, virtx_stream_wait_next, waker::testing::empty,
+            virtx_stream_free, virtx_stream_wait_next,
+            waker::testing::{empty, taken},
         },
         *,
     };
@@ -201,9 +210,13 @@ mod tests {
     fn close(held: *mut Held) -> bool {
         match unsafe { release(held) } {
             Some(Held(runtime)) => {
-                runtime.close(async |closes| {
+                let ended = runtime.close(async |closes| {
                     closes.fetch_add(1, SeqCst);
                 });
+                let mut out = empty();
+                assert_eq!(unsafe { virtx_future_wait(ended, &mut out) }, VIRTX_OK);
+                unsafe { virtx_bytes_free(out) };
+                unsafe { virtx_future_free(ended) };
                 true
             }
             None => false,
@@ -230,13 +243,13 @@ mod tests {
         let runtime = unsafe { &(*held).0 };
         let future = runtime.future(|value| async move {
             let _held = value;
-            std::future::pending::<Result<(), String>>().await
+            std::future::pending::<Result<(), Error>>().await
         });
         let stream = runtime.stream(|value| {
             async_stream::stream! {
                 let _held = value;
                 std::future::pending::<()>().await;
-                yield Ok::<(), String>(());
+                yield Ok::<(), Error>(());
             }
         });
 
@@ -244,13 +257,13 @@ mod tests {
         assert_eq!(closes.load(SeqCst), 1, "each request's clone went with it");
         let mut out = empty();
         assert_eq!(unsafe { virtx_future_wait(future, &mut out) }, VIRTX_ERROR);
-        unsafe { virtx_bytes_free(out) };
+        assert_eq!(unsafe { taken(out) }.unwrap()["source"], "transport");
         let mut out = empty();
         assert_eq!(
             unsafe { virtx_stream_wait_next(stream, &mut out) },
             VIRTX_ERROR
         );
-        unsafe { virtx_bytes_free(out) };
+        assert_eq!(unsafe { taken(out) }.unwrap()["source"], "transport");
         let mut out = empty();
         assert_eq!(
             unsafe { virtx_stream_wait_next(stream, &mut out) },

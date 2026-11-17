@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // A virtx client over the C ABI of `libvirtx_core`. Field names are the wire's, camelCased.
 
 /** The variable naming the library to open when `load` was not called first. */
@@ -5,6 +6,11 @@ export const LIBRARY_ENV: 'VIRTX_CORE_LIB'
 
 /** A request failed: the server's error, the transport's, or the library's. */
 export class VirtxError extends Error {
+  /**
+   * Where it failed: the server answered with an error, the job it started failed, the
+   * connection failed, or this side did. Tell errors apart by it and `status`, not the message.
+   */
+  source: 'server' | 'job' | 'transport' | 'client'
   /**
    * The HTTP status the server refused the request with, if it did: `404` for what does not
    * exist, `409` for what is in use or has ended, and the like.
@@ -106,14 +112,19 @@ export class ImageJob implements ImageJobInfo {
   error?: string
   /** It as the server has it now. */
   get(): Promise<ImageJob>
-  /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
+  /**
+   * Its log, from its start or after the entry numbered `after`, ending after its `end` entry,
+   * or throwing the `VirtxError` it failed with in that entry's place.
+   */
   log(after?: number): AsyncGenerator<ImageJobEntry>
+  /** Follow it to its end, each line of its log printed if `print`: the digest it ended with. Rejects with why it failed. */
+  complete(options?: CompleteOptions): Promise<string>
   /** Cancel it if it runs, and forget it. */
   remove(): Promise<void>
 }
 
-/** How an image job ended. */
-export type ImageJobEnd = { digest: string } | { error: string }
+/** How an image job that succeeded ended. One that failed throws its error in this entry's place. */
+export type ImageJobEnd = { digest: string }
 
 /** An entry of an image job's log, numbered by `id`; `end` is the last. */
 export type ImageJobEntry = { id: number } & (
@@ -128,7 +139,9 @@ export type RegistryAuth =
   | { type: 'bearer'; token: string }
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
-export type Auth = { type: 'bearer'; token: string }
+export type Auth =
+  | { type: 'bearer'; token: string }
+  | { type: 'command'; program: string; args?: string[] }
 
 export interface ImageListOutputItem {
   /** The tag, as `name:tag`. */
@@ -154,12 +167,49 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-/** What the server answers about a snapshot. */
-export interface SnapshotInfo {
+/** A user's role in a project: an owner manages its members and removes it; a member uses what is in it. */
+export type Role = 'owner' | 'member'
+
+/** What the server answers about a project. */
+export interface ProjectInfo {
+  /** What names it on any server, given it once. */
+  id: string
+  /** What its owner names it, among their projects. */
   name: string
-  size: number
-  /** Whether a sandbox held it when it was answered, from the `createSandbox` that made a sandbox on it until that sandbox's `remove`. */
-  inUse: boolean
+  /** The user whose project it is: absent for one of no user's, such as one made over stdio. */
+  owner?: string
+  /** The client's role in it. */
+  role: Role
+}
+
+/** What the server answers about a member of a project. */
+export interface ProjectMemberInfo {
+  /** The user, as the server names them, such as an email address. */
+  user: string
+  role: Role
+}
+
+/**
+ * A project the client has a role in, as making it or asking for it answered, and the client
+ * that reaches it: its members, and its removal. What is in it, a client reaches with the
+ * project set (`setProject`). Dropping it leaves the project; `remove` removes it.
+ */
+export class Project implements ProjectInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  id: string
+  name: string
+  owner?: string
+  role: Role
+  /** Its members, with their roles. */
+  members(): Promise<ProjectMemberInfo[]>
+  /** Give `user` `role` in it, adding them if they are no member. */
+  setMember(user: string, role: Role): Promise<ProjectMemberInfo>
+  /** Take `user`'s role in it away: theirs to do, leaving it, or an owner's. */
+  removeMember(user: string): Promise<void>
+  /** Delete it and everything in it. */
+  remove(): Promise<void>
 }
 
 /** What the server answers about a volume. */
@@ -223,7 +273,7 @@ export interface DirEntry {
 }
 
 /**
- * The files of a `Volume`, a `Snapshot` or a `Sandbox`. A path is relative to its root, as
+ * The files of a `Volume` or a `Sandbox`. A path is relative to its root, as
  * `dir/file.txt`; the empty path is the root, and the server refuses one that leads outside.
  */
 export class Files {
@@ -274,30 +324,17 @@ export class Volume extends Files implements VolumeInfo {
   remove(): Promise<void>
 }
 
-/**
- * A snapshot the server holds, as making it or asking for it answered, and the client that
- * reaches it: its files, refused with a `423` while a sandbox holds it. Dropping it leaves the
- * snapshot; `remove` removes it.
- */
-export class Snapshot extends Files implements SnapshotInfo {
-  private constructor()
-  name: string
-  size: number
-  inUse: boolean
-  /** Delete it and its upper layer; refused with a `409` while a sandbox holds it. */
-  remove(): Promise<void>
-}
-
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
   /** The digest of the image it was made from. */
   image: string
-  snapshot?: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
   ports?: SandboxPort[]
+  /** virtx's own programs it has at `/abin`, if it was made with some. */
+  abins?: string[]
 }
 
 /**
@@ -309,16 +346,16 @@ export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
   image: string
-  snapshot?: string
   running: boolean
   ports?: SandboxPort[]
+  abins?: string[]
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
   jobs(): Promise<SandboxJob[]>
   /** The job `id` in it. */
   job(id: string): Promise<SandboxJob>
-  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  /** Stop it, end its jobs and forget it, with everything it wrote outside its volumes. */
   remove(): Promise<void>
 }
 
@@ -330,17 +367,19 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** The snapshot it stands on, or its name. */
-  snapshot?: string | Snapshot
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
   vcpus?: number
   memoryMib?: number
+  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
+  diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number
   /** Each volume, or its name, and where it is mounted. */
   volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
+  /** virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at `/abin/skills/{name}/`. */
+  abins?: string[]
 }
 
 export interface SandboxExecOptions {
@@ -386,6 +425,11 @@ export class SandboxJob implements SandboxJobInfo {
   writeStdin(data?: string, eof?: boolean): Promise<void>
   /** Its log, from its start or after the entry numbered `after`, ending after its `end` entry. */
   log(after?: number): AsyncGenerator<SandboxJobEntry>
+  /**
+   * Follow it to its end, what its process writes to stdout and stderr printed there if
+   * `print`: its exit code, `128 + signal` for one a signal ended.
+   */
+  complete(options?: CompleteOptions): Promise<number>
   /** Cancel it if it runs, killing its process, and forget it. */
   remove(): Promise<void>
 }
@@ -398,13 +442,25 @@ export type SandboxJobEntry = { id: number } & (
   | { end: { code: number } }
 )
 
+/** How a job's `complete` follows it. */
+export interface CompleteOptions {
+  /** Print its log as it is read, to stdout, and a process's stderr to stderr. */
+  print?: boolean
+}
+
 /**
- * A job as it starts: a promise of the job `J`, and an async iterable of its log's entries `E`,
- * read until its `end` entry. The job starts at the call, as a promise's work does, and once
- * however the value is used: awaited, iterated, or both. Each loop reads the log from its start;
- * leaving one leaves the job running, which the job's `remove` cancels.
+ * A job as it starts: a promise of the job `J`, an async iterable of its log's entries `E`,
+ * read until its `end` entry, and `complete`, the job's own once started. The job starts at the
+ * call, as a promise's work does, and once however the value is used: awaited, iterated,
+ * completed, or each. Each loop reads the log from its start; leaving one leaves the job
+ * running, which the job's `remove` cancels.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
+  /** Start the job and follow it to its end, as its `complete` does. */
+  complete<T>(
+    this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>,
+    options?: CompleteOptions,
+  ): Promise<T>
   [Symbol.asyncIterator](): AsyncGenerator<E>
 }
 
@@ -417,17 +473,23 @@ export class Client {
   /**
    * Start `program` with `args` as the server, and talk to it over its stdin and stdout.
    * Without `program`, the server is `virtx-stdio` of this library's version, fetched first if
-   * this host has none, blocking for the fetch; `ensureVirtx` does that fetch alone, off the
+   * this host has none, blocking for the fetch; `ensureVirtx` does that fetch alone, on the
    * event loop.
    */
   static spawn(program?: string | null, args?: string[]): Client
   /**
-   * Reach the server at `url`, its base `http` or `https` URL, sending
-   * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
-   * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
-   * would go in the clear: over `http` to any host but this machine.
+   * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+   * it wants, `project`, the project every request is in (the user's own without one),
+   * and `headers`, whatever else it asks of each request, with every request. `Authorization`
+   * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
+   * token would go in the clear: over `http` to any host but this machine.
    */
-  static connect(url: string, auth?: Auth | null, headers?: Record<string, string>): Client
+  static connect(
+    url: string,
+    auth?: Auth | null,
+    project?: string | null,
+    headers?: Record<string, string>,
+  ): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -441,6 +503,13 @@ export class Client {
    * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
    */
   setHeaders(headers: Record<string, string>): void
+  /**
+   * Name `project` in every request from now on, over either transport, in place of a
+   * `virtx-project` among the headers given. With null, that header names it where there is one,
+   * and otherwise none is named, for the user's own project. A name no header carries throws,
+   * the project unchanged.
+   */
+  setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */
@@ -454,7 +523,10 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
@@ -477,15 +549,18 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<Snapshot[]>
-  /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
-  getSnapshot(name: string): Promise<Snapshot>
+  /** Every project the client has a role in. */
+  listProject(): Promise<Project[]>
+  /** Make the project `name`, the client its owner. */
+  createProject(name: string): Promise<Project>
+  /** The project `name` names -- a project of the user's by name, or any by its id -- with the client's role in it. */
+  getProject(name: string): Promise<Project>
   listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
   getVolume(name: string): Promise<Volume>
   listSandbox(): Promise<Sandbox[]>
+  /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
 }

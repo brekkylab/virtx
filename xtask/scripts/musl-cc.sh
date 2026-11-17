@@ -2,7 +2,8 @@
 # The C compiler cargo hands to `cc-rs` when building `virtx-abins/` for the guest. Named by
 # `virtx-abins/.cargo/config.toml`.
 #
-# It is Apple's own clang: a clang is a cross-compiler for every target LLVM was built with,
+# It is the system's clang -- Apple's on macOS, the distribution's `clang` package on Linux: a
+# clang is a cross-compiler for every target LLVM was built with,
 # and the two things it is missing for this one are a target triple and somewhere to find a
 # libc -- which is all this adds. No musl-gcc, no second toolchain; `lld` is already a
 # dependency of this repository and `llvm-ar` comes with it (see `musl-ar.sh`).

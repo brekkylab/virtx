@@ -1,8 +1,7 @@
-"""The files of a volume, a snapshot and a sandbox, against the fixture's ``virtx-stdio``."""
+"""The files of a volume and a sandbox, against the fixture's ``virtx-stdio``."""
 
 import pytest
 from conftest import ALPINE, alpine, unique
-
 from virtx import (
     Client,
     DirEntry,
@@ -68,12 +67,6 @@ async def test_a_volume_s_files_answer_every_call(client: Client) -> None:
     await volume.remove()
 
 
-async def test_a_snapshot_s_files_answer_every_call(client: Client) -> None:
-    snapshot = await client.create_snapshot(unique("files"))
-    await every_call(snapshot, "")
-    await snapshot.remove()
-
-
 async def test_a_sandbox_s_files_answer_every_call(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)
@@ -107,17 +100,6 @@ async def test_a_volume_carries_its_client_to_its_files_and_mounts(client: Clien
     await volume.remove()
     with pytest.raises(VirtxError) as refused:
         await client.get_volume(name)
-    assert refused.value.status == 404
-
-
-async def test_a_snapshot_carries_its_client_to_its_files(client: Client) -> None:
-    name = unique("snapshot")
-    snapshot = await client.create_snapshot(name)
-    await snapshot.write_file("a.txt", "kept")
-    assert await (await client.get_snapshot(name)).read_text("a.txt") == "kept"
-    await snapshot.remove()
-    with pytest.raises(VirtxError) as refused:
-        await client.get_snapshot(name)
     assert refused.value.status == 404
 
 

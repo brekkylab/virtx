@@ -8,16 +8,16 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 A **volume** is storage kept apart from any sandbox, under a name.
 It is mounted at a path in a sandbox, read-write or read-only, and stays when the sandbox is removed.
 
-A volume differs from a [snapshot](/docs/guides/keeping-snapshots/) in three ways:
+A volume differs from what a sandbox writes over its image in three ways:
 
-- It sits at one path, such as `/data`, not under the whole root filesystem.
+- It outlives the sandbox, which takes the rest of what it wrote with it when it is removed.
 - Several sandboxes can mount it at once.
-- Its files can be read and written from your code while sandboxes use it.
+- Its files can be read and written from your code with no sandbox running.
 
 ## Create a volume
 
 `create_volume` makes an empty volume, and the server picks a name when none is given.
-A volume's files are read and written from your code with the same calls as a snapshot's, through the server's files API over WebDAV.
+A volume's files are read and written from your code with the same calls as a sandbox's, through the server's files API over WebDAV.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -61,8 +61,7 @@ sandbox = await client.create_sandbox(
     "alpine:latest",
     volumes=[SandboxVolume(volume, "/data")],
 )
-async for entry in sandbox.exec(["cat", "/data/config.json"]):
-    print(entry.entry)
+await sandbox.exec(["cat", "/data/config.json"]).complete(print=True)
 ```
 
 </TabItem>
@@ -72,7 +71,7 @@ async for entry in sandbox.exec(["cat", "/data/config.json"]):
 const sandbox = await client.createSandbox('alpine:latest', {
   volumes: [{ volume, path: '/data' }],
 })
-for await (const entry of sandbox.exec(['cat', '/data/config.json'])) console.log(entry)
+await sandbox.exec(['cat', '/data/config.json']).complete({ print: true })
 ```
 
 </TabItem>
@@ -81,10 +80,7 @@ for await (const entry of sandbox.exec(['cat', '/data/config.json'])) console.lo
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").volume(volume.name(), "/data");
 let sandbox = client.create_sandbox(&args).await?;
-let mut log = sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).log();
-while let Some(entry) = log.next().await {
-    println!("{:?}", entry?.entry);
-}
+sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).complete(true).await?;
 ```
 
 </TabItem>

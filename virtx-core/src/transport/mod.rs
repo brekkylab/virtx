@@ -1,7 +1,7 @@
 //! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
 //! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
-//! ([`sse`], whose server end keeps the log too), and the files of a volume or a snapshot over
+//! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
 //! WebDAV ([`webdav`]).
 //!
 //! The client end is the `client` feature, the server end the `server` feature; the types
@@ -61,14 +61,14 @@ mod tests {
     //! connection as stdio serves one; and what every endpoint shares on either, such as the
     //! credentials sent with each request.
 
-    use ::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
+    use ::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION};
     use axum::{Json, Router, routing::get};
     use hyper::service::Service as _;
     use hyper_util::service::TowerToHyperService;
     use tokio::net::TcpListener;
 
-    use super::{TransportClient, http, serve_stdio};
-    use crate::{Auth, Error};
+    use super::{TransportClient, http, serve_stdio, testing::piped};
+    use crate::{Auth, Error, PROJECT_HEADER};
 
     /// `router` served over HTTP on this machine's loopback, and its base URL.
     async fn serve(router: Router) -> String {
@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_reads_its_code_and_message_over_either_transport() {
         let router = Router::new().route(
-            "/snapshots/{name}",
+            "/volumes/{name}",
             get(|| async {
                 let body = serde_json::json!({"error": {"code": "not_found", "message": "none"}});
                 (StatusCode::NOT_FOUND, Json(body))
@@ -235,13 +235,47 @@ mod tests {
         tokio::spawn(serve_stdio(handle, input, output));
 
         for client in [tcp.unwrap(), TransportClient::over(pipe)] {
-            let error = http::get::<String>(&client, "/snapshots/nothing")
+            let error = http::get::<String>(&client, "/volumes/nothing")
                 .await
                 .unwrap_err();
             let Error::Status(404, message) = &error else {
                 panic!("not a 404: {error:?}");
             };
             assert_eq!(message, "not_found: none");
+            client.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_project_set_goes_with_every_request_over_either_transport() {
+        let router = Router::new().route(
+            "/project",
+            get(|headers: HeaderMap| async move {
+                let named = headers.get(PROJECT_HEADER).map(|v| v.to_str().unwrap());
+                Json(named.map(str::to_owned))
+            }),
+        );
+        let given = HeaderMap::from_iter([(
+            HeaderName::from_static(PROJECT_HEADER),
+            HeaderValue::from_static("given"),
+        )]);
+        let tcp = TransportClient::connect(&serve(router.clone()).await, Auth::None, given);
+        let named = async |client: &TransportClient| {
+            http::get::<Option<String>>(client, "/project")
+                .await
+                .unwrap()
+        };
+
+        for (client, given) in [(tcp.unwrap(), Some("given")), (piped(router), None)] {
+            assert_eq!(named(&client).await.as_deref(), given);
+            // Set, it is named in place of one among the headers given; unset, that one is, or
+            // none where none was given.
+            client.set_project(Some("demo")).unwrap();
+            assert_eq!(named(&client).await.as_deref(), Some("demo"));
+            assert!(client.set_project(Some("a\nb")).is_err());
+            assert_eq!(named(&client).await.as_deref(), Some("demo"));
+            client.set_project(None).unwrap();
+            assert_eq!(named(&client).await.as_deref(), given);
             client.close().await;
         }
     }
@@ -311,36 +345,36 @@ mod tests {
             // Over HTTP, the first would go as `DELETE /sandboxes/abc`.
             for path in ["../../../sandboxes/abc", "a/../../b", ".."] {
                 let error = files::remove(client, &data, path, false).await.unwrap_err();
-                assert!(matches!(error, Error::Path(_)), "{path}: {error:?}");
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
             }
             let error = files::rename(client, &data, "a", "../../other/files/a", true)
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             let error = files::create_dir_all(client, &data, "../a/b")
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             // A name is not a path: `..` there is not resolved.
             let error = files::remove(client, &FileRoot::Volume("..".into()), "a", false)
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             let error = volumes::remove(client, "..").await.unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             // A mount's path that resolves to the root would go to the list of mounts.
             for path in [".", "a/.."] {
                 let error = volumes::remove_mount(client, "data", path)
                     .await
                     .unwrap_err();
-                assert!(matches!(error, Error::Path(_)), "{path}: {error:?}");
+                assert!(matches!(error, Error::Client(_)), "{path}: {error:?}");
             }
             // A path not built from segments, such as one a registry answers: `\` separates
             // segments in an `http` URL.
             let error = http::get::<String>(client, "/a\\..\\..\\b")
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::Path(_)), "{error:?}");
+            assert!(matches!(error, Error::Client(_)), "{error:?}");
             assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
         }
     }

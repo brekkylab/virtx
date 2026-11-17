@@ -1,4 +1,4 @@
-//! The files of a volume, a snapshot and a sandbox, against the fixture's `virtx-stdio`.
+//! The files of a volume and a sandbox, against the fixture's `virtx-stdio`.
 
 use virtx::{Files, MountSource, MountType, SandboxCreateArgs};
 
@@ -100,17 +100,6 @@ fn a_volume_s_files_answer_every_call() {
 }
 
 #[test]
-fn a_snapshot_s_files_answer_every_call() {
-    let client = common::client();
-    let snapshot = client
-        .create_snapshot(Some(&common::unique("files")), None)
-        .wait()
-        .unwrap();
-    every_call(&snapshot, "");
-    snapshot.remove().wait().unwrap();
-}
-
-#[test]
 fn a_sandbox_s_files_answer_every_call() {
     let client = common::client();
     common::alpine(&client);
@@ -179,60 +168,6 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
 }
 
 #[test]
-fn a_snapshot_is_created_got_and_removed_and_refused_while_a_sandbox_holds_it() {
-    let client = common::client();
-    let name = common::unique("snapshot");
-    let created = client.create_snapshot(Some(&name), None).wait().unwrap();
-    assert_eq!(
-        (created.name(), created.info().in_use),
-        (name.as_str(), false),
-        "{created:?}"
-    );
-    let got = client.get_snapshot(&name).wait().unwrap();
-    assert_eq!(got.info(), created.info());
-    // After the comparison: a write grows the size, what the snapshot takes on disk.
-    created.write_file("a.txt", "kept", None).wait().unwrap();
-    assert_eq!(got.read_text("a.txt").wait().unwrap(), "kept");
-
-    common::alpine(&client);
-    let sandbox = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).snapshot(&name))
-        .wait()
-        .unwrap();
-    let held = client.get_snapshot(&name).wait().unwrap();
-    assert!(held.info().in_use);
-    let refused = held.read_dir("").wait().unwrap_err();
-    assert_eq!(refused.status(), Some(423), "{refused}");
-    // One sandbox at a time on a snapshot.
-    let second = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).snapshot(&name))
-        .wait()
-        .unwrap_err();
-    assert_eq!(second.status(), Some(409), "{second}");
-    assert_eq!(
-        common::run(&sandbox, &["sh", "-c", "echo kept > /root/kept"]).1,
-        0
-    );
-    sandbox.remove().wait().unwrap();
-
-    // What the sandbox wrote is in the snapshot, with no `sync`, and what is put there is in
-    // it for the next one.
-    assert_eq!(held.read_text("root/kept").wait().unwrap(), "kept\n");
-    held.write_file("root/put", "put\n", None).wait().unwrap();
-    let next = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).snapshot(&name))
-        .wait()
-        .unwrap();
-    let read = common::run(&next, &["cat", "/root/kept", "/root/put"]);
-    assert_eq!(read, (vec!["kept".into(), "put".into()], 0));
-    next.remove().wait().unwrap();
-
-    created.remove().wait().unwrap();
-    let gone = client.get_snapshot(&name).wait().unwrap_err();
-    assert_eq!(gone.status(), Some(404), "{gone}");
-}
-
-#[test]
 fn a_sandbox_s_files_are_its_own_and_go_with_it() {
     let client = common::client();
     common::alpine(&client);
@@ -240,21 +175,17 @@ fn a_sandbox_s_files_are_its_own_and_go_with_it() {
         .create_volume(Some(&common::unique("handed")))
         .wait()
         .unwrap();
-    let snapshot = client
-        .create_snapshot(Some(&common::unique("handed")), None)
-        .wait()
-        .unwrap();
     let on_handles = client
         .create_sandbox(
             &SandboxCreateArgs::new(ALPINE)
-                .snapshot(snapshot.name())
-                .readonly_volume(volume.name(), "/data"),
+                .readonly_volume(volume.name(), "/data")
+                .abin("index"),
         )
         .wait()
         .unwrap();
-    assert_eq!(on_handles.info().snapshot.as_deref(), Some(snapshot.name()));
+    let got = client.get_sandbox(on_handles.id()).wait().unwrap();
+    assert_eq!(got.info().abins, ["index"]);
     on_handles.remove().wait().unwrap();
-    snapshot.remove().wait().unwrap();
     volume.remove().wait().unwrap();
 
     let sandbox = client

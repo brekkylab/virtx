@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">코드와 AI 에이전트를 위한 일회용 Linux VM</h3>
@@ -12,12 +14,13 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <b>한국어</b>
+  <a href="README.md">English</a> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <b>한국어</b>
 </p>
 
 <br>
@@ -25,7 +28,7 @@
 virtx를 쓰면 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있습니다.
 
 내 컴퓨터에 굳이 설치하고 싶지 않은 무거운 의존성이 필요한 작업이나, AI 에이전트가 스스로 판단해 실행하는 명령처럼 아예 내 컴퓨터에서 돌리고 싶지 않은 코드에 특히 유용합니다.
-VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 스냅샷이나 볼륨에 기록한 것만 그대로 남습니다.
+VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
 
 > [!TIP]
 > virtx로 AI 에이전트를 만들고 있다면 저희가 만든 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 살펴보세요.
@@ -57,28 +60,19 @@ pip install virtx
 ```python
 import asyncio
 
-from virtx import Client, ImageJobEnd, Log, Recipe, SandboxJobEnd, Stderr, Stdout
+from virtx import Client, Recipe
 
 
 async def main() -> None:
     with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
-        async for entry in client.build_image(recipe, "jq:latest"):
-            match entry.entry:
-                case Log(line):
-                    print(line)
-                case ImageJobEnd(error=str(error)):
-                    raise RuntimeError(error)
+        await client.build_image(recipe, "jq:latest").complete(print=True)
 
         sandbox = await client.create_sandbox("jq:latest")
         try:
             cmd = ["sh", "-c", """echo '{"hello": "virtx"}' | jq -r .hello"""]
-            async for entry in sandbox.exec(cmd):
-                match entry.entry:
-                    case Stdout(line) | Stderr(line):
-                        print(line)
-                    case SandboxJobEnd(code):
-                        print("exited", code)
+            code = await sandbox.exec(cmd).complete(print=True)
+            print("exited", code)
         finally:
             await sandbox.remove()
 
@@ -102,19 +96,13 @@ async function main() {
   const client = Client.spawn()
   try {
     const recipe = new Recipe('alpine:latest').run('apk add --no-cache jq')
-    for await (const entry of client.buildImage(recipe, 'jq:latest')) {
-      if ('log' in entry) console.log(entry.log)
-      else if ('end' in entry && entry.end.error) throw new Error(entry.end.error)
-    }
+    await client.buildImage(recipe, 'jq:latest').complete({ print: true })
 
     const sandbox = await client.createSandbox('jq:latest')
     try {
       const cmd = ['sh', '-c', `echo '{"hello": "virtx"}' | jq -r .hello`]
-      for await (const entry of sandbox.exec(cmd)) {
-        if ('stdout' in entry) console.log(entry.stdout)
-        else if ('stderr' in entry) console.error(entry.stderr)
-        else if ('end' in entry) console.log('exited', entry.end.code)
-      }
+      const code = await sandbox.exec(cmd).complete({ print: true })
+      console.log('exited', code)
     } finally {
       await sandbox.remove()
     }
@@ -132,42 +120,26 @@ main()
 <summary><b>Rust</b></summary>
 
 ```sh
-cargo add virtx futures
+cargo add virtx
 cargo add tokio --features macros,rt-multi-thread
 ```
 
 ```rust
-use futures::StreamExt;
-use virtx::{
-    Client, ImageJobEntry, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
-};
+use virtx::{Client, Recipe, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
-    let mut log = client.build_image(recipe, "jq:latest").log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            ImageJobEntry::Log(line) => println!("{line}"),
-            ImageJobEntry::End(end) if end.error.is_some() => Err(end.error.unwrap())?,
-            _ => {}
-        }
-    }
+    client.build_image(recipe, "jq:latest").complete(true).await?;
 
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("jq:latest"))
         .await?;
     let cmd = ["sh", "-c", r#"echo '{"hello": "virtx"}' | jq -r .hello"#];
-    let mut log = sandbox.exec(&SandboxExecArgs::new(cmd)).log();
-    while let Some(entry) = log.next().await {
-        match entry?.entry {
-            SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => println!("{line}"),
-            SandboxJobEntry::End(end) => println!("exited {}", end.code),
-            _ => {}
-        }
-    }
+    let code = sandbox.exec(&SandboxExecArgs::new(cmd)).complete(true).await?;
+    println!("exited {code}");
     sandbox.remove().await?;
     Ok(())
 }
@@ -177,18 +149,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-서버 머신에서 토큰을 만들고, 그 토큰을 가진 사용자가 프로젝트에 접근할 수 있도록 `server.json`을 작성합니다.
+각 [릴리스](https://github.com/brekkylab/virtx/releases)에는 서버가 `virtx-server-tcp-<os>-<arch>.tar.gz`로 들어 있습니다(`macos-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`).
+안에는 `virtx-server-tcp`, 게스트 커널, `abin/`, `alib/`이 있습니다.
+별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
 
-```sh
-virtx-server-tcp token   # 토큰과 그 token_sha256을 출력합니다
-```
+서버 머신에서 OpenID Connect 제공자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
+  "listen": "0.0.0.0:8470",
   "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -196,17 +167,25 @@ virtx-server-tcp token   # 토큰과 그 token_sha256을 출력합니다
 virtx-server-tcp serve --config server.json
 ```
 
-클라이언트에서는 `Client.spawn()` 대신 토큰과 프로젝트를 지정해 접속합니다.
+클라이언트에서는 `Client.spawn()` 대신 서버에 접속합니다.
 나머지는 로컬 예제와 같습니다.
+
+사용자는 제공자가 `client_id`의 클라이언트에 발급한 ID 토큰의 `email`입니다. 이 클라이언트는 device flow를 쓰는 공개 클라이언트여야 합니다.
+`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰으로 접속합니다.
+
+```sh
+virtx login https://virtx.example
+```
 
 <details open>
 <summary><b>Python</b></summary>
 
 ```python
-from virtx import BearerAuth, Client
+from virtx import Client, CommandAuth
 
 client = Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
 )
 ```
 
@@ -217,9 +196,8 @@ client = Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
-  { 'virtx-project': 'demo' }
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -230,13 +208,16 @@ const client = Client.connect(
 
 ```rust
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
-    [("virtx-project", "demo")],
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
 </details>
+
+`virtx token`은 마지막으로 로그인한 provider의 토큰을 줍니다. 여러 곳에 로그인해 두었다면 인자로 서버의 provider를 지정하세요: `token --json --issuer https://idp.example --client-id virtx`.
 
 클라이언트는 평문 `http`로는 자기 머신의 루프백 주소에만 토큰을 보내므로, 서버를 다른 머신에서 돌린다면 앞단에 HTTPS를 두세요.
 
@@ -251,7 +232,7 @@ let client = Client::connect(
 - **쓰던 이미지를 그대로:** Docker Hub나 어떤 OCI 레지스트리에서든 이미지를 받아 오거나 레시피 또는 Dockerfile로 빌드할 수 있고, 다시 푸시하거나 다른 서버로 복사할 수도 있습니다.
 - **셸 없이 파일 주고받기:** 샌드박스 안의 파일을 코드에서 바로 읽고, 쓰고, 복사하고, 지울 수 있습니다.
 - **안에서 돌아가는 서비스에 바로 접속:** 샌드박스 안의 웹 서버, SSH, VNC 데스크톱, 데이터베이스에 내 컴퓨터의 주소로 접속할 수 있습니다.
-- **하던 작업 이어 가기:** 샌드박스가 쓴 내용을 스냅샷에 남겨 다음 샌드박스로 넘기고, 볼륨 하나를 여러 샌드박스가 함께 쓰고, Notion, Google Drive, OneDrive를 평범한 파일처럼 마운트할 수 있습니다.
+- **하던 작업 이어 가기:** 샌드박스가 쓴 내용을 볼륨에 남겨 다음 샌드박스로 넘기고, 볼륨 하나를 여러 샌드박스가 함께 쓰고, Notion, Google Drive, OneDrive를 평범한 파일처럼 마운트할 수 있습니다.
 - **GPU도 함께:** 샌드박스 안에서 호스트의 GPU로 딥러닝을 비롯한 Vulkan 작업을 돌릴 수 있습니다.
 
 ## 요구 사항
@@ -286,7 +267,8 @@ virtx 서버를 실행하는 머신에 필요한 조건입니다.
 #### GPU (선택)
 
 GPU를 쓰는 샌드박스에만 필요합니다.
-호스트에는 Vulkan 로더가, 이미지에는 게스트 쪽 Vulkan 구성 요소가 있어야 합니다.
+호스트에 Vulkan 로더가 있어야 합니다.
+게스트 쪽 Vulkan은 모든 샌드박스에 함께 들어 있어서 이미지에는 필요 없습니다.
 자세한 내용은 [GPU 사용하기](docs/content/guides/using-gpus.mdx)를 참고하세요.
 
 ## 동작 방식
@@ -320,29 +302,26 @@ virtx는 클라이언트-서버 구조로 동작합니다.
 가장 중심이 되는 리소스는 명령을 실행하는 VM인 **샌드박스**입니다.
 
 <p align="center">
-  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 쓰기 가능한 스냅샷을 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="docs/images/core-concepts.svg" width="640">
+  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 쓰기 가능한 레이어를 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="docs/images/core-concepts.svg" width="640">
 </p>
 
 샌드박스의 루트 파일시스템은 두 층을 겹친 오버레이입니다.
-아래층은 읽기 전용인 **이미지**, 위층은 쓰기 내용이 기록되는 **스냅샷**입니다.
+아래층은 읽기 전용인 **이미지**, 위층은 쓰기 내용이 기록되는 **쓰기 레이어**입니다.
 
 이미지는 그 위에서 만든 모든 샌드박스의 출발점입니다.
 Docker가 쓰는 것과 같은 OCI 이미지 형식이라서, `alpine:latest`를 비롯해 레지스트리에 있는 이미지라면 무엇이든 쓸 수 있습니다.
 
-스냅샷에는 샌드박스가 바꾼 내용이 차곡차곡 쌓입니다.
-새 스냅샷은 빈 상태로 시작하고, 나중에 그 스냅샷으로 만든 샌드박스는 직전 샌드박스가 쓴 내용을 모두 가진 채 시작합니다.
-그래서 앞 샌드박스가 설치한 것을 다음 샌드박스에서 그대로 쓸 수 있습니다.
-스냅샷 하나는 한 번에 샌드박스 하나만 쓸 수 있습니다.
-스냅샷 없이 만든 샌드박스에는 전용 스냅샷이 따로 생기고, 이 스냅샷은 샌드박스를 지울 때 함께 사라집니다.
+쓰기 레이어에는 샌드박스가 바꾼 내용이 차곡차곡 쌓입니다.
+샌드박스마다 전용 쓰기 레이어가 빈 상태로 생기고, 샌드박스를 지울 때 함께 사라집니다.
 
 루트 파일시스템과 별개로 저장 공간이 필요하다면 **볼륨**을 쓰세요.
-볼륨은 스냅샷과 달리 특정 경로에 읽기-쓰기 또는 읽기 전용으로 마운트하며, 여러 샌드박스에 동시에 마운트할 수도 있습니다.
+볼륨은 쓰기 레이어와 달리 특정 경로에 읽기-쓰기 또는 읽기 전용으로 마운트하며, 여러 샌드박스에 동시에 마운트할 수도 있습니다.
 샌드박스를 지워도 볼륨은 남아 있고, 볼륨의 파일은 샌드박스 없이도 코드에서 바로 읽고 쓸 수 있습니다.
 Notion, Google Drive, OneDrive 같은 원격 저장소도 볼륨 안에 읽기 전용으로 마운트할 수 있어서, 샌드박스에서는 이것들이 그냥 파일로 보입니다.
 
 ## 문서
 
-가이드와 API 레퍼런스는 [문서](docs/)에서 볼 수 있습니다.
+가이드와 API 레퍼런스는 [문서](https://virtx.sh/docs)에서 볼 수 있습니다.
 그 밖의 API는 패키지별 문서에 정리되어 있습니다: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
 ## 소스에서 빌드하기

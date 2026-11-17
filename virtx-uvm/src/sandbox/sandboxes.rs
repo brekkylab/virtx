@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
@@ -319,6 +319,15 @@ impl Sandboxes {
     ) -> Result<virtx_core::Sandbox, Error> {
         let shared = &self.0.shared;
         let id = sandbox.id().to_owned();
+        // Held until its record is written, or its making undone: a disk here no record names
+        // yet is not one a server starting meanwhile takes for left over.
+        let _making = match Making::begin(&shared.kept, &id) {
+            Ok(making) => making,
+            Err(e) => {
+                self.0.all.lock().unwrap().remove(&id);
+                return Err(Error::Failed(format!("making sandbox {id}: {e}")));
+            }
+        };
         // Its disk: made here -- or, for one made again here, the one kept for it, brought
         // here. Where none was kept -- its server gone before it kept one -- a new one.
         let kept = match moved {
@@ -573,17 +582,67 @@ impl Drop for Waiting {
     }
 }
 
-/// The disks under `snapshots` that no sandbox's record under `root` names, removed: those of a
-/// making cut short -- the server ended, or its caller left, before it was kept -- which nothing
-/// lists or deletes (issue #155). One a machine runs over stays. Called before anything counts
-/// what is here: a server's keeping, and [`Sandboxes::new`].
+/// A sandbox's making under way: `<id>.making` beside the records, locked from before its disk
+/// is made until its record is written or its making undone, and gone after. While it is held
+/// -- by this server or another over the same home -- its disk is not one left over.
+struct Making {
+    path: PathBuf,
+    _held: File,
+}
+
+impl Making {
+    fn begin(kept: &Path, id: &str) -> std::io::Result<Making> {
+        let path = kept.join(format!("{id}.making"));
+        // One a server starting removed between its creating and its locking -- left over, as
+        // it looked -- made again.
+        for _ in 0..3 {
+            let file = File::create(&path)?;
+            file.lock()?;
+            if path.exists() {
+                return Ok(Making { path, _held: file });
+            }
+        }
+        Err(std::io::Error::other(format!(
+            "{} kept being removed",
+            path.display()
+        )))
+    }
+}
+
+impl Drop for Making {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The disks under `snapshots` that no sandbox's record under `root` names, and that no making
+/// under way holds ([`Making`]), removed: those of a making cut short -- the server ended, or
+/// its caller left, before it was kept -- which nothing lists or deletes (issue #155). One
+/// another server is making stays. Called before anything counts what is here: a server's
+/// keeping, and [`Sandboxes::new`].
 pub fn forget_unrecorded(snapshots: &SnapshotStore, root: &Path) {
     let kept = root.join("sandbox");
     let Ok(all) = snapshots.list() else {
         return;
     };
     for snapshot in all {
-        if kept.join(format!("{}.json", snapshot.name)).exists() {
+        let recorded = || kept.join(format!("{}.json", snapshot.name)).exists();
+        if recorded() {
+            continue;
+        }
+        let making = kept.join(format!("{}.making", snapshot.name));
+        let stale = match File::open(&making) {
+            Ok(file) => match file.try_lock() {
+                Ok(()) => Some(file),
+                // Being made, here or by another server.
+                Err(_) => continue,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        // A making lets go only once its record is written, or its disk removed: one that has
+        // since is recorded.
+        if recorded() {
             continue;
         }
         if snapshots.remove(&snapshot.name).is_ok() {
@@ -591,6 +650,9 @@ pub fn forget_unrecorded(snapshots: &SnapshotStore, root: &Path) {
                 "disk {} removed: no sandbox here was made of it",
                 snapshot.name
             );
+        }
+        if stale.is_some() {
+            let _ = std::fs::remove_file(&making);
         }
     }
 }
@@ -736,6 +798,43 @@ mod tests {
         assert!(next.snapshots().open("half-made").is_err());
         assert!(next.snapshots().open(&made.id).is_ok());
         assert_eq!(next.list(None).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A server starting while another makes a sandbox -- its disk there, its record not yet
+    /// -- leaves that disk alone: the sandbox, once made, starts over it.
+    #[tokio::test]
+    async fn a_disk_being_made_is_left_alone_by_a_server_starting() {
+        let root = std::env::temp_dir().join(format!("virtx-making-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let hooks = Arc::new(HeldMade::default());
+        let here = sandboxes_with(&root, hooks.clone());
+        let making = {
+            let here = here.clone();
+            tokio::spawn(async move {
+                here.create(SandboxCreateArgs::new("here:latest"), None, false)
+                    .await
+            })
+        };
+        hooks.reached.notified().await;
+        let disks = here.snapshots().list().unwrap();
+        assert_eq!(disks.len(), 1, "its disk made, its record not yet");
+        let started = sandboxes(&root);
+        hooks.go_on.notify_one();
+        let made = making.await.unwrap().unwrap();
+        assert_eq!(made.id, disks[0].name);
+        assert!(here.snapshots().open(&made.id).is_ok(), "its disk");
+        drop(started);
+        // Nor does one starting once it is made, nor is anything of its making left.
+        drop(sandboxes(&root));
+        assert!(here.snapshots().open(&made.id).is_ok(), "its disk");
+        let left: Vec<_> = std::fs::read_dir(root.join("sandbox"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, [OsString::from(format!("{}.json", made.id))]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

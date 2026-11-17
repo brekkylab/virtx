@@ -343,6 +343,22 @@ jobs:
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
 
+      # Tracing, for now: where cargo spends the ~27 seconds before `cargo xtask init` compiles.
+      - name: Cargo's phases (timed)
+        run: |
+          home=$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")
+          ls "$home/git/checkouts" 2>/dev/null || echo "no git/checkouts"
+          time cargo -V
+          time cargo locate-project --workspace
+          time cargo metadata --offline --format-version 1 --no-deps > /dev/null
+          CARGO_LOG=cargo::sources::git=debug,cargo::core::resolver=info \
+            bash -c 'time cargo metadata --offline --format-version 1 > /dev/null'
+          time cargo metadata --offline --format-version 1 > /dev/null
+          du -sh "$home"/git/checkouts/* 2>/dev/null
+          find "$home/git/checkouts" -type f | wc -l
+          time cargo build --offline -p xtask
+          time cargo build --offline -p xtask
+
       - name: Add the guest's musl target
         run: cargo xtask init
 

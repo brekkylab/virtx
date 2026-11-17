@@ -4,12 +4,30 @@
 //! A volume's files are the directory on this host a machine shares, its mounts at their
 //! paths. A sandbox's are its machine's root as its processes see it, asked of the agent there
 //! ([`Machine::io`]).
+//!
+//! A `PUT` to a volume or a sandbox lands whole: its body is written beside its path and moved
+//! over it once all of it has arrived, as `dav-server` flushes the file. One with `If-Match` or
+//! `If-None-Match` is checked by `dav-server` before its body is read, and [again as it
+//! lands](Landing), holding the volume or the sandbox: against what is at the path now, and the
+//! write moved over it in the same hold, or let go and refused `412`. Of two that checked one
+//! state, the second is checked against what the first wrote, and a slow or stalled sender holds
+//! up no other writer. Any other write with either condition is held while `dav-server` answers
+//! it. A sandbox's write holds each volume the sandbox mounts writable too, after the sandbox
+//! and in the order of their directories, so one through a mount and one through the volume's
+//! own files are held against each other. A `PUT` to a path in such a mount is checked against
+//! the volume's own files on this host as it lands, not as the guest sees them: the guest may
+//! hold what it saw there for a few seconds after a change made outside it. The rest is checked
+//! as the guest sees it: a `PUT` before its body is read, the condition of any other write, and
+//! a path the volume's files do not answer for, through a link, by a name they refuse, or in a
+//! mount of the volume's own.
 
 mod sandbox;
 mod volume;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -18,6 +36,8 @@ use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use dav_server::DavHandler;
 use dav_server::davpath::DavPath;
+use dav_server::fs::{DavMetaData, FsError};
+use futures_util::future::BoxFuture;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 
@@ -28,8 +48,9 @@ use crate::volume::{Error as VolumeError, Store as VolumeStore};
 /// The files endpoints over one home's volumes, and its sandboxes' as each is asked of.
 pub struct Files {
     volumes: VolumeStore,
-    /// Each volume's requests that write over an etag, by its name, so the etag each checks is
-    /// the one the file has when it writes.
+    /// Each volume's [conditional writes](conditional), by `volume:` and its name, before
+    /// its [lock file](writing) too, through its own files or a sandbox that mounts it. A
+    /// sandbox's are held by the sandbox's own first.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -60,26 +81,25 @@ impl Files {
                 return refused(status, e).into_response();
             }
         };
-        let handler = handler
-            .filesystem(Box::new(volume::Fs(volume)))
-            .build_handler();
-        let conditional = request.headers().contains_key(http::header::IF_MATCH);
-        let _serial = match conditional {
-            true => {
-                let serial = Arc::clone(
-                    self.serial
-                        .lock()
-                        .unwrap()
-                        .entry(name.to_owned())
-                        .or_default(),
-                );
-                Some(serial.lock_owned().await)
-            }
-            false => None,
+        let hold = || -> Hold {
+            let serial = self.serial(format!("volume:{name}"));
+            let dir = volume.path().to_owned();
+            Arc::new(move || {
+                let (serial, dir) = (Arc::clone(&serial), dir.clone());
+                Box::pin(async move { Ok(Box::new(held_volume(serial, &dir).await?) as Guard) })
+            })
         };
-        lingering(request, |request| handler.handle(request))
-            .await
-            .map(Body::new)
+        let (request, landing, _held) = match conditioned(request, hold).await {
+            Ok(conditioned) => conditioned,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let fs = volume::Fs {
+            volume,
+            landing: landing.clone(),
+        };
+        let handler = handler.filesystem(Box::new(fs)).build_handler();
+        let response = lingering(request, |request| handler.handle(request)).await;
+        landed(landing.as_deref(), response.map(Body::new))
     }
 
     /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from the guest
@@ -96,25 +116,63 @@ impl Files {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
         };
-        let handler = handler
-            .filesystem(Box::new(sandbox::Fs(machine)))
-            .build_handler();
+        let sandbox = activity.sandbox();
+        let mounts: Arc<[(String, PathBuf)]> = sandbox.mounts().into();
+        let hold = || -> Hold {
+            let writing = Arc::clone(sandbox.writing());
+            let mut dirs: Vec<PathBuf> = mounts.iter().map(|(_, dir)| dir.clone()).collect();
+            dirs.sort();
+            dirs.dedup();
+            let volumes: Vec<_> = dirs
+                .into_iter()
+                .map(|dir| {
+                    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+                    (self.serial(format!("volume:{name}")), dir)
+                })
+                .collect();
+            Arc::new(move || {
+                let (writing, volumes) = (Arc::clone(&writing), volumes.clone());
+                Box::pin(async move {
+                    let sandbox = writing.lock_owned().await;
+                    let mut held = Vec::with_capacity(volumes.len());
+                    for (serial, dir) in volumes {
+                        held.push(held_volume(serial, &dir).await?);
+                    }
+                    Ok(Box::new((sandbox, held)) as Guard)
+                })
+            })
+        };
+        let (request, landing, _held) = match conditioned(request, hold).await {
+            Ok(conditioned) => conditioned,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let fs = sandbox::Fs {
+            machine,
+            landing: landing.clone(),
+            mounts: Arc::clone(&mounts),
+        };
+        let handler = handler.filesystem(Box::new(fs)).build_handler();
         let response = lingering(request, |request| handler.handle(request)).await;
-        response.map(|body| {
+        landed(landing.as_deref(), response.map(Body::new)).map(|body| {
             Body::new(body.map_frame(move |frame| {
                 let _ = &activity;
                 frame
             }))
         })
     }
+
+    /// What holds the requests under `key` one at a time.
+    fn serial(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(self.serial.lock().unwrap().entry(key).or_default())
+    }
 }
 
 /// `answer` to `request`, once what `answer` left unread of its body has been read.
 ///
-/// An answer made before the body is read -- a write refused over an etag gone stale -- would
-/// otherwise go out while the body is still arriving, and the connection, with it unread, is
-/// closed: Windows resets it, and a client still sending sees the reset and never the answer.
-/// Read to its end, the body leaves the connection as one whose request was whole.
+/// An answer made before the body is read -- a `PUT` refused under a directory that is not
+/// there -- would otherwise go out while the body is still arriving, and the connection, with it
+/// unread, is closed: Windows resets it, and a client still sending sees the reset and never the
+/// answer. Read to its end, the body leaves the connection as one whose request was whole.
 async fn lingering<B, F>(
     request: Request<Body>,
     answer: impl FnOnce(Request<Shared>) -> F,
@@ -123,16 +181,18 @@ where
     F: Future<Output = http::Response<B>>,
 {
     let (parts, body) = request.into_parts();
-    let body = Shared(Arc::new(Mutex::new(body)));
+    let body = Shared(Arc::new(Mutex::new(Some(body))));
     let response = answer(Request::from_parts(parts, body.clone())).await;
     let mut rest = body;
     while let Some(Ok(_)) = rest.frame().await {}
     response
 }
 
-/// A request's body, which [`lingering`] reads the rest of after the handler it was given to.
+/// A request's body, which [`lingering`] reads the rest of after the handler it was given to:
+/// once it has ended it is not read again, so a handler that read it to its end leaves
+/// [`lingering`] nothing, whatever the body is.
 #[derive(Clone)]
-struct Shared(Arc<Mutex<Body>>);
+struct Shared(Arc<Mutex<Option<Body>>>);
 
 impl http_body::Body for Shared {
     type Data = bytes::Bytes;
@@ -142,7 +202,15 @@ impl http_body::Body for Shared {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut *self.0.lock().unwrap()).poll_frame(cx)
+        let mut body = self.0.lock().unwrap();
+        let Some(rest) = body.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let polled = Pin::new(rest).poll_frame(cx);
+        if let Poll::Ready(None) = polled {
+            *body = None;
+        }
+        polled
     }
 }
 
@@ -252,6 +320,251 @@ fn destination(request: &Request<Body>) -> Option<String> {
     }
 }
 
+/// Whether `request` is a conditional write: one that may change what is at its path, with
+/// `If-Match` or `If-None-Match`. A read with either is not: `If-None-Match` on a `GET` is a
+/// cache asking whether it is current.
+fn conditional<B>(request: &Request<B>) -> bool {
+    let method = request.method();
+    let reads = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || method.as_str() == "PROPFIND";
+    let headers = request.headers();
+    !reads
+        && (headers.contains_key(header::IF_MATCH) || headers.contains_key(header::IF_NONE_MATCH))
+}
+
+/// What holds a volume or a sandbox for a conditional write, let go of when it drops.
+type Guard = Box<dyn Send>;
+
+/// What takes a [`Guard`], waiting while another holds it, or why it could not.
+type Hold = Arc<dyn Fn() -> BoxFuture<'static, Result<Guard, Refusal>> + Send + Sync>;
+
+/// Hold a volume, whose own directory is `dir`, for one conditional write, waiting while
+/// another holds it, in this process or another over the home: first `serial`, this process's
+/// hold on it, then its `writing` file, locked, which the system lets go of with a process that
+/// ends. The file is tried, not waited on, so a write waiting holds no thread, and one whose
+/// client is gone stops waiting. The file is let go of before this process's hold, so the next
+/// here finds it free.
+async fn writing(
+    serial: Arc<tokio::sync::Mutex<()>>,
+    dir: &Path,
+) -> io::Result<(std::fs::File, tokio::sync::OwnedMutexGuard<()>)> {
+    let held = serial.lock_owned().await;
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("writing"))
+        .await?
+        .into_std()
+        .await;
+    let mut wait = std::time::Duration::from_millis(2);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok((file, held)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
+/// The volume whose own directory is `dir` held, under `serial`, for one conditional write, as
+/// [`writing`] holds it; or why not: `404` for a volume that is not there any more.
+async fn held_volume(
+    serial: Arc<tokio::sync::Mutex<()>>,
+    dir: &Path,
+) -> Result<(std::fs::File, tokio::sync::OwnedMutexGuard<()>), Refusal> {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    writing(serial, dir).await.map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            let gone = VolumeError::Unknown(name.into_owned());
+            return refused(status(&gone), gone);
+        }
+        let why = format!("holding {name} for a write: {e}");
+        refused(StatusCode::INTERNAL_SERVER_ERROR, why)
+    })
+}
+
+/// `request` made ready to answer under the [`Hold`] `hold` makes: a conditional `PUT` with the
+/// [`Landing`] its write is checked by as it lands, holding nothing before; any other
+/// conditional write [gathered], and held while it is answered; anything else as it is, with no
+/// hold made for it.
+async fn conditioned(
+    request: Request<Body>,
+    hold: impl FnOnce() -> Hold,
+) -> Result<(Request<Body>, Option<Arc<Landing>>, Option<Guard>), Refusal> {
+    if !conditional(&request) {
+        return Ok((request, None, None));
+    }
+    let hold = hold();
+    if request.method() == Method::PUT {
+        let landing = Landing {
+            condition: Condition::of(request.headers()),
+            hold,
+            refusal: Mutex::default(),
+        };
+        return Ok((request, Some(Arc::new(landing)), None));
+    }
+    let request = gathered(request).await?;
+    let held = hold().await?;
+    Ok((request, None, Some(held)))
+}
+
+/// A conditional `PUT`'s condition, checked again as its write lands: `dav-server` checks it
+/// before it reads the body, and two that checked one state would otherwise both land.
+pub(super) struct Landing {
+    condition: Condition,
+    hold: Hold,
+    /// What the request is answered with instead, once its write was let go here: `412`, or
+    /// why its root could not be held.
+    refusal: Mutex<Option<Refusal>>,
+}
+
+impl Landing {
+    /// Holding the root, check the condition against what `there` finds at the path, and `land`
+    /// the write if it holds; or let it go, failing, and answer the request [as it
+    /// says](landed). The hold is waited for here, so a write whose client is gone stops
+    /// waiting; once it is held, the check and the move go on in a task of its own, which keeps
+    /// the hold until it has done either: a client gone then, dropping the request, would
+    /// otherwise let go of the hold while a move to a sandbox's guest is still on its way.
+    pub(super) async fn land<M: DavMetaData + 'static>(
+        self: &Arc<Self>,
+        there: impl Future<Output = Result<Option<M>, FsError>> + Send + 'static,
+        land: impl Future<Output = Result<(), FsError>> + Send + 'static,
+    ) -> Result<(), FsError> {
+        let held = match (self.hold)().await {
+            Ok(held) => held,
+            Err(refusal) => return Err(self.refuse(refusal)),
+        };
+        let landing = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let _held = held;
+            let there = there.await?;
+            if !landing
+                .condition
+                .holds(there.as_ref().map(|meta| meta as &dyn DavMetaData))
+            {
+                return Err(landing.refuse(stale()));
+            }
+            land.await
+        });
+        task.await.unwrap_or(Err(FsError::GeneralFailure))
+    }
+
+    /// Answer `refusal`, failing the write.
+    fn refuse(&self, refusal: Refusal) -> FsError {
+        *self.refusal.lock().unwrap() = Some(refusal);
+        FsError::GeneralFailure
+    }
+}
+
+/// `response`, or what its write was refused with as it [landed](Landing::land), if it was.
+fn landed(landing: Option<&Landing>, response: Response) -> Response {
+    match landing.and_then(|landing| landing.refusal.lock().unwrap().take()) {
+        Some(refusal) => refusal.into_response(),
+        None => response,
+    }
+}
+
+/// A conditional write refused over a file not the one its condition named.
+fn stale() -> Refusal {
+    refused(
+        StatusCode::PRECONDITION_FAILED,
+        "the file is not the one its condition named",
+    )
+}
+
+/// The most of the body of a conditional request other than a `PUT` that is read before its
+/// root is held: what `dav-server` itself reads of one.
+const GATHERED: usize = 64 << 10;
+
+/// `request`, a conditional write other than a `PUT`, with its body read to its end first, up to
+/// [`GATHERED`], so a sender that stalls holds up no other writer while its root is held. A
+/// conditional `PATCH`, a write of part of a file, is refused, as a `PUT` of part of one is.
+async fn gathered(request: Request<Body>) -> Result<Request<Body>, Refusal> {
+    if request.method() == Method::PATCH {
+        return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
+    }
+    let (parts, body) = request.into_parts();
+    match http_body_util::Limited::new(body, GATHERED).collect().await {
+        Ok(body) => Ok(Request::from_parts(parts, Body::from(body.to_bytes()))),
+        Err(e) if e.is::<http_body_util::LengthLimitError>() => {
+            Err(refused(StatusCode::PAYLOAD_TOO_LARGE, e))
+        }
+        Err(e) => Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!("the body broke off: {e}"),
+        )),
+    }
+}
+
+/// A request's `If-Match` and `If-None-Match`: each a list of tags or `*`. `If-Match` compares
+/// tags strongly, a weak one naming nothing, and `If-None-Match` weakly, `W/` or not, as RFC 9110
+/// section 13.1 has it. A line that is not text names nothing, where `dav-server` takes the
+/// header as absent: an `If-Match` of only such lines is let through before the body and refused
+/// as it lands.
+struct Condition {
+    matching: Option<Tags>,
+    none_matching: Option<Tags>,
+}
+
+enum Tags {
+    Any,
+    These(Vec<String>),
+}
+
+impl Condition {
+    fn of(headers: &http::HeaderMap) -> Condition {
+        Condition {
+            matching: Tags::of(headers, header::IF_MATCH),
+            none_matching: Tags::of(headers, header::IF_NONE_MATCH),
+        }
+    }
+
+    /// Whether it holds over `there`, what is at the path, or nothing.
+    fn holds(&self, there: Option<&dyn DavMetaData>) -> bool {
+        self.matching
+            .as_ref()
+            .is_none_or(|tags| tags.name(there, false))
+            && !self
+                .none_matching
+                .as_ref()
+                .is_some_and(|tags| tags.name(there, true))
+    }
+}
+
+impl Tags {
+    fn of(headers: &http::HeaderMap, name: header::HeaderName) -> Option<Tags> {
+        let mut values = headers.get_all(name).iter().peekable();
+        values.peek()?;
+        let mut these = Vec::new();
+        for value in values {
+            let Ok(value) = value.to_str() else { continue };
+            if value.trim() == "*" {
+                return Some(Tags::Any);
+            }
+            these.extend(value.split(',').map(str::trim).map(str::to_owned));
+        }
+        Some(Tags::These(these))
+    }
+
+    /// Whether they name `there`: `*` anything, a tag the one it has, and, compared `weak`ly,
+    /// that one marked weak too. Every tag here is strong.
+    fn name(&self, there: Option<&dyn DavMetaData>, weak: bool) -> bool {
+        match self {
+            Tags::Any => there.is_some(),
+            Tags::These(these) => there.and_then(|meta| meta.etag()).is_some_and(|etag| {
+                let tag = format!("\"{etag}\"");
+                these.iter().any(|given| {
+                    *given == tag || (weak && given.strip_prefix("W/") == Some(tag.as_str()))
+                })
+            }),
+        }
+    }
+}
+
 /// A request refused: the status, and a line saying why.
 pub(crate) struct Refusal(StatusCode, String);
 
@@ -264,6 +577,29 @@ impl IntoResponse for Refusal {
 /// `status`, saying why.
 fn refused(status: StatusCode, why: impl fmt::Display) -> Refusal {
     Refusal(status, why.to_string())
+}
+
+/// The status a request on a volume's files is refused with when it fails with `e`, as a
+/// WebDAV request would be: `404` for nothing there, `409` for a parent that is not a
+/// directory, `403` for a change a mount or the volume will not take.
+fn status(e: &VolumeError) -> StatusCode {
+    match e {
+        VolumeError::InvalidName(_) | VolumeError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+        VolumeError::Unknown(_) | VolumeError::NoMount { .. } => StatusCode::NOT_FOUND,
+        VolumeError::AlreadyExists(_) | VolumeError::MountExists(_) => StatusCode::CONFLICT,
+        VolumeError::InUse(_) => StatusCode::LOCKED,
+        VolumeError::Refused(_) => StatusCode::FORBIDDEN,
+        VolumeError::Io { source, .. } => match source.kind() {
+            io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+            io::ErrorKind::NotADirectory | io::ErrorKind::IsADirectory => StatusCode::CONFLICT,
+            io::ErrorKind::AlreadyExists => StatusCode::CONFLICT,
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+                StatusCode::FORBIDDEN
+            }
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+        VolumeError::Source(_) | VolumeError::Origins(..) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 #[cfg(test)]

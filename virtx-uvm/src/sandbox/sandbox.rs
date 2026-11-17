@@ -148,6 +148,8 @@ pub struct Sandbox {
     used: Mutex<Instant>,
     /// How many [`Activity`]s are under way.
     active: AtomicUsize,
+    /// What a conditional write to its files holds as it lands (see [`Files`](crate::Files)).
+    writing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Sandbox {
@@ -334,6 +336,7 @@ impl Sandbox {
             ports: Ports::default(),
             used: Mutex::new(Instant::now()),
             active: AtomicUsize::new(0),
+            writing: Arc::default(),
         });
         sandbox.wake().await?;
         if let Some(after) = park_after {
@@ -447,6 +450,23 @@ impl Sandbox {
     pub fn activity(self: &Arc<Self>) -> Activity {
         self.active.fetch_add(1, Ordering::Relaxed);
         Activity(Arc::clone(self))
+    }
+
+    /// What a conditional write to its files holds first as it lands (see
+    /// [`Files`](crate::Files)).
+    pub(crate) fn writing(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.writing
+    }
+
+    /// Each volume it mounts writable: where in the guest, spelled as the guest is given it,
+    /// and the volume's own directory.
+    pub(crate) fn mounts(&self) -> Vec<(String, PathBuf)> {
+        self.config
+            .volumes
+            .iter()
+            .filter(|mount| !mount.read_only)
+            .filter_map(|mount| Some((crate::mount_point(&mount.at).ok()?, mount.path.clone())))
+            .collect()
     }
 
     /// How long it has been in use by nothing: no job running and no [`Activity`] under way.

@@ -7,7 +7,6 @@ use super::{MountSource, MountType};
 
 /// A volume, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VolumeListOutputItem {
     /// The volume's name.
     pub name: String,
@@ -28,7 +27,6 @@ pub struct VolumeCreateArgs {
 
 /// A mount in a volume, as the server answers it. Its credentials are not answered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VolumeMountListOutputItem {
     /// Where it is mounted.
     pub path: String,
@@ -64,6 +62,27 @@ mod tests {
         let decoded: MountSource = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, source);
         assert!(!format!("{source:?}").contains("secret"));
+    }
+
+    #[test]
+    fn a_volume_and_a_mount_are_read_past_members_they_do_not_know() {
+        let value = json!({"name": "data", "size": 4096, "cell": "c1"});
+        assert_eq!(
+            serde_json::from_value::<VolumeListOutputItem>(value).unwrap(),
+            VolumeListOutputItem {
+                name: "data".into(),
+                size: 4096,
+            }
+        );
+
+        let value = json!({"path": "/notes", "mount_type": "notion", "cell": "c1"});
+        assert_eq!(
+            serde_json::from_value::<VolumeMountListOutputItem>(value).unwrap(),
+            VolumeMountListOutputItem {
+                path: "/notes".into(),
+                mount_type: MountType::Notion,
+            }
+        );
     }
 
     #[test]

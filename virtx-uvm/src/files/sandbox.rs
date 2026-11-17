@@ -2,6 +2,7 @@
 //! its machine, over the I/O channel ([`Machine::io`]), as the guest's processes see the files.
 
 use std::io::SeekFrom;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,12 +14,19 @@ use dav_server::fs::{
 };
 use futures_util::stream;
 
+use super::Landing;
 use super::volume::{Meta, written};
 use crate::machine::Machine;
 use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 
+/// A sandbox's files for one request, with the [`Landing`] of a conditional `PUT`.
 #[derive(Clone)]
-pub(super) struct Fs(pub(super) Arc<Machine>);
+pub(super) struct Fs {
+    pub(super) machine: Arc<Machine>,
+    pub(super) landing: Option<Arc<Landing>>,
+    /// Each volume the sandbox mounts writable: where in the guest, and its own directory.
+    pub(super) mounts: Arc<[(String, PathBuf)]>,
+}
 
 /// A file open for reading, or for writing from its start.
 struct File {
@@ -28,6 +36,10 @@ struct File {
     /// then, and removed if this drops first. So nothing is at `path` but what was there
     /// until all of the write has arrived.
     saving: Option<String>,
+    /// What a whole write is checked by as it lands, with a condition.
+    landing: Option<Arc<Landing>>,
+    /// The sandbox's writable mounts, as [`Fs`] has them.
+    mounts: Arc<[(String, PathBuf)]>,
     /// What has arrived and is not yet written, sent a [`MAX_DATA`] at a time.
     pending: Vec<u8>,
     offset: u64,
@@ -67,6 +79,43 @@ async fn done(machine: &Arc<Machine>, request: IoReq) -> Result<(), FsError> {
     io(machine, request, Vec::new()).await.map(drop)
 }
 
+/// What is at `path` now, or nothing: what a conditional write is checked against as it lands.
+/// In a volume the sandbox mounts writable, the volume's own files on this host are asked, not
+/// the guest: the guest may still hold what it saw at the path a moment ago, before a write
+/// through the volume's files or another sandbox's moved another file there. A path those files
+/// do not [answer for](crate::Volume::answers), through a link in the volume, by a name they
+/// refuse or in a mount of the volume's own, is asked of the guest, which sees it.
+async fn there(
+    machine: &Arc<Machine>,
+    mounts: &[(String, PathBuf)],
+    path: &str,
+) -> Result<Option<Meta>, FsError> {
+    if let Some((dir, within)) = mounted(mounts, path) {
+        let volume = crate::Volume::open(&dir).map_err(|_| FsError::GeneralFailure)?;
+        if volume.answers(&within) {
+            return super::volume::there(&volume, &within).await;
+        }
+    }
+    match stat(machine, path).await {
+        Ok(meta) => Ok(Some(meta)),
+        Err(FsError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The volume of `mounts` that `path`, absolute in the guest, is in: its own directory, and
+/// `path` in its files. The deepest mount `path` is under, so a volume mounted in another's
+/// mount is the one its paths are in. A mount's own place is the guest's, not a path in the
+/// volume, and a path a symlink in the guest leads into a mount is not seen as in it.
+fn mounted(mounts: &[(String, PathBuf)], path: &str) -> Option<(PathBuf, String)> {
+    mounts
+        .iter()
+        .filter_map(|(at, dir)| Some((path.strip_prefix(at.as_str())?.strip_prefix('/')?, dir)))
+        .filter(|(within, _)| !within.is_empty())
+        .min_by_key(|(within, _)| within.len())
+        .map(|(within, dir)| (dir.clone(), within.to_owned()))
+}
+
 async fn stat(machine: &Arc<Machine>, path: &str) -> Result<Meta, FsError> {
     let request = IoReq::Stat { path: path.into() };
     match io(machine, request, Vec::new()).await? {
@@ -83,7 +132,7 @@ impl DavFileSystem for Fs {
     ) -> FsFuture<'a, Box<dyn DavFile>> {
         Box::pin(async move {
             let path = at(path);
-            let there = match stat(&self.0, &path).await {
+            let there = match stat(&self.machine, &path).await {
                 Ok(meta) => Some(meta),
                 Err(FsError::NotFound) => None,
                 Err(e) => return Err(e),
@@ -108,7 +157,7 @@ impl DavFileSystem for Fs {
                         path: saving.clone().unwrap_or_else(|| path.clone()),
                         offset: (!options.truncate).then_some(0),
                     };
-                    done(&self.0, request).await?;
+                    done(&self.machine, request).await?;
                     Meta {
                         is_dir: false,
                         len: 0,
@@ -117,8 +166,10 @@ impl DavFileSystem for Fs {
                 }
             };
             Ok(Box::new(File {
-                machine: Arc::clone(&self.0),
+                machine: Arc::clone(&self.machine),
                 path,
+                landing: saving.as_ref().and(self.landing.clone()),
+                mounts: Arc::clone(&self.mounts),
                 saving,
                 pending: Vec::new(),
                 offset: 0,
@@ -134,7 +185,7 @@ impl DavFileSystem for Fs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         Box::pin(async move {
             let request = IoReq::ReadDir { path: at(path) };
-            let IoResp::Entries(entries) = io(&self.0, request, Vec::new()).await?.0 else {
+            let IoResp::Entries(entries) = io(&self.machine, request, Vec::new()).await?.0 else {
                 return Err(FsError::GeneralFailure);
             };
             let entries: Vec<_> = entries
@@ -151,21 +202,21 @@ impl DavFileSystem for Fs {
     }
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
-        Box::pin(
-            async move { Ok(Box::new(stat(&self.0, &at(path)).await?) as Box<dyn DavMetaData>) },
-        )
+        Box::pin(async move {
+            Ok(Box::new(stat(&self.machine, &at(path)).await?) as Box<dyn DavMetaData>)
+        })
     }
 
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.0, IoReq::CreateDir { path: at(path) }).await })
+        Box::pin(async move { done(&self.machine, IoReq::CreateDir { path: at(path) }).await })
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.0, IoReq::Remove { path: at(path) }).await })
+        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
     }
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.0, IoReq::Remove { path: at(path) }).await })
+        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
     }
 
     /// What was at `to` is gone already: `dav-server` takes it away first, or refuses the
@@ -177,7 +228,7 @@ impl DavFileSystem for Fs {
                 to: at(to),
                 keep: false,
             };
-            done(&self.0, request).await
+            done(&self.machine, request).await
         })
     }
 
@@ -188,7 +239,7 @@ impl DavFileSystem for Fs {
                 from: at(from),
                 to: at(to),
             };
-            done(&self.0, request).await
+            done(&self.machine, request).await
         })
     }
 }
@@ -257,10 +308,12 @@ impl DavFile for File {
         })
     }
 
-    /// A whole write, all here now, goes over the path, as what was there was. Its metadata is
-    /// the guest's, read before it does, as a rename keeps a file's length and modification
-    /// time, so a `PUT` answers the `ETag` of the file it wrote and not of one another write puts
-    /// at the path right after.
+    /// A whole write, all here now, goes over the path, as what was there was: with a
+    /// condition, as its [`Landing`] lets it, once all of it is in the guest, so the hold is
+    /// only for the check and the move. Its metadata is the guest's, read then, before it goes
+    /// over the path, as a rename keeps a file's length and modification time, so a `PUT`
+    /// answers the `ETag` of the file it wrote and not of one another write puts at the path
+    /// right after.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             self.send(0).await?;
@@ -275,16 +328,24 @@ impl DavFile for File {
                     None
                 }
             };
-            if let Some(saving) = self.saving.take() {
+            if let Some(saving) = self.saving.clone() {
+                let machine = Arc::clone(&self.machine);
                 let request = IoReq::Rename {
-                    from: saving.clone(),
+                    from: saving,
                     to: self.path.clone(),
                     keep: true,
                 };
-                if let Err(e) = done(&self.machine, request).await {
-                    self.saving = Some(saving);
-                    return Err(e);
+                let land = async move { done(&machine, request).await };
+                match &self.landing {
+                    None => land.await?,
+                    Some(landing) => {
+                        let (machine, path) = (Arc::clone(&self.machine), self.path.clone());
+                        let mounts = Arc::clone(&self.mounts);
+                        let there = async move { there(&machine, &mounts, &path).await };
+                        landing.land(there, land).await?
+                    }
                 }
+                self.saving = None;
             }
             self.meta = written(read, &self.meta);
             Ok(())
@@ -341,5 +402,37 @@ fn refused(failure: &IoFailure) -> FsError {
         IoFailure::IsADirectory | IoFailure::Forbidden => FsError::Forbidden,
         IoFailure::Full => FsError::InsufficientStorage,
         IoFailure::Other(_) => FsError::GeneralFailure,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_is_in_the_deepest_mount_it_is_under() {
+        let mounts = vec![
+            ("/data".to_owned(), PathBuf::from("/home/volume/data")),
+            ("/data/sub".to_owned(), PathBuf::from("/home/volume/sub")),
+        ];
+        let at = |path| mounted(&mounts, path);
+        assert_eq!(
+            at("/data/a.txt"),
+            Some((PathBuf::from("/home/volume/data"), "a.txt".to_owned()))
+        );
+        assert_eq!(
+            at("/data/dir/a.txt"),
+            Some((PathBuf::from("/home/volume/data"), "dir/a.txt".to_owned()))
+        );
+        assert_eq!(
+            at("/data/sub/a.txt"),
+            Some((PathBuf::from("/home/volume/sub"), "a.txt".to_owned()))
+        );
+        // A name that only begins with a mount's is not in it, and a mount's own place is the
+        // guest's, not a path in the volume.
+        assert_eq!(at("/database/a.txt"), None);
+        assert_eq!(at("/data"), None);
+        assert_eq!(at("/data/"), None);
+        assert_eq!(at("/tmp/a.txt"), None);
     }
 }

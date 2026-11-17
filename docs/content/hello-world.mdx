@@ -95,7 +95,7 @@ use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
     client.pull_image("alpine:latest", None).complete(false).await?;
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))

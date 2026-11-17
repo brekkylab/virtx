@@ -224,7 +224,7 @@ const sandbox = await remote.createSandbox('jq:latest')
 <TabItem label="Rust">
 
 ```rust
-let local = Client::spawn_virtx([] as [&str; 0])?;
+let local = Client::spawn_virtx([] as [&str; 0]).await?;
 let mut events = local.download_image("jq:latest", "jq.tar");
 while let Some(event) = events.next().await {
     event?;

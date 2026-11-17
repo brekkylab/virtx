@@ -35,5 +35,7 @@ jobs:
     uses: ./.github/workflows/pipeline.yml
     with:
       full: ${{ github.event_name != 'pull_request' }}
+    # `actions` read, for `tests (windows-x86_64)` to see whether `guest` failed while it waits.
     permissions:
       contents: read
+      actions: read

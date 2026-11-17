@@ -30,8 +30,10 @@ jobs:
     with:
       full: true
       release: true
+    # `actions` read, for `tests (windows-x86_64)` to see whether `guest` failed while it waits.
     permissions:
       contents: read
+      actions: read
 
   # What each platform packed and tried, and `@brekkylab/virtx`, packed once here for all of
   # them: it names every platform's package and carries no library of its own. Every

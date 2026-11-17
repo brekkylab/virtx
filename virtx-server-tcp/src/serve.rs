@@ -320,7 +320,7 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::{Auth, Client, DirEntry, FileRoot, SandboxCreateArgs};
-    use virtx_uvm::{Entry, FsTree, ImageStore};
+    use virtx_uvm::{FsTree, ImageStore};
 
     use crate::config::Config;
 
@@ -474,7 +474,7 @@ mod tests {
         let served = Served::spawn("origins").await;
         let from = async |origin| {
             reqwest::Client::new()
-                .get(format!("{}snapshots/", served.url))
+                .get(format!("{}volumes/", served.url))
                 .header("virtx-project", "demo")
                 .header("origin", origin)
                 .send()
@@ -587,8 +587,6 @@ mod tests {
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The files of a volume and a snapshot through `virtx-core`'s client, given the project at
-    /// connect, as a program over the bindings reaches them.
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
     /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
     /// and a path whose segment does not read as one is `400` `invalid`.
@@ -640,7 +638,6 @@ mod tests {
             (Method::POST, "images/jobs/pull/"),
             (Method::POST, "images/jobs/push/"),
             (Method::POST, "images/jobs/build/"),
-            (Method::POST, "snapshots/"),
             (Method::POST, "volumes/"),
             (Method::PUT, "volumes/nobody/mounts/m"),
             (Method::POST, "sandboxes/"),
@@ -718,14 +715,14 @@ mod tests {
         assert!(answer.contains("\"invalid\""), "{answer}");
     }
 
+    /// The files of a volume through `virtx-core`'s client, given the project at connect, as a
+    /// program over the bindings reaches them.
     #[tokio::test]
     async fn the_client_reaches_a_project_with_the_headers_given_at_connect() {
         let served = Served::spawn("client").await;
         let client = served.connect();
         client.create_volume(Some("data")).await.unwrap();
-        client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         let volume = FileRoot::Volume("data".into());
-        let snapshot = FileRoot::Snapshot("work".into());
         let home = served.home.join("project/demo");
 
         // A volume's files, on the host's disk.
@@ -777,89 +774,12 @@ mod tests {
         );
         let nobody = FileRoot::Volume("nobody".into());
         assert_eq!(status(client.stat_file(&nobody, "").await), 404);
-
-        // A snapshot's files, in its image.
-        assert_eq!(
-            names(client.read_dir(&snapshot, "").await.unwrap()),
-            [] as [&str; 0]
-        );
-        client.create_dir(&snapshot, "etc").await.unwrap();
-        client
-            .write_file(&snapshot, "etc/hostname", "guest\n", None)
-            .await
-            .unwrap();
-        assert_eq!(
-            status(client.write_file(&snapshot, "no/file", "x", None).await),
-            409
-        );
-        assert_eq!(status(client.create_dir(&snapshot, "etc").await), 405);
-        let read = client
-            .read_file(&snapshot, "etc/hostname", 1, Some(2))
-            .await
-            .unwrap();
-        assert_eq!(&read[..], b"ue");
-        client
-            .rename_file(&snapshot, "etc/hostname", "hostname", false)
-            .await
-            .unwrap();
-        client
-            .copy_file(&snapshot, "hostname", "etc/copy", false)
-            .await
-            .unwrap();
-        assert_eq!(
-            status(
-                client
-                    .copy_file(&snapshot, "hostname", "etc/copy", false)
-                    .await
-            ),
-            412
-        );
-        client
-            .remove_file(&snapshot, "hostname", false)
-            .await
-            .unwrap();
-        assert_eq!(status(client.stat_file(&snapshot, "hostname").await), 404);
-        let image = std::fs::File::open(home.join("snapshot/work.ext4")).unwrap();
-        let tree = FsTree::from_ext4(image).unwrap();
-        let paths: Vec<_> = tree
-            .walk()
-            .into_iter()
-            .map(|(path, ..)| String::from_utf8(path).unwrap())
-            .collect();
-        assert_eq!(
-            paths,
-            ["", "lost+found", "upper", "upper/etc", "upper/etc/copy"]
-        );
-        assert!(matches!(
-            tree.entry(b"upper/etc/copy").unwrap(),
-            Some(Entry::File { data, .. }) if data == b"guest\n"
-        ));
-        let lock = std::fs::File::create(home.join("snapshot/work.ext4.lock")).unwrap();
-        lock.try_lock().unwrap();
-        assert_eq!(status(client.read_dir(&snapshot, "").await), 423);
-        assert_eq!(
-            status(client.write_file(&snapshot, "x", "y", None).await),
-            423
-        );
-        drop(lock);
-        let nobody = FileRoot::Snapshot("nobody".into());
-        assert_eq!(status(client.read_dir(&nobody, "").await), 404);
     }
 
     #[tokio::test]
-    async fn a_project_keeps_its_snapshots_and_volumes() {
+    async fn a_project_keeps_its_volumes() {
         let served = Served::spawn("project").await;
         let client = served.connect();
-        let created = client.create_snapshot(Some("work"), Some(1)).await.unwrap();
-        assert_eq!(created.name, "work");
-        assert!(
-            served
-                .home
-                .join("project/demo/snapshot/work.ext4")
-                .is_file()
-        );
-        assert_eq!(client.list_snapshot().await.unwrap(), [created]);
-
         client.create_volume(Some("data")).await.unwrap();
         assert!(served.home.join("project/demo/volume/data/files").is_dir());
         assert_eq!(status(client.create_volume(Some("data")).await), 409);

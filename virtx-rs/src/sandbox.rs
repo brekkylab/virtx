@@ -33,8 +33,8 @@ impl Sandbox {
         &self.info.id
     }
 
-    /// What the server answered about it: its image, its snapshot, whether it runs, and its
-    /// ports, which only making it answers.
+    /// What the server answered about it: its image, whether it runs, and its ports, which
+    /// only making it answers.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
     }
@@ -60,7 +60,7 @@ impl Sandbox {
         SandboxJob::new(self.client.clone(), self.info.id.clone(), info)
     }
 
-    /// Stop it, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Stop it, end its jobs, and forget it, with everything it wrote outside its volumes.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox(&self.info.id)
     }

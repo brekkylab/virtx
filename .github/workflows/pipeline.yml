@@ -60,8 +60,11 @@
 # Linux and Windows build and test on brekkylab's own runners (brekkylab/aws-ci-runners): spot
 # EC2 instances in ap-northeast-2, each new for one job, asked for by their labels -- `[self-hosted,
 # <os>, <arch>, <instance type>]` -- and gone after it. m8i-2xlarge has nested virtualization, so
-# KVM on Linux and WHP on Windows, which no GitHub runner has on Windows; its image has what the
-# jobs here install otherwise (the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git's bash,
+# KVM on Linux and WHP on Windows, which no GitHub runner has on Windows: the jobs that boot
+# machines take it, and the x64 Linux build, for its eight cores. The x64 Linux jobs that boot
+# none and build little -- `check`, `guest` and `lint` -- take c7i-xlarge, at half its price,
+# and leave m8i's spot capacity to the jobs that need it; Windows has no other kind. The images
+# have what the jobs here install otherwise (the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git's bash,
 # rustup, pkg-config, zstd, meson's Python on Windows; clang, libclang, meson and Vulkan's headers
 # on Linux). macOS, the version check and the Linux packages' smoke (on ubuntu-22.04, below the
 # build's glibc) stay on GitHub's.
@@ -149,7 +152,7 @@ jobs:
   # none, so it answers first. Its clippy is Linux's without `gpu`; each platform's build job
   # lints its own host's code with `gpu`.
   check:
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted", "linux", "x64", "m8i-2xlarge"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted", "linux", "x64", "c7i-xlarge"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
@@ -195,7 +198,7 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            own: '["self-hosted", "linux", "x64", "m8i-2xlarge"]'
+            own: '["self-hosted", "linux", "x64", "c7i-xlarge"]'
             hosted: ubuntu-24.04
             targets: linux windows
             # The targets as a cache key takes them: a space there cuts the key short.
@@ -344,7 +347,7 @@ jobs:
       matrix:
         include:
           - release: linux-x86_64
-            own: '["self-hosted", "linux", "x64", "m8i-2xlarge"]'
+            own: '["self-hosted", "linux", "x64", "c7i-xlarge"]'
             hosted: ubuntu-24.04
             arch: x86_64
           - release: linux-aarch64

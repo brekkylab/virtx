@@ -265,23 +265,38 @@ impl DavFile for File {
 
     /// A whole write, all here now, goes over the path: with a condition, as its [`Landing`]
     /// lets it, once all of it is in the file, so the hold is only for the check and the move.
+    /// Its metadata is read then, before it goes over the path, as a rename keeps a file's length
+    /// and modification time, so a `PUT` answers the `ETag` of the file it wrote and not of one
+    /// another write puts at the path right after.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             self.send()?;
-            let Some(saving) = self.saving.clone() else {
-                return Ok(());
-            };
-            let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
-            let land = async move { volume.rename(&saving, &path, true).map_err(|e| refused(&e)) };
-            match &self.landing {
-                None => land.await?,
-                Some(landing) => {
-                    let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
-                    let there = async move { there(&volume, &path).await };
-                    landing.land(there, land).await?
+            let at = self.saving.as_deref().unwrap_or(&self.path);
+            let read = match self.volume.stat(at).await {
+                Ok(stat) => Some(described(&stat)),
+                Err(e) => {
+                    log::debug!(
+                        "{self:?}: the written file was not read, so the PUT answers no ETag or \
+                         Last-Modified: {e}"
+                    );
+                    None
                 }
+            };
+            if let Some(saving) = self.saving.clone() {
+                let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
+                let land =
+                    async move { volume.rename(&saving, &path, true).map_err(|e| refused(&e)) };
+                match &self.landing {
+                    None => land.await?,
+                    Some(landing) => {
+                        let (volume, path) = (Arc::clone(&self.volume), self.path.clone());
+                        let there = async move { there(&volume, &path).await };
+                        landing.land(there, land).await?
+                    }
+                }
+                self.saving = None;
             }
-            self.saving = None;
+            self.meta = written(read, &self.meta);
             Ok(())
         })
     }
@@ -353,6 +368,15 @@ fn described(stat: &Stat) -> Meta {
         len: stat.size,
         modified: stat.mtime,
     }
+}
+
+/// The metadata of a file just written: `read` of it, or if it could not be read, `meta` with no
+/// time, so the write is answered with no validator rather than one the file does not have.
+pub(super) fn written(read: Option<Meta>, meta: &Meta) -> Meta {
+    read.unwrap_or_else(|| Meta {
+        modified: None,
+        ..meta.clone()
+    })
 }
 
 /// What `dav-server` is told of a volume's failure, which it answers with the status

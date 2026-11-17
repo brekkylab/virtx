@@ -98,7 +98,7 @@ fn refused<T: std::fmt::Debug>(answered: Result<T, virtx::Error>) -> Option<u16>
 
 /// Everything this file claims, of `served`.
 fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
-    virtx::load(common::library()).unwrap();
+    common::open();
     let (alice, carol, bob) = (&served.alice, &served.carol, &served.bob);
 
     // A request is let in with a member's token, naming the project.

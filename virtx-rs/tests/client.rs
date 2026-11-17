@@ -5,16 +5,18 @@ use virtx::{Auth, Client, Error};
 mod common;
 
 #[test]
-fn a_second_library_is_refused() {
-    virtx::load(common::library()).unwrap();
+fn another_library_is_refused() {
+    common::open();
     let error = virtx::load("/nonexistent/libvirtx_core").unwrap_err();
     assert!(matches!(error, Error::Library(_)));
+    // The one open is opened again without complaint.
+    #[cfg(not(feature = "embedded"))]
     virtx::load(common::library()).unwrap();
 }
 
 #[test]
 fn a_client_over_http_sends_its_token_and_project() {
-    virtx::load(common::library()).unwrap();
+    common::open();
     let common::Fixture {
         url,
         token,

@@ -1,0 +1,17 @@
+# The actions under `.github` are pinned to commits, so a newer release of one arrives as a pull
+# request: weekly, those that have one together. `/` is `.github/workflows`; the composite
+# actions' directories are named beside it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [CI/CD]
+    commit-message:
+      prefix: ci

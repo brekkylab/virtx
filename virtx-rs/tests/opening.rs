@@ -8,7 +8,7 @@ mod common;
 // The only test of this binary: it sets `$VIRTX_STDIO`, which no other thread may read meanwhile.
 #[test]
 fn a_client_is_opened_and_closed_inside_a_runtime() {
-    virtx::load(common::library()).unwrap();
+    common::open();
     // The fixture's server, so nothing is fetched.
     unsafe { std::env::set_var("VIRTX_STDIO", &common::fixture().stdio) };
     tokio::runtime::Runtime::new().unwrap().block_on(async {

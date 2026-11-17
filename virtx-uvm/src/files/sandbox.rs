@@ -15,7 +15,7 @@ use dav_server::fs::{
 use futures_util::stream;
 
 use super::Landing;
-use super::volume::Meta;
+use super::volume::{Meta, written};
 use crate::machine::Machine;
 use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 
@@ -310,30 +310,44 @@ impl DavFile for File {
 
     /// A whole write, all here now, goes over the path, as what was there was: with a
     /// condition, as its [`Landing`] lets it, once all of it is in the guest, so the hold is
-    /// only for the check and the move.
+    /// only for the check and the move. Its metadata is the guest's, read then, before it goes
+    /// over the path, as a rename keeps a file's length and modification time, so a `PUT`
+    /// answers the `ETag` of the file it wrote and not of one another write puts at the path
+    /// right after.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             self.send(0).await?;
-            let Some(saving) = self.saving.clone() else {
-                return Ok(());
-            };
-            let machine = Arc::clone(&self.machine);
-            let request = IoReq::Rename {
-                from: saving,
-                to: self.path.clone(),
-                keep: true,
-            };
-            let land = async move { done(&machine, request).await };
-            match &self.landing {
-                None => land.await?,
-                Some(landing) => {
-                    let (machine, path) = (Arc::clone(&self.machine), self.path.clone());
-                    let mounts = Arc::clone(&self.mounts);
-                    let there = async move { there(&machine, &mounts, &path).await };
-                    landing.land(there, land).await?
+            let at = self.saving.clone().unwrap_or_else(|| self.path.clone());
+            let read = match stat(&self.machine, &at).await {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    log::debug!(
+                        "{self:?}: the written file was not read, so the PUT answers no ETag or \
+                         Last-Modified: {e}"
+                    );
+                    None
                 }
+            };
+            if let Some(saving) = self.saving.clone() {
+                let machine = Arc::clone(&self.machine);
+                let request = IoReq::Rename {
+                    from: saving,
+                    to: self.path.clone(),
+                    keep: true,
+                };
+                let land = async move { done(&machine, request).await };
+                match &self.landing {
+                    None => land.await?,
+                    Some(landing) => {
+                        let (machine, path) = (Arc::clone(&self.machine), self.path.clone());
+                        let mounts = Arc::clone(&self.mounts);
+                        let there = async move { there(&machine, &mounts, &path).await };
+                        landing.land(there, land).await?
+                    }
+                }
+                self.saving = None;
             }
-            self.saving = None;
+            self.meta = written(read, &self.meta);
             Ok(())
         })
     }

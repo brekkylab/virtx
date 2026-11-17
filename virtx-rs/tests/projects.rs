@@ -98,7 +98,7 @@ fn refused<T: std::fmt::Debug>(answered: Result<T, virtx::Error>) -> Option<u16>
 
 /// Everything this file claims, of `served`.
 fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
-    virtx::load(common::library()).unwrap();
+    common::open();
     let (alice, carol, bob) = (&served.alice, &served.carol, &served.bob);
 
     // A request is let in with a member's token, naming the project.
@@ -284,7 +284,7 @@ fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provide
 #[test]
 fn a_user_makes_a_project_brings_another_in_and_removes_it() {
     let served = Served::fixture();
-    virtx::load(common::library()).unwrap();
+    common::open();
     let name = common::unique("made");
     let alice = served.client(&served.alice, &name);
 

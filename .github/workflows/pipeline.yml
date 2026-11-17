@@ -42,9 +42,9 @@
 # | server         | client          | built on (see Runners)               | tried on         |
 # |----------------|-----------------|--------------------------------------|------------------|
 # | macos-aarch64  | darwin-arm64    | macos-15                             | the same job     |
-# | windows-x86_64 | win32-x64-msvc  | windows m8i-2xlarge                  | the same job     |
-# | linux-x86_64   | linux-x64-gnu   | linux m8i-2xlarge, in manylinux_2_28 | ubuntu-22.04     |
-# | linux-aarch64  | linux-arm64-gnu | linux c7g-2xlarge, in manylinux_2_28 | ubuntu-22.04-arm |
+# | windows-x86_64 | win32-x64-msvc  | windows-2025                         | the same job     |
+# | linux-x86_64   | linux-x64-gnu   | ubuntu-24.04, in manylinux_2_28      | ubuntu-22.04     |
+# | linux-aarch64  | linux-arm64-gnu | ubuntu-24.04-arm, in manylinux_2_28  | ubuntu-22.04-arm |
 #
 # # The glibc floor
 #
@@ -57,34 +57,28 @@
 #
 # # Runners
 #
-# Linux and Windows build and test on brekkylab's own runners (brekkylab/aws-ci-runners): spot
-# EC2 instances in ap-northeast-2, each new for one job, asked for by their labels -- `[self-hosted,
-# <os>, <arch>, <instance type>]` -- and gone after it. m8i-2xlarge has nested virtualization, so
-# KVM on Linux and WHP on Windows, which no GitHub runner has on Windows: the jobs that boot
-# machines take it, and the x64 Linux build, for its eight cores. The x64 Linux jobs that boot
-# none and build little -- `check`, `guest` and `lint` -- take c7i-xlarge, at half its price,
-# and leave m8i's spot capacity to the jobs that need it; Windows has no other kind. The images
-# have what the jobs here install otherwise (the MSVC build tools, LLVM at `C:\Program Files\LLVM`, Git's bash,
-# rustup, pkg-config, zstd, meson's Python on Windows; clang, libclang, meson and Vulkan's headers
-# on Linux). macOS, the version check and the Linux packages' smoke (on ubuntu-22.04, below the
-# build's glibc) stay on GitHub's.
+# Every job is on GitHub's runners but one: `tests (windows-x86_64)`, which boots machines on the
+# Windows hypervisor platform (WHP), which no GitHub runner has -- they have no nested
+# virtualization. It runs on brekkylab's own (brekkylab/aws-ci-runners): a spot EC2 instance in
+# ap-northeast-2 with nested virtualization, new for the job, asked for by its labels
+# `[self-hosted, windows, x64, m8i-2xlarge]` and gone after it. Its image has what the job
+# would install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache.
 #
-# A fork's pull request runs on GitHub's runners alone, since ours hold brekkylab's caches: each
-# `runs-on` here asks for ours only when `github.event.pull_request.head.repo.fork` is not true.
-# So it has no Windows tests. That a fork's own workflow cannot ask for ours is the repository's
-# setting's to say: a maintainer approves every outside contributor's run, after reading it.
+# A fork's pull request has no Windows tests: ours hold brekkylab's caches, and that a fork's
+# own workflow cannot ask for them is the repository's setting's to say -- a maintainer approves
+# every outside contributor's run, after reading it.
 #
 # # Caches
 #
-# On our runners, rustc's output is sccache's, in S3 next to the runners (their environment names
-# the bucket): every run reads what any run before it compiled, a pull request's too, and costs no
-# transfer out of AWS. A release compiles from nothing, on an instance no run has touched. The
-# kernel, alib and MoltenVK are runs-on/cache's: S3 on our runners, GitHub's cache on GitHub's.
-# So, on our runners alone, is what cargo downloads -- the crates and the git dependencies, by
-# `Cargo.lock` (.github/actions/cargo-deps). The GPU libraries `cargo xtask` builds for the
-# servers' `gpu` feature are kept by the submodules' commits and the scripts that build them
-# (.github/actions/gpu-deps), which skip a build their stamp says is done.
-# macOS's Rust is rust-cache's, saved from `main` alone.
+# Rust is rust-cache's, saved from `main` alone, which every other ref restores. The kernel, abin,
+# alib, MoltenVK and the GPU libraries `cargo xtask` builds for the servers' `gpu` feature are
+# runs-on/cache's, which is GitHub's cache on GitHub's runners, each by what it is built from:
+# a cache only ever saves time, and a miss builds the thing again. The GPU libraries' scripts
+# skip a build their stamp says is done (.github/actions/gpu-deps).
+#
+# On ours, the Windows tests' rustc output is sccache's, and cargo's downloads are kept by
+# `Cargo.lock` (.github/actions/cargo-deps), both in S3 beside the runners, at no transfer
+# out of AWS.
 name: pipeline
 
 on:
@@ -110,7 +104,7 @@ env:
   CARGO_TERM_COLOR: always
   # Not 0: a backtrace keeps its lines.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  # sccache caches no incremental build.
+  # Neither rust-cache nor sccache keeps an incremental build.
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -159,10 +153,8 @@ jobs:
   # none, so it answers first. Its clippy is Linux's without `gpu`; each platform's build job
   # lints its own host's code with `gpu`.
   check:
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted", "linux", "x64", "c7i-xlarge"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -183,8 +175,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm
 
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/cargo-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -208,29 +202,24 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            own: '["self-hosted", "linux", "x64", "c7i-xlarge"]'
             hosted: ubuntu-24.04
             targets: linux windows
             # The targets as a cache key takes them: a space there cuts the key short.
             kernels: linux-windows
           - arch: aarch64
-            own: '["self-hosted", "linux", "arm64", "c7g-2xlarge"]'
             hosted: ubuntu-24.04-arm
             targets: linux macos
             kernels: linux-macos
     needs: version
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON(matrix.own) || matrix.hosted }}
+    runs-on: ${{ matrix.hosted }}
     timeout-minutes: 90
-    env:
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: true
 
       # A kernel is only its tag, its config and this script, which pins both. runs-on/cache is
-      # actions/cache with an S3 backend: on our runners (whose environment names the bucket) it
-      # keeps its entries there, and on GitHub's it is actions/cache.
+      # actions/cache on GitHub's runners, and keeps its entries in S3 on ours.
       - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
         id: cache
         with:
@@ -295,15 +284,8 @@ jobs:
           cp -R alib guest/alib
           tar -cf guest-${{ matrix.arch }}.tar guest
 
-      # To our runners through S3, beside them (.github/actions/guest); as an artifact only to
-      # GitHub's -- a fork's pull request's, and a full run's macOS build and manylinux
-      # container, which has no AWS -- since every byte sent out of AWS is paid for.
-      - name: Hand them to our runners
-        if: ${{ !github.event.pull_request.head.repo.fork }}
-        run: aws s3 cp --only-show-errors guest-${{ matrix.arch }}.tar "s3://$CI_CACHE_BUCKET/runs/$GITHUB_REPOSITORY/$GITHUB_RUN_ID/"
-
-      - if: ${{ !(!github.event.pull_request.head.repo.fork) || inputs.full }}
-        uses: actions/upload-artifact@v7
+      # To the jobs that use them, as an artifact of the run.
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}
           path: guest-${{ matrix.arch }}.tar
@@ -313,17 +295,15 @@ jobs:
   # Each platform's lint: the client's clippy, and the servers' with `gpu`, as a release builds
   # them -- the `cfg`s `check`, on Linux and without `gpu`, never compiles. Every run has it, a
   # pull request's too, which builds nothing it would ship; `main`'s saves the caches it reads.
-  # macOS has none: no runner of ours can test it, and the machines virtx is written on are
+  # macOS has none: no runner here can test it, and the machines virtx is written on are
   # Macs. Its build lints it, on `main` and for a release.
   lint-windows:
     name: lint (windows-x86_64)
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted", "windows", "x64", "m8i-2xlarge"]') || 'windows-2025' }}
+    runs-on: windows-2025
     timeout-minutes: 60
     defaults:
       run:
         shell: bash
-    env:
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
@@ -346,12 +326,13 @@ jobs:
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/cargo-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/gpu-deps
+      - uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -365,17 +346,13 @@ jobs:
       matrix:
         include:
           - release: linux-x86_64
-            own: '["self-hosted", "linux", "x64", "c7i-xlarge"]'
             hosted: ubuntu-24.04
             arch: x86_64
           - release: linux-aarch64
-            own: '["self-hosted", "linux", "arm64", "c7g-2xlarge"]'
             hosted: ubuntu-24.04-arm
             arch: aarch64
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON(matrix.own) || matrix.hosted }}
+    runs-on: ${{ matrix.hosted }}
     timeout-minutes: 60
-    env:
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -397,12 +374,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
 
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/cargo-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/gpu-deps
+      - uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -428,19 +406,17 @@ jobs:
             file: libvirtx_core.dylib
           - release: windows-x86_64
             platform: win32-x64-msvc
-            own: '["self-hosted", "windows", "x64", "m8i-2xlarge"]'
             hosted: windows-2025
             arch: x86_64
             target: x86_64-pc-windows-msvc
             file: virtx_core.dll
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && matrix.own && fromJSON(matrix.own) || matrix.hosted }}
+    runs-on: ${{ matrix.hosted }}
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && matrix.own && !inputs.release && 'sccache' || '' }}
     steps:
       # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
       # shell scripts written against LF.
@@ -460,9 +436,7 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
           components: clippy, rustfmt
 
-      # macOS's Rust cache: GitHub's runner, GitHub's cache.
-      - if: runner.os == 'macOS'
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: native-${{ matrix.release }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -472,7 +446,7 @@ jobs:
         run: brew install lld llvm meson ninja
 
       # pkg-config.exe for build-deps.ps1, which PowerShell runs (Git Bash's is not an .exe),
-      # and libclang for bindgen. Our runners' image has pkg-config already.
+      # and libclang for bindgen.
       - name: Toolchain (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -480,12 +454,8 @@ jobs:
           where.exe pkg-config.exe
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
-      - if: ${{ !github.event.pull_request.head.repo.fork && matrix.own }}
-        uses: ./.github/actions/cargo-deps
-
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/gpu-deps
+      - uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -502,7 +472,6 @@ jobs:
       - uses: ./.github/actions/guest
         with:
           arch: ${{ matrix.arch }}
-          from: ${{ !github.event.pull_request.head.repo.fork && matrix.own && 's3' || 'artifact' }}
 
       # macOS links the kernel.c the Linux job built; Windows takes the library as it is. alib
       # stays in `guest/`, named as virtx's cache to the server build and `archive`, which take
@@ -616,19 +585,17 @@ jobs:
         include:
           - release: linux-x86_64
             platform: linux-x64-gnu
-            own: '["self-hosted", "linux", "x64", "m8i-2xlarge"]'
             hosted: ubuntu-24.04
             container: quay.io/pypa/manylinux_2_28_x86_64
             arch: x86_64
             target: x86_64-unknown-linux-gnu
           - release: linux-aarch64
             platform: linux-arm64-gnu
-            own: '["self-hosted", "linux", "arm64", "c7g-2xlarge"]'
             hosted: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
             arch: aarch64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON(matrix.own) || matrix.hosted }}
+    runs-on: ${{ matrix.hosted }}
     container: ${{ matrix.container }}
     timeout-minutes: 120
     defaults:
@@ -648,8 +615,8 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
           components: clippy, rustfmt
 
-      # No compiler cache: sccache is the runner's, not the container's, and this job runs for
-      # `main` and releases alone.
+      # No compiler cache: rust-cache keeps the runner's, not the container's, and this job runs
+      # for `main` and releases alone.
 
       # AlmaLinux's packages and the image's own Python, for meson and virglrenderer's
       # generators. The image sets PKG_CONFIG_PATH, which `.cargo/config.toml`'s [env] does not
@@ -755,14 +722,12 @@ jobs:
           retention-days: 1
 
   # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
-  # against the fixture, each booting machines, on KVM (ours, and GitHub's Linux x86_64 alike).
+  # against the fixture, each booting machines, on KVM, which GitHub's Linux x86_64 runners have.
   tests-linux:
     name: tests (linux-x86_64)
     needs: guest
-    runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON('["self-hosted", "linux", "x64", "m8i-2xlarge"]') || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
-    env:
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -783,18 +748,18 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
 
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/cargo-deps
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tests-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/gpu-deps
+      - uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
 
-      # GitHub's runner has KVM, but /dev/kvm is root's until a rule says otherwise (ours have
-      # the job's user in its group already).
+      # GitHub's runner has KVM, but /dev/kvm is root's until a rule says otherwise.
       - name: KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -805,7 +770,6 @@ jobs:
       - uses: ./.github/actions/guest
         with:
           arch: x86_64
-          from: ${{ !github.event.pull_request.head.repo.fork && 's3' || 'artifact' }}
 
       # And abin, which the fixture would build again otherwise (`XTASK_ABIN_BUILT`).
       - name: Put the kernel and abin in place
@@ -825,12 +789,12 @@ jobs:
 
       - run: cargo xtask test
 
-  # The machine-booting crates' tests on Windows, over WHP, on ours alone: no GitHub runner has a
-  # hypervisor on Windows. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested,
+  # The machine-booting crates' tests on Windows, over WHP, on our runner: the one job not on
+  # GitHub's, whose Windows runners have no hypervisor (see Runners). Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested,
   # the faults a guest takes as it first touches its memory are most of a boot.
   #
   # It starts with the run rather than after `guest`, and takes the kernel from it once it has
-  # compiled its tests: a Windows runner's boot (about four minutes) and the compile happen
+  # compiled its tests and `guest` has ended: a Windows runner's boot (about four minutes) and the compile happen
   # while the kernel is built, not after.
   tests-windows:
     name: tests (windows-x86_64)
@@ -845,7 +809,8 @@ jobs:
       actions: read
     env:
       VIRTX_PREFAULT_MEMORY: "1"
-      RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
+      # sccache's, in S3 beside the runner; a release compiles from nothing.
+      RUSTC_WRAPPER: ${{ !inputs.release && 'sccache' || '' }}
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
@@ -862,8 +827,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
-      - if: ${{ !github.event.pull_request.head.repo.fork }}
-        uses: ./.github/actions/cargo-deps
+      - uses: ./.github/actions/cargo-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -872,11 +836,10 @@ jobs:
       - name: Compile the tests
         run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio
 
-      # `guest (x86_64)`'s, once it has put them in S3; this job ends with it if it fails.
+      # `guest (x86_64)`'s, once it has ended; this job ends with it if it fails.
       - uses: ./.github/actions/guest
         with:
           arch: x86_64
-          from: s3
           wait: true
           token: ${{ github.token }}
 

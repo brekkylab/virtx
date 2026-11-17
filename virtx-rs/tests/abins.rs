@@ -1,7 +1,7 @@
 //! virtx's own programs in a sandbox, against the fixture's `virtx-stdio`: `/abin`, the programs
 //! a sandbox is made with, from `abin/` beside the server, and `/alib`, the libraries a GPU
 //! sandbox's programs load, from `alib/` beside it. The fixture always has `abin/`; it has
-//! `alib/` only once `virtx-alibs/*/build.sh install` has run, so the tests that need it are
+//! `alib/` only once `cargo xtask build alib` has run, so the tests that need it are
 //! ignored without it.
 
 use virtx::{Client, ImageJobEnd, ImageJobEntry, SandboxCreateArgs};
@@ -128,7 +128,7 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
 /// `/alib` is read-only, with Vulkan for each C library; a sandbox without a GPU is given none
 /// of it on `LD_LIBRARY_PATH`, and no Vulkan driver.
 #[test]
-#[ignore = "needs alib/ beside the server: `virtx-alibs/*/build.sh install`"]
+#[ignore = "needs alib/ beside the server: `cargo xtask build alib`"]
 fn a_sandbox_without_a_gpu_has_alib_and_is_given_none_of_it() {
     let client = common::client();
     common::alpine(&client);

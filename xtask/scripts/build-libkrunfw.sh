@@ -109,7 +109,8 @@ fi
 
 build_in_container() {
     command -v docker >/dev/null 2>&1 || { echo "missing docker" >&2; exit 1; }
-    if [ "$(docker info --format '{{.OSType}}')" != "linux" ]; then
+    os=$(docker info --format '{{.OSType}}') || { echo "cannot reach docker; is its daemon running?" >&2; exit 1; }
+    if [ "$os" != "linux" ]; then
         echo "docker is in Windows container mode; switch it to Linux containers" >&2
         exit 1
     fi

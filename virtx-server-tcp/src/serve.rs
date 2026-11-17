@@ -588,6 +588,135 @@ mod tests {
 
     /// The files of a volume and a snapshot through `virtx-core`'s client, given the project at
     /// connect, as a program over the bindings reaches them.
+    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
+    /// and a path whose segment does not read as one is `400` `invalid`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
+        let served = Served::spawn("envelope").await;
+        let send = async |request: reqwest::RequestBuilder| {
+            let response = request
+                .header("virtx-project", "demo")
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, kind, body["error"].clone())
+        };
+        let client = reqwest::Client::new();
+
+        let over = client
+            .post(format!("{}sandboxes/", served.url))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(vec![b' '; 3 << 20]);
+        let (status, kind, error) = send(over).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "too_large", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("2 MiB"),
+            "{error}"
+        );
+
+        let unreadable = client.get(format!("{}sandboxes/%FF", served.url));
+        let (status, kind, error) = send(unreadable).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "invalid", "{error}");
+    }
+
+    /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
+    /// `too_large`, one at the limit is not, each in the envelope. The body is refused before
+    /// the handler looks anything up, so no sandbox, volume or job has to be there.
+    #[tokio::test]
+    async fn every_route_that_takes_a_body_holds_it_to_the_limit() {
+        let served = Served::spawn("limit").await;
+        let client = reqwest::Client::new();
+        let limit = 2 << 20;
+        for (method, path) in [
+            (Method::POST, "images/jobs/pull/"),
+            (Method::POST, "images/jobs/push/"),
+            (Method::POST, "images/jobs/build/"),
+            (Method::POST, "snapshots/"),
+            (Method::POST, "volumes/"),
+            (Method::PUT, "volumes/nobody/mounts/m"),
+            (Method::POST, "sandboxes/"),
+            (Method::POST, "sandboxes/nobody/jobs/exec/"),
+            (Method::POST, "sandboxes/nobody/jobs/j/signal"),
+        ] {
+            for (size, status, code) in [
+                (limit + 1, StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+                (limit, StatusCode::BAD_REQUEST, "invalid"),
+            ] {
+                let response = client
+                    .request(method.clone(), format!("{}{path}", served.url))
+                    .header("virtx-project", "demo")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(vec![b' '; size])
+                    .send()
+                    .await
+                    .unwrap();
+                let how = format!("{method} {path}, {size} bytes");
+                assert_eq!(response.status(), status, "{how}");
+                let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+                assert_eq!(kind, "application/json", "{how}");
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["error"]["code"], code, "{how}");
+            }
+        }
+    }
+
+    /// A body is read to its end before it is refused, over a socket as a client sends it: with
+    /// part of a body over the limit sent, nothing is answered; with the rest, `413`. A body that
+    /// breaks off is `400` `invalid`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_read_to_its_end_before_it_is_refused() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let served = Served::spawn("read-to-end").await;
+        let at = served
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let head = |length: usize| {
+            format!(
+                "POST /sandboxes/ HTTP/1.1\r\nhost: virtx\r\nvirtx-project: demo\r\n\
+                 content-type: application/json\r\ncontent-length: {length}\r\n\r\n"
+            )
+        };
+
+        let whole = 3 << 20;
+        let first = (2 << 20) + (64 << 10);
+        let mut socket = tokio::net::TcpStream::connect(at).await.unwrap();
+        socket.write_all(head(whole).as_bytes()).await.unwrap();
+        socket.write_all(&vec![b' '; first]).await.unwrap();
+        let mut answer = [0u8; 64];
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            socket.read(&mut answer),
+        );
+        assert!(
+            early.await.is_err(),
+            "answered while the body was still owed"
+        );
+        socket.write_all(&vec![b' '; whole - first]).await.unwrap();
+        let read = socket.read(&mut answer).await.unwrap();
+        let line = String::from_utf8_lossy(&answer[..read]);
+        assert!(line.starts_with("HTTP/1.1 413"), "{line}");
+
+        let mut socket = tokio::net::TcpStream::connect(at).await.unwrap();
+        socket.write_all(head(100).as_bytes()).await.unwrap();
+        socket.write_all(b"{\"cmd\": [").await.unwrap();
+        socket.shutdown().await.unwrap();
+        let mut answer = Vec::new();
+        socket.read_to_end(&mut answer).await.unwrap();
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(answer.contains("\"invalid\""), "{answer}");
+    }
+
     #[tokio::test]
     async fn the_client_reaches_a_project_with_the_headers_given_at_connect() {
         let served = Served::spawn("client").await;

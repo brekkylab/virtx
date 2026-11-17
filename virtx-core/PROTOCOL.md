@@ -94,12 +94,12 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member. |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. |
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
-| `413 Content Too Large` | `too_large` | The body is over the server's limit. |
+| `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
 

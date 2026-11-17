@@ -349,15 +349,15 @@ jobs:
       - name: Cargo's first resolve (traced)
         run: |
           home=$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")
-          ls "$home/registry" "$home/registry/src" 2>&1 | head
+          ls "$home/registry" || true
           SECONDS=0
           CARGO_LOG=debug cargo metadata --offline --format-version 1 2>&1 >/dev/null \
             | awk '$1 ~ /^[0-9.]+s$/ { t = $1; sub(/s$/, "", t); t += 0
                      if (t - prev >= 0.5) { printf "+%.1fs\n  before: %s\n  after:  %s\n", t - prev, substr(last, 1, 260), substr($0, 1, 260) }
                      prev = t; last = $0 }'
           echo "took ${SECONDS}s"
-          find "$home/registry/src" -type f | wc -l
-          find "$home/git/checkouts" -type f | wc -l
+          echo "registry/src: $(find "$home/registry/src" -type f 2>/dev/null | wc -l) files"
+          echo "git/checkouts: $(find "$home/git/checkouts" -type f 2>/dev/null | wc -l) files"
 
       - name: Add the guest's musl target
         run: cargo xtask init

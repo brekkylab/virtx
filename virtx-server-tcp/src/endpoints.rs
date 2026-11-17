@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,10 +30,10 @@ use virtx_core::{
     VolumeMountListOutputItem,
 };
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold,
-    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference,
-    RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step,
-    park_after, signal_number,
+    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    MachineSpec, Network, Os, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -875,12 +875,21 @@ impl IntoResponse for Refused {
     }
 }
 
+/// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
+/// refusal is answered even when stderr cannot take it, as on a disk that is full.
+fn io_failure(e: &std::io::Error, message: impl Display) -> String {
+    let _ = writeln!(io::stderr(), "{message}");
+    format!("the server's files: {}", e.kind())
+}
+
 /// The refusal an operation on the host's files that failed with `e` is.
 fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
+    let said = io_failure(e, message);
     match e.kind() {
-        std::io::ErrorKind::NotFound => not_found(message),
-        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", message),
-        _ => internal(message),
+        std::io::ErrorKind::NotFound => not_found(said),
+        std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", said),
+        _ => internal(said),
     }
 }
 
@@ -908,6 +917,9 @@ impl From<ImageStoreError> for Refused {
             ImageStoreError::Missing(_) => not_found(e),
             ImageStoreError::InUse(..) => refused(StatusCode::CONFLICT, "in_use", e),
             ImageStoreError::Io { source, .. } => io_refused(source, &e),
+            ImageStoreError::Fstree(FstreeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
+            }
             ImageStoreError::Fstree(_) | ImageStoreError::Malformed(_) => internal(e),
         }
     }
@@ -941,7 +953,7 @@ impl From<SandboxError> for Refused {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
             SandboxError::Image(e) => e.into(),
-            SandboxError::Io { .. } => internal(e),
+            SandboxError::Io { ref source, .. } => internal(io_failure(source, &e)),
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
@@ -952,5 +964,67 @@ impl From<SandboxError> for Refused {
 impl From<tokio::task::JoinError> for Refused {
     fn from(e: tokio::task::JoinError) -> Refused {
         internal(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {
+        const CONTEXT: &str = "making /home/virtx/project/a/volume/v";
+        let kinds = [
+            (io::ErrorKind::NotFound, StatusCode::NOT_FOUND, "not_found"),
+            (io::ErrorKind::AlreadyExists, StatusCode::CONFLICT, "exists"),
+            (
+                io::ErrorKind::PermissionDenied,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+            ),
+        ];
+        for (kind, status, code) in kinds {
+            let source = || io::Error::new(kind, "under /home/virtx/project/a");
+            let tree = || FstreeError::Io {
+                context: CONTEXT.into(),
+                source: source(),
+            };
+            let internal: [Refused; 2] = [
+                ImageStoreError::Fstree(tree()).into(),
+                SandboxError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+            ];
+            let by_kind: [Refused; 2] = [
+                VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                ImageStoreError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+            ];
+            let answers = by_kind.into_iter().map(|r| (r, status, code)).chain(
+                internal
+                    .into_iter()
+                    .map(|r| (r, StatusCode::INTERNAL_SERVER_ERROR, "internal")),
+            );
+            for (refusal, status, code) in answers {
+                let response = refusal.into_response();
+                assert_eq!(response.status(), status);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], code);
+                let message = body["error"]["message"].as_str().unwrap();
+                assert_eq!(message, format!("the server's files: {kind}"));
+            }
+        }
     }
 }

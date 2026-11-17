@@ -479,7 +479,20 @@ fn clippy_client() -> anyhow::Result<()> {
     let mut clippy = vec!["clippy"];
     clippy.extend(CLIENT_PACKAGES.iter().flat_map(|p| ["-p", *p]));
     clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    cargo_in_root(&clippy, "clippy of the client")
+    cargo_in_root(&clippy, "clippy of the client")?;
+    cargo_in_root(
+        &[
+            "clippy",
+            "-p",
+            "virtx",
+            "--all-targets",
+            "--no-default-features",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        "clippy of virtx over an opened library",
+    )
 }
 
 /// The servers' clippy; with `gpu`, each with its `gpu` feature -- the only feature they have,
@@ -1505,10 +1518,18 @@ fn serve_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's and
-/// virtx-cli's with cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
+/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
+/// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
+/// pytest, and virtx-node's with Node's own runner.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
-    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
+    (
+        "virtx-rs",
+        ".",
+        &[
+            &["cargo", "test", "-p", "virtx"],
+            &["cargo", "test", "-p", "virtx", "--no-default-features"],
+        ],
+    ),
     ("virtx-cli", ".", &[&["cargo", "test", "-p", "virtx-cli"]]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (

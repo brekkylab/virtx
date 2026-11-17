@@ -38,13 +38,11 @@ jobs:
   # What each platform packed and tried, and `@brekkylab/virtx`, packed once here for all of
   # them: it names every platform's package and carries no library of its own. Every
   # platform's files are counted in, so a platform that handed nothing on fails here rather
-  # than leaving the release without it.
-  draft:
+  # than leaving the release without it. Handed on as `bundle`, with its SHA256SUMS.
+  bundle:
     needs: pipeline
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: write
     env:
       VERSION: ${{ needs.pipeline.outputs.version }}
     steps:
@@ -78,7 +76,6 @@ jobs:
             done
           done
           [ "$(ls *.whl | wc -l)" = 4 ] || { echo "::error::not four wheels"; fail=1; }
-          pipx run twine check --strict *.whl || fail=1
           exit ${fail:-0}
 
       - name: SHA256SUMS
@@ -86,6 +83,34 @@ jobs:
         run: |
           sha256sum -- * | tee SHA256SUMS
           ls -la
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundle
+          path: dist/release/
+          overwrite: true
+          retention-days: 1
+
+  # `publish`'s `verify` over the bundle, so a draft holds only packages `publish` takes.
+  verify:
+    needs: bundle
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: write
+    with:
+      artifact: bundle
+
+  draft:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundle
+          path: dist/release
 
       - name: Attach to the draft
         env:

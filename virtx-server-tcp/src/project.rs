@@ -48,14 +48,14 @@ pub trait Membership: Send + Sync {
     /// Every project `who` has a role in, with that role, by name.
     fn projects<'a>(&'a self, who: &'a Principal) -> BoxFuture<'a, Result<Vec<(Project, Role)>>>;
 
-    /// Give `user` `role` in project `id`, or with `None` take theirs away: refused where it
-    /// would take the project from its owner.
+    /// Give `user` `role` in project `id`, or with `None` take theirs away, answering the role
+    /// they had before, if any: refused where it would take the project from its owner.
     fn set_member<'a>(
         &'a self,
         id: &'a ProjectId,
         user: &'a str,
         role: Option<Role>,
-    ) -> BoxFuture<'a, Result<()>>;
+    ) -> BoxFuture<'a, Result<Option<Role>>>;
 
     /// Forget project `id`, its name its owner's to give again, so that no one reaches it.
     fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<()>>;
@@ -147,7 +147,7 @@ impl Membership for TcpMembership {
         id: &'a ProjectId,
         user: &'a str,
         role: Option<Role>,
-    ) -> BoxFuture<'a, Result<()>> {
+    ) -> BoxFuture<'a, Result<Option<Role>>> {
         Box::pin(async move {
             let _lock = self.store.lock()?;
             let mut project = self
@@ -157,11 +157,14 @@ impl Membership for TcpMembership {
             if project.owner == Owner::User(user.to_owned()) && role != Some(Role::Owner) {
                 return Err(ProjectError::NoOwner(id.to_string()));
             }
-            match role {
+            let had = match role {
                 Some(role) => project.members.insert(user.to_owned(), role),
                 None => project.members.remove(user),
             };
-            self.store.write(&project)
+            if had != role {
+                self.store.write(&project)?;
+            }
+            Ok(had)
         })
     }
 
@@ -214,10 +217,10 @@ mod tests {
         );
         assert_eq!(store.role(&demo.id, &bob).await.unwrap(), None);
 
-        store
-            .set_member(&demo.id, "bob", Some(Role::Member))
-            .await
-            .unwrap();
+        // Each change answers the role it replaced.
+        let set = async |role| store.set_member(&demo.id, "bob", role).await.unwrap();
+        assert_eq!(set(Some(Role::Member)).await, None);
+        assert_eq!(set(Some(Role::Member)).await, Some(Role::Member));
         assert_eq!(
             store.role(&demo.id, &bob).await.unwrap(),
             Some(Role::Member)
@@ -244,11 +247,9 @@ mod tests {
                 Err(ProjectError::NoOwner(_))
             ));
         }
-        store
-            .set_member(&demo.id, "bob", Some(Role::Owner))
-            .await
-            .unwrap();
-        store.set_member(&demo.id, "bob", None).await.unwrap();
+        assert_eq!(set(Some(Role::Owner)).await, Some(Role::Member));
+        assert_eq!(set(None).await, Some(Role::Owner));
+        assert_eq!(set(None).await, None);
 
         // Kept on disk, for the next membership over the same root.
         let again = TcpMembership::new(root.path());

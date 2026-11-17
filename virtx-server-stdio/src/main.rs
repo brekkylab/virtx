@@ -27,7 +27,7 @@ use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
 use virtx_uvm::{
     ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
-    RegistryServer,
+    RegistryServer, Sandbox,
 };
 
 use crate::endpoints::{Home, Refused, forbidden, invalid};
@@ -116,7 +116,7 @@ async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
 pub struct Host {
     store: ProjectStore,
     /// Each project's home, by id.
-    /// `None` for a project being removed, which no request reaches until it is gone.
+    /// `None` for a project being removed or removed, which no request reaches.
     homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
 }
 
@@ -196,7 +196,7 @@ impl Host {
         home.ok_or_else(|| forbidden(format!("project {} is being removed", project.name)))
     }
 
-    /// Project `id`'s home, its images its own: `None` while it is being removed.
+    /// Project `id`'s home, its images its own: `None` once it is being removed.
     fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
         if let Some(home) = homes.get(id) {
@@ -210,14 +210,16 @@ impl Host {
         Ok(Some(home))
     }
 
-    /// Take project `id`'s home away, its image jobs cancelled, for it to be removed: no
-    /// request reaches it from now until [`release`](Host::release). `false`, and nothing
-    /// taken, while a sandbox in it lives or it is being removed already.
+    /// Take project `id`'s home away, closed and its image jobs cancelled, for it to be removed:
+    /// no request reaches it from now on, or until [`release`](Host::release) where the removal
+    /// fails. `false`, and nothing taken, while a sandbox lives or is being made in it, or it is
+    /// being removed already.
     pub fn close(&self, id: &ProjectId) -> bool {
         let mut homes = self.homes.lock().unwrap();
         match homes.get(id) {
             Some(None) => return false,
-            Some(Some(home)) if home.in_use() => return false,
+            Some(Some(home)) if !home.close() => return false,
+            None if Sandbox::lives_under(&self.store.path(id)) => return false,
             _ => {}
         }
         if let Some(Some(home)) = homes.insert(*id, None) {
@@ -226,7 +228,7 @@ impl Host {
         true
     }
 
-    /// Let requests reach project `id` again, once its removal is over.
+    /// Let requests reach project `id` again, once its removal has failed.
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);
     }
@@ -962,6 +964,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((by_id.name, by_id.owner), ("demo".to_owned(), alice_s));
+    }
+
+    /// A project is closed for its removal only while no sandbox of this process or another lives
+    /// in it; closed, a request already in its home starts nothing, and removed, it gets no home
+    /// again.
+    #[tokio::test]
+    async fn a_project_is_closed_only_while_no_sandbox_lives_in_it() {
+        let root = std::env::temp_dir().join(format!("virtx-stdio-close-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let host = Host::open(&root).await.unwrap();
+        let demo = host.create("demo").unwrap().id;
+        let unreached = host.create("unreached").unwrap().id;
+        let home = host.home_of(&demo).unwrap().unwrap();
+
+        // An upper disk another process's sandbox holds, in a project with a home here or not.
+        for id in [demo, unreached] {
+            let sandbox = host.store().path(&id).join("sandbox");
+            fs::create_dir_all(&sandbox).unwrap();
+            let held = fs::File::create(sandbox.join("other.ext4.lock")).unwrap();
+            held.lock().unwrap();
+            assert!(!host.close(&id));
+            drop(held);
+        }
+
+        assert!(host.close(&demo));
+        let pull = http::Request::post("/images/jobs/pull/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))
+            .unwrap();
+        let in_home = crate::endpoints::router().layer(axum::Extension(home));
+        let Ok(refused) = in_home.oneshot(pull).await;
+        assert_eq!(refused.status(), http::StatusCode::FORBIDDEN);
+        assert!(!host.close(&demo));
+        assert!(host.home_of(&demo).unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A removal forgets the project only once it holds the lock a record changes under, which
+    /// a server beside this one holds as it changes one: held from here, the removal is not
+    /// answered and the project is there; let go, it is removed.
+    #[tokio::test]
+    async fn a_project_is_forgotten_only_under_the_records_lock() {
+        let server = Server::spawn("forget-locked").await;
+        server.client.create_project("demo").await.unwrap();
+        let store = ProjectStore::new(&server.root);
+        let lock = store.lock().unwrap();
+
+        let (app, _) = app(&server.root).await.unwrap();
+        let request = http::Request::delete("/projects/demo")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let removed = tokio::spawn(async move {
+            let Ok(response) = app.oneshot(request).await;
+            response.status().as_u16()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !removed.is_finished(),
+            "it was answered while the lock was held"
+        );
+        assert!(store.find(&Owner::Admin, "demo").unwrap().is_some());
+
+        drop(lock);
+        assert_eq!(removed.await.unwrap(), 204);
+        assert_eq!(store.find(&Owner::Admin, "demo").unwrap(), None);
     }
 
     #[test]

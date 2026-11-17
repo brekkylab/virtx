@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
-use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer};
+use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer, Sandbox};
 
 use crate::config::Config;
 use crate::endpoints::Home;
@@ -83,7 +83,7 @@ pub struct Access {
     store: ProjectStore,
     maker: Arc<dyn Homes>,
     /// Each project's home, by id, made as it is first reached.
-    /// `None` for a project being removed, which no request reaches until it is gone.
+    /// `None` for a project being removed or removed, which no request reaches.
     homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
     /// Held while a home is made, so that each is made once.
     making: tokio::sync::Mutex<()>,
@@ -219,7 +219,7 @@ impl Access {
         Ok((who, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
-    /// Project `id`'s home, made as it is first reached: `None` while it is being removed, or
+    /// Project `id`'s home, made as it is first reached: `None` once it is being removed, or
     /// where it is to have none.
     async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         if let Some(home) = self.homes.lock().unwrap().get(id) {
@@ -239,14 +239,16 @@ impl Access {
         }
     }
 
-    /// Take project `id`'s home away, its image jobs cancelled, for it to be removed: no
-    /// request reaches it from now until [`release`](Access::release). `false`, and nothing
-    /// taken, while a sandbox in it lives or it is being removed already.
+    /// Take project `id`'s home away, closed and its image jobs cancelled, for it to be removed:
+    /// no request reaches it from now on, or until [`release`](Access::release) where the
+    /// removal fails. `false`, and nothing taken, while a sandbox lives or is being made in it,
+    /// or it is being removed already.
     pub fn close(&self, id: &ProjectId) -> bool {
         let mut homes = self.homes.lock().unwrap();
         match homes.get(id) {
             Some(None) => return false,
-            Some(Some(home)) if home.in_use() => return false,
+            Some(Some(home)) if !home.close() => return false,
+            None if Sandbox::lives_under(&self.store.path(id)) => return false,
             _ => {}
         }
         if let Some(Some(home)) = homes.insert(*id, None) {
@@ -255,7 +257,7 @@ impl Access {
         true
     }
 
-    /// Let requests reach project `id` again, once its removal is over.
+    /// Let requests reach project `id` again, once its removal has failed.
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);
     }
@@ -407,6 +409,51 @@ mod tests {
         let (_, plus) = home(Some("a+b@x.com"), None).await.unwrap();
         let (_, minus) = home(Some("a-b@x.com"), None).await.unwrap();
         assert!(!Arc::ptr_eq(&plus, &minus));
+    }
+
+    /// A project is closed for its removal only while no sandbox of this process or another lives
+    /// in it; closed, a request already in its home starts nothing, and removed, it gets no home
+    /// again.
+    #[tokio::test]
+    async fn a_project_is_closed_only_while_no_sandbox_lives_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let demo = projects.create(&alice, "demo").await.unwrap().id;
+        let unreached = projects.create(&alice, "unreached").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let (_, home) = access
+            .home(&headers(Some("alice"), Some("demo"), None))
+            .await
+            .unwrap();
+
+        // An upper disk another process's sandbox holds, in a project with a home here or not.
+        for id in [demo, unreached] {
+            let sandbox = store.path(&id).join("sandbox");
+            std::fs::create_dir_all(&sandbox).unwrap();
+            let held = std::fs::File::create(sandbox.join("other.ext4.lock")).unwrap();
+            held.lock().unwrap();
+            assert!(!access.close(&id));
+            drop(held);
+        }
+
+        assert!(access.close(&demo));
+        let pull = http::Request::post("/images/jobs/pull/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))
+            .unwrap();
+        let in_home = crate::endpoints::router().layer(axum::Extension(home));
+        let Ok(refused) = tower::ServiceExt::oneshot(in_home, pull).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(!access.close(&demo));
+        assert!(access.home_of(&demo).await.unwrap().is_none());
     }
 
     /// Homes made only for the projects listed, none for any other.

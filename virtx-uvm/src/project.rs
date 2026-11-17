@@ -124,9 +124,8 @@ impl Owner {
     }
 }
 
-/// A project, as its record keeps it.
+/// A project, as its record keeps it: a field a newer server adds is left to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Project {
     pub id: ProjectId,
     pub owner: Owner,
@@ -205,11 +204,15 @@ impl Store {
     }
 
     /// Every project's record, by id: a directory with none, left by a create that did not
-    /// end, is no project.
+    /// end, is no project, and one whose record does not read is said and passed over, so that
+    /// it stops no other being found.
     pub fn records(&self) -> Result<Vec<Project>> {
         let mut all = Vec::new();
         for id in self.list()? {
-            all.extend(self.read(&id)?);
+            match self.read(&id) {
+                Ok(project) => all.extend(project),
+                Err(e) => eprintln!("project {id} passed over: {e}"),
+            }
         }
         Ok(all)
     }
@@ -349,6 +352,27 @@ mod tests {
         assert_eq!(store.read(&kept.id).unwrap(), Some(kept.clone()));
         assert_eq!(store.read(&left).unwrap(), None);
         assert_eq!(store.records().unwrap(), std::slice::from_ref(&kept));
+
+        // A record cut short is passed over, and one with a field a newer server added is read.
+        let cut = ProjectId::new();
+        fs::create_dir_all(store.path(&cut)).unwrap();
+        fs::write(store.path(&cut).join("project.json"), "{\"id\":").unwrap();
+        let newer = ProjectId::new();
+        fs::create_dir_all(store.path(&newer)).unwrap();
+        let record = serde_json::json!({
+            "id": newer, "owner": "admin", "name": "newer", "members": {}, "added": true
+        });
+        fs::write(store.path(&newer).join("project.json"), record.to_string()).unwrap();
+        let read: Vec<_> = store.records().unwrap().into_iter().map(|p| p.id).collect();
+        let mut both = vec![kept.id, newer];
+        both.sort();
+        assert_eq!(read, both);
+        assert_eq!(
+            store.find(&Owner::Admin, "demo").unwrap(),
+            Some(kept.clone())
+        );
+        store.remove(&cut).unwrap();
+        store.remove(&newer).unwrap();
 
         store.forget(&kept.id).unwrap();
         assert_eq!(store.records().unwrap(), []);

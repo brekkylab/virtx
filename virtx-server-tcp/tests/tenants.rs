@@ -1,9 +1,10 @@
 //! A server built on this one, from outside the crate: an identity and a membership of its own
 //! in place of the config's, and a route of its own beside the server's. Its membership keeps no
-//! members: it decides from what the token grants, as a node behind a gateway does.
+//! members: it decides from what the token grants, as a node behind a gateway does, and passes a
+//! change of members on to whoever keeps them.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 use http::StatusCode;
@@ -32,8 +33,12 @@ impl Identity for Keys {
     }
 }
 
-/// The one tenant's project, `acme`, which is whoever's token grants it, and theirs alone.
-struct Tenants;
+/// The one tenant's project, `acme`, which is whoever's token grants it, and theirs alone. Its
+/// members are those a control plane keeps, which the project it answers shows none of.
+#[derive(Default)]
+struct Tenants {
+    kept: Mutex<BTreeMap<String, Role>>,
+}
 
 const ACME: &str = "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 
@@ -108,10 +113,19 @@ impl Membership for Tenants {
     fn set_member<'a>(
         &'a self,
         id: &'a ProjectId,
-        _user: &'a str,
-        _role: Option<Role>,
-    ) -> BoxFuture<'a, Result<(), ProjectError>> {
-        Box::pin(async move { Err(ProjectError::NoOwner(id.to_string())) })
+        user: &'a str,
+        role: Option<Role>,
+    ) -> BoxFuture<'a, Result<Option<Role>, ProjectError>> {
+        Box::pin(async move {
+            if *id != acme().id {
+                return Err(ProjectError::Unknown(id.to_string()));
+            }
+            let mut kept = self.kept.lock().unwrap();
+            Ok(match role {
+                Some(role) => kept.insert(user.to_owned(), role),
+                None => kept.remove(user),
+            })
+        })
     }
 
     fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<(), ProjectError>> {
@@ -127,7 +141,7 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
     let access = Access::new(
         Vec::new(),
         Arc::new(Keys),
-        Arc::new(Tenants),
+        Arc::new(Tenants::default()),
         store.clone(),
         Arc::new(store.clone()),
     );
@@ -208,6 +222,23 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
         .0,
         StatusCode::NOT_FOUND
     );
+
+    // Who is a member is the membership's to answer, not the members its project shows: a
+    // member added is `201` and changed `200`, and one taken away `204` and then `404`.
+    let bob = format!("{url}/projects/{ACME}/members/bob");
+    let put = async || {
+        let request = reqwest::Client::new().put(&bob).bearer_auth("acme-key");
+        let request = request.json(&json!({ "role": "member" }));
+        request.send().await.unwrap().status()
+    };
+    let delete = async || {
+        let request = reqwest::Client::new().delete(&bob).bearer_auth("acme-key");
+        request.send().await.unwrap().status()
+    };
+    assert_eq!(put().await, StatusCode::CREATED);
+    assert_eq!(put().await, StatusCode::OK);
+    assert_eq!(delete().await, StatusCode::NO_CONTENT);
+    assert_eq!(delete().await, StatusCode::NOT_FOUND);
 
     task.abort();
     for home in access.homes() {

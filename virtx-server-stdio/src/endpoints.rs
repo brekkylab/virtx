@@ -10,6 +10,7 @@ use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -62,6 +63,8 @@ pub struct Home {
     sandboxes: Mutex<HashMap<String, Held>>,
     /// The image jobs, by id, and what cancels each, until each is removed.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    /// Set once its project is to be removed: no sandbox or image job is added after.
+    closed: AtomicBool,
 }
 
 impl Home {
@@ -86,6 +89,7 @@ impl Home {
             ],
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
+            closed: AtomicBool::default(),
         })
     }
 
@@ -94,13 +98,21 @@ impl Home {
         &self.registry
     }
 
-    /// Whether a sandbox lives here.
-    pub fn in_use(&self) -> bool {
-        !self.sandboxes.lock().unwrap().is_empty()
+    /// Close it to every sandbox and image job from now on, for its project to be removed:
+    /// `false`, and left open, while a sandbox of this process or another lives here. Decided
+    /// under the sandboxes' lock, which a sandbox is added under once it holds its upper disk:
+    /// one made meanwhile is either seen here or sees it closed.
+    pub fn close(&self) -> bool {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        if Sandbox::lives_under(&self.root) {
+            return false;
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        true
     }
 
-    /// Cancel every image job here, and close every sandbox, as removing each does, side by side: blocks until each
-    /// machine has stopped and synced what it wrote.
+    /// Cancel every image job here, and close every sandbox, as removing each does, side by
+    /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
         for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
             cancel(&job, &task);
@@ -305,17 +317,23 @@ async fn project_remove(
             format!("a sandbox lives in project {named}"),
         ));
     }
-    let removed = async {
-        host.store().forget(&id)?;
-        let store = host.store().clone();
-        tokio::task::spawn_blocking(move || store.remove(&id))
-            .await
-            .map_err(internal)??;
-        Ok::<_, Refused>(())
-    }
+    // Forgotten under the lock a record changes under, so that no change of a server beside
+    // this one writes it back.
+    let store = host.store().clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        {
+            let _lock = store.lock()?;
+            store.forget(&id)?;
+        }
+        store.remove(&id)
+    })
     .await;
-    host.release(&id);
-    removed?;
+    // Once removed, its id stays taken: no id is given again, and a request that read the
+    // record before it was forgotten makes no home for it.
+    if !matches!(removed, Ok(Ok(()))) {
+        host.release(&id);
+    }
+    removed.map_err(internal)??;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -335,11 +353,15 @@ fn image_job<Fut>(
     kind: ImageJobKind,
     reference: String,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
-) -> Response
+) -> Answer
 where
     Fut: Future<Output = Result<Digest, Failure>> + Send + 'static,
 {
     let mut jobs = home.image_jobs.lock().unwrap();
+    // Under the jobs' lock, which closing the home cancels them under after.
+    if home.closed.load(Ordering::SeqCst) {
+        return Err(forbidden("this project is being removed"));
+    }
     let id = pick(|id| jobs.contains_key(id));
     let job = Job::new(
         ImageJob {
@@ -376,14 +398,17 @@ where
         );
     });
     jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
-    created(format!("/images/jobs/{id}"), &*job.job.lock().unwrap())
+    Ok(created(
+        format!("/images/jobs/{id}"),
+        &*job.job.lock().unwrap(),
+    ))
 }
 
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
@@ -394,14 +419,14 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
-    ))
+    )
 }
 
 async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
@@ -409,7 +434,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
             let registry = RegistryClient::new(images, args.auth);
             Ok(registry.push(&reference, report).await?)
         },
-    ))
+    )
 }
 
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -420,7 +445,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let recipe = args.recipe;
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
@@ -454,7 +479,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             .await??;
             Ok(digest)
         },
-    ))
+    )
 }
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
@@ -710,7 +735,18 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         sandbox: Arc::clone(&sandbox),
         _listening: listening,
     };
-    home.sandboxes.lock().unwrap().insert(id.clone(), held);
+    let closed = {
+        let mut sandboxes = home.sandboxes.lock().unwrap();
+        let closed = home.closed.load(Ordering::SeqCst);
+        if !closed {
+            sandboxes.insert(id.clone(), held);
+        }
+        closed
+    };
+    if closed {
+        tokio::task::spawn_blocking(move || sandbox.close()).await?;
+        return Err(forbidden("this project is being removed"));
+    }
     let answer = virtx_core::Sandbox {
         ports: opened,
         ..sandbox.answer()

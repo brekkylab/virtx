@@ -46,6 +46,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 sha2 = "0.10"
 # A test's own root, removed when it is done.
 tempfile = "3"
+# A request sent to a router as the server would.
+tower = { version = "0.5", default-features = false, features = ["util"] }
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }

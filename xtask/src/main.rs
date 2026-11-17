@@ -623,7 +623,7 @@ fn pinned_actions() -> anyhow::Result<()> {
     }
     ensure!(
         unpinned.is_empty(),
-        "an action is named by its commit's full SHA, the release as a comment after it:\n{}",
+        "an action is named by its commit's full SHA, its release or branch as a comment after it:\n{}",
         unpinned.join("\n")
     );
     Ok(())

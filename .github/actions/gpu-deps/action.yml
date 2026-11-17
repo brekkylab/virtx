@@ -1,0 +1,27 @@
+# The GPU libraries the servers' `gpu` feature links, as xtask/scripts/build-deps.* installs them
+# under build/ -- virglrenderer, and on Windows libepoxy and an import library for Vulkan's
+# loader -- kept by runs-on/cache by the submodules' commits and the scripts. The scripts build
+# them again only when their stamp says they were built from something else, so a cache of
+# another tree's or another runner's only costs its download. Building them took a minute of
+# each Windows job that does, and 11 to 14 seconds on Linux. MoltenVK, macOS's, keeps its own
+# cache in the job.
+name: gpu-deps
+description: The GPU libraries build-deps installs under build/, restored and saved by what they are built from
+
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      run: |
+        commits=$(git rev-parse HEAD:3rdparty/virglrenderer HEAD:3rdparty/libepoxy HEAD:3rdparty/MoltenVK HEAD:3rdparty/SPIRV-Cross | git hash-object --stdin)
+        echo "key=gpu-deps-$RUNNER_OS-$RUNNER_ARCH-$commits-${{ hashFiles('xtask/scripts/build-deps.*') }}" >> "$GITHUB_OUTPUT"
+
+    - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
+      with:
+        path: |
+          build/virglrenderer
+          build/epoxy
+          build/vulkan
+          build/pkgconfig
+        key: ${{ steps.key.outputs.key }}

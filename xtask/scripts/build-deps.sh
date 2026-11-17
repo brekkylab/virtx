@@ -75,6 +75,25 @@ virglrenderer_build="$ROOT/build/virglrenderer-build"
 virglrenderer_prefix="$ROOT/build/virglrenderer"
 virglrenderer_pcdir="$ROOT/build/pkgconfig"
 virglrenderer_venv="$ROOT/build/meson-venv"
+virglrenderer_stamp="$virglrenderer_prefix/.virtx-stamp"
+
+# What the installed virglrenderer was built from: this script, the submodule's commit and any
+# change in its tree, where it is installed (its .pc names the prefix), and on macOS the
+# MoltenVK it links. The same as the last build's, and it is not built again -- which is also
+# what lets CI keep it in a cache.
+tree_state() {
+    (cd "$1" && {
+        git rev-parse HEAD
+        { git diff HEAD; git ls-files -o --exclude-standard -z | xargs -0 git hash-object; } | git hash-object --stdin
+    })
+}
+virglrenderer_want="$(printf '%s\n' "$virglrenderer_prefix" "$(git hash-object "$0")" \
+    "$(tree_state "$virglrenderer_src")" "${MoltenVK_want:-}")"
+if [ "$REBUILD" = 0 ] && [ -f "$virglrenderer_prefix/lib/pkgconfig/virglrenderer.pc" ] &&
+    [ "$(cat "$virglrenderer_stamp" 2>/dev/null)" = "$virglrenderer_want" ]; then
+    echo "virglrenderer up to date ($(git -C "$virglrenderer_src" rev-parse --short HEAD))"
+    exit 0
+fi
 
 for tool in meson ninja; do
     command -v "$tool" >/dev/null 2>&1 || { echo "missing $tool (brew install $tool)" >&2; exit 1; }
@@ -141,5 +160,6 @@ PKG_CONFIG_PATH="$virglrenderer_pcdir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" meso
 if [ -f "$virglrenderer_pcdir/vulkan.pc" ]; then
     cp "$virglrenderer_pcdir/vulkan.pc" "$virglrenderer_prefix/lib/pkgconfig/vulkan.pc"
 fi
+printf '%s\n' "$virglrenderer_want" > "$virglrenderer_stamp"
 
 echo "virglrenderer $(PKG_CONFIG_PATH="$virglrenderer_prefix/lib/pkgconfig" pkg-config --modversion virglrenderer) installed to $virglrenderer_prefix"

@@ -81,7 +81,9 @@
 # transfer out of AWS. A release compiles from nothing, on an instance no run has touched. The
 # kernel, alib and MoltenVK are runs-on/cache's: S3 on our runners, GitHub's cache on GitHub's.
 # So, on our runners alone, is what cargo downloads -- the crates and the git dependencies, by
-# `Cargo.lock` (.github/actions/cargo-deps).
+# `Cargo.lock` (.github/actions/cargo-deps). The GPU libraries `cargo xtask` builds for the
+# servers' `gpu` feature are kept by the submodules' commits and the scripts that build them
+# (.github/actions/gpu-deps), which skip a build their stamp says is done.
 # macOS's Rust is rust-cache's, saved from `main` alone.
 name: pipeline
 
@@ -343,6 +345,10 @@ jobs:
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
 
+      # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/gpu-deps
+
       - name: Add the guest's musl target
         run: cargo xtask init
 
@@ -389,6 +395,10 @@ jobs:
 
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
+
+      # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -468,6 +478,10 @@ jobs:
 
       - if: ${{ !github.event.pull_request.head.repo.fork && matrix.own }}
         uses: ./.github/actions/cargo-deps
+
+      # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -766,6 +780,10 @@ jobs:
 
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
+
+      # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/gpu-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init

@@ -1,10 +1,10 @@
 # The GPU libraries the servers' `gpu` feature links, as xtask/scripts/build-deps.* installs them
 # under build/ -- virglrenderer, and on Windows libepoxy and an import library for Vulkan's
-# loader -- kept by runs-on/cache by the submodules' commits and the scripts. The scripts build
-# them again only when their stamp says they were built from something else, so a cache of
-# another tree's or another runner's only costs its download. Building them took a minute of
-# each Windows job that does, and 11 to 14 seconds on Linux. MoltenVK, macOS's, keeps its own
-# cache in the job.
+# loader -- kept by runs-on/cache by this platform's script and the submodules it builds, so a
+# change to another platform's script costs this one nothing. The scripts build them again only
+# when their stamp says they were built from something else, so a cache of another tree's or
+# another runner's only costs its download. Building them took a minute of each Windows job
+# that does, and 11 to 14 seconds on Linux. MoltenVK, macOS's, keeps its own cache in the job.
 name: gpu-deps
 description: The GPU libraries build-deps installs under build/, restored and saved by what they are built from
 
@@ -13,9 +13,15 @@ runs:
   steps:
     - id: key
       shell: bash
+      # Only what this platform's build reads: its script, and the submodules it builds.
       run: |
-        commits=$(git rev-parse HEAD:3rdparty/virglrenderer HEAD:3rdparty/libepoxy HEAD:3rdparty/MoltenVK HEAD:3rdparty/SPIRV-Cross | git hash-object --stdin)
-        echo "key=gpu-deps-$RUNNER_OS-$RUNNER_ARCH-$commits-${{ hashFiles('xtask/scripts/build-deps.*') }}" >> "$GITHUB_OUTPUT"
+        case "$RUNNER_OS" in
+          Windows) script=xtask/scripts/build-deps.ps1; submodules="virglrenderer libepoxy" ;;
+          macOS) script=xtask/scripts/build-deps.sh; submodules="virglrenderer MoltenVK SPIRV-Cross" ;;
+          *) script=xtask/scripts/build-deps.sh; submodules=virglrenderer ;;
+        esac
+        from=$({ git hash-object "$script"; for s in $submodules; do git rev-parse "HEAD:3rdparty/$s"; done; } | git hash-object --stdin)
+        echo "key=gpu-deps-$RUNNER_OS-$RUNNER_ARCH-$from" >> "$GITHUB_OUTPUT"
 
     - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
       with:

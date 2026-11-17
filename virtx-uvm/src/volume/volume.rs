@@ -8,6 +8,7 @@
 //!   volume/<name>/files/        what the volume holds, and what a machine shares
 //!   volume/<name>/mounts.json   its mounts, credentials and all: readable by this user alone
 //!   volume/<name>/lock          what a machine that mounts it, or a removal of it, holds
+//!   volume/<name>/writing       what a conditional write over the files API holds as it lands
 //! ```
 //!
 //! A machine a volume is mounted into writes the same directory, and may put a symbolic link
@@ -162,11 +163,18 @@ impl Store {
             Err(fs::TryLockError::Error(e)) => return Err(Error::io(format!("locking {name}"), e)),
         }
         // Its contents while it is held, so no machine mounts it half gone; then the rest, which
-        // a machine that takes the lock now finds no files in.
+        // a machine that takes the lock now finds no files in. The rest is moved out of the name
+        // first, under one no volume can have, so what is made in it meanwhile, as a conditional
+        // write's `writing` is, goes with it and leaves the name free.
         fs::remove_dir_all(&files)
             .map_err(|e| Error::io(format!("removing {}", files.display()), e))?;
         drop(lock);
-        fs::remove_dir_all(&dir).map_err(|e| Error::io(format!("removing {}", dir.display()), e))
+        let gone = dir.with_file_name(format!(
+            ".{name}.{}.removing",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::rename(&dir, &gone).map_err(|e| Error::io(format!("removing {}", dir.display()), e))?;
+        fs::remove_dir_all(&gone).map_err(|e| Error::io(format!("removing {}", gone.display()), e))
     }
 
     /// Volume `name`'s own directory, refused unless `name` [is one](crate::is_name).
@@ -181,7 +189,7 @@ impl Store {
 /// A volume, opened: its files' root, and the mounts in it.
 pub struct Volume {
     name: String,
-    /// Its own directory: `files/`, `mounts.json` and the lock.
+    /// Its own directory: `files/`, `mounts.json`, the lock and `writing`.
     dir: PathBuf,
     root: Dir,
     mounts: Vec<Mount>,
@@ -517,6 +525,32 @@ impl Volume {
             }
         }
         Ok(Place::Local)
+    }
+
+    /// Whether these files answer for `path` as a machine that mounts the volume sees it: a name
+    /// they take, in the volume's own files rather than a mount, with no symbolic link on the
+    /// way to it or at it, and nothing there but a file or a directory, or nothing. A machine
+    /// follows a link these files leave out, and takes a name they refuse; for such a path, ask
+    /// the machine. Nothing on the way is answered here too: neither has it.
+    pub fn answers(&self, path: &str) -> bool {
+        let Ok(at) = relative(path) else {
+            return false;
+        };
+        if self.local(&at).is_err() {
+            return false;
+        }
+        let mut prefix = PathBuf::new();
+        for part in at.components() {
+            prefix.push(part);
+            match self.root.symlink_metadata(&prefix) {
+                Ok(meta) if meta.is_symlink() => return false,
+                Ok(meta) if meta.is_file() || meta.is_dir() => {}
+                Ok(_) => return false,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     /// Refused unless `at` is in the volume's own files: a mount takes no changes.
@@ -885,6 +919,38 @@ mod tests {
             matches!(&refused, Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound),
             "{refused:?}"
         );
+    }
+
+    /// What the volume's files answer for, as a machine mounting it sees the path: a file, a
+    /// directory, or nothing, there or on the way; not a path through a link or at one, a name
+    /// they refuse, nor a path in a mount of the volume's own.
+    #[cfg(unix)]
+    #[test]
+    fn the_files_answer_for_what_they_see_as_a_machine_does() {
+        let scratch = Scratch::new("answers");
+        let mut volume = scratch.0.create("v").unwrap();
+        volume.create_dir("real", false).unwrap();
+        volume.write("real/f", b"f", None).unwrap();
+        std::os::unix::fs::symlink("real", volume.files().join("link")).unwrap();
+        let notion = MountSource::Notion {
+            api_key: "k".into(),
+        };
+        volume.mount("notes".into(), notion).unwrap();
+
+        for path in ["", "real", "real/f", "real/none", "none/f"] {
+            assert!(volume.answers(path), "{path}");
+        }
+        for path in [
+            "link",
+            "link/f",
+            "link/none",
+            "a\\b",
+            "a//b",
+            "notes",
+            "notes/page",
+        ] {
+            assert!(!volume.answers(path), "{path}");
+        }
     }
 
     #[test]

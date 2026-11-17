@@ -51,6 +51,8 @@ components:
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
   kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
   abin          the executables a sandbox gets at /abin, those it names
+  alib          the libraries every machine gets at /alib, into virtx's cache -- see
+                xtask/scripts/build-alib.sh
 
   --force         (init) resets every submodule to its pinned commit first, discarding
                   any local changes in it
@@ -97,6 +99,7 @@ enum Component {
     ServerTcp,
     Kernel,
     Abin,
+    Alib,
 }
 
 struct Options {
@@ -237,6 +240,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Options> {
             Some("server-tcp") => Component::ServerTcp,
             Some("kernel") => Component::Kernel,
             Some("abin") => Component::Abin,
+            Some("alib") => Component::Alib,
             Some("--prefix") => {
                 options.prefix = Some(args.next().context("--prefix needs a directory")?.into());
                 continue;
@@ -476,14 +480,18 @@ fn build(options: &Options) -> anyhow::Result<()> {
     if options.has(Component::Client) {
         build_client(options)?;
     }
+    // Before the servers, which take both to be beside them.
+    if options.has(Component::Kernel) {
+        build_kernel()?;
+    }
+    if options.has(Component::Alib) {
+        build_alib()?;
+    }
     if options.servers().next().is_some() {
         build_servers(options)?;
     }
     if options.has(Component::Abin) {
         build_abin(options.debug, &options.out().join("abin"))?;
-    }
-    if options.has(Component::Kernel) {
-        build_kernel()?;
     }
     let out = match &options.target {
         Some(target) => target_path().join(target).join(options.profile()),
@@ -778,8 +786,7 @@ fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where `/alib` is taken from: `alib/` in virtx's cache, where `virtx-alibs/*/build.sh install`
-/// puts it.
+/// Where `/alib` is taken from: `alib/` in virtx's cache, where `build alib` puts it.
 fn alib_dir() -> PathBuf {
     cache_root().join("alib")
 }
@@ -837,6 +844,19 @@ fn build_kernel() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build `/alib` into [`alib_dir`].
+///
+/// The whole of it is in [`build-alib.sh`](../scripts/build-alib.sh), including why it is
+/// built once for each C library, in that library's own image.
+fn build_alib() -> anyhow::Result<()> {
+    let mut sh = Command::new("sh");
+    sh.arg(root_path().join("xtask/scripts/build-alib.sh"))
+        .arg(alib_dir());
+    let status = sh.status().context("running build-alib.sh")?;
+    ensure!(status.success(), "building alib failed");
+    Ok(())
+}
+
 /// The platforms a release is published for, as `std::env::consts` spells them, which is
 /// how an archive's name spells them. macOS is Apple silicon only and Windows
 /// x86_64 only for now.
@@ -868,7 +888,7 @@ fn archive(abin: bool, servers: &[Component]) -> anyhow::Result<()> {
     );
     ensure!(
         !abin || alib_dir().is_dir(),
-        "--with-abin, but no alib in {}",
+        "--with-abin, but no alib in {} -- run `cargo xtask build alib` first",
         alib_dir().display()
     );
     let servers: Vec<_> = SERVERS

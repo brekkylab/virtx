@@ -77,6 +77,7 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 Everything but images and files is made, read and removed with the requests below.
 A request body is JSON, sent with `Content-Type: application/json`, and so is every response body but an [event stream](#events).
+A client ignores a member of a response body it does not know, so a server can add one without breaking a client already released.
 `{name}`, `{id}` and `{job}` are each one path segment, percent-encoded.
 
 A `POST` or `PUT` that makes something answers `201 Created` with it, and with its path in `Location`.
@@ -93,12 +94,12 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member. |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. |
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
-| `413 Content Too Large` | `too_large` | The body is over the server's limit. |
+| `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
 
@@ -387,7 +388,8 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 | Copy | `COPY`, with `Overwrite` |
 
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
-- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
+- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read. One with `If-None-Match: *` is refused with `412` when anything is at the path: how a client creates a file only if no other did.
+- A `PUT` with `If-Match` or `If-None-Match` to a volume or a sandbox is checked before its body is read, and again once all of it has arrived, against the file as it is then, and lands in the same step, so no other write with a condition lands between the two: none from another client of the server, and, to a volume, none from another server over one home. Of two sent at once to one file, one lands, and the other is checked against what it wrote and refused `412` if its condition no longer holds: read the file again, and retry. On one server, the one whose body has all arrived first, and to a sandbox been sent on to it, is checked first. A write to a sandbox holds each volume the sandbox mounts writable as well, so a file in such a volume is held the same whether it is written through the sandbox's files or the volume's, and a `PUT` to a path in it is checked against the volume's own files as it lands. The rest is checked as the sandbox sees the file, which can trail a write through the volume's files by a few seconds: the check before a `PUT`'s body is read, the condition of a `DELETE`, `MOVE` or `COPY`, and a `PUT` to a path the volume's files do not answer for, such as one through a symbolic link. For those few seconds after such a write, a `DELETE` or `MOVE` naming the replaced file's tag can go through, and a `PUT` naming the new one can be refused `412`. A `DELETE`, `MOVE` or `COPY` with either condition is held the same way while it is answered, but one of a directory that fails on a member, answered `207`, may go on with the rest after. A snapshot's requests go one at a time. A sandbox's processes write its files without asking, and a write without a condition is not held, so either may land between the check and the write.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
 - `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume, snapshot or sandbox is removed through [Resources](#resources).
 - `MOVE` and `COPY` take a `Destination` in the same volume, snapshot or sandbox, and refuse any other with `400 Bad Request`.

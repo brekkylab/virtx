@@ -13,7 +13,6 @@ use super::{Recipe, RegistryAuth};
 
 /// An image job, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ImageJob {
     /// The job's id, which every request about it names it by.
     pub id: String,
@@ -103,7 +102,6 @@ pub enum ImageJobEntry {
 
 /// How an image job ended: with a digest if it succeeded, an error if not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ImageJobEnd {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
@@ -115,7 +113,6 @@ pub struct ImageJobEnd {
 /// What `POST /images/prune` answers: what it deleted, each image no reference points at and no
 /// sandbox uses, and what only such images held.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ImagePruneOutput {
     /// The digest of each image deleted, as `algorithm:hex`.
     pub images: Vec<String>,
@@ -151,5 +148,37 @@ mod tests {
         let value = json!({"end": {"error": "no image"}});
         assert_eq!(serde_json::to_value(&end).unwrap(), value);
         assert_eq!(serde_json::from_value::<ImageJobEntry>(value).unwrap(), end);
+    }
+
+    #[test]
+    fn a_job_its_end_and_a_prune_are_read_past_members_they_do_not_know() {
+        let value = json!({
+            "id": "j",
+            "kind": "pull",
+            "reference": "alpine:3.20",
+            "running": false,
+            "digest": "sha256:00",
+            "cell": "c1",
+        });
+        let job: ImageJob = serde_json::from_value(value).unwrap();
+        assert_eq!(job.digest.as_deref(), Some("sha256:00"));
+
+        let value = json!({"end": {"digest": "sha256:00", "cell": "c1"}});
+        assert_eq!(
+            serde_json::from_value::<ImageJobEntry>(value).unwrap(),
+            ImageJobEntry::End(ImageJobEnd {
+                digest: Some("sha256:00".into()),
+                error: None,
+            })
+        );
+
+        let value = json!({"images": ["sha256:00"], "reclaimed": 4096, "cell": "c1"});
+        assert_eq!(
+            serde_json::from_value::<ImagePruneOutput>(value).unwrap(),
+            ImagePruneOutput {
+                images: vec!["sha256:00".into()],
+                reclaimed: 4096,
+            }
+        );
     }
 }

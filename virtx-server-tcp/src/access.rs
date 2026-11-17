@@ -277,10 +277,7 @@ mod tests {
 
         let (user, reached) = home(None, None).await.unwrap();
         assert_eq!(user, ANYONE);
-        assert_eq!(
-            reached.snapshots.root(),
-            dir.join("project").join(DEFAULT_PROJECT).as_path()
-        );
+        assert_eq!(reached.root, dir.join("project").join(DEFAULT_PROJECT));
         assert!(home(Some("whatever"), Some(DEFAULT_PROJECT)).await.is_ok());
         assert_eq!(
             home(None, Some("other")).await.err(),

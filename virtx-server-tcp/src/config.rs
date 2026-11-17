@@ -10,7 +10,8 @@
 //! }
 //! ```
 //!
-//! A project's snapshots, volumes and images are under `<home>/project/<name>/`, its own.
+//! A project's volumes, images and its sandboxes' upper disks are under
+//! `<home>/project/<name>/`, its own.
 //! Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! With `oidc`, a request's token is an ID token its issuer signed for `client_id`, and the

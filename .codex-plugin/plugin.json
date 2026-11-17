@@ -24,11 +24,11 @@
     "shortDescription": "Linux microVMs from your own code",
     "developerName": "brekkylab",
     "category": "Developer Tools",
-    "longDescription": "virtx runs tasks in Linux microVMs from Python, Node.js or Rust, with no Docker and no daemon to install. A sandbox boots from an image you build or pull, runs commands in it, and is gone when you remove it; what should outlive it is kept in a snapshot or a volume, and remote stores such as Notion or Google Drive can be mounted inside a volume, read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
+    "longDescription": "virtx runs tasks in Linux microVMs from Python, Node.js or Rust, with no Docker and no daemon to install. A sandbox boots from an image you build or pull, runs commands in it, and is gone when you remove it; what should outlive it is kept in a volume, and remote stores such as Notion or Google Drive can be mounted inside a volume, read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
     "capabilities": [
       "Build or pull an image, and boot Linux microVMs from it",
       "Run commands in it and read their output, from Python, Node.js or Rust",
-      "Keep work in snapshots and volumes, and read their files without a VM",
+      "Keep work in volumes, and read their files without a VM",
       "Cut the network, or give the VM a GPU, CPUs and memory",
       "Reach a service in the VM through a forwarded port",
       "Start a local server with one call, or connect to your own; no Docker"

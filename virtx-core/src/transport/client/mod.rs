@@ -35,8 +35,8 @@ enum Connection {
 }
 
 impl Connection {
-    /// Send `request`, whose URI is a path under the server's base, such as `/snapshots/`. An
-    /// `Err` says why no response came.
+    /// Send `request`, whose URI is a path under the server's base. An `Err` says why no
+    /// response came.
     async fn send(&self, request: http::Request<Body>) -> Result<http::Response<Body>, Error> {
         match self {
             Connection::Tcp(tcp) => tcp.send(request).await,
@@ -103,9 +103,9 @@ impl TransportClient {
         Self::new(Connection::Stdio(Stdio::over(io, None)))
     }
 
-    /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/snapshots/`, names. An `Err` says why no response came, or that the server refused the
-    /// headers with a `401` or a `403`, which every endpoint's are alike. A path, or a
+    /// Send `request` to whichever endpoint its URI, a path under the server's base, names. An
+    /// `Err` says why no response came, or that the server refused the headers with a `401` or
+    /// a `403`, which every endpoint's are alike. A path, or a
     /// `Destination`, with a `.` or `..` segment still in it, a file's path that goes above its
     /// root or a name that is one, is refused unsent: over HTTP it would be resolved before it
     /// went, to another endpoint's path even, and the server refuses one that arrives.

@@ -9,8 +9,9 @@
 //! }
 //! ```
 //!
-//! A project's snapshots, volumes and images are under its own root, `<home>/project/<id>/`
-//! (see [`virtx_uvm::ProjectStore`]). Without `home`, it is [`virtx_uvm::cache_root`].
+//! A project's volumes, images and its sandboxes' upper disks are under its own root,
+//! `<home>/project/<id>/` (see [`virtx_uvm::ProjectStore`]).
+//! Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! A request's token is a token `oidc`'s issuer signed for `client_id`, and the user is its
 //! `username_claim` (`email` unless given). The issuer's keys are found through its OpenID

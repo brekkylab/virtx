@@ -1,5 +1,5 @@
 //! Projects: what everything a server keeps belongs to. Each project is a directory of its own,
-//! under an id given it once, which its images, snapshots, sandboxes and volumes are kept in.
+//! under an id given it once, which its images, sandboxes and volumes are kept in.
 //! [`Store`] keeps the directories, and in each the server's record of the project, its name and
 //! whatever else that server keeps of it, such as its members.
 //!
@@ -8,7 +8,7 @@
 //! ```text
 //! <root>/
 //!   project/.lock             held while a record changes
-//!   project/<id>/             a project's own: images/, snapshot/, sandbox/, volume/
+//!   project/<id>/             a project's own: images/, sandbox/, volume/
 //!   project/<id>/project.json its record: a project is there while this is
 //! ```
 

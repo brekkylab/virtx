@@ -1,7 +1,7 @@
-//! Images, the machines provisioned from them, and the snapshots and registries around
-//! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client; and
-//! the projects all of it belongs to.
+//! Images, the machines provisioned from them, and the registries around them, and the
+//! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
+//! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
+//! belongs to.
 
 mod files;
 mod fstree;
@@ -9,7 +9,6 @@ mod image;
 mod machine;
 mod project;
 mod sandbox;
-mod snapshot;
 mod volume;
 
 pub use files::Files;
@@ -32,11 +31,8 @@ pub use project::{
     Error as ProjectError, ProjectId, Store as ProjectStore, is_name as is_project_name,
 };
 pub use sandbox::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
-    LOG_LIMIT, Sandbox, park_after, signal_number,
-};
-pub use snapshot::{
-    Error as SnapshotError, Lock as SnapshotLock, Snapshot, Store as SnapshotStore,
+    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
+    Job as SandboxJob, LOG_LIMIT, Sandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,
@@ -45,7 +41,7 @@ pub use volume::{
     Store as VolumeStore, Volume,
 };
 
-/// Whether `name` can name a snapshot, a volume or anything else kept under a name: letters,
+/// Whether `name` can name a volume or anything else kept under a name: letters,
 /// digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 bytes, since it
 /// becomes a file name.
 pub fn is_name(name: &str) -> bool {

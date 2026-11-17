@@ -1,7 +1,7 @@
 # virtx-uvm
 
 The server's machinery, on [libkrun](https://github.com/libkrun/libkrun) 2.0: images and the
-disks made of them, machines booted from those disks, and the snapshots and volumes they
+disks made of them, machines booted from those disks, and the upper disks and volumes they
 write to. [`virtx-server-stdio`](../virtx-server-stdio/) and
 [`virtx-server-tcp`](../virtx-server-tcp/) serve it on `virtx-core`'s protocol, over stdio
 and over HTTP; a client reaches a machine through one of them, never through this crate.
@@ -89,18 +89,18 @@ installs stand in for the one `build/` had built, silently, since the GPU still 
 [`fstree::erofs`](src/fstree/erofs/) makes an image's layers into a disk: one
 read-only EROFS filesystem -- the layers merged into a metadata image that points into
 them, rather than a copy of them -- shared by every machine ever booted on those layers.
-A [snapshot](src/snapshot.rs) is what makes one of those machines writable: an ext4 of its own,
-stacked over it by [`machine`](src/machine/):
+An upper disk is what makes one of those machines writable: an ext4 of its own, made by
+[`create_upper`](src/machine/machine.rs) and stacked over it by [`machine`](src/machine/):
 
 ```
-/dev/vdb  ext4,  writable    the snapshot, the upper layer ─┐
+/dev/vdb  ext4,  writable    the upper disk                ─┐
                                                             ├─ overlay ──► /
 /dev/vda  erofs, read-only   the image's disk              ─┘
 ```
 
-A sandbox made without a snapshot gets one of its own, gone with it. A sandbox's machine is
+Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
 stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
-unless it says otherwise, `0` for never) and booted again over the same snapshot when something
+unless it says otherwise, `0` for never) and booted again over the same upper disk when something
 does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
 
@@ -989,7 +989,7 @@ Without `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` from the image, it names that di
 Without a GPU it adds neither: there is no driver to give, and the loader would only shadow one the image brings.
 
 A sandbox gets the programs it is made with, by its `abins`, from the `abin/` directory beside the server's binary, and every machine gets the `alib/` directory there.
-The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into `<name>.abin/` beside the sandbox's `<name>.owner` under the snapshots' `sandbox/`, deleted with the sandbox or by the next server's sweep.
+The programs are hard-linked, or copied where they cannot be, with their `SKILL.md`, into a directory under `sandbox/abin/`, shared by every sandbox made with the same programs and deleted by the next server's sweep once none holds it.
 That directory and `alib/` are each shared read-only and mounted at `/abin` and `/alib`, with `/abin` put in front of the image's `PATH`.
 A sandbox made with no `abins` has no `/abin`, a name `abin/` has no program by is refused, and a host without `alib/` boots machines without it rather than refusing to.
 On Windows each file directly in them, the programs `/abin` runs by path, is marked executable for the guest on every boot, since NTFS keeps no mode for libkrun's virtiofs to report; what is in their directories is read, not run, and left as it is.
@@ -1027,7 +1027,7 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
   bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
                         beside them, libvirtx_core, abin/, alib/
   project/<id>/         each project's: project.json, its owner, name and members, and its
-                        images/, snapshot/, sandbox/ and volume/; the HTTP server's config's
+                        images/, sandbox/ and volume/; the HTTP server's config's
                         `home` moves the whole of it
 ```
 
@@ -1035,7 +1035,7 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
 
 ```
 virtx-uvm/                  this crate: images, the disks made of them, machines and booting
-                            them, snapshots, volumes and their remote stores, and the WebDAV
+                            them, upper disks, volumes and their remote stores, and the WebDAV
                             files endpoints
 virtx-server-stdio/         the server over stdio, as the `virtx-stdio` binary -- and, as
                             `virtx-stdio vm`, spawned by itself, the process that becomes a VM;

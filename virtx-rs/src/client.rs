@@ -20,13 +20,12 @@ use virtx_core::{
     ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
     ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
     RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SnapshotCreateArgs,
-    SnapshotListOutputItem as SnapshotInfo, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
-    VolumeMountListOutputItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
+    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Project, Sandbox, SandboxJob, Snapshot, Volume,
+    Error, ImageJob, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -427,55 +426,6 @@ impl Client {
         })
     }
 
-    /// Every snapshot the server holds.
-    pub fn list_snapshot(&self) -> Call<Vec<Snapshot>> {
-        let client = self.clone();
-        let call: Call<Vec<SnapshotInfo>> = Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_snapshot)(self.raw)
-        });
-        call.map(move |infos| {
-            infos
-                .into_iter()
-                .map(|info| Snapshot::new(client.clone(), info))
-                .collect()
-        })
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Call<Snapshot> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_create_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
-    }
-
-    /// The snapshot `info` describes, reached through this client, without asking the server.
-    pub fn snapshot(&self, info: SnapshotInfo) -> Snapshot {
-        Snapshot::new(self.clone(), info)
-    }
-
-    /// The snapshot `name`.
-    pub fn get_snapshot(&self, name: impl AsRef<str>) -> Call<Snapshot> {
-        let args = json!({ "name": name.as_ref() });
-        let client = self.clone();
-        let call: Call<SnapshotInfo> = self.call(self.api.virtx_client_get_snapshot, args);
-        call.map(move |info| Snapshot::new(client.clone(), info))
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub(crate) fn remove_snapshot(&self, name: impl AsRef<str>) -> Call<()> {
-        let args = json!({ "name": name.as_ref() });
-        self.call(self.api.virtx_client_remove_snapshot, args)
-    }
-
     /// Every project the client has a role in.
     pub fn list_project(&self) -> Call<Vec<Project>> {
         let client = self.clone();
@@ -801,7 +751,8 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)

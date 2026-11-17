@@ -1,7 +1,7 @@
 //! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
 //! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
-//! ([`sse`], whose server end keeps the log too), and the files of a volume or a snapshot over
+//! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
 //! WebDAV ([`webdav`]).
 //!
 //! The client end is the `client` feature, the server end the `server` feature; the types
@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_reads_its_code_and_message_over_either_transport() {
         let router = Router::new().route(
-            "/snapshots/{name}",
+            "/volumes/{name}",
             get(|| async {
                 let body = serde_json::json!({"error": {"code": "not_found", "message": "none"}});
                 (StatusCode::NOT_FOUND, Json(body))
@@ -235,7 +235,7 @@ mod tests {
         tokio::spawn(serve_stdio(handle, input, output));
 
         for client in [tcp.unwrap(), TransportClient::over(pipe)] {
-            let error = http::get::<String>(&client, "/snapshots/nothing")
+            let error = http::get::<String>(&client, "/volumes/nothing")
                 .await
                 .unwrap_err();
             let Error::Status(404, message) = &error else {

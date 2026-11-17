@@ -193,8 +193,8 @@ struct VirtxFuture *virtx_client_release(struct VirtxClient *client);
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
-// read after this returns.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+// is `args_len` readable bytes, not read after this returns.
 struct VirtxFuture *virtx_client_build_image(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
@@ -228,7 +228,7 @@ struct VirtxFuture *virtx_client_push_image(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image_job(struct VirtxClient *client);
 
 // Answers with the image job `id`, given `{"id": "..."}`, as `virtx_client_build_image`
@@ -269,7 +269,7 @@ struct VirtxStream *virtx_client_image_job_log(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_image(struct VirtxClient *client);
 
 // Points the tag `target` at the image `source` names, given
@@ -334,7 +334,7 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 
 // Answers with each project the client has a role in, as
@@ -343,7 +343,7 @@ struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is as in `virtx_client_list_volume`.
 struct VirtxFuture *virtx_client_list_project(struct VirtxClient *client);
 
 // Makes the project `name`, the client its owner, given `{"name": "..."}`. Answers with
@@ -407,7 +407,7 @@ struct VirtxFuture *virtx_client_remove_project_member(struct VirtxClient *clien
                                                        const uint8_t *args,
                                                        size_t args_len);
 
-// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
+// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
 //
 // Every value here is JSON. A request that takes arguments takes them as `args`, the
 // `args_len` bytes of one object.
@@ -415,44 +415,6 @@ struct VirtxFuture *virtx_client_remove_project_member(struct VirtxClient *clien
 // # Safety
 //
 // `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-struct VirtxFuture *virtx_client_list_snapshot(struct VirtxClient *client);
-
-// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
-// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
-// with the snapshot, as `virtx_client_list_snapshot` answers each.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_create_snapshot(struct VirtxClient *client,
-                                                 const uint8_t *args,
-                                                 size_t args_len);
-
-// Answers with the snapshot `name`, given `{"name": "..."}`, as
-// `virtx_client_list_snapshot` answers each.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_get_snapshot(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
-
-// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
-// `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_remove_snapshot(struct VirtxClient *client,
-                                                 const uint8_t *args,
-                                                 size_t args_len);
-
-// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
-//
-// # Safety
-//
-// `client` is as in `virtx_client_list_snapshot`.
 struct VirtxFuture *virtx_client_list_volume(struct VirtxClient *client);
 
 // Keeps a new, empty volume under `name`, or a name the server picks if there is none,
@@ -519,9 +481,8 @@ struct VirtxFuture *virtx_client_remove_volume_mount(struct VirtxClient *client,
                                                      const uint8_t *args,
                                                      size_t args_len);
 
-// The files of a volume or a snapshot: what is at `path`, given
-// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
-// `{"sandbox": "...", "path": "..."}`, the path
+// The files of a volume or a sandbox: what is at `path`, given
+// `{"volume": "...", "path": "..."}` or `{"sandbox": "...", "path": "..."}`, the path
 // relative to its root as `dir/file.txt`. Answers with
 // `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
 // the Unix epoch and `etag` as the server spells it, each only if the server says.
@@ -644,7 +605,7 @@ struct VirtxFuture *virtx_client_remove_file(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
 
-// Moves what is at `from` to `to` in the same volume or snapshot, given
+// Moves what is at `from` to `to` in the same volume or sandbox, given
 // `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
 // and false without it: whether to replace what is at `to`, which is otherwise refused.
 // Answers with `null`.
@@ -667,17 +628,16 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
-// `snapshot` only for one that has one.
+// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
-// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
+// `{"image": {...}, "network": bool, "ports": [n],
+// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
@@ -859,8 +819,8 @@ void virtx_stream_free(struct VirtxStream *stream);
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_snapshot`, and `args` as in
-// `virtx_client_build_image`. `forwarder` and `out` are writable.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held, and
+// `args` as in `virtx_client_build_image`. `forwarder` and `out` are writable.
 int virtx_port_forwarder_open(struct VirtxClient *client,
                               const uint8_t *args,
                               size_t args_len,

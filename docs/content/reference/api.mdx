@@ -80,11 +80,11 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
-| `remove()` | `None` | Stops it, ends its jobs, and forgets it, keeping its snapshot and volumes. |
+| `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `snapshot`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
 
 ## Jobs
 
@@ -139,18 +139,6 @@ Its `source` says where it failed, and `status` the HTTP status when the server 
 Tell errors apart by `source` and `status`, not by the message.
 In Rust, `source_kind()` answers the `Source` and `status()` the status.
 
-## Snapshots
-
-See [Keeping work in snapshots](/docs/guides/keeping-snapshots/).
-
-| Call | Returns | What it does |
-| --- | --- | --- |
-| `create_snapshot(name, disk_gib)` | `Snapshot` | Makes an empty snapshot holding at most `disk_gib` GiB. Without a name, the server picks one. |
-| `list_snapshot()`, `get_snapshot(name)` | `list[Snapshot]`, `Snapshot` | The server's snapshots. |
-
-A `Snapshot` has its `name`, `size` and whether it is `in_use`, and its [files](#files).
-Its `remove()` deletes it and everything in it; refused with `409` while a sandbox holds it.
-
 ## Volumes
 
 See [Mounting volumes](/docs/guides/mounting-volumes/).
@@ -171,7 +159,7 @@ A `Volume` has its `name` and `size`, and its [files](#files):
 
 ## Files
 
-A `Sandbox`, a `Snapshot` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
+A `Sandbox` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`.
 
 | Call | Returns | What it does |
 | --- | --- | --- |

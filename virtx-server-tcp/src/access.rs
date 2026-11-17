@@ -342,7 +342,7 @@ mod tests {
         );
         let (user, reached) = home(alice, Some("demo")).await.unwrap();
         assert_eq!(user, "alice@example.com");
-        assert_eq!(reached.snapshots.root(), access.store().path(&demo));
+        assert_eq!(reached.root, access.store().path(&demo));
         // By its id, the same home.
         assert!(Arc::ptr_eq(
             &home(alice, Some(&id)).await.unwrap().1,
@@ -370,7 +370,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(own.snapshots.root(), access.store().path(&own_id));
+        assert_eq!(own.root, access.store().path(&own_id));
         assert!(Arc::ptr_eq(
             &home(alice, Some(DEFAULT_PROJECT)).await.unwrap().1,
             &own

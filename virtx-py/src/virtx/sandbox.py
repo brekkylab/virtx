@@ -1,5 +1,5 @@
-"""Sandboxes: a VM booted from an image, standing on a snapshot, with volumes mounted into it;
-and the processes run in one, each a job whose log is its output."""
+"""Sandboxes: a VM booted from an image, with volumes mounted into it; and the processes run in
+one, each a job whose log is its output."""
 
 from __future__ import annotations
 
@@ -60,9 +60,6 @@ class Sandbox(Files):
     image: str
     """The digest of the image it booted, as ``algorithm:hex``."""
 
-    snapshot: str | None
-    """The snapshot it stands on, if it has one."""
-
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
@@ -77,7 +74,6 @@ class Sandbox(Files):
             client,
             value["id"],
             value["image"],
-            value.get("snapshot"),
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
             list(value.get("abins", ())),
@@ -115,7 +111,7 @@ class Sandbox(Files):
         return SandboxJob.from_dict(self.client, self.id, output)
 
     async def remove(self) -> None:
-        """Stop it, end its jobs, and forget it, keeping its snapshot and volumes."""
+        """Stop it, end its jobs, and forget it, with everything it wrote outside its volumes."""
         await self.client._call("virtx_client_remove_sandbox", args(id=self.id))
 
 

@@ -39,7 +39,8 @@ pub(crate) async fn get(client: &TransportClient, id: &str) -> Result<Sandbox, E
     http::get(client, &sandbox(id)).await
 }
 
-/// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+/// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+/// its volumes.
 pub(crate) async fn remove(client: &TransportClient, id: &str) -> Result<(), Error> {
     http::delete(client, &sandbox(id)).await
 }

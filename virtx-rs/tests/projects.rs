@@ -1,7 +1,7 @@
-//! Who reaches what on `virtx-server-tcp`: the members of a project share its volumes,
-//! snapshots, images and sandboxes, and no one else reaches any of them. Against the
-//! fixture's server, whose provider is the fixture's own; and against a server of this file's
-//! over Dex, where `dex` is installed.
+//! Who reaches what on `virtx-server-tcp`: the members of a project share its volumes, images
+//! and sandboxes, and no one else reaches any of them. Against the fixture's server, whose
+//! provider is the fixture's own; and against a server of this file's over Dex, where `dex` is
+//! installed.
 
 use std::{
     io::{BufRead, BufReader},
@@ -182,15 +182,6 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         "{status} {entries}"
     );
 
-    // A snapshot likewise.
-    let kept = common::unique("shared");
-    let snapshot = alice.create_snapshot(Some(&kept), Some(1)).wait().unwrap();
-    snapshot.write_file("a.txt", "kept", None).wait().unwrap();
-    let theirs = carol.get_snapshot(&kept).wait().unwrap();
-    assert_eq!(theirs.read_text("a.txt").wait().unwrap(), "kept");
-    assert_eq!(refused(bob.get_snapshot(&kept).wait()), Some(404));
-    assert_eq!(refused(intruder.get_snapshot(&kept).wait()), Some(403));
-
     // An image one member pulls is in the project's images, and in its registry.
     let digest = common::alpine(&alice);
     assert_eq!(common::tagged(&carol, ALPINE), Some(digest));
@@ -257,13 +248,6 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
 
     theirs.remove().wait().unwrap();
     assert_eq!(refused(alice.get_sandbox(sandbox.id()).wait()), Some(404));
-    carol
-        .get_snapshot(&kept)
-        .wait()
-        .unwrap()
-        .remove()
-        .wait()
-        .unwrap();
     carol
         .get_volume(&name)
         .wait()

@@ -166,14 +166,6 @@ export interface ImagePruneOutput {
   reclaimed: number
 }
 
-/** What the server answers about a snapshot. */
-export interface SnapshotInfo {
-  name: string
-  size: number
-  /** Whether a sandbox held it when it was answered, from the `createSandbox` that made a sandbox on it until that sandbox's `remove`. */
-  inUse: boolean
-}
-
 /** A user's role in a project: an owner manages its members and removes it; a member uses what is in it. */
 export type Role = 'owner' | 'member'
 
@@ -280,7 +272,7 @@ export interface DirEntry {
 }
 
 /**
- * The files of a `Volume`, a `Snapshot` or a `Sandbox`. A path is relative to its root, as
+ * The files of a `Volume` or a `Sandbox`. A path is relative to its root, as
  * `dir/file.txt`; the empty path is the root, and the server refuses one that leads outside.
  */
 export class Files {
@@ -331,26 +323,11 @@ export class Volume extends Files implements VolumeInfo {
   remove(): Promise<void>
 }
 
-/**
- * A snapshot the server holds, as making it or asking for it answered, and the client that
- * reaches it: its files, refused with a `423` while a sandbox holds it. Dropping it leaves the
- * snapshot; `remove` removes it.
- */
-export class Snapshot extends Files implements SnapshotInfo {
-  private constructor()
-  name: string
-  size: number
-  inUse: boolean
-  /** Delete it and its upper layer; refused with a `409` while a sandbox holds it. */
-  remove(): Promise<void>
-}
-
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
   /** The digest of the image it was made from. */
   image: string
-  snapshot?: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Only as `createSandbox` answers it, if it was given some. */
@@ -368,7 +345,6 @@ export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
   image: string
-  snapshot?: string
   running: boolean
   ports?: SandboxPort[]
   abins?: string[]
@@ -378,7 +354,7 @@ export class Sandbox extends Files implements SandboxInfo {
   jobs(): Promise<SandboxJob[]>
   /** The job `id` in it. */
   job(id: string): Promise<SandboxJob>
-  /** Stop it, end its jobs and forget it, keeping its snapshot and volumes. */
+  /** Stop it, end its jobs and forget it, with everything it wrote outside its volumes. */
   remove(): Promise<void>
 }
 
@@ -390,13 +366,13 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** The snapshot it stands on, or its name. */
-  snapshot?: string | Snapshot
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
   vcpus?: number
   memoryMib?: number
+  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
+  diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number
   /** Each volume, or its name, and where it is mounted. */
@@ -560,10 +536,6 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
-  listSnapshot(): Promise<Snapshot[]>
-  /** The server picks a name or size not given. */
-  createSnapshot(name?: string, diskGib?: number): Promise<Snapshot>
-  getSnapshot(name: string): Promise<Snapshot>
   /** Every project the client has a role in. */
   listProject(): Promise<Project[]>
   /** Make the project `name`, the client its owner. */

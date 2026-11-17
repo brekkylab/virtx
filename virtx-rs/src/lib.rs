@@ -14,11 +14,10 @@
 //! Starting a job is a [`StartedJob`], a call answering with the job, its [`JobLog`], or its
 //! `complete`: a [`JobEnd`], what the job ended with once it has.
 //!
-//! Making or asking for a sandbox, a volume or a snapshot answers a [`Sandbox`], a [`Volume`]
-//! or a [`Snapshot`], running a process in a sandbox a [`SandboxJob`], and building, pulling or
-//! pushing an image an [`ImageJob`]: each carries the client, so it is all a caller hands on to
-//! act on it. The three with files reach them through
-//! [`Files`].
+//! Making or asking for a sandbox or a volume answers a [`Sandbox`] or a [`Volume`], running a
+//! process in a sandbox a [`SandboxJob`], and building, pulling or pushing an image an
+//! [`ImageJob`]: each carries the client, so it is all a caller hands on to act on it. The two
+//! with files reach them through [`Files`].
 //!
 //! The types requests take and answer are `virtx-core`'s, re-exported here.
 
@@ -32,7 +31,6 @@ mod library;
 mod portforward;
 mod project;
 mod sandbox;
-mod snapshot;
 mod volume;
 
 pub use call::{Call, Events};
@@ -45,7 +43,6 @@ pub use library::{LIBRARY_ENV, library_path, load};
 pub use portforward::PortForwarder;
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
-pub use snapshot::Snapshot;
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
 pub use virtx_core::ImageJob as ImageJobInfo;
 /// What the server answers about a project; a [`Project`] carries it with its client.
@@ -56,8 +53,6 @@ pub use virtx_core::ProjectMemberListOutputItem as ProjectMemberInfo;
 pub use virtx_core::Sandbox as SandboxInfo;
 /// What the server answers about a sandbox job; a [`SandboxJob`] carries it with its client.
 pub use virtx_core::SandboxJob as SandboxJobInfo;
-/// What the server answers about a snapshot; a [`Snapshot`] carries it with its client.
-pub use virtx_core::SnapshotListOutputItem as SnapshotInfo;
 /// What the server answers about a volume; a [`Volume`] carries it with its client.
 pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{

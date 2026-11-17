@@ -29,7 +29,6 @@ from .image import (
 from .job import StartedJob
 from .project import Project
 from .sandbox import Sandbox, SandboxVolume
-from .snapshot import Snapshot
 from .volume import Volume
 
 T = TypeVar("T")
@@ -405,26 +404,6 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
-    async def list_snapshot(self) -> list[Snapshot]:
-        """Every snapshot the server holds."""
-        items = await self._call("virtx_client_list_snapshot")
-        return [Snapshot.from_dict(self, item) for item in items]
-
-    async def create_snapshot(
-        self, name: str | None = None, disk_gib: int | None = None
-    ) -> Snapshot:
-        """Keep a new, empty upper layer under ``name``, holding at most ``disk_gib`` GiB;
-        without either the server picks it."""
-        output = await self._call(
-            "virtx_client_create_snapshot", _args(name=name, disk_gib=disk_gib)
-        )
-        return Snapshot.from_dict(self, output)
-
-    async def get_snapshot(self, name: str) -> Snapshot:
-        """The snapshot ``name``."""
-        output = await self._call("virtx_client_get_snapshot", _args(name=name))
-        return Snapshot.from_dict(self, output)
-
     async def list_project(self) -> list[Project]:
         """Every project the client has a role in."""
         items = await self._call("virtx_client_list_project")
@@ -465,22 +444,22 @@ class Client:
         self,
         image: str | ImageName,
         *,
-        snapshot: str | Snapshot | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
+        disk_gib: int | None = None,
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
         abins: Iterable[str] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, standing on ``snapshot``, a ``Snapshot`` or its name, if
-        given, with ``volumes`` mounted into it, each a ``SandboxVolume``, and virtx's programs
-        named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at ``/abin/skills/{name}/``.
-        ``ports`` are TCP
-        ports in it to open, reserved as it is made and answered here only, each with the
-        ``url`` a ``PortForwarder`` reaches it by. Whatever is left out the server picks.
+        """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
+        and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
+        ``/abin/skills/{name}/``. ``ports`` are TCP ports in it to open, reserved as it is made
+        and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
+        is left out the server picks. ``disk_gib`` is how much it may write over its image, in
+        GiB, at most 1024, which goes with it.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
@@ -490,11 +469,11 @@ class Client:
                 "virtx_client_create_sandbox",
                 _args(
                     image=image_name(image).to_dict(),
-                    snapshot=snapshot.name if isinstance(snapshot, Snapshot) else snapshot,
                     network=network,
                     ports=list(ports),
                     vcpus=vcpus,
                     memory_mib=memory_mib,
+                    disk_gib=disk_gib,
                     gpu=gpu,
                     gpu_memory_mib=gpu_memory_mib,
                     volumes=[

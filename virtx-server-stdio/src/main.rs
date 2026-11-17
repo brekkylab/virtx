@@ -273,7 +273,7 @@ impl Host {
 /// Move what this host kept before it kept projects, at `root` itself, into `default`, the
 /// directory of the client's own project: once, while it has none of it.
 fn adopt_unprojected(root: &Path, default: &Path) -> anyhow::Result<()> {
-    const KEPT: [&str; 4] = ["images", "snapshot", "sandbox", "volume"];
+    const KEPT: [&str; 3] = ["images", "sandbox", "volume"];
     if KEPT.iter().any(|kept| default.join(kept).exists()) {
         return Ok(());
     }
@@ -300,8 +300,8 @@ fn adopt_unprojected(root: &Path, default: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     //! The app, served in the test's own process as over stdio, and called as a client calls it:
-    //! the endpoints over a `VIRTX_HOME` of the test's own, and the files of its volumes and
-    //! snapshots among them.
+    //! the endpoints over a `VIRTX_HOME` of the test's own, and the files of its volumes among
+    //! them.
 
     use std::{
         path::{Path, PathBuf},
@@ -312,7 +312,7 @@ mod tests {
         Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, Recipe,
         SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
     };
-    use virtx_uvm::{Entry, FsTree, ImageStore};
+    use virtx_uvm::{FsTree, ImageStore};
 
     use super::*;
 
@@ -403,15 +403,6 @@ mod tests {
         entries.into_iter().map(|entry| entry.name).collect()
     }
 
-    /// A snapshot held by this process, as a machine over it would hold it.
-    fn hold(server: &Server, snapshot: &str) -> std::fs::File {
-        let lock =
-            std::fs::File::create(server.home.join(format!("snapshot/{snapshot}.ext4.lock")))
-                .unwrap();
-        lock.try_lock().unwrap();
-        lock
-    }
-
     #[tokio::test]
     async fn what_cannot_be_built_is_refused_before_it_starts() {
         let server = Server::spawn("build-refused").await;
@@ -426,69 +417,6 @@ mod tests {
             .await;
         assert_eq!(status(built), 400);
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
-    }
-
-    #[tokio::test]
-    async fn creates_lists_and_removes_a_snapshot() {
-        let server = Server::spawn("snapshot").await;
-        let created = server
-            .client
-            .create_snapshot(Some("work"), Some(1))
-            .await
-            .unwrap();
-        assert_eq!(created.name, "work");
-        assert!(!created.in_use);
-
-        let listed = server.client.list_snapshot().await.unwrap();
-        assert_eq!(listed, std::slice::from_ref(&created));
-        assert_eq!(server.client.get_snapshot("work").await.unwrap(), created);
-        assert!(server.home.join("snapshot/work.ext4").is_file());
-
-        server.client.remove_snapshot("work").await.unwrap();
-        assert_eq!(server.client.list_snapshot().await.unwrap(), []);
-        assert_eq!(status(server.client.remove_snapshot("work").await), 404);
-        assert_eq!(status(server.client.get_snapshot("work").await), 404);
-    }
-
-    #[tokio::test]
-    async fn what_cannot_be_a_snapshot_is_refused() {
-        let server = Server::spawn("snapshot-refused").await;
-        let create = async |name: Option<&str>, disk_gib| {
-            server.client.create_snapshot(name, disk_gib).await
-        };
-        create(Some("taken"), Some(1)).await.unwrap();
-
-        assert_eq!(status(create(Some("taken"), Some(1)).await), 409);
-        assert_eq!(status(create(Some("zero"), Some(0)).await), 400);
-        for name in ["../out", ".hidden", "-flag", "spa ce"] {
-            assert_eq!(status(create(Some(name), Some(1)).await), 400, "{name:?}");
-        }
-
-        // One with no name is given one.
-        let picked = create(None, None).await.unwrap().name;
-        let listed = server.client.list_snapshot().await.unwrap();
-        assert!(listed.iter().any(|item| item.name == picked), "{listed:?}");
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_in_use_is_listed_so_and_not_removed() {
-        let server = Server::spawn("snapshot-held").await;
-        server
-            .client
-            .create_snapshot(Some("held"), Some(1))
-            .await
-            .unwrap();
-
-        // Locked by this process, as a VM over it would: the lock is the file beside the snapshot.
-        let lock = std::fs::File::create(server.home.join("snapshot/held.ext4.lock")).unwrap();
-        lock.try_lock().unwrap();
-        let listed = server.client.list_snapshot().await.unwrap();
-        assert!(listed[0].in_use);
-        assert_eq!(status(server.client.remove_snapshot("held").await), 409);
-
-        drop(lock);
-        server.client.remove_snapshot("held").await.unwrap();
-        assert!(!server.home.join("snapshot/held.ext4.lock").exists());
     }
 
     #[tokio::test]
@@ -588,6 +516,11 @@ mod tests {
             args.memory_mib = Some(mib);
             assert_eq!(refused(args).await, 400, "memory_mib {mib}");
         }
+        for gib in [0, 1025, 16384, u32::MAX] {
+            let mut args = here();
+            args.disk_gib = Some(gib);
+            assert_eq!(refused(args).await, 400, "disk_gib {gib}");
+        }
         let mut args = here();
         args.gpu_memory_mib = Some(1024);
         assert_eq!(refused(args).await, 400);
@@ -607,9 +540,6 @@ mod tests {
             refused(SandboxCreateArgs::new(ImageName::parse(&absent))).await,
             404
         );
-        let mut args = here();
-        args.snapshot = Some("missing".into());
-        assert_eq!(refused(args).await, 404);
         let mut args = here();
         args.volumes = vec![SandboxVolume {
             volume: "missing".into(),
@@ -826,120 +756,6 @@ mod tests {
                 !names(client.read_dir(&volume, "").await.unwrap()).contains(&"out".to_owned())
             );
         }
-    }
-
-    #[tokio::test]
-    async fn the_files_of_a_snapshot_are_kept_in_its_image() {
-        let server = Server::spawn("snapshot-files").await;
-        server
-            .client
-            .create_snapshot(Some("work"), Some(1))
-            .await
-            .unwrap();
-        let client = &server.client;
-        let snapshot = FileRoot::Snapshot("work".into());
-
-        // What the format made, and nothing else.
-        assert_eq!(
-            names(client.read_dir(&snapshot, "").await.unwrap()),
-            [] as [&str; 0]
-        );
-
-        client.create_dir(&snapshot, "etc").await.unwrap();
-        client
-            .write_file(&snapshot, "etc/hostname", "guest\n", None)
-            .await
-            .unwrap();
-        assert_eq!(
-            status(client.write_file(&snapshot, "no/file", "x", None).await),
-            409
-        );
-        assert_eq!(status(client.create_dir(&snapshot, "etc").await), 405);
-        let read = client
-            .read_file(&snapshot, "etc/hostname", 0, None)
-            .await
-            .unwrap();
-        assert_eq!(&read[..], b"guest\n");
-        let read = client
-            .read_file(&snapshot, "etc/hostname", 1, Some(2))
-            .await
-            .unwrap();
-        assert_eq!(&read[..], b"ue");
-        let metadata = client.stat_file(&snapshot, "etc/hostname").await.unwrap();
-        assert_eq!((metadata.is_dir, metadata.size), (false, 6));
-        assert!(metadata.modified.is_some());
-        assert_eq!(
-            names(client.read_dir(&snapshot, "etc").await.unwrap()),
-            ["hostname"]
-        );
-
-        client
-            .rename_file(&snapshot, "etc/hostname", "hostname", false)
-            .await
-            .unwrap();
-        client
-            .copy_file(&snapshot, "hostname", "etc/copy", false)
-            .await
-            .unwrap();
-        assert_eq!(
-            status(
-                client
-                    .copy_file(&snapshot, "hostname", "etc/copy", false)
-                    .await
-            ),
-            412
-        );
-        client
-            .remove_file(&snapshot, "hostname", false)
-            .await
-            .unwrap();
-        assert_eq!(status(client.stat_file(&snapshot, "hostname").await), 404);
-
-        // In the image, as the next machine over it finds it.
-        let image = std::fs::File::open(server.home.join("snapshot/work.ext4")).unwrap();
-        let tree = FsTree::from_ext4(image).unwrap();
-        let paths: Vec<_> = tree
-            .walk()
-            .into_iter()
-            .map(|(path, ..)| String::from_utf8(path).unwrap())
-            .collect();
-        assert_eq!(
-            paths,
-            ["", "lost+found", "upper", "upper/etc", "upper/etc/copy"]
-        );
-        assert!(matches!(
-            tree.entry(b"upper/etc/copy").unwrap(),
-            Some(Entry::File { data, .. }) if data == b"guest\n"
-        ));
-
-        // At once: each request reads and writes the image whole, one after another.
-        let paths = ["etc/0", "etc/1", "etc/2", "etc/3"];
-        let writes = paths
-            .iter()
-            .map(|path| client.write_file(&snapshot, path, "x", None));
-        for written in futures_util::future::join_all(writes).await {
-            written.unwrap();
-        }
-        assert_eq!(
-            names(client.read_dir(&snapshot, "etc").await.unwrap()),
-            ["0", "1", "2", "3", "copy"]
-        );
-
-        // Held by a machine: nothing is read or written until it is let go.
-        let held = hold(&server, "work");
-        assert_eq!(status(client.read_dir(&snapshot, "").await), 423);
-        assert_eq!(
-            status(client.write_file(&snapshot, "x", "y", None).await),
-            423
-        );
-        drop(held);
-        client.remove_file(&snapshot, "etc", false).await.unwrap();
-        assert_eq!(
-            names(client.read_dir(&snapshot, "").await.unwrap()),
-            [] as [&str; 0]
-        );
-        let nobody = FileRoot::Snapshot("nobody".into());
-        assert_eq!(status(client.read_dir(&nobody, "").await), 404);
     }
 
     /// The images are an OCI registry at `/images/oci/v2/` on the same stdio, beside the other
@@ -1435,7 +1251,6 @@ mod tests {
             ("POST", "/images/jobs/pull/"),
             ("POST", "/images/jobs/push/"),
             ("POST", "/images/jobs/build/"),
-            ("POST", "/snapshots/"),
             ("POST", "/volumes/"),
             ("PUT", "/volumes/nobody/mounts/m"),
             ("POST", "/sandboxes/"),

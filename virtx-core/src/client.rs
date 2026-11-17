@@ -1,7 +1,7 @@
 //! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
 //! made by the module of what it names: [`project`](crate::project), [`image`](crate::image),
-//! [`snapshot`](crate::snapshot), [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and
-//! the files of a volume or a snapshot over WebDAV.
+//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a
+//! sandbox over WebDAV.
 
 use std::{io, path::PathBuf};
 
@@ -25,7 +25,6 @@ use crate::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
         SandboxSignalArgs, SandboxStdinArgs,
     },
-    snapshot::{self, SnapshotCreateArgs, SnapshotListOutputItem},
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
@@ -273,38 +272,6 @@ impl Client {
         image::client::prune(&self.inner).await
     }
 
-    /// Every snapshot the server holds.
-    pub async fn list_snapshot(&self) -> Result<Vec<SnapshotListOutputItem>, Error> {
-        snapshot::client::list(&self.inner).await
-    }
-
-    /// Keep a new, empty upper layer under `name`, holding at most `disk_gib` GiB; without
-    /// either the server picks it.
-    pub async fn create_snapshot(
-        &self,
-        name: Option<impl Into<String>>,
-        disk_gib: Option<u32>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        let args = SnapshotCreateArgs {
-            name: name.map(Into::into),
-            disk_gib,
-        };
-        snapshot::client::create(&self.inner, &args).await
-    }
-
-    /// The snapshot `name`.
-    pub async fn get_snapshot(
-        &self,
-        name: impl AsRef<str>,
-    ) -> Result<SnapshotListOutputItem, Error> {
-        snapshot::client::get(&self.inner, name.as_ref()).await
-    }
-
-    /// Delete the snapshot `name` and its upper layer.
-    pub async fn remove_snapshot(&self, name: impl AsRef<str>) -> Result<(), Error> {
-        snapshot::client::remove(&self.inner, name.as_ref()).await
-    }
-
     /// Every volume the server holds.
     pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
         volume::client::list(&self.inner).await
@@ -480,7 +447,8 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
-    /// Stop the sandbox `id`, end its jobs, and forget it, keeping its snapshot and volumes.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
@@ -595,12 +563,11 @@ pub(crate) mod ffi {
         },
         project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs},
-        snapshot::SnapshotCreateArgs,
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
 
-    /// What names a project, a snapshot or a volume: `{"name": "..."}`.
+    /// What names a project or a volume: `{"name": "..."}`.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Name {
@@ -936,8 +903,8 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`. `args` is `args_len` readable bytes, not
-    /// read after this returns.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+    /// is `args_len` readable bytes, not read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
         client: *mut VirtxClient,
@@ -998,7 +965,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image_job(
         client: *mut VirtxClient,
@@ -1077,7 +1044,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }.future(|client| async move { client.list_image().await })
@@ -1208,7 +1175,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_prune_image(
         client: *mut VirtxClient,
@@ -1222,7 +1189,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is as in `virtx_client_list_volume`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_project(
         client: *mut VirtxClient,
@@ -1343,7 +1310,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Answers with the snapshots, as `[{"name": "...", "size": n, "in_use": false}, ...]`.
+    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
     ///
     /// Every value here is JSON. A request that takes arguments takes them as `args`, the
     /// `args_len` bytes of one object.
@@ -1351,72 +1318,6 @@ pub(crate) mod ffi {
     /// # Safety
     ///
     /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_list_snapshot(
-        client: *mut VirtxClient,
-    ) -> *mut VirtxFuture {
-        unsafe { &(*client).0 }.future(|client| async move { client.list_snapshot().await })
-    }
-
-    /// Keeps a new, empty upper layer under `name`, holding at most `disk_gib` GiB, the server
-    /// picking either one not given, given `{"name": "...", "disk_gib": 8}` or less. Answers
-    /// with the snapshot, as `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_create_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<SnapshotCreateArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client.create_snapshot(args.name, args.disk_gib).await
-        })
-    }
-
-    /// Answers with the snapshot `name`, given `{"name": "..."}`, as
-    /// `virtx_client_list_snapshot` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_get_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.get_snapshot(args?.name).await })
-    }
-
-    /// Deletes the snapshot `name` and its upper layer, given `{"name": "..."}`. Answers with
-    /// `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_remove_snapshot(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Name>(args, args_len) };
-        unsafe { &(*client).0 }
-            .future(|client| async move { client.remove_snapshot(args?.name).await })
-    }
-
-    /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
-    ///
-    /// # Safety
-    ///
-    /// `client` is as in `virtx_client_list_snapshot`.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_volume(
         client: *mut VirtxClient,
@@ -1538,9 +1439,8 @@ pub(crate) mod ffi {
         })
     }
 
-    /// The files of a volume or a snapshot: what is at `path`, given
-    /// `{"volume": "...", "path": "..."}`, `{"snapshot": "...", "path": "..."}` or
-    /// `{"sandbox": "...", "path": "..."}`, the path
+    /// The files of a volume or a sandbox: what is at `path`, given
+    /// `{"volume": "...", "path": "..."}` or `{"sandbox": "...", "path": "..."}`, the path
     /// relative to its root as `dir/file.txt`. Answers with
     /// `{"is_dir": bool, "size": n, "modified": n, "etag": "..."}`, `modified` in seconds since
     /// the Unix epoch and `etag` as the server spells it, each only if the server says.
@@ -1785,7 +1685,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Moves what is at `from` to `to` in the same volume or snapshot, given
+    /// Moves what is at `from` to `to` in the same volume or sandbox, given
     /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
     /// and false without it: whether to replace what is at `to`, which is otherwise refused.
     /// Answers with `null`.
@@ -1836,12 +1736,11 @@ pub(crate) mod ffi {
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "image": "algorithm:hex", "snapshot": "...", "running": bool}, ...]`,
-    /// `snapshot` only for one that has one.
+    /// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_snapshot`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_sandbox(
         client: *mut VirtxClient,
@@ -1850,8 +1749,8 @@ pub(crate) mod ffi {
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "snapshot": "...", "network": bool, "ports": [n],
-    /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
+    /// `{"image": {...}, "network": bool, "ports": [n],
+    /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the

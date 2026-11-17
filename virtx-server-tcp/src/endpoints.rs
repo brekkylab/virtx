@@ -1131,7 +1131,12 @@ impl From<ProjectError> for Refused {
             ProjectError::Unknown(_) => forbidden(e),
             ProjectError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
             ProjectError::NoOwner(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            ProjectError::Io { .. } | ProjectError::Other(_) => internal(e),
+            ProjectError::Io { source, .. } => internal(io_failure(source, &e)),
+            // A server's own, such as its database's, which can name what it runs on.
+            ProjectError::Other(_) => {
+                let _ = writeln!(io::stderr(), "{e:#}");
+                internal("the server's projects failed")
+            }
         }
     }
 }
@@ -1232,8 +1237,13 @@ mod tests {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 2] = [
+            let internal: [Refused; 3] = [
                 ImageStoreError::Fstree(tree()).into(),
+                ProjectError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
                 SandboxError::Io {
                     context: CONTEXT.into(),
                     source: source(),
@@ -1269,5 +1279,11 @@ mod tests {
                 assert_eq!(message, format!("the server's files: {kind}"));
             }
         }
+        let other: Refused = ProjectError::Other(anyhow::anyhow!("postgres://db.internal")).into();
+        let body = axum::body::to_bytes(other.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "the server's projects failed");
     }
 }

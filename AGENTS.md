@@ -20,7 +20,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
-- `.github/workflows/` — `build` builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `build` refuses any other spelling of) and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
+- `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them; `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
 
 ## Building from source
 
@@ -83,6 +83,7 @@ Each test goes in the lowest layer that can show what it tests, fastest first:
 
 ```bash
 cargo xtask test                                  # every suite, each summed up at the end; those that need the servers are skipped until they can be built
+cargo xtask test --no-run                         # compiles everything `test` would and runs none; needs no guest kernel
 cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
@@ -99,11 +100,12 @@ cargo xtask fixture -- <command>                  # any command, against the fix
 ## Lint and the gate
 
 ```bash
-cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run
+cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run; and the bindings' lint (ruff, biome, tsc) where uv and npm are on PATH
 cargo xtask check --client                        # the client's alone, without `init`
+cargo xtask clippy --gpu                          # clippy alone, the servers with `gpu`: this host's own `cfg`s, as a release builds them
 ```
 
-- Run `cargo xtask check` before pushing. There is no pull-request CI, so what you run locally is the gate. `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
+- Run `cargo xtask check` before pushing. CI (`ci`) runs it on every pull request too, lints each platform's own code with `cargo xtask clippy --gpu` and runs the machine-booting tests, but a push that fails here only finds out later there. Building, packing and trying each platform's release runs on `main` after a merge, and when `ci` is run by hand on a branch (`gh workflow run ci --ref <branch>`). `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - `cargo xtask check` runs no test that boots a VM. A change that reaches one runs `cargo xtask test`, or the suites it touches.
 
 ## Comments and docs

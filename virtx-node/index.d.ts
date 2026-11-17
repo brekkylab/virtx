@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // A virtx client over the C ABI of `libvirtx_core`. Field names are the wire's, camelCased.
 
 /** The variable naming the library to open when `load` was not called first. */
@@ -456,7 +457,10 @@ export interface CompleteOptions {
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   /** Start the job and follow it to its end, as its `complete` does. */
-  complete<T>(this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>, options?: CompleteOptions): Promise<T>
+  complete<T>(
+    this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>,
+    options?: CompleteOptions,
+  ): Promise<T>
   [Symbol.asyncIterator](): AsyncGenerator<E>
 }
 
@@ -480,7 +484,12 @@ export class Client {
    * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
    * token would go in the clear: over `http` to any host but this machine.
    */
-  static connect(url: string, auth?: Auth | null, project?: string | null, headers?: Record<string, string>): Client
+  static connect(
+    url: string,
+    auth?: Auth | null,
+    project?: string | null,
+    headers?: Record<string, string>,
+  ): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -514,7 +523,10 @@ export class Client {
   [Symbol.asyncDispose](): Promise<void>
 
   /** Start building `recipe`, to point `reference` (`name:tag`) at it. Its log is the job's `log`. */
-  buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+  buildImage(
+    recipe: Recipe | ReturnType<Recipe['toJSON']>,
+    reference: string,
+  ): StartedJob<ImageJob, ImageJobEntry>
   /** Start pulling `reference` from its registry, to point it at what it pulls; without `auth` the server pulls anonymously. */
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */

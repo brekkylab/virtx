@@ -15,7 +15,7 @@ test('a second library is refused', () => {
 })
 
 test('an image is named by its spelling', () => {
-  const digest = 'sha256:' + '0'.repeat(64)
+  const digest = `sha256:${'0'.repeat(64)}`
   assert.deepEqual(virtx.imageName(digest), { type: 'digest', digest })
   assert.deepEqual(virtx.imageName('sha256:0'), { type: 'tag', tag: 'sha256:0' })
 })
@@ -49,9 +49,16 @@ test('a project is made, its members set and taken away, and it is removed', asy
     assert.ok((await alice.listProject()).some((p) => p.id === made.id))
     assert.equal((await alice.getProject(name)).role, 'owner')
     assert.equal((await alice.getProject(made.id)).name, name)
-    await assert.rejects(alice.createProject(name), { name: 'VirtxError', source: 'server', status: 409 })
+    await assert.rejects(alice.createProject(name), {
+      name: 'VirtxError',
+      source: 'server',
+      status: 409,
+    })
 
-    assert.deepEqual(await made.setMember('bob@example.com', 'member'), { user: 'bob@example.com', role: 'member' })
+    assert.deepEqual(await made.setMember('bob@example.com', 'member'), {
+      user: 'bob@example.com',
+      role: 'member',
+    })
     assert.deepEqual(await made.members(), [
       { user: 'alice@example.com', role: 'owner' },
       { user: 'bob@example.com', role: 'member' },

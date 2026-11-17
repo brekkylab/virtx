@@ -1,9 +1,8 @@
 import json
 
 import pytest
-from conftest import fixture, unique
-
 import virtx
+from conftest import fixture, unique
 from virtx import BearerAuth, Client, Project, ProjectMemberListOutputItem, Role, VirtxError
 
 

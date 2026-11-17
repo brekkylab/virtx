@@ -54,10 +54,8 @@ pub fn become_machine_if_spawned() {
 
 /// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
 /// where a client signs in for its tokens, answered without any -- the provider and the client
-/// to sign in as. Its image jobs connect to the registries the config lets them
-/// ([`Config::registries`]), unless a registry proxy was set before.
+/// to sign in as.
 pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
-    endpoints::set_registry_proxy(Arc::new(config.registries()?));
     let access = Arc::new(Access::configured(config).await?);
     let oidc = &config.oidc;
     let advertised = serde_json::json!({
@@ -304,10 +302,11 @@ mod tests {
     use reqwest::{Method, StatusCode, Url};
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
+    use tokio::io::AsyncReadExt as _;
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
-    use virtx_uvm::{FsTree, ImageStore};
+    use virtx_uvm::{FsTree, ImageStore, PublicRegistries, RegistryProxy};
 
     use std::sync::Arc;
 
@@ -344,6 +343,12 @@ mod tests {
         /// With every request the tester's, the owner of `demo` and `other`, from
         /// `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
+            Served::spawn_through(name, None).await
+        }
+
+        /// As [`Served::spawn`], its image jobs connecting to registries through `registries`
+        /// where given.
+        async fn spawn_through(name: &str, registries: Option<Arc<dyn RegistryProxy>>) -> Served {
             Served::spawn_over(name, async |home| {
                 let projects = TcpMembership::new(home);
                 let tester = Principal::new("tester");
@@ -351,13 +356,16 @@ mod tests {
                     projects.create(&tester, project).await.unwrap();
                 }
                 let store = ProjectStore::new(home);
-                let access = Access::new(
+                let mut access = Access::new(
                     vec!["https://allowed.example".to_owned()],
                     Arc::new(Tester),
                     Arc::new(projects),
                     store.clone(),
                     Arc::new(store),
                 );
+                if let Some(registries) = registries {
+                    access = access.through(registries);
+                }
                 super::router(Arc::new(access), axum::Router::new())
             })
             .await
@@ -810,6 +818,66 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
             "the registry was connected to"
         );
+    }
+
+    /// Two servers in one process, each through its own registry proxy: a pull from a registry
+    /// on this host's loopback fails on the server whose proxy names none, without a
+    /// connection, and reaches it on the server whose proxy names it, which still fails a pull
+    /// from a registry beside it that it does not name.
+    #[tokio::test]
+    async fn each_server_reaches_the_private_registries_its_own_proxy_names() {
+        let [named, other] = [(); 2].map(|_| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            listener
+        });
+        let [named_host, other_host] =
+            [&named, &other].map(|listener| listener.local_addr().unwrap().to_string());
+        let naming = PublicRegistries::new([&named_host]).unwrap();
+        let naming = Served::spawn_through("naming", Some(Arc::new(naming))).await;
+        let public = Served::spawn("public").await;
+        let unreachable = |reference: &str, host: &str| {
+            format!(
+                "{reference}: {host} is not reachable from this server: it is not a public address"
+            )
+        };
+        let not_connected = |listener: &std::net::TcpListener| {
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "the registry was connected to"
+            );
+        };
+
+        let pulled = format!("{named_host}/team/app:1");
+        let client = public.connect();
+        let job = client.pull_image(&pulled, None).await.unwrap();
+        assert_eq!(
+            failed(&client, job).await,
+            unreachable(&pulled, &named_host)
+        );
+        not_connected(&named);
+
+        let client = naming.connect();
+        client.pull_image(&pulled, None).await.unwrap();
+        let named = tokio::net::TcpListener::from_std(named).unwrap();
+        // A guard against a hang, not a measure of anything.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let (mut stream, _) = named.accept().await.unwrap();
+            stream.read_u8().await.unwrap()
+        })
+        .await
+        .expect("the registry named was not connected to");
+        // A TLS handshake's record: the job reached the listener itself.
+        assert_eq!(first, 0x16);
+
+        let beside = format!("{other_host}/team/app:1");
+        let job = client.pull_image(&beside, None).await.unwrap();
+        assert_eq!(
+            failed(&client, job).await,
+            unreachable(&beside, &other_host)
+        );
+        not_connected(&other);
     }
 
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client

@@ -80,6 +80,8 @@
 # the bucket): every run reads what any run before it compiled, a pull request's too, and costs no
 # transfer out of AWS. A release compiles from nothing, on an instance no run has touched. The
 # kernel, alib and MoltenVK are runs-on/cache's: S3 on our runners, GitHub's cache on GitHub's.
+# So, on our runners alone, is what cargo downloads -- the crates and the git dependencies, by
+# `Cargo.lock` (.github/actions/cargo-deps).
 # macOS's Rust is rust-cache's, saved from `main` alone.
 name: pipeline
 
@@ -175,6 +177,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm
+
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/cargo-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -335,6 +340,16 @@ jobs:
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/cargo-deps
+
+      # Measuring, for now: `cargo xtask init` waited about 33 seconds on a new Windows runner
+      # before it did anything, and these are the two things it starts first.
+      - name: First start of rustc and sccache (timed)
+        run: |
+          time rustc -vV
+          [ -z "$RUSTC_WRAPPER" ] || time sccache --start-server
+
       - name: Add the guest's musl target
         run: cargo xtask init
 
@@ -378,6 +393,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
+
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/cargo-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -454,6 +472,9 @@ jobs:
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
           where.exe pkg-config.exe
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
+      - if: ${{ !github.event.pull_request.head.repo.fork && matrix.own }}
+        uses: ./.github/actions/cargo-deps
 
       - name: Add the guest's musl target
         run: cargo xtask init
@@ -750,6 +771,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
 
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/cargo-deps
+
       - name: Add the guest's musl target
         run: cargo xtask init
 
@@ -821,6 +845,16 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
+
+      - if: ${{ !github.event.pull_request.head.repo.fork }}
+        uses: ./.github/actions/cargo-deps
+
+      # Measuring, for now: `cargo xtask init` waited about 33 seconds on a new Windows runner
+      # before it did anything, and these are the two things it starts first.
+      - name: First start of rustc and sccache (timed)
+        run: |
+          time rustc -vV
+          [ -z "$RUSTC_WRAPPER" ] || time sccache --start-server
 
       - name: Add the guest's musl target
         run: cargo xtask init

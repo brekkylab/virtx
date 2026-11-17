@@ -31,4 +31,5 @@ pub mod wire;
 pub use error::{Error, Result};
 pub use machine::*;
 pub use net::Network;
+pub(crate) use net::routed;
 pub use ports::{Ports, Publication};

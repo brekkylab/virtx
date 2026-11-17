@@ -1,0 +1,49 @@
+# The guest parts `guest` built for this run -- its kernel, abin and alib, as
+# `guest-<arch>.tar` in the working directory: from S3 on our runners (aws-ci-runners), where
+# `guest` on ours put them, and as the run's artifact on GitHub's.
+name: guest
+description: The guest parts this run's `guest` job built, from S3 or as an artifact
+
+inputs:
+  arch:
+    description: x86_64 or aarch64
+    required: true
+  from:
+    description: s3 (on our runners) or artifact (on GitHub's)
+    required: true
+  wait:
+    description: Wait for `guest` to put them there, for a job that does not wait for it
+    default: "false"
+  token:
+    description: To read this run's jobs while waiting (github.token, with actions read)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # `guest (<arch>)` ending in failure ends this too, rather than leaving it to time out.
+    - name: From S3
+      if: inputs.from == 's3'
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        WAIT: ${{ inputs.wait }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        key="runs/$GITHUB_REPOSITORY/$GITHUB_RUN_ID/guest-$ARCH.tar"
+        until aws s3api head-object --bucket "$CI_CACHE_BUCKET" --key "$key" >/dev/null 2>&1; do
+          [ "$WAIT" = true ] || { echo "::error::no s3://$CI_CACHE_BUCKET/$key"; exit 1; }
+          guest=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --paginate --jq ".jobs[] | select(.name | endswith(\"guest ($ARCH)\")) | .conclusion")
+          case "$guest" in
+            failure | cancelled | skipped) echo "::error::guest ($ARCH) ended $guest"; exit 1 ;;
+          esac
+          sleep 5
+        done
+        aws s3 cp --only-show-errors "s3://$CI_CACHE_BUCKET/$key" "guest-$ARCH.tar"
+
+    - name: As an artifact
+      if: inputs.from != 's3'
+      uses: actions/download-artifact@v8
+      with:
+        name: guest-${{ inputs.arch }}

@@ -1632,8 +1632,15 @@ impl Fixture {
             locked: false,
         };
         build_servers(&options)?;
-        // The programs as they stand, for the tests that make a sandbox with them.
-        build_abin(options.debug, &options.out().join("abin"))?;
+        // The programs as they stand, for the tests that make a sandbox with them -- unless
+        // `XTASK_ABIN_BUILT` says the ones there were built from this tree already (CI hands
+        // them on from the job that built them).
+        let abin = options.out().join("abin");
+        if env::var_os("XTASK_ABIN_BUILT").is_some() && abin.is_dir() {
+            eprintln!("xtask: abin as built already, in {}", abin.display());
+        } else {
+            build_abin(options.debug, &abin)?;
+        }
         let built = |name: &str| {
             options
                 .out()

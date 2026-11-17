@@ -14,7 +14,8 @@
 #   lint (windows-x86_64,                 nothing       clippy with `gpu`, on this platform
 #     linux-x86_64, linux-aarch64)
 #   tests (linux-x86_64)                  guest         the crates' and packages' suites, on KVM
-#   tests (windows-x86_64)                guest         the machine-booting suites, on WHP
+#   tests (windows-x86_64)                nothing       the machine-booting suites, on WHP; takes
+#                                                       `guest`'s kernel once it has compiled
 #
 #   and, in a full run:
 #   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
@@ -240,12 +241,21 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl
           components: clippy, rustfmt
 
+      # abin is its crates, the toolchain and the scripts that cross-compile it.
+      - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
+        id: abin
+        with:
+          path: target/release/abin
+          key: abin-${{ matrix.arch }}-${{ hashFiles('virtx-abins/**', 'rust-toolchain.toml', 'xtask/scripts/musl-*.sh', 'xtask/scripts/fetch-musl-sysroot.sh', 'xtask/src/main.rs') }}
+
       - name: abin
+        if: steps.abin.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm
           cargo xtask build abin
-          ls -la target/release/abin
+
+      - run: ls -la target/release/abin
 
       # alib is only its script, which pins what it builds.
       - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
@@ -268,7 +278,15 @@ jobs:
           cp -R alib guest/alib
           tar -cf guest-${{ matrix.arch }}.tar guest
 
-      - uses: actions/upload-artifact@v7
+      # To our runners through S3, beside them (.github/actions/guest); as an artifact only to
+      # GitHub's -- a fork's pull request's, and a full run's macOS build and manylinux
+      # container, which has no AWS -- since every byte sent out of AWS is paid for.
+      - name: Hand them to our runners
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        run: aws s3 cp --only-show-errors guest-${{ matrix.arch }}.tar "s3://$CI_CACHE_BUCKET/runs/$GITHUB_REPOSITORY/$GITHUB_RUN_ID/"
+
+      - if: ${{ !(!github.event.pull_request.head.repo.fork) || inputs.full }}
+        uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.arch }}
           path: guest-${{ matrix.arch }}.tar
@@ -442,9 +460,10 @@ jobs:
           path: 3rdparty/MoltenVK/Package
           key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', 'xtask/scripts/build-deps.sh') }}
 
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/guest
         with:
-          name: guest-${{ matrix.arch }}
+          arch: ${{ matrix.arch }}
+          from: ${{ !github.event.pull_request.head.repo.fork && matrix.own && 's3' || 'artifact' }}
 
       # macOS links the kernel.c the Linux job built; Windows takes the library as it is. alib
       # stays in `guest/`, named as virtx's cache to the server build and `archive`, which take
@@ -737,15 +756,19 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - uses: actions/download-artifact@v8
+      - uses: ./.github/actions/guest
         with:
-          name: guest-x86_64
+          arch: x86_64
+          from: ${{ !github.event.pull_request.head.repo.fork && 's3' || 'artifact' }}
 
-      - name: Put the kernel in place
+      # And abin, which the fixture would build again otherwise (`XTASK_ABIN_BUILT`).
+      - name: Put the kernel and abin in place
         run: |
           tar -xf guest-x86_64.tar
-          mkdir -p build/krunfw
+          mkdir -p build/krunfw target/release
           cp -v guest/kernel/libkrunfw.so.* build/krunfw/
+          cp -R guest/abin target/release/abin
+          echo XTASK_ABIN_BUILT=1 >> "$GITHUB_ENV"
 
       # A full version: setup-uv publishes no major tag to follow since v8.
       - uses: astral-sh/setup-uv@v10.3.3
@@ -759,15 +782,21 @@ jobs:
   # The machine-booting crates' tests on Windows, over WHP, on ours alone: no GitHub runner has a
   # hypervisor on Windows. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested,
   # the faults a guest takes as it first touches its memory are most of a boot.
+  #
+  # It starts with the run rather than after `guest`, and takes the kernel from it once it has
+  # compiled its tests: a Windows runner's boot (about four minutes) and the compile happen
+  # while the kernel is built, not after.
   tests-windows:
     name: tests (windows-x86_64)
-    needs: guest
     if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: [self-hosted, windows, x64, m8i-2xlarge]
     timeout-minutes: 60
     defaults:
       run:
         shell: bash
+    permissions:
+      contents: read
+      actions: read
     env:
       VIRTX_PREFAULT_MEMORY: "1"
       RUSTC_WRAPPER: ${{ !github.event.pull_request.head.repo.fork && !inputs.release && 'sccache' || '' }}
@@ -787,9 +816,20 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
-      - uses: actions/download-artifact@v8
+      - name: Add the guest's musl target
+        run: cargo xtask init
+
+      # What `cargo xtask test` below builds first, which needs no kernel.
+      - name: Compile the tests
+        run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio
+
+      # `guest (x86_64)`'s, once it has put them in S3; this job ends with it if it fails.
+      - uses: ./.github/actions/guest
         with:
-          name: guest-x86_64
+          arch: x86_64
+          from: s3
+          wait: true
+          token: ${{ github.token }}
 
       - name: Put the kernel in place
         run: |
@@ -797,7 +837,4 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.dll build/krunfw/
 
-      - name: Add the guest's musl target
-        run: cargo xtask init
-
-      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored --test-threads 1
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored

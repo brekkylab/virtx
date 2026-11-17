@@ -12,6 +12,9 @@
 # Each skips what its registry already holds at this version, which makes a rerun safe. A
 # dispatch names the tag, for a release whose publishing failed.
 #
+# A dry run is `verify` alone: `release` calls it so over the run's `bundle`, passing no
+# secrets, and a dispatch with `dry-run` runs it over a draft's or a release's files.
+#
 # npm is given a tarball as `./dist/name.tgz`: a bare `dist/name.tgz` reads as a GitHub
 # `user/repo`.
 #
@@ -27,11 +30,24 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: The published release's tag (vX.Y.Z)
+        description: The release's tag (vX.Y.Z)
         required: true
+      dry-run:
+        description: Verify the release's packages, publishing nothing
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      artifact:
+        description: This run's artifact holding the packages, in place of the release's files
+        type: string
+        required: true
+      dry-run:
+        type: boolean
+        default: true
 
 concurrency:
-  group: publish-${{ github.event.release.tag_name || inputs.tag }}
+  group: publish-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -40,13 +56,22 @@ permissions:
 env:
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
-  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
 jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # `write` only to see a draft: GitHub lists one to those who may push alone.
+    permissions:
+      contents: write
     steps:
+      # A registry's client finds its server only once the release is public.
+      - if: ${{ !inputs.dry-run }}
+        run: |
+          [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false ] || {
+            echo "::error::$TAG's release is a draft; publish it first"; exit 1; }
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
@@ -62,11 +87,18 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
+      - if: inputs.artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - if: ${{ !inputs.artifact }}
+        run: gh release download "$TAG" --dir dist --pattern '*.tgz' --pattern '*.whl' --pattern SHA256SUMS
+
       # Every package SHA256SUMS lists, not only those that came down.
       - name: The release's packages
-        run: |
-          gh release download "$TAG" --dir dist --pattern '*.tgz' --pattern '*.whl' --pattern SHA256SUMS
-          cd dist && grep -E '\.(tgz|whl)$' SHA256SUMS | sha256sum --check
+        run: cd dist && grep -E '\.(tgz|whl)$' SHA256SUMS | sha256sum --check
 
       # Each package is the root's name or one of its platform packages, at the tag's version;
       # every optional dependency the root names is among them; and each passes npm's dry run.
@@ -129,6 +161,7 @@ jobs:
 
   npm:
     needs: verify
+    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -167,6 +200,7 @@ jobs:
 
   pypi:
     needs: verify
+    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -183,6 +217,7 @@ jobs:
 
   crates:
     needs: verify
+    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

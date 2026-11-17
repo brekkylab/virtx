@@ -43,8 +43,8 @@
 # |----------------|-----------------|--------------------------------------|------------------|
 # | macos-aarch64  | darwin-arm64    | macos-15                             | the same job     |
 # | windows-x86_64 | win32-x64-msvc  | windows-2025                         | the same job     |
-# | linux-x86_64   | linux-x64-gnu   | ubuntu-24.04, in manylinux_2_28      | ubuntu-22.04     |
-# | linux-aarch64  | linux-arm64-gnu | ubuntu-24.04-arm, in manylinux_2_28  | ubuntu-22.04-arm |
+# | linux-x86_64   | linux-x64-gnu   | ubuntu-26.04, in manylinux_2_28      | ubuntu-22.04     |
+# | linux-aarch64  | linux-arm64-gnu | ubuntu-26.04-arm, in manylinux_2_28  | ubuntu-22.04-arm |
 #
 # # The glibc floor
 #
@@ -112,7 +112,7 @@ jobs:
   # build waits for it, so a tag the manifests do not match builds nothing.
   version:
     name: version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -153,7 +153,7 @@ jobs:
   # none, so it answers first. Its clippy is Linux's without `gpu`; each platform's build job
   # lints its own host's code with `gpu`.
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -202,12 +202,12 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            hosted: ubuntu-24.04
+            hosted: ubuntu-26.04
             targets: linux windows
             # The targets as a cache key takes them: a space there cuts the key short.
             kernels: linux-windows
           - arch: aarch64
-            hosted: ubuntu-24.04-arm
+            hosted: ubuntu-26.04-arm
             targets: linux macos
             kernels: linux-macos
     needs: version
@@ -346,10 +346,10 @@ jobs:
       matrix:
         include:
           - release: linux-x86_64
-            hosted: ubuntu-24.04
+            hosted: ubuntu-26.04
             arch: x86_64
           - release: linux-aarch64
-            hosted: ubuntu-24.04-arm
+            hosted: ubuntu-26.04-arm
             arch: aarch64
     runs-on: ${{ matrix.hosted }}
     timeout-minutes: 60
@@ -585,13 +585,13 @@ jobs:
         include:
           - release: linux-x86_64
             platform: linux-x64-gnu
-            hosted: ubuntu-24.04
+            hosted: ubuntu-26.04
             container: quay.io/pypa/manylinux_2_28_x86_64
             arch: x86_64
             target: x86_64-unknown-linux-gnu
           - release: linux-aarch64
             platform: linux-arm64-gnu
-            hosted: ubuntu-24.04-arm
+            hosted: ubuntu-26.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
             arch: aarch64
             target: aarch64-unknown-linux-gnu
@@ -726,7 +726,7 @@ jobs:
   tests-linux:
     name: tests (linux-x86_64)
     needs: guest
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7

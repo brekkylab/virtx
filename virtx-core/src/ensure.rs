@@ -110,8 +110,10 @@ async fn ensure_in(
 
     fs::create_dir_all(root).map_err(here(format!("creating {}", root.display())))?;
     let lock_path = root.join(".lock");
-    let _lock = lock(&lock_path, version, patience.lock).await?;
-    // Another process may have placed it while this one waited.
+    let Some(_lock) = lock(&lock_path, &placed, version, patience.lock).await? else {
+        return Ok(placed);
+    };
+    // Another process may have placed it and let go since the first look.
     if placed.is_file() {
         return Ok(placed);
     }
@@ -147,13 +149,19 @@ async fn ensure_in(
 }
 
 /// The lock file at `path`, locked, waiting up to `deadline` for the caller fetching `version`
-/// that holds it.
-async fn lock(path: &Path, version: &str, deadline: Duration) -> Result<fs::File, Error> {
+/// that holds it; or `None` if that caller places the server at `placed` before letting go.
+async fn lock(
+    path: &Path,
+    placed: &Path,
+    version: &str,
+    deadline: Duration,
+) -> Result<Option<fs::File>, Error> {
     let lock = fs::File::create(path).map_err(here(format!("creating {}", path.display())))?;
     let since = Instant::now();
     loop {
         match lock.try_lock() {
-            Ok(()) => return Ok(lock),
+            Ok(()) => return Ok(Some(lock)),
+            Err(fs::TryLockError::WouldBlock) if placed.is_file() => return Ok(None),
             Err(fs::TryLockError::WouldBlock) if since.elapsed() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -584,6 +592,38 @@ mod tests {
             .await
             .unwrap();
         assert!(placed.is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_caller_waiting_on_the_lock_takes_the_server_once_it_is_placed() {
+        let release = release(None).await;
+        let root = fresh_root();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let held = fs::File::create(root.join(".lock")).unwrap();
+        held.lock().unwrap();
+
+        let waiting = tokio::spawn({
+            let (root, base) = (root.clone(), release.base.clone());
+            let patience = Patience {
+                lock: Duration::from_secs(60),
+                ..SHORT
+            };
+            async move { ensure_in(&root, &base, "1.2.3", patience).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The holder places the server and has not let go yet.
+        let server = root.join("bin").join(server_file());
+        fs::write(&server, b"placed").unwrap();
+
+        let placed = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the waiting caller returns before the lock's deadline")
+            .unwrap()
+            .unwrap();
+        assert_eq!(placed, server);
+        assert_eq!(release.fetches.load(SeqCst), 0);
+        drop(held);
         fs::remove_dir_all(&root).unwrap();
     }
 

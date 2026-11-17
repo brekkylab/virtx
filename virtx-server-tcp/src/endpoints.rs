@@ -9,7 +9,7 @@ use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -32,8 +32,9 @@ use virtx_core::{
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, Os, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryError,
+    RegistryProxy, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step,
+    park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -45,6 +46,25 @@ pub const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// How long an image job that has ended is kept, for its end to be read, before it is removed.
 const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
+
+/// The proxy this server's pulls, pushes and builds connect through: the one set
+/// ([`set_registry_proxy`]), and where none was, [`PublicRegistries`] with no registry named,
+/// which holds them to registries on public addresses. See [`RegistryClient::through`].
+static REGISTRY_PROXY: OnceLock<Arc<dyn RegistryProxy>> = OnceLock::new();
+
+/// Connect to registries through `proxy`, from now on: said once, before any is reached.
+pub fn set_registry_proxy(proxy: Arc<dyn RegistryProxy>) {
+    let _ = REGISTRY_PROXY.set(proxy);
+}
+
+/// A registry client for this server's pulls and pushes, through its registry proxy.
+fn registry(
+    images: ImageStore,
+    auth: Option<virtx_core::RegistryAuth>,
+) -> Result<RegistryClient, RegistryError> {
+    let proxy = REGISTRY_PROXY.get_or_init(|| Arc::new(PublicRegistries::default()));
+    RegistryClient::new(images, auth).through(Some(proxy.as_ref()))
+}
 
 /// What one project's requests reach: the stores, and the sandboxes and jobs its members made
 /// from them, which are theirs together.
@@ -334,7 +354,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images.clone(), args.auth);
+            let registry = registry(images.clone(), args.auth)?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -352,7 +372,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images, args.auth);
+            let registry = registry(images, args.auth)?;
             Ok(registry.push(&reference, report).await?)
         },
     ))
@@ -420,7 +440,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            RegistryClient::new(images.clone(), None)
+            registry(images.clone(), None)?
                 .pull(&reference, report)
                 .await?
                 .1

@@ -53,8 +53,10 @@ pub fn become_machine_if_spawned() {
 
 /// The server `config` alone makes: its [`Projects`] behind [`router`], and beside it where a
 /// client signs in for its tokens, answered without any -- the provider and the client to
-/// sign in as, or nothing where no one signs in.
+/// sign in as, or nothing where no one signs in. Its image jobs connect to the registries the
+/// config lets them ([`Config::registries`]), unless a registry proxy was set before.
 pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>, axum::Router)> {
+    endpoints::set_registry_proxy(Arc::new(config.registries()?));
     let homes = Arc::new(Homes::new(config.home().join("project")));
     let projects = Arc::new(Projects::new(config, &homes)?);
     let advertised = match &config.oidc {
@@ -319,7 +321,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-    use virtx_core::{Auth, Client, DirEntry, FileRoot, SandboxCreateArgs};
+    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
     use virtx_uvm::{FsTree, ImageStore};
 
     use crate::config::Config;
@@ -585,6 +587,62 @@ mod tests {
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
         let theirs = get(&format!("alpine/blobs/{digest}"), "other").await;
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// What `job` failed with, once it has ended.
+    async fn failed(client: &Client, job: ImageJob) -> String {
+        // A guard against a hang, not a measure of anything.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let job = client.get_image_job(&job.id).await.unwrap();
+                if !job.running {
+                    break job.error.expect("the job did not fail");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the job went on")
+    }
+
+    /// A server's image jobs are held to registries on public addresses: a pull, a push and a
+    /// build's base that name one on this host's loopback each fail saying so, and it is
+    /// connected to not at all.
+    #[tokio::test]
+    async fn an_image_job_does_not_connect_to_a_registry_on_this_host() {
+        let served = Served::spawn("registries").await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let client = served.connect();
+        let unreachable = |reference: &str| {
+            format!(
+                "{reference}: {host} is not reachable from this server: \
+                 it is not a public address"
+            )
+        };
+
+        let pulled = format!("{host}/team/app:1");
+        let job = client.pull_image(&pulled, None).await.unwrap();
+        assert_eq!(failed(&client, job).await, unreachable(&pulled));
+
+        let pushed = format!("{host}/team/app:2");
+        served.file_image(&pushed);
+        let job = client.push_image(&pushed, None).await.unwrap();
+        assert_eq!(failed(&client, job).await, unreachable(&pushed));
+
+        let base = format!("{host}/team/base:1");
+        let job = client
+            .build_image(Recipe::new(&base), "built:1")
+            .await
+            .unwrap();
+        assert_eq!(failed(&client, job).await, unreachable(&base));
+
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the registry was connected to"
+        );
     }
 
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client

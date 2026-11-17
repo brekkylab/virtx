@@ -4,6 +4,8 @@
 //! - [`access::Authenticator`]: who the tokens are, and the projects they reach. The binary's is
 //!   [`access::Projects`].
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
+//! - [`endpoints::set_registry_proxy`]: what its image jobs connect to registries through. The
+//!   binary's is its config's ([`config::Config::registries`]).
 
 pub mod access;
 pub mod config;

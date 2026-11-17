@@ -922,21 +922,33 @@ mod tests {
     }
 
     /// What the volume's files answer for, as a machine mounting it sees the path: a file, a
-    /// directory, or nothing, there or on the way; not a path through a link or at one, nor a
-    /// name they refuse.
+    /// directory, or nothing, there or on the way; not a path through a link or at one, a name
+    /// they refuse, nor a path in a mount of the volume's own.
     #[cfg(unix)]
     #[test]
     fn the_files_answer_for_what_they_see_as_a_machine_does() {
         let scratch = Scratch::new("answers");
-        let volume = scratch.0.create("v").unwrap();
+        let mut volume = scratch.0.create("v").unwrap();
         volume.create_dir("real", false).unwrap();
         volume.write("real/f", b"f", None).unwrap();
         std::os::unix::fs::symlink("real", volume.files().join("link")).unwrap();
+        let notion = MountSource::Notion {
+            api_key: "k".into(),
+        };
+        volume.mount("notes".into(), notion).unwrap();
 
         for path in ["", "real", "real/f", "real/none", "none/f"] {
             assert!(volume.answers(path), "{path}");
         }
-        for path in ["link", "link/f", "link/none", "a\\b", "a//b"] {
+        for path in [
+            "link",
+            "link/f",
+            "link/none",
+            "a\\b",
+            "a//b",
+            "notes",
+            "notes/page",
+        ] {
             assert!(!volume.answers(path), "{path}");
         }
     }

@@ -524,7 +524,13 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
     // the guest sees it, so a tag the guest answered is taken, and of two at once one lands.
     let made = ["sh", "-c", "mkdir /data/real && ln -s real /data/link"];
     assert_eq!(run(&sandbox, &made, None).await.unwrap().1, 0);
-    for name in ["link/f", "a%5Cb"] {
+    // On a Windows host a mounted volume does not take a name with a backslash.
+    let names: &[&str] = if cfg!(windows) {
+        &["link/f"]
+    } else {
+        &["link/f", "a%5Cb"]
+    };
+    for &name in names {
         let put = Request::put(at(true, name)).body(Body::from("one"));
         assert_eq!(send(true, put.unwrap()).await.status(), 201, "{name}");
         let etag = tag(true, name.to_owned()).await;
@@ -539,10 +545,12 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
             .body(body)
             .unwrap()
     };
-    assert_eq!(
-        send(true, fresh("c%5Cd", Body::from("c"))).await.status(),
-        201
-    );
+    if !cfg!(windows) {
+        assert_eq!(
+            send(true, fresh("c%5Cd", Body::from("c"))).await.status(),
+            201
+        );
+    }
     let (slow, read, go) = stalled();
     let first = tokio::spawn(send(true, fresh("link/g", slow)));
     read.await.unwrap();

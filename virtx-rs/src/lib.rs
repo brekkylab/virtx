@@ -1,10 +1,12 @@
 //! A virtx client for Rust, over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`).
 //!
-//! The client is not compiled in: the library is opened at run time, from the path given to
-//! [`load`], or `$VIRTX_CORE_LIB`, or the system loader's search for its file name. So every
-//! module in a process (this crate, the Python or Node package, another native extension) can
-//! make its requests through the one library, and hand a [`Client`] between them as the
-//! `VirtxClient*` it is, with [`Client::as_raw`] and [`Client::from_raw`].
+//! The client is `libvirtx_core`'s: linked into this crate by the `embedded` feature, on by
+//! default; or, without it, opened at run time, from the path given to [`load`], or
+//! `$VIRTX_CORE_LIB`, or the system loader's search for its file name. Opened, the library is
+//! one every module in a process (this crate, the Python or Node package, another native
+//! extension) makes its requests through, and a [`Client`] is handed between them as the
+//! `VirtxClient*` it is, with [`Client::as_raw`] and [`Client::from_raw`]; so a crate that
+//! shares one takes this crate without `embedded`.
 //!
 //! Each request starts when its method is called, on the library's own runtime, and is a
 //! [`Call`] (a `Future`) or [`Events`] (a `Stream`), woken by the library, so any async runtime

@@ -39,8 +39,17 @@ jobs:
     with:
       version: ${{ needs.check.outputs.version }}
 
+  # `publish`'s `verify` over what was built, so a draft holds only packages `publish` takes.
+  verify:
+    needs: [build]
+    uses: ./.github/workflows/publish.yml
+    permissions:
+      contents: write
+    with:
+      artifact: bundle
+
   draft:
-    needs: [build, test]
+    needs: [build, test, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

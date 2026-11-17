@@ -16,8 +16,9 @@ use std::{
     time::Duration,
 };
 
+use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
-use http::HeaderMap;
+use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::{
     DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
@@ -314,6 +315,49 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
     // Closed, it lets it go.
     close(sandbox).await;
     home.volumes.remove("data").unwrap();
+}
+
+async fn a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote(home: Home) {
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let files = Files::new(home.volumes.clone());
+    let sent = async |method: Method, if_match: Option<&str>, body: &'static str| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/sandboxes/sb/files/tmp/a.txt");
+        if let Some(etag) = if_match {
+            request = request.header(header::IF_MATCH, etag);
+        }
+        let request = request.body(Body::from(body)).unwrap();
+        let machine = sandbox.machine().await.unwrap();
+        let response = files
+            .sandbox("sb", machine, sandbox.activity(), request)
+            .await;
+        let etag = response.headers().get(header::ETAG);
+        (
+            response.status(),
+            etag.map(|etag| etag.to_str().unwrap().to_owned()),
+        )
+    };
+
+    let (status, put) = sent(Method::PUT, None, "one").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let put = put.expect("a PUT answers an ETag");
+    let (status, got) = sent(Method::GET, None, "").await;
+    assert_eq!(
+        (status, got.as_deref()),
+        (StatusCode::OK, Some(put.as_str()))
+    );
+
+    // The tag a write was answered is the one the next write is taken over. That write is
+    // longer: a tag is a file's length and time, and the guest's file times move a clock tick at
+    // a time, so two writes in a row can have one time.
+    let (status, again) = sent(Method::PUT, Some(&put), "three").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, got) = sent(Method::GET, None, "").await;
+    assert_eq!(got, again);
+    let (status, _) = sent(Method::PUT, Some(&put), "old").await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    close(sandbox).await;
 }
 
 /// Two conditional writes to one file in a sandbox at once: the second, sent while the first is
@@ -633,6 +677,7 @@ fn main() -> ExitCode {
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_parked_sandbox_holds_its_volume_against_removal,
+        a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ];

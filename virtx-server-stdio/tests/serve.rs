@@ -38,6 +38,18 @@ fn mirrored(reference: &str) -> String {
 }
 
 impl Server {
+    /// The directory of the client's own project, the one project here: what the tests reach,
+    /// naming none. Asked of the server first, which makes it as it starts.
+    async fn project(&self) -> PathBuf {
+        self.client.list_volume().await.unwrap();
+        std::fs::read_dir(self.home.join("project"))
+            .unwrap()
+            .flatten()
+            .map(|project| project.path())
+            .find(|project| project.is_dir())
+            .expect("the client's own project")
+    }
+
     /// Where the disk of sandbox `id` is: under its project's directory, whichever project of
     /// the home it is in, or else where none is.
     fn disk(&self, id: &str) -> PathBuf {
@@ -96,7 +108,7 @@ impl Server {
 
     /// Pull `reference` from its registry into the store the server reads, under its own name.
     async fn pull_image(&self, reference: &str) {
-        let store = ImageStore::new(self.home.join("images")).unwrap();
+        let store = ImageStore::new(self.project().await.join("images")).unwrap();
         let named = reference.parse().unwrap();
         let reference = mirrored(reference).parse().unwrap();
         let registry = RegistryClient::new(store.clone(), None);
@@ -272,7 +284,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
         .await;
     assert_eq!(ended.unwrap(), 0);
     assert_eq!(
-        std::fs::read_to_string(server.home.join("volume/data/files/shared")).unwrap(),
+        std::fs::read_to_string(server.project().await.join("volume/data/files/shared")).unwrap(),
         "shared\n"
     );
     let stopped = server.client.stop_sandbox(&id).await.unwrap();
@@ -463,7 +475,7 @@ async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
     assert_eq!(lines, ["written"]);
 
     server.client.remove_sandbox(&id).await.unwrap();
-    let left = std::fs::read_dir(server.home.join("sandbox"))
+    let left = std::fs::read_dir(server.project().await.join("sandbox"))
         .unwrap()
         .count();
     assert_eq!(left, 0);

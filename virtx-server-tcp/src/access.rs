@@ -256,6 +256,12 @@ impl Access {
         true
     }
 
+    /// Take project `id`'s home away for good, whatever runs in it, as an embedder removing the
+    /// project elsewhere does: no request reaches it again. The home it had, if one was made.
+    pub fn forget(&self, id: &ProjectId) -> Option<Arc<Home>> {
+        self.homes.lock().unwrap().insert(*id, None).flatten()
+    }
+
     /// Let requests reach project `id` again, once its removal has failed.
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);

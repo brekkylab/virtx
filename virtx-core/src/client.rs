@@ -520,8 +520,8 @@ pub(crate) mod ffi {
     use crate::{
         Auth, Error,
         ffi::{
-            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, encode, failure, json,
-            release, retain, share, write,
+            Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, done, encode, failure, json,
+            release, retain, share, start_on_thread, write,
         },
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
@@ -601,14 +601,14 @@ pub(crate) mod ffi {
     pub struct VirtxClient(pub(crate) Runtime<Client>);
 
     /// Start `program` with `args_len` arguments from `args` as the server, over its stdin and
-    /// stdout, and write the client, held once, to `client`. A null `program` is `virtx-stdio`,
-    /// the server of this library's version, fetched first if this host has none -- see
-    /// `virtx_ensure_virtx`, which does that fetch alone.
+    /// stdout, and write the client, held once, to `client`. `virtx_ensure_virtx` answers the
+    /// path of `virtx-stdio`, the server of this library's version.
     ///
     /// # Safety
     ///
-    /// `program` is null or NUL-terminated UTF-8, as each of the `args_len` pointers in `args`
-    /// is. `client` is writable. `error` is null or writable.
+    /// `program` is NUL-terminated UTF-8, as each of the `args_len` pointers in `args` is; a
+    /// null one is refused.
+    /// `client` is writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_spawn(
         program: *const c_char,
@@ -618,22 +618,12 @@ pub(crate) mod ffi {
         error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
-            let program = if program.is_null() {
-                None
-            } else {
-                Some(unsafe { utf8(program) }?.to_string())
-            };
+            let program = unsafe { utf8(program) }?.to_string();
             let args = (0..args_len)
                 .map(|i| unsafe { utf8(*args.add(i)) }.map(str::to_string))
                 .collect::<Result<Vec<_>, _>>()?;
             Runtime::open(|| {
-                let mut command = match program {
-                    Some(program) => Command::new(program),
-                    // On the runtime being opened, which this thread is not a worker of.
-                    None => Command::new(
-                        tokio::runtime::Handle::current().block_on(crate::ensure_virtx())?,
-                    ),
-                };
+                let mut command = Command::new(program);
                 command.args(args);
                 Client::spawn(command)
                     .map_err(|e| Error::Client(format!("starting the server: {e}")))
@@ -643,36 +633,32 @@ pub(crate) mod ffi {
     }
 
     /// Fetch `virtx-stdio`, the server of this library's version, into this host's cache if it
-    /// is not there, and write its path, as a JSON string, to `out`: what `virtx_client_spawn`
-    /// given a null `program` starts. Blocks for the fetch. `VIRTX_OK`, or `VIRTX_ERROR` with
-    /// why written to `out`.
+    /// is not there, and answer its path as a JSON string: what `virtx_client_spawn` is given
+    /// to start it. Answered off any client's runtime, so this is called before one is opened.
     ///
     /// The server is kept one directory per version, so a library that is upgraded fetches
     /// its own. `$VIRTX_STDIO` names a server to use as it is; `$VIRTX_STDIO_VERSION` another
     /// version; `$VIRTX_DIST_URL` where releases are fetched from; `$VIRTX_HOME` the cache.
-    ///
-    /// # Safety
-    ///
-    /// `out` is writable.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_ensure_virtx(out: *mut VirtxBytes) -> c_int {
-        let fetched = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Client(format!("starting a runtime: {e}")))
-            .and_then(|runtime| runtime.block_on(crate::ensure_virtx()))
-            .map(|path| path.to_string_lossy().into_owned());
-        let (status, bytes) = encode(fetched);
-        unsafe { write(out, bytes) };
-        status
+    pub extern "C" fn virtx_ensure_virtx() -> *mut VirtxFuture {
+        start_on_thread(async {
+            encode(
+                crate::ensure_virtx()
+                    .await
+                    .map(|path| path.to_string_lossy().into_owned()),
+            )
+        })
     }
 
-    /// `ptr` as a `&str`.
+    /// `ptr` as a `&str`; a null one is refused.
     ///
     /// # Safety
     ///
-    /// `ptr` is NUL-terminated UTF-8, kept for `'a`.
+    /// `ptr` is null or NUL-terminated, kept for `'a`.
     unsafe fn utf8<'a>(ptr: *const c_char) -> Result<&'a str, Error> {
+        if ptr.is_null() {
+            return Err(Error::Client("a string argument is null".into()));
+        }
         unsafe { CStr::from_ptr(ptr) }
             .to_str()
             .map_err(|e| Error::Client(e.to_string()))
@@ -702,7 +688,9 @@ pub(crate) mod ffi {
         Ok(map)
     }
 
-    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, or null for none.
+    /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, `{"type":
+    /// "command", "program": "...", "args": [...]}` for the token a command prints, or null for
+    /// none.
     ///
     /// # Safety
     ///
@@ -716,7 +704,8 @@ pub(crate) mod ffi {
 
     /// Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
     /// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-    /// "..."}` or null for none, and the `headers_len` headers in `headers` -- each its name
+    /// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, and
+    /// the `headers_len` headers in `headers` -- each its name
     /// then its value, so `2 * headers_len` strings -- with every request, and write the
     /// client, held once, to `client`. The headers are whatever else the server asks of each
     /// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
@@ -816,18 +805,20 @@ pub(crate) mod ffi {
         unsafe { retain(client) };
     }
 
-    /// Let go of `client`. The last holder's release answers every request not yet answered
-    /// with `VIRTX_ERROR`, ends the session, and frees it; its futures and streams stay to be
-    /// polled and freed. Null does nothing.
+    /// Let go of `client`, and answer, with `VIRTX_OK` and nothing, once it is let go of. The
+    /// last holder's release answers every request not yet answered with `VIRTX_ERROR`, ends
+    /// the session, and frees it, answering once that is done; its futures and streams stay to
+    /// be polled and freed. Any other release answers at once. Freeing the future does not
+    /// stop the ending. Null is let go of at once.
     ///
     /// # Safety
     ///
-    /// `client` is null, or held by the caller, who does not use it again. Not called from a
-    /// `wake`, which runs on the runtime this may stop.
+    /// `client` is null, or held by the caller, who does not use it again.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) {
-        if let Some(VirtxClient(runtime)) = unsafe { release(client) } {
-            runtime.close(Client::close);
+    pub unsafe extern "C" fn virtx_client_release(client: *mut VirtxClient) -> *mut VirtxFuture {
+        match unsafe { release(client) } {
+            Some(VirtxClient(runtime)) => runtime.close(Client::close),
+            None => done(),
         }
     }
 

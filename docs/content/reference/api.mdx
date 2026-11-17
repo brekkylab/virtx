@@ -20,6 +20,7 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
 | `Client.connect(url, auth, project, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. A token is sent over plain `http` only to this machine's loopback. |
+| `Client.from_env()` | `Client` | Reaches virtx cloud, or the server `VIRTX_URL` names, as its [environment variables](#environment-variables) say: with `VIRTX_API_KEY`, as that key, which is one project's; with `VIRTX_PROJECT` and no key, as the person `virtx login` signed in, running `virtx token --json --project <VIRTX_PROJECT>` for each token. Node.js calls it `fromEnv`. |
 | `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. Without a project, a request is in its user's own, `default`. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
@@ -196,7 +197,11 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_HOME` | `spawn`, CLI | Where virtx keeps what it fetches on this machine. |
 | `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
 | `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
-| `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
+| `VIRTX_PROJECT` | `from_env`, CLI | The project the requests belong to; for the CLI, when `--project` is not given. Without `VIRTX_API_KEY`, `from_env` also asks `virtx token` for a token for it, and there it is a project's ID. |
+| `VIRTX_URL` | `from_env` | A server's base URL, reached in place of virtx cloud. |
+| `VIRTX_API_KEY` | `from_env` | An API key of virtx cloud, sent as the bearer token. |
+| `VIRTX_REGION` | `from_env` | Without `VIRTX_URL`, the region of virtx cloud to reach, at `https://<VIRTX_REGION>.api.<VIRTX_DOMAIN>`. Without it, the region nearest this machine, when `VIRTX_API_KEY` or `VIRTX_PROJECT` is set. |
+| `VIRTX_DOMAIN` | `from_env`, CLI | Where virtx cloud is, when `--domain` is not given; `virtx.sh` by default. |
 | `VIRTX_OIDC_ISSUER`, `VIRTX_OIDC_CLIENT_ID` | CLI | The provider `virtx login` signs in to and the client it signs in as, when `--issuer` and `--client-id` are not given. See [Signing in](/docs/reference/cli/#signing-in). |
 | `VIRTX_OIDC_CLIENT_SECRET` | CLI | That client's secret, for a provider that gives its public clients one, when `--client-secret` is not given. |
 | `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |

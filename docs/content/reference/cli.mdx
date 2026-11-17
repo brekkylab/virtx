@@ -40,7 +40,7 @@ Without options, the command starts `virtx-stdio` of its own version, fetched in
 
 ## Signing in
 
-The `virtx` built from `virtx-cli/` also signs a person in to the OpenID Connect provider of a virtx server, for a client to send the session's token.
+The `virtx` command also signs a person in, to virtx cloud or to the OpenID Connect provider of a virtx server, for a client to send the session's token.
 
 | Command | What it does |
 | --- | --- |
@@ -49,9 +49,26 @@ The `virtx` built from `virtx-cli/` also signs a person in to the OpenID Connect
 | `virtx whoami` | Says who is signed in. |
 | `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
 
+The `virtx` the Python and Node.js packages install signs in to virtx cloud alone. The one built from `virtx-cli/` signs in to both: a command is of the provider it names; naming none, of virtx cloud with `--domain` or `token --project`; and otherwise of what was signed in to last, or of virtx cloud where nothing was.
+
+### virtx cloud
+
+The page `virtx login` shows is the console's. `--domain` (`$VIRTX_DOMAIN`) names where virtx cloud is, `virtx.sh` by default.
+
+`virtx token` prints an access token, which lasts at most 15 minutes. With `--project ID` (`$VIRTX_PROJECT`), it prints one for the project of that ID: the token virtx cloud takes for a request to the project's sandboxes, volumes and images. `virtx logout` forgets the session on this machine whatever virtx cloud answers; if virtx cloud could not be told, the command says so and exits with an error, and the session ends there as it expires.
+
+The session is kept in `~/.config/virtx/<domain>.token` and `<domain>.access`. On Linux and macOS they are readable by their owner alone.
+
+A client made by [`Client.from_env()`](/docs/reference/api/#client) authenticates with `$VIRTX_API_KEY` if it is set. Without one and with `$VIRTX_PROJECT` set to a project's ID, it authenticates as the person signed in, running `virtx token --json --project $VIRTX_PROJECT` for each token, so the `virtx` the package installs serves it with no other program. The console shows a project's ID on the project's API keys page.
+
+```sh
+virtx login
+export VIRTX_PROJECT=<the project's ID>
+```
+
 ### A server's provider
 
-`virtx login <the server's URL>` asks the server which provider to sign in to and as which client: the `issuer` and `client_id` of its `oidc`. `--issuer` (`$VIRTX_OIDC_ISSUER`) and `--client-id` (`$VIRTX_OIDC_CLIENT_ID`) name the two without asking a server, and `--client-secret` (`$VIRTX_OIDC_CLIENT_SECRET`) gives the secret of a provider that has one for its public clients. Without a URL or the two options, a command is of what was signed in to last.
+`virtx login <the server's URL>` asks the server which provider to sign in to and as which client: the `issuer` and `client_id` of its `oidc`. `--issuer` (`$VIRTX_OIDC_ISSUER`) and `--client-id` (`$VIRTX_OIDC_CLIENT_ID`) name the two without asking a server, and `--client-secret` (`$VIRTX_OIDC_CLIENT_SECRET`) gives the secret of a provider that has one for its public clients.
 
 `virtx token` prints the ID token, which the server checks against the provider's keys. `virtx logout` asks the provider to end the session, where the provider takes that.
 

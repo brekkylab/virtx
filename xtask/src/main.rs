@@ -1515,11 +1515,15 @@ impl Fixture {
             fs::remove_dir_all(&scratch)
                 .with_context(|| format!("emptying {}", scratch.display()))?;
         }
-        let home = scratch.join("home");
-        fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+        // A home each: the servers keep their projects' records each its own way.
+        let (home, tcp_home) = (scratch.join("home"), scratch.join("tcp"));
+        for dir in [&home, &tcp_home] {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
         let provider = FixtureProvider::serve()?;
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
+            "home": tcp_home,
             "oidc": { "issuer": provider.issuer, "client_id": FIXTURE_CLIENT },
         });
         let config_path = scratch.join("config.json");
@@ -1531,7 +1535,6 @@ impl Fixture {
             .arg("serve")
             .arg("--config")
             .arg(&config_path)
-            .env("VIRTX_HOME", &home)
             .stderr(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("starting {}", tcp.display()))?;
@@ -1569,8 +1572,9 @@ impl Fixture {
             }
         }
         eprintln!(
-            "xtask: the fixture is served at {}, over {}",
+            "xtask: the fixture is served at {}, over {}, and virtx-stdio over {}",
             fixture.url,
+            tcp_home.display(),
             home.display()
         );
         Ok(fixture)
@@ -1611,8 +1615,8 @@ impl Fixture {
         Ok(())
     }
 
-    /// What it names to a command in its environment: the home both servers keep, where
-    /// `virtx-stdio` is, and how to reach `virtx-server-tcp`.
+    /// What it names to a command in its environment: the home `virtx-stdio` keeps, where it
+    /// is, and how to reach `virtx-server-tcp`.
     fn vars(&self) -> Vec<(&'static str, OsString)> {
         vec![
             ("VIRTX_HOME", self.scratch.join("home").into()),

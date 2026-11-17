@@ -11,6 +11,7 @@
 //! Windows a lock is mandatory, and one on the disk would refuse the machine's own reads and
 //! writes.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -48,18 +49,23 @@ impl Upper {
         Ok(Some(upper))
     }
 
-    /// Delete every disk under `dir` that nothing holds: those of sandboxes whose process ended
-    /// without closing them.
+    /// Delete every disk under `dir` that nothing holds, and every lock file nothing holds with
+    /// no disk beside it: what sandboxes whose process ended without closing them left.
     pub(super) fn sweep(dir: &Path) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "ext4")
-                && let Ok(Some(_held)) = hold(&path)
-            {
-                let _ = delete(&path);
+        let disks: BTreeSet<PathBuf> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let disk = name.strip_suffix(".lock").unwrap_or(&name);
+                disk.ends_with(".ext4").then(|| dir.join(disk))
+            })
+            .collect();
+        for disk in disks {
+            if let Ok(Some(_held)) = hold(&disk) {
+                let _ = delete(&disk);
             }
         }
     }
@@ -167,5 +173,19 @@ mod tests {
         Upper::sweep(dir.path());
         assert!(!path.exists());
         assert!(!lock_path(&path).exists());
+    }
+
+    #[test]
+    fn a_lock_file_nothing_holds_without_a_disk_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        // What a process that ended before making its disk leaves.
+        let lock = lock_path(&dir.path().join("early.ext4"));
+        fs::write(&lock, b"").unwrap();
+        let held = Upper::create(dir.path(), "held", 2).unwrap().unwrap();
+        fs::remove_file(&held.path).unwrap();
+
+        Upper::sweep(dir.path());
+        assert!(!lock.exists());
+        assert!(lock_path(&held.path).is_file(), "one held is not swept");
     }
 }

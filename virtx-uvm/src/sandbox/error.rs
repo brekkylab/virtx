@@ -30,7 +30,7 @@ pub enum Error {
     #[error(transparent)]
     Image(#[from] ImageStoreError),
 
-    /// What it keeps on this host beside its machine's disk -- the owner of its upper disk, its
+    /// What it keeps on this host beside its machine's disk -- the lock of its upper disk, its
     /// `/abin` -- that could not be made or read.
     #[error("{context}: {source}")]
     Io {

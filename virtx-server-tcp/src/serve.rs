@@ -313,16 +313,16 @@ mod tests {
 
     use virtx_uvm::ProjectStore;
 
-    use crate::access::{Access, Identity, TokenIsUser};
+    use crate::access::{Access, Identity, Principal, TokenIsUser};
     use crate::config::Config;
-    use crate::project::{Membership as _, Owner, TcpMembership};
+    use crate::project::{Membership as _, TcpMembership};
 
     /// Every request the tester's, whatever it carries.
     struct Tester;
 
     impl Identity for Tester {
-        fn identify<'a>(&'a self, _token: Option<&'a str>) -> BoxFuture<'a, Option<String>> {
-            Box::pin(async { Some("tester".to_owned()) })
+        fn identify<'a>(&'a self, _token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+            Box::pin(async { Some(Principal::new("tester")) })
         }
     }
 
@@ -344,9 +344,9 @@ mod tests {
         async fn spawn(name: &str) -> Served {
             Served::spawn_over(name, async |home| {
                 let projects = TcpMembership::new(home);
-                let tester = Owner::User("tester".into());
+                let tester = Principal::new("tester");
                 for project in ["demo", "other"] {
-                    projects.create(&tester, project, "tester").await.unwrap();
+                    projects.create(&tester, project).await.unwrap();
                 }
                 let store = ProjectStore::new(home);
                 let access = Access::new(
@@ -406,7 +406,7 @@ mod tests {
 
         /// The directory of the tester's project `name`.
         async fn project(&self, name: &str) -> PathBuf {
-            let tester = Owner::User("tester".into());
+            let tester = Principal::new("tester");
             let projects = TcpMembership::new(&self.home);
             let id = projects.resolve(&tester, name).await.unwrap().unwrap();
             ProjectStore::new(&self.home).path(&id)

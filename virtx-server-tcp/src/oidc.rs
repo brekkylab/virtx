@@ -15,6 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::access::Principal;
+
 /// How long the keys last fetched stand before a key unknown has them fetched again.
 const REFETCH_AFTER: Duration = Duration::from_secs(60);
 
@@ -86,8 +88,9 @@ impl Oidc {
         }
     }
 
-    /// The user `token` names, if the provider signed it for the client and it is current.
-    pub async fn user(&self, token: &str) -> Option<String> {
+    /// Who `token` is from, and what it carries, if the provider signed it for the client and
+    /// it is current.
+    pub async fn principal(&self, token: &str) -> Option<Principal> {
         let header = jsonwebtoken::decode_header(token).ok()?;
         // Signed with a key pair only: a shared secret is no provider's signature.
         if matches!(
@@ -108,7 +111,11 @@ impl Oidc {
         if claim == "email" && claims.get("email_verified") != Some(&Value::Bool(true)) {
             return None;
         }
-        claims.get(claim)?.as_str().map(str::to_owned)
+        let user = claims.get(claim)?.as_str()?.to_owned();
+        let Value::Object(claims) = claims else {
+            return None;
+        };
+        Some(Principal { user, claims })
     }
 
     async fn key(&self, kid: &str) -> Option<DecodingKey> {
@@ -208,7 +215,9 @@ rABUOPQZw+SIzclThn/7Vcn7i0rAcmmlVj8sdMeJsFeMZ3CehtnTDGVK
             username_claim: "sub".into(),
             jwks_uri: Some(url),
         });
-        assert_eq!(oidc.user(&token).await.as_deref(), Some("agent"));
+        let principal = oidc.principal(&token).await.unwrap();
+        assert_eq!(principal.user, "agent");
+        assert_eq!(principal.claims["aud"], "node");
         task.abort();
     }
 }

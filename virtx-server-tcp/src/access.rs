@@ -14,27 +14,45 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
 use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer};
 
 use crate::config::Config;
 use crate::endpoints::Home;
 use crate::oidc::Oidc;
-use crate::project::{Membership, Owner, Project, TcpMembership};
+use crate::project::{Membership, TcpMembership};
 
 /// Where a home's images are served as a registry.
 pub const REGISTRY_PATH: &str = "/images/oci";
 
-/// Who a server's tokens are.
+/// Who a request is from, as its token was verified: its user, and the claims the token
+/// carries, for a [`Membership`] to decide from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Principal {
+    pub user: String,
+    pub claims: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Principal {
+    /// `user`, with no claims.
+    pub fn new(user: impl Into<String>) -> Principal {
+        Principal {
+            user: user.into(),
+            claims: serde_json::Map::new(),
+        }
+    }
+}
+
+/// Who a server's tokens are from: it authenticates, and the [`Membership`] authorizes.
 pub trait Identity: Send + Sync {
-    /// The user a request carrying `token` is sent by: `None` for a token that is no one's, or
-    /// for none where one is needed.
-    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<String>>;
+    /// Who a request carrying `token` is from: `None` for a token that is no one's, or for none
+    /// where one is needed.
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>>;
 }
 
 impl Identity for Oidc {
-    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<String>> {
-        Box::pin(async move { self.user(token?).await })
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+        Box::pin(async move { self.principal(token?).await })
     }
 }
 
@@ -147,9 +165,9 @@ impl Access {
         Ok(())
     }
 
-    /// Who a request with `headers` is sent by: `403` from an `Origin` not let in, and `401`
-    /// for a token that is no one's.
-    pub async fn user(&self, headers: &HeaderMap) -> Result<String, StatusCode> {
+    /// Who a request with `headers` is from: `403` from an `Origin` not let in, and `401` for a
+    /// token that is no one's.
+    pub async fn principal(&self, headers: &HeaderMap) -> Result<Principal, StatusCode> {
         self.origin(headers)?;
         self.identity
             .identify(bearer(headers))
@@ -157,52 +175,48 @@ impl Access {
             .ok_or(StatusCode::UNAUTHORIZED)
     }
 
-    /// The project `named` names to `user`, if they are a member of it: their own,
+    /// The project `named` names to `who`, and their role in it, if they have one: their own,
     /// [`DEFAULT_PROJECT`], where it is `None`; the project of that id, where it is one; and
-    /// otherwise the project of theirs of that name.
+    /// otherwise the one the [`Membership`] resolves the name to. The membership decides both.
     pub async fn project(
         &self,
-        user: &str,
+        who: &Principal,
         named: Option<&str>,
-    ) -> Result<Option<Project>, ProjectError> {
+    ) -> Result<Option<(ProjectId, Role)>, ProjectError> {
         let named = named.unwrap_or(DEFAULT_PROJECT);
         let id = match named.parse::<ProjectId>() {
             Ok(id) => id,
-            Err(_) => {
-                let owner = Owner::User(user.to_owned());
-                match self.membership.resolve(&owner, named).await? {
-                    Some(id) => id,
-                    None => return Ok(None),
-                }
-            }
+            Err(_) => match self.membership.resolve(who, named).await? {
+                Some(id) => id,
+                None => return Ok(None),
+            },
         };
-        let project = self.membership.project(&id).await?;
-        Ok(project.filter(|project| project.members.contains_key(user)))
+        Ok(self.membership.role(&id, who).await?.map(|role| (id, role)))
     }
 
-    /// Who a request with `headers` is sent by, and the home of the project it names, as
-    /// [`project`](Access::project) reads it: as [`user`](Access::user) refuses, `400` for a
-    /// project that is no string, and `403` for one its sender is no member of -- or that does
-    /// not exist, or has no home, which is not told apart.
-    pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
-        let user = self.user(headers).await?;
+    /// Who a request with `headers` is from, and the home of the project it names, as
+    /// [`project`](Access::project) reads it: as [`principal`](Access::principal) refuses, `400`
+    /// for a project that is no string, and `403` for one its sender has no role in -- or that
+    /// does not exist, or has no home, which is not told apart.
+    pub async fn home(&self, headers: &HeaderMap) -> Result<(Principal, Arc<Home>), StatusCode> {
+        let who = self.principal(headers).await?;
         let named = match headers.get(PROJECT_HEADER) {
             Some(named) => Some(named.to_str().map_err(|_| StatusCode::BAD_REQUEST)?),
             None => None,
         };
-        let project = self
-            .project(&user, named)
+        let (id, _) = self
+            .project(&who, named)
             .await
             .map_err(|e| {
-                eprintln!("reaching {user}'s project {named:?}: {e}");
+                eprintln!("reaching {}'s project {named:?}: {e:#}", who.user);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .ok_or(StatusCode::FORBIDDEN)?;
-        let home = self.home_of(&project.id).await.map_err(|e| {
-            eprintln!("making project {}'s home: {e:#}", project.id);
+        let home = self.home_of(&id).await.map_err(|e| {
+            eprintln!("making project {id}'s home: {e:#}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        Ok((user, home.ok_or(StatusCode::FORBIDDEN)?))
+        Ok((who, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
     /// Project `id`'s home, made as it is first reached: `None` while it is being removed, or
@@ -262,11 +276,11 @@ pub(crate) struct TokenIsUser(pub std::collections::HashSet<String>);
 
 #[cfg(test)]
 impl Identity for TokenIsUser {
-    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<String>> {
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
         Box::pin(async move {
             token
                 .filter(|user| self.0.contains(*user))
-                .map(str::to_owned)
+                .map(Principal::new)
         })
     }
 }
@@ -314,12 +328,8 @@ mod tests {
         .map(str::to_owned)
         .into();
         let projects = Arc::new(TcpMembership::new(dir.path()));
-        let owner = Owner::User("alice@example.com".into());
-        let demo = projects
-            .create(&owner, "demo", "alice@example.com")
-            .await
-            .unwrap()
-            .id;
+        let alice_is = Principal::new("alice@example.com");
+        let demo = projects.create(&alice_is, "demo").await.unwrap().id;
         let store = ProjectStore::new(dir.path());
         let access = Access::new(
             Vec::new(),
@@ -340,8 +350,8 @@ mod tests {
             home(Some("mallory"), Some("demo")).await.err(),
             Some(StatusCode::UNAUTHORIZED)
         );
-        let (user, reached) = home(alice, Some("demo")).await.unwrap();
-        assert_eq!(user, "alice@example.com");
+        let (who, reached) = home(alice, Some("demo")).await.unwrap();
+        assert_eq!(who, alice_is);
         assert_eq!(reached.root, access.store().path(&demo));
         // By its id, the same home.
         assert!(Arc::ptr_eq(
@@ -366,7 +376,7 @@ mod tests {
         let (_, own) = home(alice, None).await.unwrap();
         let own_id = access
             .membership()
-            .resolve(&owner, DEFAULT_PROJECT)
+            .resolve(&alice_is, DEFAULT_PROJECT)
             .await
             .unwrap()
             .unwrap();
@@ -417,9 +427,9 @@ mod tests {
     async fn a_project_its_homes_make_none_of_is_reached_by_no_request() {
         let dir = tempfile::tempdir().unwrap();
         let projects = Arc::new(TcpMembership::new(dir.path()));
-        let alice = Owner::User("alice".into());
-        let kept = projects.create(&alice, "kept", "alice").await.unwrap().id;
-        let gone = projects.create(&alice, "gone", "alice").await.unwrap().id;
+        let alice = Principal::new("alice");
+        let kept = projects.create(&alice, "kept").await.unwrap().id;
+        let gone = projects.create(&alice, "gone").await.unwrap().id;
         let store = ProjectStore::new(dir.path());
         let access = Access::new(
             Vec::new(),

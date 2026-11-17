@@ -1,28 +1,38 @@
-//! A server built on this one, from outside the crate: an identity and a store of projects of its
-//! own in place of the config's, and a route of its own beside the server's.
+//! A server built on this one, from outside the crate: an identity and a membership of its own
+//! in place of the config's, and a route of its own beside the server's. Its membership keeps no
+//! members: it decides from what the token grants, as a node behind a gateway does.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use http::StatusCode;
+use serde_json::json;
 use virtx_core::{DEFAULT_PROJECT, Role};
-use virtx_server_tcp::access::{Access, Identity};
+use virtx_server_tcp::access::{Access, Identity, Principal};
 use virtx_server_tcp::project::{Membership, Owner, Project};
 use virtx_server_tcp::serve;
 use virtx_uvm::{ProjectError, ProjectId, ProjectStore};
 
-/// Each token `<name>-key` is the user `<name>`'s.
+/// The token `acme-key` is an agent's, granted `acme` as its owner.
 struct Keys;
 
 impl Identity for Keys {
-    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<String>> {
-        Box::pin(async move { token?.strip_suffix("-key").map(str::to_owned) })
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+        Box::pin(async move {
+            let claims = json!({ "project": ACME, "role": "owner" });
+            let serde_json::Value::Object(claims) = claims else {
+                unreachable!()
+            };
+            (token? == "acme-key").then(|| Principal {
+                user: "agent".into(),
+                claims,
+            })
+        })
     }
 }
 
-/// The one tenant, `acme`, the one owner of the project of its name, which is its own too: as a
-/// tenant is, in a server that keeps its tenants elsewhere.
+/// The one tenant's project, `acme`, which is whoever's token grants it, and theirs alone.
 struct Tenants;
 
 const ACME: &str = "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
@@ -32,20 +42,40 @@ fn acme() -> Project {
         id: ACME.parse().unwrap(),
         owner: Owner::User("acme".into()),
         name: "acme".into(),
-        members: BTreeMap::from([("acme".to_owned(), Role::Owner)]),
+        members: BTreeMap::new(),
     }
+}
+
+/// The project `who`'s token grants, and their role in it.
+fn granted(who: &Principal) -> Option<(ProjectId, Role)> {
+    let id = who.claims.get("project")?.as_str()?.parse().ok()?;
+    let role = serde_json::from_value(who.claims.get("role")?.clone()).ok()?;
+    Some((id, role))
 }
 
 impl Membership for Tenants {
     fn resolve<'a>(
         &'a self,
-        owner: &'a Owner,
+        who: &'a Principal,
         name: &'a str,
     ) -> BoxFuture<'a, Result<Option<ProjectId>, ProjectError>> {
         Box::pin(async move {
             let acme = acme();
             let named = name == acme.name || name == DEFAULT_PROJECT;
-            Ok((*owner == acme.owner && named).then_some(acme.id))
+            let granted = granted(who).is_some_and(|(id, _)| id == acme.id);
+            Ok((granted && named).then_some(acme.id))
+        })
+    }
+
+    fn role<'a>(
+        &'a self,
+        id: &'a ProjectId,
+        who: &'a Principal,
+    ) -> BoxFuture<'a, Result<Option<Role>, ProjectError>> {
+        Box::pin(async move {
+            Ok(granted(who)
+                .filter(|(granted, _)| granted == id)
+                .map(|(_, role)| role))
         })
     }
 
@@ -58,19 +88,20 @@ impl Membership for Tenants {
 
     fn create<'a>(
         &'a self,
-        _owner: &'a Owner,
+        _who: &'a Principal,
         name: &'a str,
-        _creator: &'a str,
     ) -> BoxFuture<'a, Result<Project, ProjectError>> {
         Box::pin(async move { Err(ProjectError::AlreadyExists(name.to_owned())) })
     }
 
-    fn projects<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Project>, ProjectError>> {
+    fn projects<'a>(
+        &'a self,
+        who: &'a Principal,
+    ) -> BoxFuture<'a, Result<Vec<(Project, Role)>, ProjectError>> {
         Box::pin(async move {
-            Ok(Some(acme())
-                .filter(|acme| acme.members.contains_key(user))
-                .into_iter()
-                .collect())
+            let acme = acme();
+            let role = granted(who).and_then(|(id, role)| (id == acme.id).then_some(role));
+            Ok(role.map(|role| (acme, role)).into_iter().collect())
         })
     }
 
@@ -136,7 +167,7 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
         get("/volumes/", Some("acme-key"), Some("other")).await.0,
         StatusCode::FORBIDDEN
     );
-    // Naming none, a request is in its sender's own project, the tenant's.
+    // Naming none, a request is in the project its token grants.
     assert_eq!(
         get("/volumes/", Some("acme-key"), None).await.0,
         StatusCode::OK

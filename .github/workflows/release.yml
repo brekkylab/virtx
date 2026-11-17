@@ -30,7 +30,7 @@ jobs:
     with:
       full: true
       release: true
-    # `actions` read, for `tests (windows-x86_64)` to see whether `guest` failed while it waits.
+    # `actions` read, for the tests jobs to see whether `guest` failed while they wait for it.
     permissions:
       contents: read
       actions: read

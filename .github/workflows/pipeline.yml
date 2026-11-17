@@ -13,9 +13,11 @@
 #   guest (x86_64, aarch64)               version       the guest kernel, abin and alib
 #   lint (windows-x86_64,                 nothing       clippy with `gpu`, on this platform
 #     linux-x86_64, linux-aarch64)
-#   tests (linux-x86_64)                  guest         the crates' and packages' suites, on KVM
-#   tests (windows-x86_64)                nothing       the machine-booting suites, on WHP; takes
-#                                                       `guest`'s kernel once it has compiled
+#   tests (linux-x86_64)                  nothing       the crates' and packages' suites, on KVM
+#   tests (windows-x86_64)                nothing       the machine-booting suites, on WHP
+#
+#   Each tests job compiles its suites while `guest` builds, then takes `guest`'s parts once it
+#   has ended.
 #
 #   and, in a full run:
 #   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
@@ -723,11 +725,16 @@ jobs:
 
   # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
   # against the fixture, each booting machines, on KVM, which GitHub's Linux x86_64 runners have.
+  #
+  # Like the Windows tests, it starts with the run rather than after `guest`: it compiles all
+  # of it while `guest` builds, then takes the kernel and abin once `guest` has ended.
   tests-linux:
     name: tests (linux-x86_64)
-    needs: guest
     runs-on: ubuntu-26.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -767,9 +774,16 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
+      # Everything `cargo xtask test` compiles, which needs no kernel.
+      - name: Compile the tests
+        run: cargo xtask test --no-run
+
+      # `guest (x86_64)`'s, once it has ended; this job ends with it if it fails.
       - uses: ./.github/actions/guest
         with:
           arch: x86_64
+          wait: true
+          token: ${{ github.token }}
 
       # And abin, which the fixture would build again otherwise (`XTASK_ABIN_BUILT`).
       - name: Put the kernel and abin in place

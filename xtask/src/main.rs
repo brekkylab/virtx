@@ -20,6 +20,7 @@ usage: cargo xtask init     [--force]
        cargo xtask archive  [<server>...] [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
+       cargo xtask test     --no-run
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
@@ -41,7 +42,9 @@ usage: cargo xtask init     [--force]
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
-            the fixture where they name virtx or virtx-cli
+            the fixture where they name virtx or virtx-cli. With --no-run alone, compiles
+            everything `test` would -- the crates' tests, the servers, the packages' cargo
+            tests -- and runs none, which needs no guest kernel
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -212,6 +215,7 @@ fn main() -> anyhow::Result<()> {
             let args: Vec<OsString> = args.collect();
             match args.as_slice() {
                 [] => test_all(),
+                [no_run] if no_run == "--no-run" => compile_tests(),
                 // virtx-rs's tests are against the fixture too, and virtx-cli's.
                 _ if args.iter().any(|arg| arg == "virtx" || arg == "virtx-cli") => {
                     let fixture = Fixture::start()?;
@@ -682,6 +686,20 @@ fn build_gpu_deps() -> anyhow::Result<()> {
 /// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
 /// is no second one to keep working.
 fn build_servers(options: &Options) -> anyhow::Result<()> {
+    compile_servers(options)?;
+    for (_, _, binary) in options.servers() {
+        ready(
+            &options
+                .out()
+                .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
+        )?;
+    }
+    Ok(())
+}
+
+/// The servers' cargo build alone, the GPU libraries first: what [`build_servers`] does before
+/// readying each, which takes the guest kernel.
+fn compile_servers(options: &Options) -> anyhow::Result<()> {
     build_gpu_deps()?;
 
     let mut cargo = cargo();
@@ -696,16 +714,7 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
     if options.locked {
         cargo.arg("--locked");
     }
-    run(cargo, "the servers")?;
-
-    for (_, _, binary) in options.servers() {
-        ready(
-            &options
-                .out()
-                .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
-        )?;
-    }
-    Ok(())
+    run(cargo, "the servers")
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
@@ -1433,6 +1442,14 @@ fn serve_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The crates whose own tests [`test_all`] runs first, each by itself.
+const TEST_CRATES: &[&str] = &[
+    "virtx-core",
+    "virtx-uvm",
+    "virtx-server-stdio",
+    "virtx-server-tcp",
+];
+
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
 /// pytest, and virtx-node's with Node's own runner.
@@ -1461,6 +1478,45 @@ enum Outcome {
     Skipped(String),
 }
 
+/// The servers the fixture serves, as it builds them.
+fn fixture_servers() -> Options {
+    Options {
+        components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
+        prefix: None,
+        debug: false,
+        target: None,
+        locked: false,
+    }
+}
+
+/// Everything [`test_all`] compiles, compiled the same way and run not at all: the crates'
+/// tests, the fixture's servers and the packages' cargo tests. It takes no guest kernel, so CI
+/// does it while the kernel is still being built elsewhere.
+fn compile_tests() -> anyhow::Result<()> {
+    if let Some(why) = servers_unready()? {
+        bail!("{why} -- `cargo xtask init` readies the servers");
+    }
+    for &name in TEST_CRATES {
+        cargo_in_root(
+            &["test", "--no-run", "-p", name],
+            &format!("the tests of {name}"),
+        )?;
+    }
+    compile_servers(&fixture_servers())?;
+    for (name, _, commands) in PACKAGES {
+        for argv in commands
+            .iter()
+            .filter(|argv| argv[..2] == ["cargo", "test"])
+        {
+            let mut args = vec!["test", "--no-run"];
+            args.extend(&argv[2..]);
+            cargo_in_root(&args, &format!("the tests of {name}"))?;
+        }
+    }
+    eprintln!("xtask: compiled, nothing run");
+    Ok(())
+}
+
 /// Every suite: the crates' own tests, then the packages' against one fixture, each run whatever
 /// came before, and how each ended. The servers' suites and the packages' are skipped until the
 /// servers can be built here.
@@ -1474,13 +1530,7 @@ fn test_all() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let crates = [
-        "virtx-core",
-        "virtx-uvm",
-        "virtx-server-stdio",
-        "virtx-server-tcp",
-    ];
-    for name in crates {
+    for &name in TEST_CRATES {
         let outcome = match &unready {
             Some(why) if name != CLIENT_PACKAGE => Outcome::Skipped(why.clone()),
             _ => match run_target(vec!["-p".into(), name.into()], true, &[]) {
@@ -1560,13 +1610,7 @@ impl Fixture {
             bail!("{why} -- `cargo xtask init` readies the servers");
         }
         kernel_library().context("no guest kernel -- `cargo xtask build kernel` builds it")?;
-        let options = Options {
-            components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
-            prefix: None,
-            debug: false,
-            target: None,
-            locked: false,
-        };
+        let options = fixture_servers();
         build_servers(&options)?;
         // The programs as they stand, for the tests that make a sandbox with them -- unless
         // `XTASK_ABIN_BUILT` says the ones there were built from this tree already (CI hands

@@ -626,7 +626,7 @@ jobs:
         run: |
           dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
           py=/opt/python/cp312-cp312/bin
-          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako
+          "$py/pip" install -q --root-user-action=ignore meson==1.12.1 ninja==1.13.2 pyyaml==6.0.3 mako==1.4.3
           echo "$py" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 

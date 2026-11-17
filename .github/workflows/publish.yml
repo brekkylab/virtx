@@ -57,6 +57,8 @@ env:
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
   TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  # The twine `verify` checks the wheels with and `pypi` uploads them with.
+  TWINE: twine==7.0.0
 
 jobs:
   verify:
@@ -148,7 +150,7 @@ jobs:
             got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta")"
             [ "$(pep440 <<< "$got")" = "$name $version" ] || { echo "::error::$whl's metadata says $got"; exit 1; }
           done
-          pipx run twine check --strict dist/*.whl
+          pipx run --spec "$TWINE" twine check --strict dist/*.whl
 
       # Both crates are the tag's version, and package: `cargo package` builds each from what
       # it packed, `virtx` against the `virtx-core` packed beside it.
@@ -215,7 +217,7 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: pipx run twine upload --non-interactive --skip-existing dist/*.whl
+        run: pipx run --spec "$TWINE" twine upload --non-interactive --skip-existing dist/*.whl
 
   crates:
     needs: verify

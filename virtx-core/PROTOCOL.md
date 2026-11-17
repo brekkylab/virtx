@@ -79,6 +79,7 @@ A server answers `401 Unauthorized` to a request without valid credentials, and 
 
 Everything a server keeps, its images, snapshots, volumes and sandboxes, belongs to a project, and a project to its members, each in a role.
 A request names its project in the `virtx-project` header, the same over either transport.
+A server that answers browsers from other [origins](#origin) lists `virtx-project` in its CORS preflight's `Access-Control-Allow-Headers`, or a browser sends no request naming a project.
 A request that names none belongs to its sender's own project, which the server makes the first time, its sender its owner.
 
 - A project's name is lower-case letters, digits, `.`, `_` and `-`, up to 128 characters, and starts with neither `.` nor `-`.

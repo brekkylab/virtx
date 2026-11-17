@@ -620,4 +620,30 @@ mod tests {
         let anew = again.create(&alice, "demo", "alice").await.unwrap();
         assert_ne!(anew.id, demo.id);
     }
+
+    /// A create that failed writing leaves a directory with no `project.json`: no project, and
+    /// no name taken, so the user's own and a project of that name are made after it.
+    #[tokio::test]
+    async fn a_create_that_did_not_end_takes_no_name() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TcpMembership::new(root.path());
+        let alice = Owner::User("alice".into());
+        let left = ProjectId::new();
+        let dir = ProjectStore::new(root.path()).path(&left);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("project.json.part"), "{").unwrap();
+
+        assert_eq!(store.project(&left).await.unwrap(), None);
+        assert_eq!(store.projects("alice").await.unwrap(), []);
+        let own = store
+            .resolve(&alice, DEFAULT_PROJECT)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(own, left);
+        let kept = store.project(&own).await.unwrap().unwrap();
+        assert_eq!(kept.members.get("alice"), Some(&Role::Owner));
+        let demo = store.create(&alice, "demo", "alice").await.unwrap();
+        assert_ne!(demo.id, left);
+    }
 }

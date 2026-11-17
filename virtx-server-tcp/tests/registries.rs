@@ -1,13 +1,27 @@
 //! A server whose config names a registry on a private address, in a process of its own: a
 //! process's registry proxy is set once.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use serde_json::json;
 use tokio::io::AsyncReadExt as _;
 use virtx_core::{Auth, Client};
+use virtx_server_tcp::access::{Access, Identity, Principal};
 use virtx_server_tcp::config::Config;
-use virtx_server_tcp::serve;
+use virtx_server_tcp::project::TcpMembership;
+use virtx_server_tcp::{endpoints, serve};
+use virtx_uvm::ProjectStore;
+
+/// Every request the tester's, whatever it carries.
+struct Tester;
+
+impl Identity for Tester {
+    fn identify<'a>(&'a self, _token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+        Box::pin(async { Some(Principal::new("tester")) })
+    }
+}
 
 /// A pull from the registry the config names reaches it on this host's loopback, and a pull
 /// from one beside it, which the config does not name, fails without a connection.
@@ -23,11 +37,20 @@ async fn an_image_job_connects_to_the_private_registry_its_config_names() {
 
     let config = Config::parse(json!({
         "listen": "127.0.0.1:0",
-        "home": root,
+        "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
         "private_registries": [named_host],
     }))
     .unwrap();
-    let (_, _, router) = serve::configured(&config).unwrap();
+    endpoints::set_registry_proxy(Arc::new(config.registries().unwrap()));
+    let store = ProjectStore::new(&root);
+    let access = Access::new(
+        Vec::new(),
+        Arc::new(Tester),
+        Arc::new(TcpMembership::new(&root)),
+        store.clone(),
+        Arc::new(store),
+    );
+    let router = serve::router(Arc::new(access), axum::Router::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, router).await });

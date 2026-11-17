@@ -820,6 +820,12 @@ impl Sandbox {
         Upper::sweep(&root.join(SANDBOX));
         Abin::sweep(&Abin::dir(root));
     }
+
+    /// Whether a sandbox, of this process or another, lives under `root`: one holds an upper
+    /// disk there from before its machine boots until it is closed.
+    pub fn lives_under(root: &Path) -> bool {
+        Upper::held(&root.join(SANDBOX))
+    }
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

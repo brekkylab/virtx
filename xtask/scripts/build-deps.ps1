@@ -17,23 +17,6 @@ function Invoke-Checked([string] $what, [scriptblock] $block) {
     if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" }
 }
 
-Write-Output 'Setting up the MSVC environment'
-
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) { Write-Error 'vswhere.exe not found; install the MSVC build tools' }
-$vs = & $vswhere -latest -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { Write-Error 'no Visual Studio installation with the x64 C++ tools' }
-cmd /c "`"$(Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat')`" >nul 2>&1 && set" | ForEach-Object {
-    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
-}
-
-$clangcl = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue).Source
-if (-not $clangcl) { Write-Error 'clang-cl.exe is not on PATH; install LLVM' }
-$lldLink = (Get-Command lld-link.exe -ErrorAction SilentlyContinue).Source
-$llvmLib = (Get-Command llvm-lib.exe -ErrorAction SilentlyContinue).Source
-if (-not (Get-Command pkg-config.exe -ErrorAction SilentlyContinue)) { Write-Error 'pkg-config.exe is not on PATH' }
-
 $build = Join-Path $root 'build'
 $venv = Join-Path $build 'meson-venv'
 $meson = Join-Path $venv 'Scripts\meson.exe'
@@ -54,11 +37,53 @@ foreach ($sub in @($epoxySrc, $virglrendererSrc)) {
     }
 }
 
+# What the installed libraries were built from: this script, both submodules' commits and any
+# change in their trees, where they are installed (their .pc files name the prefixes), and the
+# Vulkan SDK if there is one. The same as the last build's, and nothing is built again -- which
+# is also what lets CI keep them in a cache.
+function Get-TreeState([string] $dir) {
+    $head = & git -C $dir rev-parse HEAD
+    $changes = @(& git -C $dir diff HEAD) + @(& git -C $dir ls-files -o --exclude-standard)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($changes -join "`n"))
+    "$head $([BitConverter]::ToString($digest) -replace '-', '')"
+}
+$stamp = Join-Path $virglrendererPrefix '.virtx-stamp'
+$want = (@(
+    $build
+    (Get-FileHash -Algorithm SHA256 $PSCommandPath).Hash
+    Get-TreeState $epoxySrc
+    Get-TreeState $virglrendererSrc
+    "$env:VULKAN_SDK"
+) -join "`n").TrimEnd()
+if (-not $Rebuild -and (Test-Path (Join-Path $virglrendererPrefix 'lib\pkgconfig\virglrenderer.pc')) -and
+    (Test-Path $stamp) -and ((Get-Content -Raw $stamp).TrimEnd() -eq $want)) {
+    Write-Output "virglrenderer up to date ($(& git -C $virglrendererSrc rev-parse --short HEAD))"
+    exit 0
+}
+
 if ($Rebuild) {
     Remove-Item -Recurse -Force $epoxyBuild, $epoxyPrefix, $virglrendererBuild, $virglrendererPrefix `
         -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force -Path $build, $pcdir | Out-Null
+
+Write-Output 'Setting up the MSVC environment'
+
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path $vswhere)) { Write-Error 'vswhere.exe not found; install the MSVC build tools' }
+$vs = & $vswhere -latest -products * `
+    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vs) { Write-Error 'no Visual Studio installation with the x64 C++ tools' }
+cmd /c "`"$(Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat')`" >nul 2>&1 && set" | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
+}
+
+$clangcl = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue).Source
+if (-not $clangcl) { Write-Error 'clang-cl.exe is not on PATH; install LLVM' }
+$lldLink = (Get-Command lld-link.exe -ErrorAction SilentlyContinue).Source
+$llvmLib = (Get-Command llvm-lib.exe -ErrorAction SilentlyContinue).Source
+if (-not (Get-Command pkg-config.exe -ErrorAction SilentlyContinue)) { Write-Error 'pkg-config.exe is not on PATH' }
 
 if (-not (Test-Path $meson)) {
     $python = Get-Command python.exe, python3.exe -All -ErrorAction SilentlyContinue |
@@ -212,3 +237,4 @@ foreach ($pc in 'vulkan.pc', 'epoxy.pc') {
 $env:PKG_CONFIG_PATH = $virglrendererPcdir
 $version = & pkg-config --modversion virglrenderer
 Write-Output "virglrenderer $version installed to $virglrendererPrefix"
+Set-Content -Encoding ascii $stamp $want

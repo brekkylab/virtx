@@ -5,9 +5,8 @@ import os
 import subprocess
 import sys
 
-from conftest import ALPINE, familiar, tags
-
 import virtx
+from conftest import ALPINE, familiar, tags
 from virtx import Client
 
 

@@ -12,7 +12,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
 import virtx
 from virtx import BearerAuth, Client
 
@@ -87,8 +86,8 @@ def client(server: str) -> Iterator[Client]:
 def tcp_client() -> Iterator[Client]:
     """A client of the ``virtx-server-tcp`` served for the run, with its token and project."""
     auth = BearerAuth(fixture("VIRTX_TEST_TOKEN"))
-    headers = {"virtx-project": fixture("VIRTX_TEST_PROJECT")}
-    with Client.connect(fixture("VIRTX_TEST_URL"), auth, headers) as client:
+    project = fixture("VIRTX_TEST_PROJECT")
+    with Client.connect(fixture("VIRTX_TEST_URL"), auth, project) as client:
         yield client
 
 

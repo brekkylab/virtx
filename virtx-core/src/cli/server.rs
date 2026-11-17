@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use clap::Args;
 use tokio::process::Command;
 
-use crate::{Auth, Client, ensure_virtx};
+use crate::{Auth, Client, PROJECT_HEADER, ensure_virtx};
 
 /// The bearer token the server reached over HTTP wants, taken from the environment alone so it
 /// is never on a command line.
@@ -19,9 +19,6 @@ const HOST: &str = "VIRTX_HOST";
 /// The project when `--project` is not given.
 const PROJECT: &str = "VIRTX_PROJECT";
 
-/// The header a request to the server reached over HTTP names its project in.
-const PROJECT_HEADER: &str = "virtx-project";
-
 #[derive(Debug, PartialEq, Args)]
 pub(crate) struct ServerArgs {
     /// The server's base URL, reached over HTTP with `$VIRTX_TOKEN` as its bearer token if set;
@@ -29,8 +26,9 @@ pub(crate) struct ServerArgs {
     #[arg(short = 'H', long, global = true, value_name = "URL")]
     pub(crate) host: Option<String>,
 
-    /// The project the requests belong to, by its name in the server's config, sent to a host as
-    /// the `virtx-project` header; if absent, `$VIRTX_PROJECT`. A server started here takes none.
+    /// The project the requests belong to -- a project of the user's by its name, or any by its
+    /// id -- sent as the `virtx-project` header; if absent, `$VIRTX_PROJECT`, and without
+    /// either, the user's own.
     #[arg(long, global = true, value_name = "NAME")]
     pub(crate) project: Option<String>,
 
@@ -50,42 +48,46 @@ pub(crate) fn host(args: &ServerArgs) -> Option<String> {
     std::env::var(HOST).ok().filter(|url| !url.is_empty())
 }
 
-/// The project the requests to a host belong to, if `args` and the environment name one:
-/// `--project`, or else `$VIRTX_PROJECT`.
+/// The project the requests belong to, if `args` and the environment name one: `--project`, or
+/// else `$VIRTX_PROJECT`.
 pub(crate) fn project(args: &ServerArgs) -> Option<String> {
     args.project
         .clone()
         .or_else(|| std::env::var(PROJECT).ok().filter(|name| !name.is_empty()))
 }
 
-/// A client of the server `args` names.
+/// A client of the server `args` names, in the project they name.
 pub(crate) async fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
-    if let Some(url) = host(args) {
-        let auth = match std::env::var(TOKEN) {
-            Ok(token) if !token.is_empty() => Auth::Bearer { token },
-            _ => Auth::None,
-        };
-        let mut headers = http::HeaderMap::new();
-        if let Some(project) = project(args) {
-            let value = http::HeaderValue::from_str(&project).with_context(|| {
-                format!("the project {project:?} cannot be sent in the {PROJECT_HEADER} header")
-            })?;
-            headers.insert(PROJECT_HEADER, value);
+    let client = match host(args) {
+        Some(url) => {
+            let auth = match std::env::var(TOKEN) {
+                Ok(token) if !token.is_empty() => Auth::Bearer { token },
+                _ => Auth::None,
+            };
+            Client::connect(&url, auth, http::HeaderMap::new())
+                .with_context(|| format!("reaching {url}"))?
         }
-        return Client::connect(&url, auth, headers).with_context(|| format!("reaching {url}"));
-    }
-    let program = match &args.server {
-        Some(program) => program.clone(),
-        None => ensure_virtx().await.context("fetching the server")?,
+        None => {
+            let program = match &args.server {
+                Some(program) => program.clone(),
+                None => ensure_virtx().await.context("fetching the server")?,
+            };
+            Client::spawn(Command::new(&program)).map_err(|error| {
+                let started = format!("starting {}", program.display());
+                if error.kind() == io::ErrorKind::NotFound {
+                    anyhow::Error::new(error).context(format!("{started}: no such program"))
+                } else {
+                    anyhow::Error::new(error).context(started)
+                }
+            })?
+        }
     };
-    Client::spawn(Command::new(&program)).map_err(|error| {
-        let started = format!("starting {}", program.display());
-        if error.kind() == io::ErrorKind::NotFound {
-            anyhow::Error::new(error).context(format!("{started}: no such program"))
-        } else {
-            anyhow::Error::new(error).context(started)
-        }
-    })
+    if let Some(project) = project(args) {
+        client.set_project(Some(&project)).with_context(|| {
+            format!("the project {project:?} cannot be sent in the {PROJECT_HEADER} header")
+        })?;
+    }
+    Ok(client)
 }
 
 #[cfg(test)]

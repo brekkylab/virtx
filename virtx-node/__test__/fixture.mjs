@@ -21,8 +21,9 @@ const library =
 execFileSync('cargo', ['build', '-p', 'virtx-core', '--lib'], { cwd: root, stdio: 'inherit' })
 virtx.load(process.env[virtx.LIBRARY_ENV] || path.join(target, 'debug', library))
 
-// What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`, and
-// `url`, `token` and `project`, the `virtx-server-tcp` it serves.
+// What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`;
+// `url`, `token` and `project`, the `virtx-server-tcp` it serves; and `users`, a token of each
+// of the members of its other projects (alice, bob, carol) by user, as JSON.
 export function fixture() {
   const named = {}
   for (const [key, name] of [
@@ -30,8 +31,12 @@ export function fixture() {
     ['url', 'VIRTX_TEST_URL'],
     ['token', 'VIRTX_TEST_TOKEN'],
     ['project', 'VIRTX_TEST_PROJECT'],
+    ['users', 'VIRTX_TEST_USERS'],
   ]) {
-    assert.ok(process.env[name], `${name} is not set: run these with \`npm test\`, under \`cargo xtask fixture\``)
+    assert.ok(
+      process.env[name],
+      `${name} is not set: run these with \`npm test\`, under \`cargo xtask fixture\``,
+    )
     named[key] = process.env[name]
   }
   return named
@@ -57,7 +62,9 @@ export function familiar(reference) {
 
 // Every tag on the server's images, as the tests name it, with the digest it points at.
 export async function tags(client) {
-  return Object.fromEntries((await client.listImage()).map((image) => [familiar(image.reference), image.digest]))
+  return Object.fromEntries(
+    (await client.listImage()).map((image) => [familiar(image.reference), image.digest]),
+  )
 }
 
 // `ALPINE` on the server, pulled unless it is there already, and its digest. Docker Hub limits

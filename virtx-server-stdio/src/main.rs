@@ -1,25 +1,42 @@
 //! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
 //! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
-//! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
-//! this host keeps is that one client's.
+//! answered on stdin and stdout to the client that spawned it, until it closes stdin. That client
+//! is the host's admin, who reaches every project here, each a directory of its own in the cache
+//! (see [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those
+//! a `virtx-server-tcp` over the same cache keeps for its users, by id.
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod endpoints;
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use anyhow::Context as _;
 use axum::Extension;
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse as _;
 use axum::routing::any;
+use http::HeaderMap;
 use tower::ServiceExt as _;
-use virtx_core::serve_stdio;
-use virtx_uvm::{ImageStore, RegistryServer};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
+use virtx_uvm::{
+    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    RegistryServer, Sandbox,
+};
 
-use crate::endpoints::Home;
+use crate::endpoints::{Home, Refused, forbidden, invalid};
 
 /// What this binary is spawned with to be a machine.
 const MACHINE_SUBCOMMAND: &str = "vm";
+
+/// Where a home's images are served as a registry.
+const REGISTRY_PATH: &str = "/images/oci";
 
 fn main() -> anyhow::Result<()> {
     // Before any runtime: this process is about to become a machine and never come back.
@@ -37,7 +54,8 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn serve() -> anyhow::Result<()> {
-    let (app, home) = app(&virtx_uvm::cache_root())?;
+    let root = virtx_uvm::cache_root();
+    let (app, host) = app(&root).await?;
     let handle = move |request: http::Request<_>| {
         let app = app.clone();
         async move {
@@ -47,25 +65,216 @@ async fn serve() -> anyhow::Result<()> {
     };
     let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
     // The client is gone, and every sandbox was its.
-    tokio::task::spawn_blocking(move || home.close_all()).await?;
+    tokio::task::spawn_blocking(move || host.close_all()).await?;
     Ok(served?)
 }
 
-/// Everything served over `root`: the endpoints, from its home, and the images' registry.
-fn app(root: &std::path::Path) -> anyhow::Result<(axum::Router, Arc<Home>)> {
-    let images = ImageStore::new(root.join("images"))?;
-    let home = Arc::new(Home::new(images.clone(), root)?);
-    let registry = Arc::new(RegistryServer::new(images, "/images/oci")?);
-    let images = move |request: axum::extract::Request| {
-        let registry = Arc::clone(&registry);
-        async move { registry.handle(request).await.map(axum::body::Body::new) }
+/// Everything served over `root`: the endpoints and the images' registry, each answered from the
+/// home of the project its request names, and the projects themselves.
+async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
+    let host = Arc::new(Host::open(root).await?);
+    let reading = Arc::clone(&host);
+    let images = move |request: Request| {
+        let host = Arc::clone(&reading);
+        async move {
+            match host.home(request.headers()).await {
+                Ok(home) => home
+                    .registry()
+                    .handle(request)
+                    .await
+                    .map(axum::body::Body::new)
+                    .into_response(),
+                Err(refused) => refused.into_response(),
+            }
+        }
     };
+    let reaching = Arc::clone(&host);
     let app = endpoints::router()
-        .layer(Extension(Arc::clone(&home)))
+        .layer(axum::middleware::from_fn(
+            move |mut request: Request, next: Next| {
+                let host = Arc::clone(&reaching);
+                async move {
+                    match host.home(request.headers()).await {
+                        Ok(home) => {
+                            request.extensions_mut().insert(home);
+                            next.run(request).await
+                        }
+                        Err(refused) => refused.into_response(),
+                    }
+                }
+            },
+        ))
+        .merge(endpoints::projects().layer(Extension(Arc::clone(&host))))
         .route("/images/oci/v2", any(images.clone()))
         .route("/images/oci/v2/", any(images.clone()))
         .route("/images/oci/v2/{*rest}", any(images));
-    Ok((app, home))
+    Ok((app, host))
+}
+
+/// The projects this host keeps, every one the client's to reach, the home of each made as it
+/// is first reached.
+pub struct Host {
+    store: ProjectStore,
+    /// Each project's home, by id.
+    /// `None` for a project being removed or removed, which no request reaches.
+    homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
+}
+
+impl Host {
+    /// The projects under `root`, what was kept at `root` before moved into the client's own
+    /// (see [`adopt_unprojected`]), and the home of each made now, so that its sandboxes left
+    /// from before are swept as the server starts.
+    async fn open(root: &Path) -> anyhow::Result<Host> {
+        let host = Host {
+            store: ProjectStore::new(root),
+            homes: Mutex::default(),
+        };
+        let own = host.project(None)?.context("the client's own project")?;
+        adopt_unprojected(root, &host.store.path(&own.id))?;
+        for id in host.store.list()? {
+            host.home_of(&id)?;
+        }
+        Ok(host)
+    }
+
+    pub fn store(&self) -> &ProjectStore {
+        &self.store
+    }
+
+    /// The project `named` names, if any: the client's own, [`DEFAULT_PROJECT`], where it is
+    /// `None`, made if it is not there; the project of that id, where it is one, whoever's it
+    /// is; and otherwise the admin's project of that name.
+    pub fn project(&self, named: Option<&str>) -> Result<Option<Project>, ProjectError> {
+        let named = named.unwrap_or(DEFAULT_PROJECT);
+        if let Ok(id) = named.parse::<ProjectId>() {
+            return self.store.read(&id);
+        }
+        if let Some(project) = self.store.find(&Owner::Admin, named)? {
+            return Ok(Some(project));
+        }
+        if named != DEFAULT_PROJECT {
+            return Ok(None);
+        }
+        match self.create(DEFAULT_PROJECT) {
+            Ok(project) => Ok(Some(project)),
+            // Made by a `virtx-stdio` beside this one.
+            Err(ProjectError::AlreadyExists(_)) => self.store.find(&Owner::Admin, named),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Every project here, whoever's, by name.
+    pub fn projects(&self) -> Result<Vec<Project>, ProjectError> {
+        let mut all = self.store.records()?;
+        all.sort_by(|a, b| (&a.name, &a.owner).cmp(&(&b.name, &b.owner)));
+        Ok(all)
+    }
+
+    /// Make the admin's project `name`: refused where the admin has one named so.
+    pub fn create(&self, name: &str) -> Result<Project, ProjectError> {
+        self.store.create(&Owner::Admin, name, BTreeMap::new())
+    }
+
+    /// The home of the project `headers` name, or of the client's own where they name none:
+    /// `403` for a project not here.
+    async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
+        let named = match headers.get(PROJECT_HEADER) {
+            None => None,
+            Some(named) => Some(
+                named
+                    .to_str()
+                    .map_err(|_| invalid("the virtx-project header is not a project's name"))?,
+            ),
+        };
+        let project = self
+            .project(named)
+            .map_err(endpoints::internal)?
+            .ok_or_else(|| forbidden(format!("no project here is {named:?}")))?;
+        let home = self.home_of(&project.id).map_err(|e| {
+            endpoints::internal(format!("making project {}'s home: {e:#}", project.name))
+        })?;
+        home.ok_or_else(|| forbidden(format!("project {} is being removed", project.name)))
+    }
+
+    /// Project `id`'s home, its images its own: `None` once it is being removed.
+    fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+        let mut homes = self.homes.lock().unwrap();
+        if let Some(home) = homes.get(id) {
+            return Ok(home.clone());
+        }
+        let dir = self.store.path(id);
+        let images = ImageStore::new(dir.join("images"))?;
+        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let home = Arc::new(Home::new(images, registry, &dir)?);
+        homes.insert(*id, Some(Arc::clone(&home)));
+        Ok(Some(home))
+    }
+
+    /// Take project `id`'s home away, closed and its image jobs cancelled, for it to be removed:
+    /// no request reaches it from now on, or until [`release`](Host::release) where the removal
+    /// fails. `false`, and nothing taken, while a sandbox lives or is being made in it, or it is
+    /// being removed already.
+    pub fn close(&self, id: &ProjectId) -> bool {
+        let mut homes = self.homes.lock().unwrap();
+        match homes.get(id) {
+            Some(None) => return false,
+            Some(Some(home)) if !home.close() => return false,
+            None if Sandbox::lives_under(&self.store.path(id)) => return false,
+            _ => {}
+        }
+        if let Some(Some(home)) = homes.insert(*id, None) {
+            home.close_all();
+        }
+        true
+    }
+
+    /// Let requests reach project `id` again, once its removal has failed.
+    pub fn release(&self, id: &ProjectId) {
+        self.homes.lock().unwrap().remove(id);
+    }
+
+    /// Close every sandbox of every home, as removing each does: blocks until each machine has
+    /// stopped and synced what it wrote.
+    fn close_all(&self) {
+        let homes: Vec<_> = self
+            .homes
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        for home in homes {
+            home.close_all();
+        }
+    }
+}
+
+/// Move what this host kept before it kept projects, at `root` itself, into `default`, the
+/// directory of the client's own project: once, while it has none of it.
+fn adopt_unprojected(root: &Path, default: &Path) -> anyhow::Result<()> {
+    const KEPT: [&str; 3] = ["images", "sandbox", "volume"];
+    if KEPT.iter().any(|kept| default.join(kept).exists()) {
+        return Ok(());
+    }
+    for kept in KEPT {
+        let from = root.join(kept);
+        if !from.exists() {
+            continue;
+        }
+        fs::create_dir_all(default).with_context(|| format!("making {}", default.display()))?;
+        match fs::rename(&from, default.join(kept)) {
+            Ok(()) => {}
+            // Another `virtx-stdio`, starting beside this one, moved it first.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("moving {} into the client's own project", from.display())
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -87,28 +296,36 @@ mod tests {
 
     use super::*;
 
-    /// The app over a home of its own, served as over stdio, and a client of it; the home is
+    /// The app over a root of its own, served as over stdio, and a client of it; the root is
     /// removed when this drops.
     struct Server {
         client: Client,
+        root: PathBuf,
+        /// The root of the client's own project, which it reaches naming none.
         home: PathBuf,
         /// The app the client is served, for a request no client sends.
         app: axum::Router,
     }
 
     impl Server {
-        fn spawn(name: &str) -> Server {
-            Server::spawn_after(name, |_, _| {})
+        async fn spawn(name: &str) -> Server {
+            Server::spawn_after(name, |_, _| {}).await
         }
 
-        /// `spawn`, with `after` run once the app has answered each request, given the home
-        /// and the request's path: for what another client does between a client's requests.
-        fn spawn_after(name: &str, after: impl Fn(&Path, &str) + Send + Sync + 'static) -> Server {
-            let home =
+        /// `spawn`, with `after` run once the app has answered each request, given the client's
+        /// own project's root and the request's path: for what another client does between a client's
+        /// requests.
+        async fn spawn_after(
+            name: &str,
+            after: impl Fn(&Path, &str) + Send + Sync + 'static,
+        ) -> Server {
+            let root =
                 std::env::temp_dir().join(format!("virtx-stdio-app-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&home);
-            std::fs::create_dir_all(&home).unwrap();
-            let (app, _) = app(&home).unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let (app, host) = app(&root).await.unwrap();
+            let own = host.project(None).unwrap().unwrap();
+            let home = host.store().path(&own.id);
             let served_app = app.clone();
             let after = Arc::new(after);
             let served = home.clone();
@@ -128,6 +345,7 @@ mod tests {
             tokio::spawn(serve_stdio(handle, input, output));
             Server {
                 client: Client::over_stream(pipe),
+                root,
                 home,
                 app: served_app,
             }
@@ -149,7 +367,7 @@ mod tests {
 
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.home);
+            let _ = std::fs::remove_dir_all(&self.root);
         }
     }
 
@@ -167,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn what_cannot_be_built_is_refused_before_it_starts() {
-        let server = Server::spawn("build-refused");
+        let server = Server::spawn("build-refused").await;
         let built = server
             .client
             .build_image(Recipe::new("alpine:3.20"), "not a reference")
@@ -183,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn creates_lists_and_removes_a_volume() {
-        let server = Server::spawn("volume");
+        let server = Server::spawn("volume").await;
         let create = async |name: Option<&str>| server.client.create_volume(name).await;
         assert_eq!(create(Some("data")).await.unwrap().name, "data");
         assert_eq!(status(create(Some("data")).await), 409);
@@ -218,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mount_is_kept_at_a_path_until_it_is_removed() {
-        let server = Server::spawn("mount");
+        let server = Server::spawn("mount").await;
         server.client.create_volume(Some("v")).await.unwrap();
         let mount = async |path: &str| {
             let source = MountSource::Notion {
@@ -259,7 +477,7 @@ mod tests {
     /// Refused before any machine is booted.
     #[tokio::test]
     async fn a_sandbox_that_cannot_be_is_refused_before_it_boots() {
-        let server = Server::spawn("sandbox-refused");
+        let server = Server::spawn("sandbox-refused").await;
         let digest = server.file_image("here:latest");
         let refused =
             async |args: SandboxCreateArgs| status(server.client.create_sandbox(&args).await);
@@ -357,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_files_of_a_volume_are_written_listed_moved_and_read_back() {
-        let server = Server::spawn("volume-files");
+        let server = Server::spawn("volume-files").await;
         server.client.create_volume(Some("data")).await.unwrap();
         let client = &server.client;
         let volume = FileRoot::Volume("data".into());
@@ -524,7 +742,7 @@ mod tests {
     /// endpoints.
     #[tokio::test]
     async fn the_images_are_a_registry_beside_the_endpoints() {
-        let server = Server::spawn("registry");
+        let server = Server::spawn("registry").await;
         let digest = server.file_image("alpine:3.21");
         let listed = server.client.list_image().await.unwrap();
         assert_eq!(listed.len(), 1, "{listed:?}");
@@ -542,7 +760,8 @@ mod tests {
                 let store = ImageStore::new(home.join("images")).unwrap();
                 store.remove_tag(&"gone:latest".parse().unwrap()).unwrap();
             }
-        });
+        })
+        .await;
         let kept = server.file_image("kept:latest");
         server.file_image("gone:latest");
         let listed = server.client.list_image().await.unwrap();
@@ -557,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_prune_takes_an_old_untagged_image() {
-        let server = Server::spawn("prune");
+        let server = Server::spawn("prune").await;
         let tagged = server.file_image("app:v1");
         let store = ImageStore::new(server.home.join("images")).unwrap();
         let mut tree = FsTree::new();
@@ -597,6 +816,244 @@ mod tests {
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
 
+    /// The client owns every project: its own, `default`, there from the start, and each it
+    /// makes. A project's things are its own, and go with it.
+    #[tokio::test]
+    async fn the_client_makes_reaches_and_removes_its_projects() {
+        let server = Server::spawn("projects").await;
+        let send = async |method: &str, path: &str, project: Option<&str>, body: &str| {
+            let mut request = http::Request::builder().method(method).uri(path);
+            if let Some(project) = project {
+                request = request.header("virtx-project", project);
+            }
+            let request = request
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        };
+        let status = async |method, path, project, body| send(method, path, project, body).await.0;
+
+        let listed = async || -> Vec<(String, String)> {
+            let listed = send("GET", "/projects/", None, "").await.1;
+            let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+            let listed = listed.as_array().unwrap().iter();
+            listed
+                .map(|project| {
+                    assert_eq!(project["role"], "owner");
+                    assert!(project.get("owner").is_none());
+                    let field = |name: &str| project[name].as_str().unwrap().to_owned();
+                    (field("name"), field("id"))
+                })
+                .collect()
+        };
+        let own = listed().await;
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].0, "default");
+        let made = send("POST", "/projects/", None, r#"{"name": "demo"}"#).await;
+        assert_eq!(made.0, 201);
+        let made: serde_json::Value = serde_json::from_str(&made.1).unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            made,
+            serde_json::json!({"id": id, "name": "demo", "role": "owner"})
+        );
+        assert_eq!(
+            status("POST", "/projects/", None, r#"{"name": "demo"}"#).await,
+            409
+        );
+        // `default` is the client's own, and an id names no other.
+        for theirs in [
+            r#"{"name": "default"}"#,
+            r#"{"name": "Demo"}"#,
+            r#"{"name": "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b"}"#,
+        ] {
+            assert_eq!(
+                status("POST", "/projects/", None, theirs).await,
+                400,
+                "{theirs}"
+            );
+        }
+        let names: Vec<_> = listed().await.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["default", "demo"]);
+        assert_eq!(status("GET", "/projects/demo", None, "").await, 200);
+        let by_id = format!("/projects/{id}");
+        assert_eq!(status("GET", &by_id, None, "").await, 200);
+        assert_eq!(status("GET", "/projects/nowhere", None, "").await, 403);
+
+        // Each project's things are its own, by its name or its id, and a project not here is
+        // reached by no request.
+        let volume = r#"{"name": "data"}"#;
+        assert_eq!(status("POST", "/volumes/", Some("demo"), volume).await, 201);
+        assert_ne!(send("GET", "/volumes/", Some(&id), "").await.1, "[]");
+        assert_eq!(send("GET", "/volumes/", None, "").await.1, "[]");
+        assert_eq!(status("GET", "/volumes/", Some("nowhere"), "").await, 403);
+        let dir = server.root.join("project").join(&id);
+        assert!(dir.join("volume/data/files").is_dir());
+
+        assert_eq!(
+            status("GET", "/projects/demo/members/", None, "").await,
+            404
+        );
+        let member = r#"{"role": "member"}"#;
+        assert_eq!(
+            status("PUT", "/projects/demo/members/alice", None, member).await,
+            404
+        );
+
+        // A project goes with everything in it; the client's own is made again, empty.
+        assert_eq!(status("DELETE", "/projects/demo", None, "").await, 204);
+        assert!(!dir.exists());
+        assert_eq!(status("GET", "/volumes/", Some("demo"), "").await, 403);
+        assert_eq!(status("POST", "/volumes/", None, volume).await, 201);
+        assert_eq!(status("DELETE", "/projects/default", None, "").await, 204);
+        assert_eq!(send("GET", "/volumes/", None, "").await.1, "[]");
+        let again = listed().await;
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].0, "default");
+        assert_ne!(again[0].1, own[0].1);
+    }
+
+    /// The projects a `virtx-server-tcp` over the same cache keeps for its users are here too:
+    /// listed with their owners, and reached by id, the client's names its own alone.
+    #[tokio::test]
+    async fn a_user_s_projects_over_the_same_cache_are_reached_by_id() {
+        let server = Server::spawn("users-projects").await;
+        let alice = virtx_uvm::ProjectOwner::User("alice".into());
+        let members = BTreeMap::from([("alice".to_owned(), virtx_core::Role::Owner)]);
+        let store = ProjectStore::new(&server.root);
+        let theirs = store
+            .create(&alice, DEFAULT_PROJECT, members.clone())
+            .unwrap();
+        let demo = store.create(&alice, "demo", members).unwrap();
+
+        let listed: Vec<_> = server
+            .client
+            .list_project()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|project| (project.name, project.owner, project.role))
+            .collect();
+        let alice_s = Some("alice".to_owned());
+        assert_eq!(
+            listed,
+            [
+                ("default".to_owned(), None, virtx_core::Role::Owner),
+                (
+                    "default".to_owned(),
+                    alice_s.clone(),
+                    virtx_core::Role::Owner
+                ),
+                ("demo".to_owned(), alice_s.clone(), virtx_core::Role::Owner),
+            ]
+        );
+        assert_ne!(
+            server.client.get_project("default").await.unwrap().id,
+            theirs.id.to_string()
+        );
+        assert_eq!(status(server.client.get_project("demo").await), 403);
+        let by_id = server
+            .client
+            .get_project(demo.id.to_string())
+            .await
+            .unwrap();
+        assert_eq!((by_id.name, by_id.owner), ("demo".to_owned(), alice_s));
+    }
+
+    /// A project is closed for its removal only while no sandbox of this process or another lives
+    /// in it; closed, a request already in its home starts nothing, and removed, it gets no home
+    /// again.
+    #[tokio::test]
+    async fn a_project_is_closed_only_while_no_sandbox_lives_in_it() {
+        let root = std::env::temp_dir().join(format!("virtx-stdio-close-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let host = Host::open(&root).await.unwrap();
+        let demo = host.create("demo").unwrap().id;
+        let unreached = host.create("unreached").unwrap().id;
+        let home = host.home_of(&demo).unwrap().unwrap();
+
+        // An upper disk another process's sandbox holds, in a project with a home here or not.
+        for id in [demo, unreached] {
+            let sandbox = host.store().path(&id).join("sandbox");
+            fs::create_dir_all(&sandbox).unwrap();
+            let held = fs::File::create(sandbox.join("other.ext4.lock")).unwrap();
+            held.lock().unwrap();
+            assert!(!host.close(&id));
+            drop(held);
+        }
+
+        assert!(host.close(&demo));
+        let pull = http::Request::post("/images/jobs/pull/")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))
+            .unwrap();
+        let in_home = crate::endpoints::router().layer(axum::Extension(home));
+        let Ok(refused) = in_home.oneshot(pull).await;
+        assert_eq!(refused.status(), http::StatusCode::FORBIDDEN);
+        assert!(!host.close(&demo));
+        assert!(host.home_of(&demo).unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A removal forgets the project only once it holds the lock a record changes under, which
+    /// a server beside this one holds as it changes one: held from here, the removal is not
+    /// answered and the project is there; let go, it is removed.
+    #[tokio::test]
+    async fn a_project_is_forgotten_only_under_the_records_lock() {
+        let server = Server::spawn("forget-locked").await;
+        server.client.create_project("demo").await.unwrap();
+        let store = ProjectStore::new(&server.root);
+        let lock = store.lock().unwrap();
+
+        let (app, _) = app(&server.root).await.unwrap();
+        let request = http::Request::delete("/projects/demo")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let removed = tokio::spawn(async move {
+            let Ok(response) = app.oneshot(request).await;
+            response.status().as_u16()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !removed.is_finished(),
+            "it was answered while the lock was held"
+        );
+        assert!(store.find(&Owner::Admin, "demo").unwrap().is_some());
+
+        drop(lock);
+        assert_eq!(removed.await.unwrap(), 204);
+        assert_eq!(store.find(&Owner::Admin, "demo").unwrap(), None);
+    }
+
+    #[test]
+    fn what_was_kept_before_projects_is_the_client_s_own() {
+        let root = std::env::temp_dir().join(format!("virtx-stdio-adopt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("volume/data/files")).unwrap();
+        fs::create_dir_all(root.join("images/tag")).unwrap();
+        fs::create_dir_all(root.join("virtx-stdio/0.1.0")).unwrap();
+        let default = root.join("project/own");
+
+        adopt_unprojected(&root, &default).unwrap();
+        assert!(default.join("volume/data/files").is_dir());
+        assert!(default.join("images/tag").is_dir());
+        assert!(!root.join("volume").exists() && !root.join("images").exists());
+        // What is no project's stays where it was.
+        assert!(root.join("virtx-stdio/0.1.0").is_dir());
+
+        // Once only: what turns up at the root after is left there.
+        fs::create_dir_all(root.join("volume")).unwrap();
+        adopt_unprojected(&root, &default).unwrap();
+        assert!(root.join("volume").is_dir());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A file's `getetag`, as a `PROPFIND` answers it, is the entity-tag its `ETag` header is,
     /// quotes and all, so a client that sends it as `If-Match` writes over the file it read: the
     /// write lands, and the same tag again, gone stale, is refused `412`.
@@ -605,7 +1062,7 @@ mod tests {
         use axum::body::Body;
         use http::header::{ETAG, IF_MATCH};
 
-        let server = Server::spawn("getetag");
+        let server = Server::spawn("getetag").await;
         server.client.create_volume(Some("data")).await.unwrap();
         let app = server.app.clone();
         let path = "/volumes/data/files/a.txt";
@@ -660,7 +1117,7 @@ mod tests {
     async fn a_proppatch_is_answered_with_each_property_s_status() {
         use axum::body::Body;
 
-        let server = Server::spawn("proppatch");
+        let server = Server::spawn("proppatch").await;
         server.client.create_volume(Some("data")).await.unwrap();
         let volume = FileRoot::Volume("data".into());
         server
@@ -698,7 +1155,7 @@ mod tests {
         use http::header;
         use tokio::sync::oneshot;
 
-        let server = Server::spawn("conditional-writes");
+        let server = Server::spawn("conditional-writes").await;
         let client = &server.client;
         client.create_volume(Some("data")).await.unwrap();
         let volume = FileRoot::Volume("data".into());
@@ -712,8 +1169,8 @@ mod tests {
             .unwrap()
             .etag
             .unwrap();
-        let (one, _) = app(&server.home).unwrap();
-        let (two, _) = app(&server.home).unwrap();
+        let (one, _) = app(&server.root).await.unwrap();
+        let (two, _) = app(&server.root).await.unwrap();
 
         for (path, condition, value) in [
             ("new", header::IF_NONE_MATCH, "*".to_owned()),
@@ -767,7 +1224,7 @@ mod tests {
     /// body is all in and it has not landed, nor been answered; let go, it lands.
     #[tokio::test]
     async fn a_conditional_write_lands_only_once_it_holds_its_volume() {
-        let server = Server::spawn("conditional-held");
+        let server = Server::spawn("conditional-held").await;
         let client = &server.client;
         client.create_volume(Some("data")).await.unwrap();
         let volume = FileRoot::Volume("data".into());
@@ -785,7 +1242,7 @@ mod tests {
             .unwrap();
         writing.lock().unwrap();
 
-        let (app, _) = app(&server.home).unwrap();
+        let (app, _) = app(&server.root).await.unwrap();
         let request = http::Request::put("/volumes/data/files/new")
             .header(http::header::IF_NONE_MATCH, "*")
             .body(axum::body::Body::from("held"))
@@ -825,7 +1282,7 @@ mod tests {
     async fn a_conditional_write_whose_condition_fails_is_refused_and_leaves_nothing() {
         use http::header::{IF_MATCH, IF_NONE_MATCH, IF_UNMODIFIED_SINCE};
 
-        let server = Server::spawn("conditional-refused");
+        let server = Server::spawn("conditional-refused").await;
         let client = &server.client;
         client.create_volume(Some("data")).await.unwrap();
         let volume = FileRoot::Volume("data".into());
@@ -840,7 +1297,7 @@ mod tests {
             .etag
             .unwrap();
         client.create_dir(&volume, "dir").await.unwrap();
-        let (app, _) = app(&server.home).unwrap();
+        let (app, _) = app(&server.root).await.unwrap();
 
         let long_ago = "Mon, 01 Jan 2001 00:00:00 GMT";
         let weak = format!("W/{etag}");
@@ -899,8 +1356,8 @@ mod tests {
     /// such limit.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
-        let server = Server::spawn("envelope");
-        let (app, _) = app(&server.home).unwrap();
+        let server = Server::spawn("envelope").await;
+        let (app, _) = app(&server.root).await.unwrap();
         let refusal = |response: http::Response<axum::body::Body>| async move {
             let status = response.status().as_u16();
             let kind = response.headers()[http::header::CONTENT_TYPE].clone();
@@ -949,8 +1406,8 @@ mod tests {
     async fn every_route_that_takes_a_body_holds_it_to_the_limit() {
         use axum::body::{Body, Bytes};
 
-        let server = Server::spawn("limit");
-        let (app, _) = app(&server.home).unwrap();
+        let server = Server::spawn("limit").await;
+        let (app, _) = app(&server.root).await.unwrap();
         let answer = |method: &'static str, path: &'static str, body: Body| {
             let app = app.clone();
             async move {
@@ -1016,8 +1473,8 @@ mod tests {
 
         use futures_util::StreamExt as _;
 
-        let server = Server::spawn("read-to-end");
-        let (app, _) = app(&server.home).unwrap();
+        let server = Server::spawn("read-to-end").await;
+        let (app, _) = app(&server.root).await.unwrap();
         let read = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&read);
         let chunks =

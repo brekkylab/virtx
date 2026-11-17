@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">コードとAIエージェントのための使い捨てLinux VM</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -148,12 +151,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 中身は `virtx-server-tcp`、ゲストカーネル、`abin/`、`alib/` です。
 専用のディレクトリに展開すると、`virtx-server-tcp` は隣にあるゲストカーネルを見つけるので、`PATH` やライブラリパスを設定せずにそのまま実行できます。
 
-サーバーマシンで`server.json`を書き、サーバーを起動します。
+サーバーマシンで、OpenID Connectプロバイダーを指定した`server.json`を書き、サーバーを起動します。
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -163,53 +167,8 @@ virtx-server-tcp serve --config server.json
 
 クライアント側では、`Client.spawn()`の代わりにサーバーへ接続します。それ以外はローカルの例と同じです。
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-ループバックで待ち受けるサーバーは認証を求めません。
-他のマシンに提供するには、OpenID Connectプロバイダーと、各プロジェクトにアクセスできるユーザーを指定します。
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 ユーザーは、プロバイダーが`client_id`のクライアントに発行するIDトークンの`email`です。このクライアントはデバイスフローを使う公開クライアントである必要があります。
-`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンとプロジェクトを指定して接続します。
+`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンで接続します。
 
 ```sh
 virtx login https://virtx.example
@@ -224,7 +183,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -236,8 +194,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -250,7 +207,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -342,7 +300,7 @@ virtxはクライアント・サーバーモデルを採用しています。ク
 
 ## ドキュメント
 
-ガイドとAPIリファレンスは[ドキュメント](docs/)にあります。それ以外のAPIは、各パッケージのドキュメント（[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)）にまとめています。
+ガイドとAPIリファレンスは[ドキュメント](https://virtx.sh/docs)にあります。それ以外のAPIは、各パッケージのドキュメント（[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)）にまとめています。
 
 ## ソースからビルドする
 

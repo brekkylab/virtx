@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">為你的程式碼與 AI 代理準備的拋棄式 Linux 虛擬機器</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -150,12 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
 解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
 
-在伺服器那台機器上寫一份 `server.json`，然後啟動伺服器：
+在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者，然後啟動伺服器：
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -166,53 +170,8 @@ virtx-server-tcp serve --config server.json
 在用戶端，改為連線到這台伺服器，取代 `Client.spawn()`。
 其餘部分和本機範例完全相同。
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-監聽回送位址的伺服器不需要驗證。
-要提供給其他機器使用，請指定你的 OpenID Connect 提供者，以及每個專案允許存取的使用者：
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 使用者就是提供者核發給 `client_id` 所指用戶端的 ID 權杖中的 `email`，該用戶端須是使用裝置流程的公開用戶端。
-用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖和專案名稱連線：
+用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖連線：
 
 ```sh
 virtx login https://virtx.example
@@ -227,7 +186,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -239,8 +197,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -253,7 +210,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -361,7 +319,7 @@ Notion、Google Drive、OneDrive 等遠端儲存空間也能以唯讀方式掛�
 
 ## 文件
 
-指南和 API 參考請見[文件](docs/)。
+指南和 API 參考請見[文件](https://virtx.sh/docs)。
 其餘 API 記載在各套件的文件中：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
 
 ## 從原始碼建置

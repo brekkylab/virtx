@@ -1,5 +1,6 @@
-# A registry on localhost that holds only what the `build` workflow packed of `@brekkylab`, so `npm
-# install @brekkylab/virtx` resolves its optional platform packages the way npmjs would. Its
+# A registry on localhost that holds only what a `pipeline` platform job packed of `@brekkylab` --
+# `@brekkylab/virtx` and its own platform's package -- so `npm install @brekkylab/virtx` resolves
+# its optional platform packages the way npmjs would, passing over the ones it is not. Its
 # other dependencies (koffi) come from npmjs.
 storage: ./verdaccio-storage
 auth:

@@ -69,26 +69,24 @@ describe('against virtx-stdio', () => {
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
   })
 
-  test(
-    'a job reads its stdin until it is closed',
-    { skip: 'no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused' },
-    async () => {
-      await alpine(client)
-      const sandbox = await client.createSandbox(ALPINE)
-      try {
-        const cat = await sandbox.exec(['cat'], { stdin: true })
-        await cat.writeStdin('one\n')
-        await cat.writeStdin('two\n', true)
-        const log = await Array.fromAsync(cat.log())
-        assert.deepEqual(
-          log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
-          ['one', 'two'],
-        )
-      } finally {
-        await sandbox.remove()
-      }
-    },
-  )
+  test('a job reads its stdin until it is closed', {
+    skip: 'no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused',
+  }, async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    try {
+      const cat = await sandbox.exec(['cat'], { stdin: true })
+      await cat.writeStdin('one\n')
+      await cat.writeStdin('two\n', true)
+      const log = await Array.fromAsync(cat.log())
+      assert.deepEqual(
+        log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
+        ['one', 'two'],
+      )
+    } finally {
+      await sandbox.remove()
+    }
+  })
 
   test('a command completed prints its output and answers its code', async (t) => {
     await alpine(client)
@@ -100,8 +98,14 @@ describe('against virtx-stdio', () => {
       assert.equal(await sandbox.exec(cmd).complete(), 3)
       assert.equal(log.mock.callCount() + error.mock.callCount(), 0)
       assert.equal(await sandbox.exec(cmd).complete({ print: true }), 3)
-      assert.deepEqual(log.mock.calls.map((call) => call.arguments), [['out']])
-      assert.deepEqual(error.mock.calls.map((call) => call.arguments), [['err']])
+      assert.deepEqual(
+        log.mock.calls.map((call) => call.arguments),
+        [['out']],
+      )
+      assert.deepEqual(
+        error.mock.calls.map((call) => call.arguments),
+        [['err']],
+      )
     } finally {
       await sandbox.remove()
     }
@@ -122,7 +126,10 @@ describe('against virtx-stdio', () => {
   test('an image build is a job whose log ends with its digest', async () => {
     await alpine(client)
     const reference = `${unique('built')}:latest`
-    const job = await client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference)
+    const job = await client.buildImage(
+      new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`),
+      reference,
+    )
     assert.equal(job.kind, 'build')
     assert.equal(job.reference, reference)
     assert.ok(job instanceof virtx.ImageJob)
@@ -144,7 +151,9 @@ describe('against virtx-stdio', () => {
   test('a started build is iterated to its end', async () => {
     await alpine(client)
     const reference = `${unique('iterated')}:latest`
-    const log = await Array.fromAsync(client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference))
+    const log = await Array.fromAsync(
+      client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference),
+    )
     assert.deepEqual(log.at(-1).end, { digest: (await tags(client))[reference] })
     await client.removeImage(reference)
   })
@@ -156,7 +165,9 @@ describe('against virtx-stdio', () => {
     const recipe = new virtx.Recipe(ALPINE).run(`echo ${reference}-step | tee /built`)
     const digest = await client.buildImage(recipe, reference).complete({ print: true })
     assert.equal((await tags(client))[reference], digest)
-    assert.ok(printed.mock.calls.some((call) => String(call.arguments[0]).includes(`${reference}-step`)))
+    assert.ok(
+      printed.mock.calls.some((call) => String(call.arguments[0]).includes(`${reference}-step`)),
+    )
     await client.removeImage(reference)
   })
 
@@ -175,7 +186,10 @@ describe('against virtx-stdio', () => {
     await alpine(client)
     const reference = `${unique('once')}:latest`
     const before = (await client.listImageJob()).length
-    const build = client.buildImage(new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`), reference)
+    const build = client.buildImage(
+      new virtx.Recipe(ALPINE).run(`echo ${reference} > /built`),
+      reference,
+    )
     const job = await build
     assert.equal(job.kind, 'build')
     const log = await Array.fromAsync(build)
@@ -195,10 +209,14 @@ describe('against virtx-stdio', () => {
       assert.equal((await tags(client))[reference], digest)
 
       const archive = path.join(dir, 'copy.tar')
-      assert.deepEqual((await Array.fromAsync(client.downloadImage(reference, archive))).at(-1), { output: { digest } })
+      assert.deepEqual((await Array.fromAsync(client.downloadImage(reference, archive))).at(-1), {
+        output: { digest },
+      })
       await client.removeImage(reference)
       assert.ok(!(reference in (await tags(client))))
-      assert.deepEqual((await Array.fromAsync(client.uploadImage(archive, reference))).at(-1), { output: { digest } })
+      assert.deepEqual((await Array.fromAsync(client.uploadImage(archive, reference))).at(-1), {
+        output: { digest },
+      })
       assert.equal((await tags(client))[reference], digest)
 
       await client.untagImage(reference)

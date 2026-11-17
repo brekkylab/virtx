@@ -34,7 +34,7 @@ struct Patience {
 const PATIENCE: Patience = Patience {
     connect: Duration::from_secs(10),
     read: Duration::from_secs(30),
-    // Enough for `virtx-stdio`'s linux-x86_64 archive, 31 MiB on 2026-11-17, at 140 kbit/s.
+    // Enough for `virtx-stdio`'s linux-x86_64 archive, 31 MiB on 2026-11-17, at 150 kbit/s.
     whole: Duration::from_secs(30 * 60),
     lock: Duration::from_secs(300),
 };

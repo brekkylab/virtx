@@ -426,7 +426,7 @@ class Client:
         ``/abin/skills/{name}/``. ``ports`` are TCP ports in it to open, reserved as it is made
         and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
         is left out the server picks. ``disk_gib`` is how much it may write over its image, in
-        GiB, which goes with it.
+        GiB, at most 1024, which goes with it.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""

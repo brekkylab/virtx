@@ -15,7 +15,7 @@ The image has to be on the server already, pulled or built as [Images](/docs/gui
 | --- | --- | --- |
 | `vcpus` | 4 | Its CPUs. |
 | `memory_mib` | 4096 | Its memory, in MiB. |
-| `disk_gib` | 2 | How much it may write over its image, in GiB. What it writes there goes when it is removed. |
+| `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
 | `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
 | `ports` | none | TCP ports in it to reach from outside, even with `network` off; see [Networks and ports](/docs/guides/networks-ports/). |
 | `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/guides/mounting-volumes/). |

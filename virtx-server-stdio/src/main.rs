@@ -278,9 +278,11 @@ mod tests {
             args.memory_mib = Some(mib);
             assert_eq!(refused(args).await, 400, "memory_mib {mib}");
         }
-        let mut args = here();
-        args.disk_gib = Some(0);
-        assert_eq!(refused(args).await, 400);
+        for gib in [0, 1025, 16384, u32::MAX] {
+            let mut args = here();
+            args.disk_gib = Some(gib);
+            assert_eq!(refused(args).await, 400, "disk_gib {gib}");
+        }
         let mut args = here();
         args.gpu_memory_mib = Some(1024);
         assert_eq!(refused(args).await, 400);

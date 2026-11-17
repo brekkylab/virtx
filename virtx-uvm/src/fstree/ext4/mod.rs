@@ -266,4 +266,11 @@ mod tests {
         image.put(1024 + 0x3A, &0u16.to_le_bytes()); // s_state, as a mount leaves it
         assert!(matches!(image.read(), Err(Error::Malformed(_))));
     }
+
+    #[test]
+    fn an_image_of_more_blocks_than_32_bits_count_is_refused() {
+        let size = (u64::from(u32::MAX) + 1) * BLOCK;
+        let written = FsTree::new().to_ext4(std::io::Cursor::new(Vec::new()), size);
+        assert!(matches!(written, Err(Error::Unwritable(_))));
+    }
 }

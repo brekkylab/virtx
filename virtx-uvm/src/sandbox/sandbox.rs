@@ -29,6 +29,10 @@ pub const DEFAULT_DISK_GIB: u32 = 2;
 /// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
 const MIN_MEMORY_MIB: u32 = 64;
 
+/// The most `disk_gib` a sandbox may ask for. Formatting a disk keeps 64 KiB of its bitmaps in
+/// memory for each GiB.
+const MAX_DISK_GIB: u32 = 1024;
+
 /// The directory under a server's root its sandboxes keep what they make on the host in.
 const SANDBOX: &str = "sandbox";
 
@@ -190,10 +194,18 @@ impl Sandbox {
                 volume.volume, volume.path
             )));
         }
-        if args.disk_gib == Some(0) {
-            return Err(Error::Invalid(
-                "disk_gib: 0 is a disk nothing fits on".into(),
-            ));
+        match args.disk_gib {
+            Some(0) => {
+                return Err(Error::Invalid(
+                    "disk_gib: 0 is a disk nothing fits on".into(),
+                ));
+            }
+            Some(gib) if gib > MAX_DISK_GIB => {
+                return Err(Error::Invalid(format!(
+                    "disk_gib: {gib} is over the {MAX_DISK_GIB} a sandbox may have"
+                )));
+            }
+            _ => {}
         }
         for (what, given) in [
             ("vcpus", args.vcpus.map(u32::from)),

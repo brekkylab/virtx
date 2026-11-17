@@ -326,7 +326,7 @@ export interface SandboxCreateOptions {
   ports?: number[]
   vcpus?: number
   memoryMib?: number
-  /** How much it may write over its image, in GiB, which goes with it. */
+  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
   diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number

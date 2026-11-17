@@ -56,8 +56,8 @@ pub struct SandboxCreateArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
 
-    /// How much it may write over its image, in GiB: the size of its writable layer, which
-    /// goes with it.
+    /// How much it may write over its image, in GiB, at most 1024: the size of its writable
+    /// layer, which goes with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_gib: Option<u32>,
 

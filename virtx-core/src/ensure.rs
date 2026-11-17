@@ -14,8 +14,9 @@ use crate::Error;
 /// `<base>/v<version>/<asset>`.
 const DIST_URL: &str = "https://github.com/brekkylab/virtx/releases/download";
 
-/// How long a fetch waits before it gives up, so a release server that stops answering, or
-/// another caller's fetch that does not end, fails the call rather than holding it.
+/// How long a fetch waits before it gives up, so a release server that stops answering or
+/// sends too slowly to finish, or another caller's fetch that does not end, fails the call
+/// rather than holding it.
 #[derive(Clone, Copy)]
 struct Patience {
     /// For a connection to the release server.
@@ -23,6 +24,9 @@ struct Patience {
     /// For an answer: its head since the request, connecting and redirects included, and each
     /// next part of its body since the last.
     read: Duration,
+    /// For an answer whole, from the request to the end of its body, however steadily the body
+    /// comes.
+    whole: Duration,
     /// For the lock another caller holds while it fetches the same version.
     lock: Duration,
 }
@@ -30,6 +34,8 @@ struct Patience {
 const PATIENCE: Patience = Patience {
     connect: Duration::from_secs(10),
     read: Duration::from_secs(30),
+    // Enough for `virtx-stdio`'s linux-x86_64 archive, 31 MiB on 2026-11-17, at 140 kbit/s.
+    whole: Duration::from_secs(30 * 60),
     lock: Duration::from_secs(300),
 };
 
@@ -113,6 +119,7 @@ async fn ensure_in(
     let client = reqwest::Client::builder()
         .connect_timeout(patience.connect)
         .read_timeout(patience.read)
+        .timeout(patience.whole)
         .build()
         .map_err(|e| Error::Client(format!("making an HTTP client: {}", reason(e))))?;
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
@@ -460,6 +467,7 @@ mod tests {
     const SHORT: Patience = Patience {
         connect: Duration::from_secs(2),
         read: Duration::from_millis(300),
+        whole: Duration::from_secs(2),
         lock: Duration::from_millis(300),
     };
 
@@ -491,6 +499,45 @@ mod tests {
         );
         assert!(error.contains("timed out"), "{error}");
         assert!(!error.contains("is published"), "{error}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_release_server_that_sends_too_slowly_to_finish_fails_the_fetch() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // Answers every connection with a long body, a byte every 50 ms, each well within `read`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let head = b"HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\r\n";
+                    if stream.write_all(head).await.is_err() {
+                        return;
+                    }
+                    while stream.write_all(b"0").await.is_ok() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+            }
+        });
+        let root = fresh_root();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            ensure_in(&root, &base, "1.2.3", SHORT),
+        )
+        .await
+        .expect("the fetch gives up")
+        .unwrap_err();
+        assert_eq!(error.source_kind(), Source::Transport, "{error}");
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("reading {base}/v1.2.3/SHA256SUMS")),
+            "{error}"
+        );
+        assert!(error.contains("timed out"), "{error}");
         fs::remove_dir_all(&root).unwrap();
     }
 

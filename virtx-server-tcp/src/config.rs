@@ -45,7 +45,8 @@ pub struct Config {
     pub origins: Vec<String>,
     pub oidc: crate::oidc::Config,
     /// The registries image jobs reach on this host or a private network: each `host`, at any
-    /// port, or `host:port`.
+    /// port, or `host:port`. A host a registry sends a job on to, for a token or a layer, is
+    /// reached on a private address only if it is listed too.
     #[serde(default)]
     pub private_registries: Vec<String>,
 }

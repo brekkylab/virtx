@@ -86,7 +86,7 @@ A request that names none belongs to its sender's own project, `default`, which 
 - `virtx-project`, and `{project}` in the paths below, name a project by its id, or a project of the sender's by its name. `default` names the sender's own, and no request makes a project of that name: it is refused with `400`, `invalid`.
 - Projects are apart: the volume `data` of one project is not that of another, and nothing in one is reached from another.
 - A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
-- A URL the server forms, such as a [port's](#ports), carries the project it was made in.
+- A [port's](#ports) URL names no project: the capability in it alone finds the port.
 
 Each member of a project has a role:
 

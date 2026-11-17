@@ -463,7 +463,12 @@ class Client {
       error,
     )
     const client = opening(lib, status, raw, error)
-    client.setProject(project)
+    try {
+      client.setProject(project)
+    } catch (e) {
+      client.close()
+      throw e
+    }
     return client
   }
 
@@ -489,9 +494,10 @@ class Client {
     if (status !== OK) this._lib.take(status, error)
   }
 
-  // Name `project` in every request from now on, over either transport, or with null none, for
-  // the user's own project. It is sent in place of a `virtx-project` among the headers given. A
-  // name no header carries throws, the project unchanged.
+  // Name `project` in every request from now on, over either transport, in place of a
+  // `virtx-project` among the headers given. With null, that header names it where there is one,
+  // and otherwise none is named, for the user's own project. A name no header carries throws,
+  // the project unchanged.
   setProject(project) {
     const error = {}
     const status = this._lib.virtx_client_set_project(this._held(), project, error)

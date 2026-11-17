@@ -101,8 +101,10 @@ impl TransportClient {
         }
     }
 
-    /// Name `project` in every request from now on, or with `None` none, for the user's own
-    /// project. Refused for a name no header carries, the project unchanged.
+    /// Name `project` in every request from now on, in place of a `virtx-project` among the
+    /// headers given. With `None`, that header names it where there is one, and otherwise none
+    /// is named, for the user's own project. Refused for a name no header carries, the project
+    /// unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         let project = project
             .map(HeaderValue::from_str)

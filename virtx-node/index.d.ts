@@ -495,9 +495,10 @@ export class Client {
    */
   setHeaders(headers: Record<string, string>): void
   /**
-   * Name `project` in every request from now on, over either transport, or with null none, for
-   * the user's own project. It is sent in place of a `virtx-project` among the headers given. A
-   * name no header carries throws, the project unchanged.
+   * Name `project` in every request from now on, over either transport, in place of a
+   * `virtx-project` among the headers given. With null, that header names it where there is one,
+   * and otherwise none is named, for the user's own project. A name no header carries throws,
+   * the project unchanged.
    */
   setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */

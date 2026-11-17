@@ -156,8 +156,10 @@ int virtx_client_set_headers(struct VirtxClient *client,
                              struct VirtxBytes *error);
 
 // Name `project`, NUL-terminated UTF-8, in every request from now on, over either
-// transport, or with a null one none, for the user's own project. Answers `VIRTX_OK`, or
-// `VIRTX_ERROR` with why it is refused written to `error`, the project unchanged.
+// transport, in place of a `virtx-project` among the headers given. With a null one, that
+// header names it where there is one, and otherwise none is named, for the user's own
+// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+// the project unchanged.
 //
 // # Safety
 //

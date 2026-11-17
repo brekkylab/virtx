@@ -268,7 +268,8 @@ mod tests {
 
         for (client, given) in [(tcp.unwrap(), Some("given")), (piped(router), None)] {
             assert_eq!(named(&client).await.as_deref(), given);
-            // Set, it is named in place of one among the headers given; unset, none is.
+            // Set, it is named in place of one among the headers given; unset, that one is, or
+            // none where none was given.
             client.set_project(Some("demo")).unwrap();
             assert_eq!(named(&client).await.as_deref(), Some("demo"));
             assert!(client.set_project(Some("a\nb")).is_err());

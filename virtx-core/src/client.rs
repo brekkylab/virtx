@@ -84,9 +84,10 @@ impl Client {
     }
 
     /// Name `project` in every request from now on, over either transport -- a project of the
-    /// user's by name, or any by its id -- or with `None` none, for the user's own project,
-    /// [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). It is sent in place of a `virtx-project` among the
-    /// headers given. Refused for a name no header carries, the project unchanged.
+    /// user's by name, or any by its id -- in place of a `virtx-project` among the headers given.
+    /// With `None`, that header names it where there is one, and otherwise none is named, for
+    /// the user's own project, [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). Refused for a name no
+    /// header carries, the project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         self.inner.set_project(project)
     }
@@ -840,8 +841,10 @@ pub(crate) mod ffi {
     }
 
     /// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
-    /// transport, or with a null one none, for the user's own project. Answers `VIRTX_OK`, or
-    /// `VIRTX_ERROR` with why it is refused written to `error`, the project unchanged.
+    /// transport, in place of a `virtx-project` among the headers given. With a null one, that
+    /// header names it where there is one, and otherwise none is named, for the user's own
+    /// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+    /// the project unchanged.
     ///
     /// # Safety
     ///

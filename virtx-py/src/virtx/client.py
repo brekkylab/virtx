@@ -181,7 +181,11 @@ class Client:
             ctypes.byref(error),
         )
         client = cls._opened(lib, status, raw, error)
-        client.set_project(project)
+        try:
+            client.set_project(project)
+        except BaseException:
+            client.close()
+            raise
         return client
 
     def set_auth(self, auth: Auth | None) -> None:
@@ -211,9 +215,10 @@ class Client:
             self._lib.take(status, error)
 
     def set_project(self, project: str | None) -> None:
-        """Name ``project`` in every request from now on, over either transport, or with
-        ``None`` none, for the user's own project. It is sent in place of a ``virtx-project``
-        among the headers given. A name no header carries raises, the project unchanged."""
+        """Name ``project`` in every request from now on, over either transport, in place of a
+        ``virtx-project`` among the headers given. With ``None``, that header names it where
+        there is one, and otherwise none is named, for the user's own project. A name no header
+        carries raises, the project unchanged."""
         error = _Bytes()
         status = self._lib.virtx_client_set_project(
             self._held(), None if project is None else project.encode(), ctypes.byref(error)

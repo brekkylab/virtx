@@ -83,8 +83,8 @@ async fn done(machine: &Arc<Machine>, request: IoReq) -> Result<(), FsError> {
 /// In a volume the sandbox mounts writable, the volume's own files on this host are asked, not
 /// the guest: the guest may still hold what it saw at the path a moment ago, before a write
 /// through the volume's files or another sandbox's moved another file there. A path those files
-/// do not [answer for](crate::Volume::answers), through a link in the volume or by a name they
-/// refuse, is asked of the guest, which sees it.
+/// do not [answer for](crate::Volume::answers), through a link in the volume, by a name they
+/// refuse or in a mount of the volume's own, is asked of the guest, which sees it.
 async fn there(
     machine: &Arc<Machine>,
     mounts: &[(String, PathBuf)],

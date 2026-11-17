@@ -22,7 +22,8 @@
 //! the volume's own files on this host as it lands, not as the guest sees them: the guest may
 //! hold what it saw there for a few seconds after a change made outside it. The rest is checked
 //! as the guest sees it: a `PUT` before its body is read, the condition of any other write, and
-//! a path the volume's files do not answer for, through a link or by a name they refuse.
+//! a path the volume's files do not answer for, through a link, by a name they refuse, or in a
+//! mount of the volume's own.
 
 mod sandbox;
 mod snapshot;

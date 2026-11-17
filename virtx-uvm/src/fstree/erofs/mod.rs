@@ -52,7 +52,7 @@ impl FsTree<Span> {
         if len != reader.bytes {
             return Err(Error::Malformed(format!(
                 "EROFS image: {} is {len} bytes and its superblock accounts for {}",
-                path.display(),
+                path.file_name().unwrap_or(path.as_os_str()).display(),
                 reader.bytes
             )));
         }
@@ -85,5 +85,41 @@ impl FsTree<Span> {
     /// is not among them.
     pub fn to_erofs_meta(&self, out: impl Write + Seek) -> Result<Vec<Arc<Path>>> {
         write(self, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::fstree::{Entry, Meta};
+
+    #[test]
+    fn an_image_of_the_wrong_length_is_named_by_its_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layer.erofs");
+        let mut tree = FsTree::new();
+        let hostname = Entry::File {
+            meta: Meta::default(),
+            data: b"host".to_vec(),
+        };
+        tree.insert(b"etc/hostname", hostname).unwrap();
+        tree.to_erofs(File::create(&path).unwrap()).unwrap();
+        let spans = FsTree::from_erofs_meta(&path).unwrap();
+
+        let mut image = OpenOptions::new().append(true).open(&path).unwrap();
+        image.write_all(b"\0").unwrap();
+        let refusals = [
+            FsTree::from_erofs_meta(&path).unwrap_err(),
+            spans.to_erofs_meta(Cursor::new(Vec::new())).unwrap_err(),
+        ];
+        let dir = dir.path().display().to_string();
+        for e in refusals {
+            let said = e.to_string();
+            assert!(said.contains("EROFS image: layer.erofs is "), "{said}");
+            assert!(!said.contains(&dir), "{said}");
+        }
     }
 }

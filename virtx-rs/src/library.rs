@@ -89,7 +89,7 @@ macro_rules! api {
 }
 
 api! {
-    virtx_ensure_virtx: unsafe extern "C" fn(out: *mut VirtxBytes) -> c_int,
+    virtx_ensure_virtx: unsafe extern "C" fn() -> *mut Opaque,
     virtx_client_spawn: unsafe extern "C" fn(
         program: *const c_char,
         args: *const *const c_char,
@@ -119,7 +119,7 @@ api! {
         error: *mut VirtxBytes,
     ) -> c_int,
     virtx_client_retain: unsafe extern "C" fn(client: *mut Opaque),
-    virtx_client_release: unsafe extern "C" fn(client: *mut Opaque),
+    virtx_client_release: unsafe extern "C" fn(client: *mut Opaque) -> *mut Opaque,
     virtx_client_build_image: WithArgs,
     virtx_client_pull_image: WithArgs,
     virtx_client_push_image: WithArgs,

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <b>English</b> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -125,7 +125,7 @@ use virtx::{Client, Recipe, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
 
     let recipe = Recipe::new("alpine:latest").step("apk add --no-cache jq");
     client.build_image(recipe, "jq:latest").complete(true).await?;
@@ -149,18 +149,12 @@ Each [release](https://github.com/brekkylab/virtx/releases) carries the server a
 It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
 Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
 
-On the server machine, make a token and write a `server.json` that lets its user into a project:
-
-```sh
-virtx-server-tcp token   # prints a token and its token_sha256
-```
+On the server machine, write a `server.json` and start the server:
 
 ```json
 {
   "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx",
-  "users": { "alice": { "token_sha256": "<token_sha256>" } },
-  "projects": { "demo": { "members": ["alice"] } }
+  "home": "/var/lib/virtx"
 }
 ```
 
@@ -168,17 +162,71 @@ virtx-server-tcp token   # prints a token and its token_sha256
 virtx-server-tcp serve --config server.json
 ```
 
-On the client, connect with the token and the project in place of `Client.spawn()`.
+On the client, connect to it in place of `Client.spawn()`.
 The rest is the same as the local example.
 
 <details open>
 <summary><b>Python</b></summary>
 
 ```python
-from virtx import BearerAuth, Client
+from virtx import Client
+
+client = Client.connect("http://127.0.0.1:8470")
+```
+
+</details>
+
+<details>
+<summary><b>Node</b></summary>
+
+```js
+const client = Client.connect('http://127.0.0.1:8470')
+```
+
+</details>
+
+<details>
+<summary><b>Rust</b></summary>
+
+```rust
+let client = Client::connect(
+    "http://127.0.0.1:8470",
+    Auth::None,
+    [("virtx-project", "default")],
+)?;
+```
+
+</details>
+
+A server listening on the loopback takes no credentials.
+To serve other machines, name your OpenID Connect provider and who may reach each project:
+
+```json
+{
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+  "projects": { "demo": { "members": ["alice@example.com"] } }
+}
+```
+
+A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
+Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints and the project:
+
+```sh
+virtx login https://virtx.example
+```
+
+<details open>
+<summary><b>Python</b></summary>
+
+```python
+from virtx import Client, CommandAuth
 
 client = Client.connect(
-    "http://127.0.0.1:8470", BearerAuth("<token>"), {"virtx-project": "demo"}
+    "https://virtx.example",
+    CommandAuth("virtx", ("token", "--json")),
+    {"virtx-project": "demo"},
 )
 ```
 
@@ -189,8 +237,8 @@ client = Client.connect(
 
 ```js
 const client = Client.connect(
-  'http://127.0.0.1:8470',
-  { type: 'bearer', token: '<token>' },
+  'https://virtx.example',
+  { type: 'command', program: 'virtx', args: ['token', '--json'] },
   { 'virtx-project': 'demo' }
 )
 ```
@@ -202,13 +250,15 @@ const client = Client.connect(
 
 ```rust
 let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::Bearer { token: "<token>".into() },
+    "https://virtx.example",
+    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
     [("virtx-project", "demo")],
 )?;
 ```
 
 </details>
+
+`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
 
 A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
@@ -232,8 +282,8 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 
 Pick the one for the language you use.
 
-- **Python:** 3.10 or later.
-- **Node:** 18 or later.
+- **Python:** 3.11 or later.
+- **Node:** 22 or later.
 - **Rust:** 1.89 or later.
 
 ### Server

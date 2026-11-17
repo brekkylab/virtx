@@ -29,8 +29,9 @@ usage: cargo xtask init     [--force]
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
-            of the client always and of the servers once `init` has run; and the bindings'
-            lint -- ruff, biome and tsc -- where uv and npm are on PATH
+            of the client always and of the servers once `init` has run; the bindings'
+            lint -- ruff, biome and tsc -- where uv and npm are on PATH; and every action
+            under .github pinned to a commit
   clippy    check's clippy alone: the client's, and the servers' once `init` has run. With
             --gpu, the servers' with the `gpu` feature a release builds them with, the GPU
             libraries built first as `build` builds them; for this host's own code, the
@@ -426,6 +427,7 @@ fn servers_unready() -> anyhow::Result<Option<String>> {
 /// `cargo xtask test -p <server>`, run when a change reaches them.
 fn check(client_only: bool) -> anyhow::Result<()> {
     cargo_in_root(&["fmt", "--check"], "the format")?;
+    pinned_actions()?;
     clippy_client()?;
     cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
     lint_bindings()?;
@@ -597,6 +599,64 @@ fn lint_bindings() -> anyhow::Result<()> {
         &[&exec[..], &["tsc", "-p", "virtx-node/tsconfig.json"]].concat(),
         "tsc of index.d.ts",
     )
+}
+
+/// Every action the YAML under `.github` runs -- the workflows' and the composite actions' -- is
+/// named by a commit's full SHA: a tag or a branch is whatever its owner last pointed it at. An
+/// action of this checkout's own (`./`) is the checkout's.
+fn pinned_actions() -> anyhow::Result<()> {
+    eprintln!("xtask: the actions the workflows run");
+    let root = root_path();
+    let mut files = Vec::new();
+    yaml_files(&root.join(".github"), &mut files)?;
+    files.sort();
+    let mut unpinned = Vec::new();
+    for file in &files {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        for (at, line) in text.lines().enumerate() {
+            if let Some(action) = used_action(line).filter(|action| !pinned(action)) {
+                let file = file.strip_prefix(&root).unwrap_or(file);
+                unpinned.push(format!("  {}:{}: {action}", file.display(), at + 1));
+            }
+        }
+    }
+    ensure!(
+        unpinned.is_empty(),
+        "an action is named by its commit's full SHA, the release as a comment after it:\n{}",
+        unpinned.join("\n")
+    );
+    Ok(())
+}
+
+/// The YAML files under `dir`, at any depth.
+fn yaml_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            yaml_files(&path, files)?;
+        } else if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// What a line of a workflow names with `uses:`, a step's or a job's, without its comment.
+fn used_action(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let line = line.strip_prefix("- ").unwrap_or(line).trim_start();
+    let named = line.strip_prefix("uses:")?;
+    let named = named.split_once('#').map_or(named, |(named, _)| named);
+    Some(named.trim().trim_matches(['"', '\'']))
+}
+
+/// Whether an action is this checkout's own, or named by a commit's 40 hex digits.
+fn pinned(action: &str) -> bool {
+    action.starts_with("./")
+        || action
+            .rsplit_once('@')
+            .is_some_and(|(_, sha)| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// `cargo <args>` at the root, said first as `what`, which it fails as.

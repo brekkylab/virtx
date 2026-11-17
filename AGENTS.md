@@ -100,13 +100,14 @@ cargo xtask fixture -- <command>                  # any command, against the fix
 ## Lint and the gate
 
 ```bash
-cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run; and the bindings' lint (ruff, biome, tsc) where uv and npm are on PATH
+cargo xtask check                                 # format, clippy and the crates' unit tests: of the client always, of the servers once `init` has run; the bindings' lint (ruff, biome, tsc) where uv and npm are on PATH; and every action under `.github` pinned to a commit
 cargo xtask check --client                        # the client's alone, without `init`
 cargo xtask clippy --gpu                          # clippy alone, the servers with `gpu`: this host's own `cfg`s, as a release builds them
 ```
 
 - Run `cargo xtask check` before pushing. CI (`ci`) runs it on every pull request too, lints each platform's own code with `cargo xtask clippy --gpu` and runs the machine-booting tests, but a push that fails here only finds out later there. Building, packing and trying each platform's release runs on `main` after a merge, and when `ci` is run by hand on a branch (`gh workflow run ci --ref <branch>`). `git config core.hooksPath .githooks` installs the hooks in `.githooks/`: the format check on every commit, and `cargo xtask check` on every push. `SKIP_HOOKS=1 git push` skips the hook for that one command.
 - `cargo xtask check` runs no test that boots a VM. A change that reaches one runs `cargo xtask test`, or the suites it touches.
+- A workflow or a composite action under `.github` names another repository's action by its commit's full SHA, with the release as a comment (`actions/checkout@<sha> # v7.0.1`): `cargo xtask check` refuses a tag or a branch, and `.github/dependabot.yml` asks for the pull requests that move the pins. A step there that installs a tool from PyPI or npm names its exact version.
 
 ## Comments and docs
 

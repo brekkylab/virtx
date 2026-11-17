@@ -9,7 +9,8 @@
 #
 #   job (as the checks name it)           waits for     does
 #   version                               nothing       every manifest says one version
-#   check                                 nothing       format, clippy, unit tests, the bindings' lint
+#   check                                 nothing       format, clippy, unit tests, the bindings' lint,
+#                                                       the actions' pins
 #   guest (x86_64, aarch64)               version       the guest kernel, abin and alib
 #   lint (windows-x86_64,                 nothing       clippy with `gpu`, on this platform
 #     linux-x86_64, linux-aarch64)
@@ -150,10 +151,10 @@ jobs:
           echo "virtx $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # `cargo xtask check`: the format, clippy of the client and the servers, the tests that boot
-  # nothing, and the bindings' lint -- ruff, biome and tsc. It compiles the servers but runs
-  # none, so it answers first. Its clippy is Linux's without `gpu`; each platform's build job
-  # lints its own host's code with `gpu`.
+  # `cargo xtask check`: the format, that every action is pinned to a commit, clippy of the
+  # client and the servers, the tests that boot nothing, and the bindings' lint -- ruff, biome
+  # and tsc. It compiles the servers but runs none, so it answers first. Its clippy is Linux's
+  # without `gpu`; each platform's build job lints its own host's code with `gpu`.
   check:
     runs-on: ubuntu-26.04
     timeout-minutes: 45

@@ -20,7 +20,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
-- `.github/workflows/` — `build` builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `build` refuses any other spelling of) and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which puts its npm packages and wheels on npm and PyPI. `docs` builds `docs/` and checks its links on a pull request that touches it.
+- `.github/workflows/` — `build` builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and `test` tests them, `cargo xtask test` among it, on Linux over KVM; `ci` runs both on a pull request, and `release` runs both on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `build` refuses any other spelling of) and attaches what was built to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
 
 ## Building from source
 
@@ -43,7 +43,7 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 
 ### Clients
 
-Every package loads one library, `libvirtx_core`, so build it first and point the package at it:
+The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, so build it first and point the package at it:
 
 ```bash
 cargo xtask build client
@@ -55,7 +55,7 @@ Then, in your own project, install the package for your language from the clone:
 
 - **Python:** `pip install path/to/virtx/virtx-py`
 - **Node:** `npm install path/to/virtx/virtx-node`
-- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
 
 - A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
 
@@ -73,7 +73,7 @@ Then, in your own project, install the package for your language from the clone:
 Each test goes in the lowest layer that can show what it tests, fastest first:
 
 - **`virtx-core`: unit tests.** What it does by itself, in a `#[cfg(test)] mod tests {}` inside the module it tests. Its transport is tested from one end to the other there, since both ends are in the crate.
-- **`virtx-uvm`: unit tests, and the tests that boot machines.** Its unit tests sit in its modules as `virtx-core`'s do. A machine is a process the binary it is in spawns of itself (see `machine/`), which a module's test cannot be, so the tests that boot one are `virtx-uvm/tests/machine.rs`, a test binary with a `main` that becomes the machine when spawned so. They make sandboxes of `virtx-uvm` itself, with no server in front: a job's output, end and timeout, a job cancelled, a machine parked and booted again, what a snapshot keeps, and sandboxes made, closed and mounting one volume at once.
+- **`virtx-uvm`: unit tests, and the tests that boot machines.** Its unit tests sit in its modules as `virtx-core`'s do. A machine is a process the binary it is in spawns of itself (see `machine/`), which a module's test cannot be, so the tests that boot one are `virtx-uvm/tests/machine.rs`, a test binary with a `main` that becomes the machine when spawned so. They make sandboxes of `virtx-uvm` itself, with no server in front: a job's output, end and timeout, a job cancelled, a machine parked and booted again, what a snapshot keeps, sandboxes made, closed and mounting one volume at once, and what the files endpoints answer a write to a sandbox's file.
 - **`virtx-server-*`: unit tests, and the app served in the test's process.** Each server's `app` -- what its binary serves -- is served in the test's own process, over a pipe as stdio serves it or on the loopback over HTTP, and called as a client calls it: the endpoints, what they refuse, who reaches which project, and what each keeps on disk. No machine is booted here: what a server does with one, such as a build's steps, is tested end to end.
 - **`virtx-rs`, `virtx-py`, `virtx-node`: end to end, against the servers.** Each package through its own runner, against the real servers served as the fixture: a client's flow through the package, the library, a transport and a server to a machine, such as a sandbox's files as its processes see them, its ports, and a build. There is no other suite of them. The flows, and what a server does in them, are `virtx-rs`'s, since every package reaches the server through the one library. `virtx-py` and `virtx-node` test their own layer: each call goes through, its arguments as the language takes them, its answer as the language's types, its log as the language iterates one, and its refusal as the language raises one -- not a server's behaviour again.
 

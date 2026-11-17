@@ -23,7 +23,7 @@ use dav_server::fs::{
 use futures_util::stream;
 use tokio::sync::OwnedMutexGuard;
 
-use super::volume::Meta;
+use super::volume::{Meta, written};
 use crate::fstree::{Entry, FsTree, Meta as TreeMeta, Timestamp};
 use crate::snapshot::{Error, Lock, Snapshot};
 
@@ -388,12 +388,14 @@ impl DavFile for File {
         })
     }
 
-    /// A written file goes into the tree whole, here, as `dav-server` ends a `PUT`.
+    /// A written file goes into the tree whole, here, as `dav-server` ends a `PUT`, and the
+    /// file's metadata is then the entry's, so a `PUT` answers the `ETag` a `GET` of it does.
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             if self.writing {
-                self.fs
-                    .insert(&self.path, file(std::mem::take(&mut self.data)))?;
+                let entry = file(std::mem::take(&mut self.data));
+                self.meta = written(described(&entry), &self.meta);
+                self.fs.insert(&self.path, entry)?;
                 self.writing = false;
             }
             Ok(())

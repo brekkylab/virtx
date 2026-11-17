@@ -29,7 +29,7 @@ A sandbox's port is reached through a ``PortForwarder``, opened over a client wi
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
-from .client import Client, Event, Output, Progress, ensure_virtx
+from .client import Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, Files, Metadata
 from .image import (
     BasicAuth,
@@ -76,9 +76,11 @@ from .volume import (
 
 __all__ = [
     "LIBRARY_ENV",
+    "Auth",
     "BasicAuth",
     "BearerAuth",
     "Client",
+    "CommandAuth",
     "DirEntry",
     "Event",
     "Files",

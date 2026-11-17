@@ -436,7 +436,8 @@ class Client:
         return Project.from_dict(self, output)
 
     async def get_project(self, name: str) -> Project:
-        """The project ``name``, with the client's role in it."""
+        """The project ``name`` names -- a project of the user's by name, or any by its id --
+        with the client's role in it."""
         output = await self._call("virtx_client_get_project", _args(name=name))
         return Project.from_dict(self, output)
 

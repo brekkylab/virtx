@@ -338,7 +338,8 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_prune_image(struct VirtxClient *client);
 
 // Answers with each project the client has a role in, as
-// `[{"name": "...", "role": "owner" or "member"}, ...]`.
+// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+// `owner` from a server with no users, such as over stdio.
 //
 // # Safety
 //
@@ -355,8 +356,8 @@ struct VirtxFuture *virtx_client_create_project(struct VirtxClient *client,
                                                 const uint8_t *args,
                                                 size_t args_len);
 
-// Answers with the project `name`, given `{"name": "..."}`, as `virtx_client_list_project`
-// answers each.
+// Answers with the project `name` names, a project of the user's by name or any by its id,
+// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
 //
 // # Safety
 //

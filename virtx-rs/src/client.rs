@@ -503,7 +503,8 @@ impl Client {
         Project::new(self.clone(), info)
     }
 
-    /// The project `name`, with the client's role in it.
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
     pub fn get_project(&self, name: impl AsRef<str>) -> Call<Project> {
         let args = json!({ "name": name.as_ref() });
         let client = self.clone();
@@ -511,7 +512,7 @@ impl Client {
         call.map(move |info| Project::new(client.clone(), info))
     }
 
-    /// Delete the project `name` and everything in it.
+    /// Delete the project `name` names and everything in it.
     pub(crate) fn remove_project(&self, name: impl AsRef<str>) -> Call<()> {
         let args = json!({ "name": name.as_ref() });
         self.call(self.api.virtx_client_remove_project, args)

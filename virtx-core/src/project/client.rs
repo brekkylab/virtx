@@ -8,7 +8,7 @@ use crate::{
     transport::{TransportClient, http, segment},
 };
 
-/// The path of the project `name`.
+/// The path of the project `name` names: a project of the user's by name, or any by its id.
 fn project(name: &str) -> String {
     format!("/projects/{}", segment(name))
 }

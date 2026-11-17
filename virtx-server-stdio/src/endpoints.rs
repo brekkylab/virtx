@@ -32,12 +32,13 @@ use virtx_core::{
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, ProjectError, Reference,
-    RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Membership as _, Network, Os, Owner,
+    Project, ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
+    Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore, build_step, park_after,
+    signal_number,
 };
 
-use crate::Host;
+use crate::{CLIENT, Host};
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -265,100 +266,97 @@ pub fn router() -> Router {
 pub fn projects() -> Router {
     Router::new()
         .route("/projects/", get(project_list).post(project_create))
-        .route("/projects/{name}", get(project_get).delete(project_remove))
-        .route("/projects/{name}/members/", get(project_member_list))
         .route(
-            "/projects/{name}/members/{user}",
+            "/projects/{project}",
+            get(project_get).delete(project_remove),
+        )
+        .route("/projects/{project}/members/", get(project_member_list))
+        .route(
+            "/projects/{project}/members/{user}",
             put(project_member_change).delete(project_member_change),
         )
 }
 
 type Answer = Result<Response, Refused>;
 
-/// `403` for a project that is not here.
-fn here(host: &Host, project: &str) -> Result<(), Refused> {
-    match host.store().exists(project) {
-        true => Ok(()),
-        false => Err(forbidden(format!("no project here is named {project}"))),
+/// The client's project `named` names: `403` for one not here.
+async fn here(host: &Host, named: &str) -> Result<Project, Refused> {
+    host.project(Some(named))
+        .await?
+        .ok_or_else(|| forbidden(format!("no project here is {named}")))
+}
+
+/// `project` as the server answers it: the client's, who owns it.
+fn answer(project: Project) -> ProjectListOutputItem {
+    ProjectListOutputItem {
+        id: project.id.to_string(),
+        name: project.name,
+        owner: None,
+        role: Role::Owner,
     }
 }
 
+/// Every project, the client's own among them, made if it is not there.
 async fn project_list(Extension(host): Extension<Arc<Host>>) -> Answer {
-    let listed: Vec<_> = host
-        .store()
-        .list()?
-        .into_iter()
-        .map(|name| ProjectListOutputItem {
-            name,
-            role: Role::Owner,
-        })
-        .collect();
-    Ok(json(&listed))
+    host.project(None).await?;
+    let listed = host.membership().projects(CLIENT).await?;
+    Ok(json(&listed.into_iter().map(answer).collect::<Vec<_>>()))
 }
 
-/// Make a project: refused for a name starting with `_`, which is the server's, for the
-/// client's own.
+/// Make a project: refused for [`DEFAULT_PROJECT`], the client's own.
 async fn project_create(Extension(host): Extension<Arc<Host>>, request: Bytes) -> Answer {
     let args: ProjectCreateArgs = body(&request)?;
-    if args.name.starts_with('_') {
+    if args.name == DEFAULT_PROJECT {
         return Err(invalid(format!(
-            "{:?}: a name starting with '_' is the server's",
-            args.name
+            "{DEFAULT_PROJECT:?} is the client's own project, made for it"
         )));
     }
-    host.store().create(&args.name)?;
-    let made = ProjectListOutputItem {
-        name: args.name,
-        role: Role::Owner,
-    };
-    Ok(created(format!("/projects/{}", made.name), &made))
+    let owner = Owner::User(CLIENT.to_owned());
+    let made = answer(host.membership().create(&owner, &args.name, CLIENT).await?);
+    Ok(created(format!("/projects/{}", made.id), &made))
 }
 
 async fn project_get(
     Extension(host): Extension<Arc<Host>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
 ) -> Answer {
-    here(&host, &name)?;
-    Ok(json(&ProjectListOutputItem {
-        name,
-        role: Role::Owner,
-    }))
+    Ok(json(&answer(here(&host, &named).await?)))
 }
 
 /// Remove a project and everything in it, its image jobs cancelled: refused while a sandbox
-/// lives in it. The client's own, `_`, is there again, empty.
+/// lives in it. The client's own is made again, empty, as it is next reached.
 async fn project_remove(
     Extension(host): Extension<Arc<Host>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
 ) -> Answer {
-    here(&host, &name)?;
-    if !host.close(&name) {
+    let id = here(&host, &named).await?.id;
+    if !host.close(&id) {
         return Err(refused(
             StatusCode::CONFLICT,
             "in_use",
-            format!("a sandbox lives in project {name}"),
+            format!("a sandbox lives in project {named}"),
         ));
     }
-    let (store, project) = (host.store().clone(), name.clone());
-    let removed = tokio::task::spawn_blocking(move || {
-        store.remove(&project)?;
-        if project == DEFAULT_PROJECT {
-            store.create(&project)?;
-        }
-        Ok::<_, ProjectError>(())
-    })
+    let removed = async {
+        host.membership().remove(&id).await?;
+        let store = host.store().clone();
+        tokio::task::spawn_blocking(move || store.remove(&id))
+            .await
+            .map_err(internal)??;
+        Ok::<_, Refused>(())
+    }
     .await;
-    host.release(&name);
-    removed.map_err(internal)??;
+    host.release(&id);
+    removed?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// None: a project here has no members.
 async fn project_member_list(
     Extension(host): Extension<Arc<Host>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
 ) -> Answer {
-    here(&host, &name)?;
+    here(&host, &named).await?;
     Ok(json(&Vec::<ProjectListOutputItem>::new()))
 }
 

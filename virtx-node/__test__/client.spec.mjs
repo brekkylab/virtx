@@ -45,9 +45,10 @@ test('a project is made, its members set and taken away, and it is removed', asy
   try {
     const made = await alice.createProject(name)
     assert.ok(made instanceof virtx.Project)
-    assert.deepEqual({ ...made }, { name, role: 'owner' })
-    assert.ok((await alice.listProject()).some((p) => p.name === name))
+    assert.deepEqual({ ...made }, { id: made.id, name, owner: 'alice@example.com', role: 'owner' })
+    assert.ok((await alice.listProject()).some((p) => p.id === made.id))
     assert.equal((await alice.getProject(name)).role, 'owner')
+    assert.equal((await alice.getProject(made.id)).name, name)
     await assert.rejects(alice.createProject(name), { name: 'VirtxError', source: 'server', status: 409 })
 
     assert.deepEqual(await made.setMember('bob@example.com', 'member'), { user: 'bob@example.com', role: 'member' })

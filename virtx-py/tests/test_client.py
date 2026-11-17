@@ -56,10 +56,11 @@ async def test_a_project_is_made_its_members_set_and_removed() -> None:
     name = unique("project")
     with Client.connect(fixture("VIRTX_TEST_URL"), BearerAuth(users["alice"])) as alice:
         made = await alice.create_project(name)
-        assert made == Project(alice, name, Role.OWNER)
+        assert made == Project(alice, made.id, name, "alice@example.com", Role.OWNER)
         assert made in await alice.list_project()
         got = await alice.get_project(name)
         assert (got, got.client) == (made, alice)
+        assert await alice.get_project(made.id) == made
 
         owner = ProjectMemberListOutputItem("alice@example.com", Role.OWNER)
         added = await made.set_member("bob@example.com", Role.MEMBER)

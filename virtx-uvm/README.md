@@ -1026,10 +1026,8 @@ on macOS, `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` or `~/.cache` otherwise
 <root>/
   bin/                  what `cargo xtask install` puts there: the servers, the guest kernel
                         beside them, libvirtx_core, abin/, alib/
-  images/               the image store, shared by both servers
-  snapshot/             the stdio server's snapshots, one ext4 each
-  volume/               the stdio server's volumes
-  project/<name>/       the HTTP server's, a snapshot/ and a volume/ per project; its config's
+  project/<id>/         each project's: project.json, its owner, name and members, and its
+                        images/, snapshot/, sandbox/ and volume/; the HTTP server's config's
                         `home` moves the whole of it
 ```
 

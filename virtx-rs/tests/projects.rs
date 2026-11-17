@@ -120,9 +120,13 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
     let told: Value = serde_json::from_str(&told).unwrap();
     assert_eq!((status, &told["oidc"]["client_id"]), (200, &json!(CLIENT)));
 
+    // Alice names `demo` by its name; carol, whose it is not, by its id.
     let alice = served.client(alice, "demo");
-    let carol = served.client(carol, "demo");
-    let intruder = served.client(bob, "demo");
+    let demo = alice.get_project("demo").wait().unwrap();
+    let id = demo.id().to_owned();
+    assert_eq!(demo.owner(), Some("alice@example.com"));
+    let carol = served.client(carol, &id);
+    let intruder = served.client(bob, &id);
     let bob = served.client(bob, "other");
 
     // A volume one member makes is the other's too, and its files.
@@ -166,9 +170,9 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
             .0
     };
     assert_eq!(put(None, "demo"), 401);
-    assert_eq!(put(Some(&served.bob), "demo"), 403);
+    assert_eq!(put(Some(&served.bob), &id), 403);
     assert_eq!(put(Some(&served.bob), "other"), 404);
-    assert_eq!(put(Some(&served.carol), "demo"), 201);
+    assert_eq!(put(Some(&served.carol), &id), 201);
     let got = served.send("GET", &file, Some(&served.alice), Some("demo"), "");
     assert_eq!(got, (200, "over dav".to_owned()));
     let dir = format!("volumes/{name}/files/");
@@ -197,19 +201,19 @@ fn members_share_a_project_and_no_one_else_reaches_it(served: &Served) {
         served.send("GET", &path, token, Some(project), "")
     };
     assert_eq!(registry("", None, "demo").0, 401);
-    assert_eq!(registry("", Some(&served.bob), "demo").0, 403);
-    assert_eq!(registry("", Some(&served.carol), "demo").0, 200);
+    assert_eq!(registry("", Some(&served.bob), &id).0, 403);
+    assert_eq!(registry("", Some(&served.carol), &id).0, 200);
     let repositories = |token, project| -> Vec<String> {
         let (status, catalog) = registry("_catalog", Some(token), project);
         assert_eq!(status, 200, "{catalog}");
         let catalog: Value = serde_json::from_str(&catalog).unwrap();
         serde_json::from_value(catalog["repositories"].clone()).unwrap()
     };
-    let repos = repositories(&served.carol, "demo");
+    let repos = repositories(&served.carol, &id);
     let repository = repos.iter().find(|name| name.ends_with("alpine"));
     let repository = repository.unwrap_or_else(|| panic!("no alpine among {repos:?}"));
     let manifest = format!("{repository}/manifests/3.20");
-    assert_eq!(registry(&manifest, Some(&served.carol), "demo").0, 200);
+    assert_eq!(registry(&manifest, Some(&served.carol), &id).0, 200);
     assert_eq!(repositories(&served.bob, "other"), [] as [&str; 0]);
     assert_eq!(registry(&manifest, Some(&served.bob), "other").0, 404);
 
@@ -283,13 +287,16 @@ fn a_user_makes_a_project_brings_another_in_and_removes_it() {
     virtx::load(common::library()).unwrap();
     let name = common::unique("made");
     let alice = served.client(&served.alice, &name);
-    let bob = served.client(&served.bob, &name);
 
     let made = alice.create_project(&name).wait().unwrap();
     assert_eq!((made.name(), made.role()), (name.as_str(), Role::Owner));
+    assert_eq!(made.owner(), Some("alice@example.com"));
     let listed = alice.list_project().wait().unwrap();
-    assert!(listed.iter().any(|project| project.name() == name));
+    assert!(listed.iter().any(|project| project.id() == made.id()));
     assert_eq!(refused(alice.create_project(&name).wait()), Some(409));
+    // Another user names theirs by its id; by its name, they name a project of their own.
+    let bob = served.client(&served.bob, made.id());
+    assert_eq!(refused(bob.get_project(made.id()).wait()), Some(403));
     assert_eq!(refused(bob.get_project(&name).wait()), Some(403));
     assert_eq!(refused(bob.list_volume().wait()), Some(403));
 
@@ -301,7 +308,7 @@ fn a_user_makes_a_project_brings_another_in_and_removes_it() {
     let members = made.members().wait().unwrap();
     let users: Vec<_> = members.iter().map(|member| member.user.as_str()).collect();
     assert_eq!(users, ["alice@example.com", "bob@example.com"]);
-    let theirs = bob.get_project(&name).wait().unwrap();
+    let theirs = bob.get_project(made.id()).wait().unwrap();
     assert_eq!(theirs.role(), Role::Member);
     let volume = alice.create_volume(Some("data")).wait().unwrap();
     assert!(bob.get_volume(volume.name()).wait().is_ok());
@@ -314,7 +321,7 @@ fn a_user_makes_a_project_brings_another_in_and_removes_it() {
     theirs.remove_member("bob@example.com").wait().unwrap();
     assert_eq!(refused(bob.list_volume().wait()), Some(403));
     made.remove().wait().unwrap();
-    assert_eq!(refused(alice.get_project(&name).wait()), Some(403));
+    assert_eq!(refused(alice.get_project(made.id()).wait()), Some(403));
     assert_eq!(refused(alice.list_volume().wait()), Some(403));
 }
 

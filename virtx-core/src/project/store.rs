@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 /// The header a request names its project in.
 pub const PROJECT_HEADER: &str = "virtx-project";
 
-/// The project a request that names none belongs to on a server of one client, such as over
-/// stdio: the client's own. A server with users has one of each user's own, also named starting
-/// with `_`.
-pub const DEFAULT_PROJECT: &str = "_";
+/// The name of each user's own project, which a request that names none belongs to: no request
+/// makes a project of this name, and the server makes each the first time its user is reached.
+pub const DEFAULT_PROJECT: &str = "default";
 
 /// What a member of a project may do there: an `Owner` all a `Member` may, and more, so it
 /// orders above it.
@@ -26,7 +25,14 @@ pub enum Role {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectListOutputItem {
+    /// What names it on any server, given it once, as a UUID.
+    pub id: String,
+    /// What its owner names it, among their projects.
     pub name: String,
+    /// The user whose project it is, as the server names them: none on a server with no
+    /// users, such as over stdio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub role: Role,
 }
 

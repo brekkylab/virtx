@@ -25,8 +25,8 @@ use tokio::task::AbortHandle;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
-    ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
-    ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
     SandboxPort, SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
@@ -38,7 +38,7 @@ use virtx_uvm::{
     VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
-use virtx_uvm::ProjectError;
+use virtx_uvm::{Owner, Project, ProjectError};
 
 use crate::access::Access;
 
@@ -303,10 +303,13 @@ pub fn router() -> Router {
 pub fn projects() -> Router {
     Router::new()
         .route("/projects/", get(project_list).post(project_create))
-        .route("/projects/{name}", get(project_get).delete(project_remove))
-        .route("/projects/{name}/members/", get(project_member_list))
         .route(
-            "/projects/{name}/members/{user}",
+            "/projects/{project}",
+            get(project_get).delete(project_remove),
+        )
+        .route("/projects/{project}/members/", get(project_member_list))
+        .route(
+            "/projects/{project}/members/{user}",
             put(project_member_set).delete(project_member_remove),
         )
 }
@@ -320,34 +323,51 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Who sends a request with `headers`, and their role in `project`: refused as
-/// [`Access::user`] refuses, and `403` where they have none, or it does not exist.
+/// Who sends a request with `headers`, the project `named` names to them, and their role in
+/// it: refused as [`Access::user`] refuses, and `403` where they have none, or it does not
+/// exist.
 async fn role_in(
     access: &Access,
     headers: &HeaderMap,
-    project: &str,
-) -> Result<(String, Role), Refused> {
+    named: &str,
+) -> Result<(String, Project, Role), Refused> {
     let user = access.user(headers).await.map_err(refusal)?;
-    match access.membership().role(&user, project).await? {
-        Some(role) => Ok((user, role)),
-        None => Err(forbidden(format!("project {project} is not one you reach"))),
+    let project = access.project(&user, Some(named)).await?;
+    match project.and_then(|project| Some((project.members.get(&user).copied()?, project))) {
+        Some((role, project)) => Ok((user, project, role)),
+        None => Err(forbidden(format!("project {named} is not one you reach"))),
     }
 }
 
+/// `project` as the server answers it to `user`, a member of it.
+fn answer(project: Project, user: &str) -> ProjectListOutputItem {
+    ProjectListOutputItem {
+        id: project.id.to_string(),
+        owner: match project.owner {
+            Owner::User(owner) => Some(owner),
+            _ => None,
+        },
+        role: project.members[user],
+        name: project.name,
+    }
+}
+
+/// Every project the sender is a member of, their own among them, made if it is not there.
 async fn project_list(Extension(access): Extension<Arc<Access>>, headers: HeaderMap) -> Answer {
     let user = access.user(&headers).await.map_err(refusal)?;
+    access.project(&user, None).await?;
     let listed: Vec<_> = access
         .membership()
         .projects(&user)
         .await?
         .into_iter()
-        .map(|(name, role)| ProjectListOutputItem { name, role })
+        .map(|project| answer(project, &user))
         .collect();
     Ok(json(&listed))
 }
 
-/// Make a project, its maker its owner: refused for a name starting with `_`, which is the
-/// server's, for each user's own project.
+/// Make a project of the sender's, them its owner: refused for [`DEFAULT_PROJECT`], which is
+/// each user's own.
 async fn project_create(
     Extension(access): Extension<Arc<Access>>,
     headers: HeaderMap,
@@ -355,71 +375,70 @@ async fn project_create(
 ) -> Answer {
     let user = access.user(&headers).await.map_err(refusal)?;
     let args: ProjectCreateArgs = body(&request)?;
-    if args.name.starts_with('_') {
+    if args.name == DEFAULT_PROJECT {
         return Err(invalid(format!(
-            "{:?}: a name starting with '_' is the server's",
-            args.name
+            "{DEFAULT_PROJECT:?} is each user's own project, made for them"
         )));
     }
-    access.membership().create(&args.name, &user).await?;
-    let made = ProjectListOutputItem {
-        name: args.name,
-        role: Role::Owner,
-    };
-    Ok(created(format!("/projects/{}", made.name), &made))
+    let owner = Owner::User(user.clone());
+    let made = access
+        .membership()
+        .create(&owner, &args.name, &user)
+        .await?;
+    let made = answer(made, &user);
+    Ok(created(format!("/projects/{}", made.id), &made))
 }
 
 async fn project_get(
     Extension(access): Extension<Arc<Access>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
     headers: HeaderMap,
 ) -> Answer {
-    let (_, role) = role_in(&access, &headers, &name).await?;
-    Ok(json(&ProjectListOutputItem { name, role }))
+    let (user, project, _) = role_in(&access, &headers, &named).await?;
+    Ok(json(&answer(project, &user)))
 }
 
 /// Remove a project and everything in it, its image jobs cancelled: an owner's to do, and
 /// refused while a sandbox lives in it.
 async fn project_remove(
     Extension(access): Extension<Arc<Access>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
     headers: HeaderMap,
 ) -> Answer {
-    let (_, role) = role_in(&access, &headers, &name).await?;
+    let (_, project, role) = role_in(&access, &headers, &named).await?;
     if role != Role::Owner {
-        return Err(forbidden(format!("only an owner removes project {name}")));
+        return Err(forbidden(format!("only an owner removes project {named}")));
     }
-    if !access.close(&name) {
+    let id = project.id;
+    if !access.close(&id) {
         return Err(refused(
             StatusCode::CONFLICT,
             "in_use",
-            format!("a sandbox lives in project {name}"),
+            format!("a sandbox lives in project {named}"),
         ));
     }
     let removed = async {
-        access.membership().remove(&name).await?;
-        let (store, project) = (access.store().clone(), name.clone());
-        tokio::task::spawn_blocking(move || store.remove(&project))
+        access.membership().remove(&id).await?;
+        let store = access.store().clone();
+        tokio::task::spawn_blocking(move || store.remove(&id))
             .await
             .map_err(internal)??;
         Ok::<_, Refused>(())
     }
     .await;
-    access.release(&name);
+    access.release(&id);
     removed?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn project_member_list(
     Extension(access): Extension<Arc<Access>>,
-    Segments(name): Segments<String>,
+    Segments(named): Segments<String>,
     headers: HeaderMap,
 ) -> Answer {
-    role_in(&access, &headers, &name).await?;
-    let members: Vec<_> = access
-        .membership()
-        .members(&name)
-        .await?
+    let (_, project, _) = role_in(&access, &headers, &named).await?;
+    let members: Vec<_> = project
+        .members
         .into_iter()
         .map(|(user, role)| ProjectMemberListOutputItem { user, role })
         .collect();
@@ -429,49 +448,54 @@ async fn project_member_list(
 /// Give `user` a role in a project, adding them if they are no member yet: an owner's to do.
 async fn project_member_set(
     Extension(access): Extension<Arc<Access>>,
-    Segments((name, user)): Segments<(String, String)>,
+    Segments((named, user)): Segments<(String, String)>,
     headers: HeaderMap,
     request: Bytes,
 ) -> Answer {
-    let (_, role) = role_in(&access, &headers, &name).await?;
+    let (_, project, role) = role_in(&access, &headers, &named).await?;
     if role != Role::Owner {
         return Err(forbidden(format!(
-            "only an owner changes the members of project {name}"
+            "only an owner changes the members of project {named}"
         )));
     }
     let args: ProjectMemberSetArgs = body(&request)?;
-    let member = access.membership().role(&user, &name).await?.is_some();
     access
         .membership()
-        .set_member(&name, &user, Some(args.role))
+        .set_member(&project.id, &user, Some(args.role))
         .await?;
     let set = ProjectMemberListOutputItem {
         user,
         role: args.role,
     };
-    if member {
+    if project.members.contains_key(&set.user) {
         return Ok(json(&set));
     }
     let user = utf8_percent_encode(&set.user, SEGMENT);
-    Ok(created(format!("/projects/{name}/members/{user}"), &set))
+    Ok(created(
+        format!("/projects/{}/members/{user}", project.id),
+        &set,
+    ))
 }
 
 /// Take `user`'s role in a project away: an owner's to do, or the user's own, leaving it.
 async fn project_member_remove(
     Extension(access): Extension<Arc<Access>>,
-    Segments((name, user)): Segments<(String, String)>,
+    Segments((named, user)): Segments<(String, String)>,
     headers: HeaderMap,
 ) -> Answer {
-    let (sender, role) = role_in(&access, &headers, &name).await?;
+    let (sender, project, role) = role_in(&access, &headers, &named).await?;
     if role != Role::Owner && sender != user {
         return Err(forbidden(format!(
-            "only an owner removes another member of project {name}"
+            "only an owner removes another member of project {named}"
         )));
     }
-    if access.membership().role(&user, &name).await?.is_none() {
-        return Err(not_found(format!("{user} is no member of project {name}")));
+    if !project.members.contains_key(&user) {
+        return Err(not_found(format!("{user} is no member of project {named}")));
     }
-    access.membership().set_member(&name, &user, None).await?;
+    access
+        .membership()
+        .set_member(&project.id, &user, None)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

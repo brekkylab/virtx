@@ -1,15 +1,15 @@
 //! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
 //! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
 //! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
-//! this host keeps is that one client's, who owns every project here: its own, `_`, and each one
-//! made, each a directory of its own in the cache (see [`virtx_uvm::ProjectStore`]).
+//! this host keeps is that one client's, who owns every project here: its own, `default`, and
+//! each one made, each a directory of its own in the cache (see [`virtx_uvm::ProjectStore`]).
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod endpoints;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -21,10 +21,13 @@ use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::IntoResponse as _;
 use axum::routing::any;
+use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use tower::ServiceExt as _;
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
-use virtx_uvm::{ImageStore, ProjectError, ProjectStore, RegistryServer};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role, serve_stdio};
+use virtx_uvm::{
+    ImageStore, Membership, Owner, Project, ProjectError, ProjectId, ProjectStore, RegistryServer,
+};
 
 use crate::endpoints::{Home, Refused, forbidden, invalid};
 
@@ -51,8 +54,7 @@ fn main() -> anyhow::Result<()> {
 #[tokio::main]
 async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
-    adopt_unprojected(&root)?;
-    let (app, host) = app(&root)?;
+    let (app, host) = app(&root).await?;
     let handle = move |request: http::Request<_>| {
         let app = app.clone();
         async move {
@@ -68,13 +70,13 @@ async fn serve() -> anyhow::Result<()> {
 
 /// Everything served over `root`: the endpoints and the images' registry, each answered from the
 /// home of the project its request names, and the projects themselves.
-fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
-    let host = Arc::new(Host::open(root)?);
+async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
+    let host = Arc::new(Host::open(root).await?);
     let reading = Arc::clone(&host);
     let images = move |request: Request| {
         let host = Arc::clone(&reading);
         async move {
-            match host.home(request.headers()) {
+            match host.home(request.headers()).await {
                 Ok(home) => home
                     .registry()
                     .handle(request)
@@ -91,7 +93,7 @@ fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
             move |mut request: Request, next: Next| {
                 let host = Arc::clone(&reaching);
                 async move {
-                    match host.home(request.headers()) {
+                    match host.home(request.headers()).await {
                         Ok(home) => {
                             request.extensions_mut().insert(home);
                             next.run(request).await
@@ -108,91 +110,118 @@ fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
     Ok((app, host))
 }
 
-/// The projects this host keeps: the client's own, `_`, made as the server starts, and each made
-/// since,
-/// the home of each made as it is first reached.
+/// The one user here, the client, whose every project is.
+const CLIENT: &str = "client";
+
+/// The projects this host keeps, each the client's, the home of each made as it is first
+/// reached.
 pub struct Host {
+    membership: StdioMembership,
     store: ProjectStore,
-    /// Each project's home, by name.
+    /// Each project's home, by id.
     /// `None` for a project being removed, which no request reaches until it is gone.
-    homes: Mutex<HashMap<String, Option<Arc<Home>>>>,
+    homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
 }
 
 impl Host {
-    /// The projects under `root`, `_` made if it is not there, and the home of each made
-    /// now, so that its sandboxes left from before are swept as the server starts.
-    fn open(root: &Path) -> anyhow::Result<Host> {
-        let store = ProjectStore::new(root);
-        match store.create(DEFAULT_PROJECT) {
-            Ok(_) | Err(ProjectError::AlreadyExists(_)) => {}
-            Err(e) => return Err(e.into()),
-        }
+    /// The projects under `root`, what was kept at `root` before moved into the client's own
+    /// (see [`adopt_unprojected`]), and the home of each made now, so that its sandboxes left
+    /// from before are swept as the server starts.
+    async fn open(root: &Path) -> anyhow::Result<Host> {
         let host = Host {
-            store,
+            membership: StdioMembership::new(root),
+            store: ProjectStore::new(root),
             homes: Mutex::default(),
         };
-        for name in host.store.list()? {
-            host.home_of(&name)?;
+        let own = host
+            .project(None)
+            .await?
+            .context("the client's own project")?;
+        adopt_unprojected(root, &host.store.path(&own.id))?;
+        for id in host.store.list()? {
+            host.home_of(&id)?;
         }
         Ok(host)
+    }
+
+    pub fn membership(&self) -> &StdioMembership {
+        &self.membership
     }
 
     pub fn store(&self) -> &ProjectStore {
         &self.store
     }
 
-    /// The home of the project `headers` name, or of the client's own, `_`, where they name none: `403` for
-    /// a project not here.
-    fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
-        let project = match headers.get(PROJECT_HEADER) {
-            None => DEFAULT_PROJECT,
-            Some(named) => named
-                .to_str()
-                .map_err(|_| invalid("the virtx-project header is not a project's name"))?,
+    /// The client's project `named` names, if any: its own, [`DEFAULT_PROJECT`], where it is
+    /// `None`; the project of that id, where it is one; and otherwise the project of that name.
+    pub async fn project(&self, named: Option<&str>) -> Result<Option<Project>, ProjectError> {
+        let named = named.unwrap_or(DEFAULT_PROJECT);
+        let id = match named.parse::<ProjectId>() {
+            Ok(id) => id,
+            Err(_) => match self.membership.resolve(&client(), named).await? {
+                Some(id) => id,
+                None => return Ok(None),
+            },
         };
-        if !self.store.exists(project) {
-            return Err(forbidden(format!("no project here is named {project}")));
-        }
-        let home = self
-            .home_of(project)
-            .map_err(|e| endpoints::internal(format!("making project {project}'s home: {e:#}")))?;
-        home.ok_or_else(|| forbidden(format!("project {project} is being removed")))
+        let project = self.membership.project(&id).await?;
+        Ok(project.filter(|project| project.members.contains_key(CLIENT)))
     }
 
-    /// Project `project`'s home, its images its own: `None` while it is being removed.
-    fn home_of(&self, project: &str) -> anyhow::Result<Option<Arc<Home>>> {
+    /// The home of the project `headers` name, or of the client's own where they name none:
+    /// `403` for a project not here.
+    async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
+        let named = match headers.get(PROJECT_HEADER) {
+            None => None,
+            Some(named) => Some(
+                named
+                    .to_str()
+                    .map_err(|_| invalid("the virtx-project header is not a project's name"))?,
+            ),
+        };
+        let project = self
+            .project(named)
+            .await
+            .map_err(endpoints::internal)?
+            .ok_or_else(|| forbidden(format!("no project here is {named:?}")))?;
+        let home = self.home_of(&project.id).map_err(|e| {
+            endpoints::internal(format!("making project {}'s home: {e:#}", project.name))
+        })?;
+        home.ok_or_else(|| forbidden(format!("project {} is being removed", project.name)))
+    }
+
+    /// Project `id`'s home, its images its own: `None` while it is being removed.
+    fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
-        if let Some(home) = homes.get(project) {
+        if let Some(home) = homes.get(id) {
             return Ok(home.clone());
         }
-        let dir = self.store.path(project)?;
+        let dir = self.store.path(id);
         let images = ImageStore::new(dir.join("images"))?;
         let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
         let home = Arc::new(Home::new(images, registry, &dir)?);
-        homes.insert(project.to_owned(), Some(Arc::clone(&home)));
+        homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
     }
 
-    /// Take project `project`'s home away, its image jobs cancelled, for it to be removed: no
+    /// Take project `id`'s home away, its image jobs cancelled, for it to be removed: no
     /// request reaches it from now until [`release`](Host::release). `false`, and nothing
     /// taken, while a sandbox in it lives or it is being removed already.
-    pub fn close(&self, project: &str) -> bool {
+    pub fn close(&self, id: &ProjectId) -> bool {
         let mut homes = self.homes.lock().unwrap();
-        match homes.get(project) {
+        match homes.get(id) {
             Some(None) => return false,
             Some(Some(home)) if home.in_use() => return false,
             _ => {}
         }
-        if let Some(Some(home)) = homes.insert(project.to_owned(), None) {
+        if let Some(Some(home)) = homes.insert(*id, None) {
             home.close_all();
         }
         true
     }
 
-    /// Let requests reach project `project` again, once its removal is over: as made anew, if
-    /// it is there still.
-    pub fn release(&self, project: &str) {
-        self.homes.lock().unwrap().remove(project);
+    /// Let requests reach project `id` again, once its removal is over.
+    pub fn release(&self, id: &ProjectId) {
+        self.homes.lock().unwrap().remove(id);
     }
 
     /// Close every sandbox of every home, as removing each does: blocks until each machine has
@@ -212,26 +241,195 @@ impl Host {
     }
 }
 
-/// Move what this host kept before it kept projects, at `root` itself, into the client's own
-/// project, `_`: once, while it has none.
-fn adopt_unprojected(root: &Path) -> anyhow::Result<()> {
-    let default = ProjectStore::new(root).path(DEFAULT_PROJECT)?;
-    if default.exists() {
+/// The client, as the owner of its projects.
+fn client() -> Owner {
+    Owner::User(CLIENT.to_owned())
+}
+
+/// The client's projects, each kept in its directory as `project.json`, the [`Project`], the
+/// client its one member: a project is there while that file is. Each change is made holding
+/// `project/.lock`, so that a `virtx-stdio` for each client over one root changes them one at a
+/// time.
+pub struct StdioMembership {
+    store: ProjectStore,
+}
+
+impl StdioMembership {
+    fn new(root: &Path) -> StdioMembership {
+        StdioMembership {
+            store: ProjectStore::new(root),
+        }
+    }
+
+    /// Project `id`, as kept: `None` where it is not there.
+    fn read(&self, id: &ProjectId) -> Result<Option<Project>, ProjectError> {
+        let path = self.store.path(id).join("project.json");
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| ProjectError::io(format!("reading {}", path.display()), e.into())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(ProjectError::io(format!("reading {}", path.display()), e)),
+        }
+    }
+
+    /// Every project here.
+    fn all(&self) -> Result<Vec<Project>, ProjectError> {
+        let mut all = Vec::new();
+        for id in self.store.list()? {
+            all.extend(self.read(&id)?);
+        }
+        Ok(all)
+    }
+
+    /// The project `owner` names `name`, if any, as kept.
+    fn find(&self, owner: &Owner, name: &str) -> Result<Option<Project>, ProjectError> {
+        let all = self.all()?;
+        Ok(all
+            .into_iter()
+            .find(|project| project.owner == *owner && project.name == name))
+    }
+
+    /// The lock held while the projects change, until it drops.
+    fn lock(&self) -> Result<fs::File, ProjectError> {
+        let dir = self.store.dir();
+        fs::create_dir_all(&dir)
+            .map_err(|e| ProjectError::io(format!("making {}", dir.display()), e))?;
+        let path = dir.join(".lock");
+        let lock = fs::File::create(&path)
+            .map_err(|e| ProjectError::io(format!("opening {}", path.display()), e))?;
+        lock.lock()
+            .map_err(|e| ProjectError::io(format!("locking {}", path.display()), e))?;
+        Ok(lock)
+    }
+
+    /// Make project `name` of `owner`'s, `creator` its owner, holding the lock: written beside,
+    /// and renamed over.
+    fn make(&self, owner: &Owner, name: &str, creator: &str) -> Result<Project, ProjectError> {
+        let _lock = self.lock()?;
+        if self.find(owner, name)?.is_some() {
+            return Err(ProjectError::AlreadyExists(name.to_owned()));
+        }
+        let project = Project {
+            id: ProjectId::new(),
+            owner: owner.clone(),
+            name: name.to_owned(),
+            members: BTreeMap::from([(creator.to_owned(), Role::Owner)]),
+        };
+        let dir = self.store.path(&project.id);
+        fs::create_dir_all(&dir)
+            .map_err(|e| ProjectError::io(format!("making {}", dir.display()), e))?;
+        let (path, part) = (dir.join("project.json"), dir.join("project.json.part"));
+        let bytes = serde_json::to_vec_pretty(&project).expect("JSON of strings");
+        fs::write(&part, bytes)
+            .map_err(|e| ProjectError::io(format!("writing {}", part.display()), e))?;
+        fs::rename(&part, &path)
+            .map_err(|e| ProjectError::io(format!("writing {}", path.display()), e))?;
+        Ok(project)
+    }
+}
+
+impl Membership for StdioMembership {
+    fn resolve<'a>(
+        &'a self,
+        owner: &'a Owner,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ProjectId>, ProjectError>> {
+        Box::pin(async move {
+            if let Some(project) = self.find(owner, name)? {
+                return Ok(Some(project.id));
+            }
+            if name != DEFAULT_PROJECT {
+                return Ok(None);
+            }
+            let Owner::User(user) = owner else {
+                return Ok(None);
+            };
+            match self.make(owner, name, user) {
+                Ok(project) => Ok(Some(project.id)),
+                // Made by a `virtx-stdio` beside this one.
+                Err(ProjectError::AlreadyExists(_)) => Ok(self.find(owner, name)?.map(|p| p.id)),
+                Err(e) => Err(e),
+            }
+        })
+    }
+
+    fn project<'a>(
+        &'a self,
+        id: &'a ProjectId,
+    ) -> BoxFuture<'a, Result<Option<Project>, ProjectError>> {
+        Box::pin(async move { self.read(id) })
+    }
+
+    fn create<'a>(
+        &'a self,
+        owner: &'a Owner,
+        name: &'a str,
+        creator: &'a str,
+    ) -> BoxFuture<'a, Result<Project, ProjectError>> {
+        Box::pin(async move {
+            if !virtx_uvm::is_project_name(name) {
+                return Err(ProjectError::InvalidName(name.to_owned()));
+            }
+            self.make(owner, name, creator)
+        })
+    }
+
+    fn projects<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Project>, ProjectError>> {
+        Box::pin(async move {
+            let mut reached = self.all()?;
+            reached.retain(|project| project.members.contains_key(user));
+            reached.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(reached)
+        })
+    }
+
+    /// Refused: the client is the one member of each project here.
+    fn set_member<'a>(
+        &'a self,
+        id: &'a ProjectId,
+        _user: &'a str,
+        _role: Option<Role>,
+    ) -> BoxFuture<'a, Result<(), ProjectError>> {
+        Box::pin(async move { Err(ProjectError::NoOwner(id.to_string())) })
+    }
+
+    fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<(), ProjectError>> {
+        Box::pin(async move {
+            let _lock = self.lock()?;
+            let path = self.store.path(id).join("project.json");
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    Err(ProjectError::Unknown(id.to_string()))
+                }
+                Err(e) => Err(ProjectError::io(format!("removing {}", path.display()), e)),
+            }
+        })
+    }
+}
+
+/// Move what this host kept before it kept projects, at `root` itself, into `default`, the
+/// directory of the client's own project: once, while it has none of it.
+fn adopt_unprojected(root: &Path, default: &Path) -> anyhow::Result<()> {
+    const KEPT: [&str; 4] = ["images", "snapshot", "sandbox", "volume"];
+    if KEPT.iter().any(|kept| default.join(kept).exists()) {
         return Ok(());
     }
-    for kept in ["images", "snapshot", "sandbox", "volume"] {
+    for kept in KEPT {
         let from = root.join(kept);
         if !from.exists() {
             continue;
         }
-        fs::create_dir_all(&default).with_context(|| format!("making {}", default.display()))?;
+        fs::create_dir_all(default).with_context(|| format!("making {}", default.display()))?;
         match fs::rename(&from, default.join(kept)) {
             Ok(()) => {}
             // Another `virtx-stdio`, starting beside this one, moved it first.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("moving {} into project default", from.display()));
+                return Err(e).with_context(|| {
+                    format!("moving {} into the client's own project", from.display())
+                });
             }
         }
     }
@@ -262,7 +460,7 @@ mod tests {
     struct Server {
         client: Client,
         root: PathBuf,
-        /// The root of `_`, the client's own project, which it reaches naming none.
+        /// The root of the client's own project, which it reaches naming none.
         home: PathBuf,
         /// The app the client is served, for a request no client sends.
         app: axum::Router,
@@ -273,8 +471,8 @@ mod tests {
             Server::spawn_after(name, |_, _| {}).await
         }
 
-        /// `spawn`, with `after` run once the app has answered each request, given `_`'s
-        /// root and the request's path: for what another client does between a client's
+        /// `spawn`, with `after` run once the app has answered each request, given the client's
+        /// own project's root and the request's path: for what another client does between a client's
         /// requests.
         async fn spawn_after(
             name: &str,
@@ -284,8 +482,9 @@ mod tests {
                 std::env::temp_dir().join(format!("virtx-stdio-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
-            let home = root.join("project").join("_");
-            let (app, _) = app(&root).unwrap();
+            let (app, host) = app(&root).await.unwrap();
+            let own = host.project(None).await.unwrap().unwrap();
+            let home = host.store().path(&own.id);
             let served_app = app.clone();
             let after = Arc::new(after);
             let served = home.clone();
@@ -983,45 +1182,62 @@ mod tests {
         };
         let status = async |method, path, project, body| send(method, path, project, body).await.0;
 
-        let owned = |names: &[&str]| {
-            let listed: Vec<_> = names
-                .iter()
-                .map(|name| format!(r#"{{"name":"{name}","role":"owner"}}"#))
-                .collect();
-            format!("[{}]", listed.join(","))
+        let listed = async || -> Vec<(String, String)> {
+            let listed = send("GET", "/projects/", None, "").await.1;
+            let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+            let listed = listed.as_array().unwrap().iter();
+            listed
+                .map(|project| {
+                    assert_eq!(project["role"], "owner");
+                    assert!(project.get("owner").is_none());
+                    let field = |name: &str| project[name].as_str().unwrap().to_owned();
+                    (field("name"), field("id"))
+                })
+                .collect()
         };
-        assert_eq!(send("GET", "/projects/", None, "").await.1, owned(&["_"]));
+        let own = listed().await;
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].0, "default");
         let made = send("POST", "/projects/", None, r#"{"name": "demo"}"#).await;
-        assert_eq!(made, (201, r#"{"name":"demo","role":"owner"}"#.to_owned()));
+        assert_eq!(made.0, 201);
+        let made: serde_json::Value = serde_json::from_str(&made.1).unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            (&made["name"], &made["role"]),
+            (&"demo".into(), &"owner".into())
+        );
         assert_eq!(
             status("POST", "/projects/", None, r#"{"name": "demo"}"#).await,
             409
         );
-        // A name starting with `_` is the server's.
-        for theirs in [r#"{"name": "_"}"#, r#"{"name": "_mine"}"#] {
+        // `default` is the client's own, and an id names no other.
+        for theirs in [
+            r#"{"name": "default"}"#,
+            r#"{"name": "Demo"}"#,
+            r#"{"name": "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b"}"#,
+        ] {
             assert_eq!(
                 status("POST", "/projects/", None, theirs).await,
                 400,
                 "{theirs}"
             );
         }
-        assert_eq!(
-            status("POST", "/projects/", None, r#"{"name": "Demo"}"#).await,
-            400
-        );
-        assert_eq!(
-            send("GET", "/projects/", None, "").await.1,
-            owned(&["_", "demo"])
-        );
+        let names: Vec<_> = listed().await.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["default", "demo"]);
         assert_eq!(status("GET", "/projects/demo", None, "").await, 200);
+        let by_id = format!("/projects/{id}");
+        assert_eq!(status("GET", &by_id, None, "").await, 200);
         assert_eq!(status("GET", "/projects/nowhere", None, "").await, 403);
 
-        // Each project's things are its own, and a project not here is reached by no request.
+        // Each project's things are its own, by its name or its id, and a project not here is
+        // reached by no request.
         let volume = r#"{"name": "data"}"#;
         assert_eq!(status("POST", "/volumes/", Some("demo"), volume).await, 201);
+        assert_ne!(send("GET", "/volumes/", Some(&id), "").await.1, "[]");
         assert_eq!(send("GET", "/volumes/", None, "").await.1, "[]");
         assert_eq!(status("GET", "/volumes/", Some("nowhere"), "").await, 403);
-        assert!(server.root.join("project/demo/volume/data/files").is_dir());
+        let dir = server.root.join("project").join(&id);
+        assert!(dir.join("volume/data/files").is_dir());
 
         // No one but the client: a project here has no members to change.
         assert_eq!(
@@ -1034,14 +1250,17 @@ mod tests {
             403
         );
 
-        // A project goes with everything in it; the client's own is there again, empty.
+        // A project goes with everything in it; the client's own is made again, empty.
         assert_eq!(status("DELETE", "/projects/demo", None, "").await, 204);
-        assert!(!server.root.join("project/demo").exists());
+        assert!(!dir.exists());
         assert_eq!(status("GET", "/volumes/", Some("demo"), "").await, 403);
         assert_eq!(status("POST", "/volumes/", None, volume).await, 201);
-        assert_eq!(status("DELETE", "/projects/_", None, "").await, 204);
+        assert_eq!(status("DELETE", "/projects/default", None, "").await, 204);
         assert_eq!(send("GET", "/volumes/", None, "").await.1, "[]");
-        assert_eq!(send("GET", "/projects/", None, "").await.1, owned(&["_"]));
+        let again = listed().await;
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].0, "default");
+        assert_ne!(again[0].1, own[0].1);
     }
 
     #[test]
@@ -1051,9 +1270,9 @@ mod tests {
         fs::create_dir_all(root.join("volume/data/files")).unwrap();
         fs::create_dir_all(root.join("images/tag")).unwrap();
         fs::create_dir_all(root.join("virtx-stdio/0.1.0")).unwrap();
+        let default = root.join("project/own");
 
-        adopt_unprojected(&root).unwrap();
-        let default = root.join("project/_");
+        adopt_unprojected(&root, &default).unwrap();
         assert!(default.join("volume/data/files").is_dir());
         assert!(default.join("images/tag").is_dir());
         assert!(!root.join("volume").exists() && !root.join("images").exists());
@@ -1062,7 +1281,7 @@ mod tests {
 
         // Once only: what turns up at the root after is left there.
         fs::create_dir_all(root.join("volume")).unwrap();
-        adopt_unprojected(&root).unwrap();
+        adopt_unprojected(&root, &default).unwrap();
         assert!(root.join("volume").is_dir());
         let _ = fs::remove_dir_all(&root);
     }

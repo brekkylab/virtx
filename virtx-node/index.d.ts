@@ -179,7 +179,12 @@ export type Role = 'owner' | 'member'
 
 /** What the server answers about a project. */
 export interface ProjectInfo {
+  /** What names it on any server, given it once. */
+  id: string
+  /** What its owner names it, among their projects. */
   name: string
+  /** The user whose project it is: absent from a server with no users, such as over stdio. */
+  owner?: string
   /** The client's role in it. */
   role: Role
 }
@@ -200,7 +205,9 @@ export class Project implements ProjectInfo {
   private constructor()
   /** The client its requests go through. */
   readonly client: Client
+  id: string
   name: string
+  owner?: string
   role: Role
   /** Its members, with their roles. */
   members(): Promise<ProjectMemberInfo[]>
@@ -561,7 +568,7 @@ export class Client {
   listProject(): Promise<Project[]>
   /** Make the project `name`, the client its owner. */
   createProject(name: string): Promise<Project>
-  /** The project `name`, with the client's role in it. */
+  /** The project `name` names -- a project of the user's by name, or any by its id -- with the client's role in it. */
   getProject(name: string): Promise<Project>
   listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */

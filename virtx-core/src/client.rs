@@ -84,8 +84,9 @@ impl Client {
         self.inner.set_headers(headers);
     }
 
-    /// Name `project` in every request from now on, over either transport, or with `None`
-    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
+    /// Name `project` in every request from now on, over either transport -- a project of the
+    /// user's by name, or any by its id -- or with `None` none, for the user's own project,
+    /// [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). It is sent in place of a `virtx-project` among the
     /// headers given. Refused for a name no header carries, the project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         self.inner.set_project(project)
@@ -105,12 +106,14 @@ impl Client {
         project::client::create(&self.inner, &args).await
     }
 
-    /// The project `name`, with the client's role in it.
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
     pub async fn get_project(&self, name: impl AsRef<str>) -> Result<ProjectListOutputItem, Error> {
         project::client::get(&self.inner, name.as_ref()).await
     }
 
-    /// Delete the project `name` and everything in it.
+    /// Delete the project `name` names, as [`get_project`](Self::get_project) reads it, and
+    /// everything in it.
     pub async fn remove_project(&self, name: impl AsRef<str>) -> Result<(), Error> {
         project::client::remove(&self.inner, name.as_ref()).await
     }
@@ -1214,7 +1217,8 @@ pub(crate) mod ffi {
     }
 
     /// Answers with each project the client has a role in, as
-    /// `[{"name": "...", "role": "owner" or "member"}, ...]`.
+    /// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+    /// `owner` from a server with no users, such as over stdio.
     ///
     /// # Safety
     ///
@@ -1243,8 +1247,8 @@ pub(crate) mod ffi {
             .future(|client| async move { client.create_project(args?.name).await })
     }
 
-    /// Answers with the project `name`, given `{"name": "..."}`, as `virtx_client_list_project`
-    /// answers each.
+    /// Answers with the project `name` names, a project of the user's by name or any by its id,
+    /// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
     ///
     /// # Safety
     ///

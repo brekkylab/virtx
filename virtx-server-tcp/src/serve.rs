@@ -310,9 +310,9 @@ mod tests {
 
     use futures_util::future::BoxFuture;
 
-    use virtx_uvm::{Membership as _, ProjectStore};
+    use virtx_uvm::{Membership as _, Owner, ProjectStore};
 
-    use crate::access::{Access, FileMembership, Identity, TokenIsUser};
+    use crate::access::{Access, Identity, TcpMembership, TokenIsUser};
     use crate::config::Config;
 
     /// Every request the tester's, whatever it carries.
@@ -341,9 +341,10 @@ mod tests {
         /// `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
             Served::spawn_over(name, async |home| {
-                let projects = FileMembership::new(ProjectStore::new(home));
+                let projects = TcpMembership::new(home);
+                let tester = Owner::User("tester".into());
                 for project in ["demo", "other"] {
-                    projects.create(project, "tester").await.unwrap();
+                    projects.create(&tester, project, "tester").await.unwrap();
                 }
                 let access = Access::new(
                     vec!["https://allowed.example".to_owned()],
@@ -399,9 +400,17 @@ mod tests {
             Client::connect(&self.url, Auth::None, headers).unwrap()
         }
 
+        /// The directory of the tester's project `name`.
+        async fn project(&self, name: &str) -> PathBuf {
+            let tester = Owner::User("tester".into());
+            let projects = TcpMembership::new(&self.home);
+            let id = projects.resolve(&tester, name).await.unwrap().unwrap();
+            ProjectStore::new(&self.home).path(&id)
+        }
+
         /// File an empty image under `tag` in `demo`'s images.
-        fn file_image(&self, tag: &str) {
-            let store = ImageStore::new(self.home.join("project/demo/images")).unwrap();
+        async fn file_image(&self, tag: &str) {
+            let store = ImageStore::new(self.project("demo").await.join("images")).unwrap();
             let layer = store.insert_layer(&FsTree::new()).unwrap();
             let config = serde_json::from_str(
                 r#"{"architecture": "arm64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}"#,
@@ -481,7 +490,7 @@ mod tests {
             let access = Access::new(
                 Vec::new(),
                 Arc::new(TokenIsUser(users)),
-                Arc::new(FileMembership::new(ProjectStore::new(home))),
+                Arc::new(TcpMembership::new(home)),
                 ProjectStore::new(home),
             );
             super::router(Arc::new(access.unwrap()), axum::Router::new())
@@ -508,97 +517,116 @@ mod tests {
         let status = async |method, path, token, body| send(method, path, token, body).await.0;
         let none = Value::Null;
 
-        // Whoever signs in makes a project, and owns it: one of a name in use is refused.
+        // Whoever signs in makes a project, and owns it: one of a name in use of theirs is
+        // refused, and of another's is another project.
         let demo = json!({ "name": "demo" });
         let (made, answer, location) = send("POST", "projects/", "alice", demo.clone()).await;
+        let id = answer["id"].as_str().unwrap().to_owned();
         assert_eq!(
             (made, &answer),
-            (201, &json!({ "name": "demo", "role": "owner" }))
+            (
+                201,
+                &json!({ "id": id, "name": "demo", "owner": "alice", "role": "owner" })
+            )
         );
-        assert_eq!(location.unwrap(), "/projects/demo");
-        assert_eq!(
-            status("POST", "projects/", "bob", json!({ "name": "his" })).await,
-            201
-        );
+        assert_eq!(location.unwrap(), format!("/projects/{id}"));
         assert_eq!(
             status("POST", "projects/", "alice", demo.clone()).await,
             409
         );
-        for theirs in ["_alice", "_alice-example.com"] {
-            let made = status("POST", "projects/", "alice", json!({ "name": theirs })).await;
-            assert_eq!(made, 400, "{theirs}");
+        let (made, his, _) = send("POST", "projects/", "bob", demo.clone()).await;
+        assert_eq!(made, 201);
+        assert_ne!(his["id"], answer["id"]);
+        for name in ["default", "Demo", "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b"] {
+            let made = status("POST", "projects/", "alice", json!({ "name": name })).await;
+            assert_eq!(made, 400, "{name}");
         }
-        assert_eq!(
-            status("POST", "projects/", "alice", json!({ "name": "Demo" })).await,
-            400
-        );
         assert_eq!(status("POST", "projects/", "nobody", demo).await, 401);
-        let listed = async |token| send("GET", "projects/", token, Value::Null).await.1;
+        // Each lists their own, made for them, and theirs by name.
+        let listed = async |token| {
+            let listed = send("GET", "projects/", token, Value::Null).await.1;
+            let listed = listed.as_array().unwrap().iter();
+            listed
+                .map(|project| (project["name"].clone(), project["owner"].clone()))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             listed("alice").await,
-            json!([{ "name": "demo", "role": "owner" }])
+            [
+                (json!("default"), json!("alice")),
+                (json!("demo"), json!("alice"))
+            ]
         );
         assert_eq!(
             listed("bob").await,
-            json!([{ "name": "his", "role": "owner" }])
+            [
+                (json!("default"), json!("bob")),
+                (json!("demo"), json!("bob"))
+            ]
         );
 
-        // Bob reaches it, and what is in it, once Alice adds him.
+        // Bob reaches it by its id, and what is in it, once Alice adds him; by its name, he
+        // names his own.
+        let project = format!("projects/{id}");
         let volumes = async |token: &str| {
             let request = reqwest::Client::new()
                 .get(format!("{}volumes/", served.url))
                 .bearer_auth(token)
-                .header("virtx-project", "demo");
+                .header("virtx-project", &id);
             request.send().await.unwrap().status().as_u16()
         };
-        assert_eq!(
-            status("GET", "projects/demo", "bob", none.clone()).await,
-            403
-        );
+        assert_eq!(status("GET", &project, "bob", none.clone()).await, 403);
         assert_eq!(volumes("bob").await, 403);
         let member = json!({ "role": "member" });
-        let bob = "projects/demo/members/bob";
-        let (added, answer, location) = send("PUT", bob, "alice", member.clone()).await;
+        let bob = format!("{project}/members/bob");
+        let (added, answer, location) = send("PUT", &bob, "alice", member.clone()).await;
         assert_eq!(
             (added, &answer),
             (201, &json!({ "user": "bob", "role": "member" }))
         );
-        assert_eq!(location.unwrap(), "/projects/demo/members/bob");
-        assert_eq!(status("PUT", bob, "alice", member.clone()).await, 200);
+        assert_eq!(location.unwrap(), format!("/{bob}"));
+        assert_eq!(status("PUT", &bob, "alice", member.clone()).await, 200);
         assert_eq!(
-            send("GET", "projects/demo", "bob", none.clone()).await.1,
-            json!({ "name": "demo", "role": "member" })
+            send("GET", &project, "bob", none.clone()).await.1,
+            json!({ "id": id, "name": "demo", "owner": "alice", "role": "member" })
+        );
+        assert_eq!(
+            send("GET", "projects/demo", "bob", none.clone()).await.1["id"],
+            his["id"]
         );
         assert_eq!(volumes("bob").await, 200);
         assert_eq!(
-            send("GET", "projects/demo/members/", "bob", none.clone())
+            send("GET", &format!("{project}/members/"), "bob", none.clone())
                 .await
                 .1,
             json!([{ "user": "alice", "role": "owner" }, { "user": "bob", "role": "member" }])
         );
 
-        // A member neither changes the members nor removes the project; the last owner stays.
-        let (alice, carol) = ("projects/demo/members/alice", "projects/demo/members/carol");
-        assert_eq!(status("PUT", carol, "bob", member).await, 403);
-        assert_eq!(status("DELETE", alice, "bob", none.clone()).await, 403);
-        assert_eq!(
-            status("DELETE", "projects/demo", "bob", none.clone()).await,
-            403
+        // A member neither changes the members nor removes the project; its owner stays one.
+        let (alice, carol) = (
+            format!("{project}/members/alice"),
+            format!("{project}/members/carol"),
         );
-        assert_eq!(status("DELETE", alice, "alice", none.clone()).await, 409);
-        assert_eq!(status("DELETE", carol, "alice", none.clone()).await, 404);
+        assert_eq!(status("PUT", &carol, "bob", member).await, 403);
+        assert_eq!(status("DELETE", &alice, "bob", none.clone()).await, 403);
+        assert_eq!(status("DELETE", &project, "bob", none.clone()).await, 403);
+        assert_eq!(status("DELETE", &alice, "alice", none.clone()).await, 409);
+        let demoted = json!({ "role": "member" });
+        assert_eq!(status("PUT", &alice, "alice", demoted).await, 409);
+        assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 404);
 
         // Bob leaves; Alice removes the project, and everything in it.
-        assert_eq!(status("DELETE", bob, "bob", none.clone()).await, 204);
+        assert_eq!(status("DELETE", &bob, "bob", none.clone()).await, 204);
         assert_eq!(volumes("bob").await, 403);
-        assert!(served.home.join("project/demo").is_dir());
+        let dir = served.home.join("project").join(&id);
+        assert!(dir.is_dir());
         assert_eq!(
             status("DELETE", "projects/demo", "alice", none.clone()).await,
             204
         );
-        assert!(!served.home.join("project/demo").exists());
-        assert_eq!(status("GET", "projects/demo", "alice", none).await, 403);
-        assert_eq!(listed("alice").await, json!([]));
+        assert!(!dir.exists());
+        assert_eq!(status("GET", &project, "alice", none).await, 403);
+        assert_eq!(listed("alice").await, [(json!("default"), json!("alice"))]);
     }
 
     #[tokio::test]
@@ -686,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn a_project_s_images_are_a_registry() {
         let served = Served::spawn("registry").await;
-        served.file_image("alpine:3.21");
+        served.file_image("alpine:3.21").await;
         let base = format!("{}images/oci/v2", served.url);
         let get = async |path: &str, project: &str| {
             reqwest::Client::new()
@@ -729,7 +757,7 @@ mod tests {
         client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         let volume = FileRoot::Volume("data".into());
         let snapshot = FileRoot::Snapshot("work".into());
-        let home = served.home.join("project/demo");
+        let home = served.project("demo").await;
 
         // A volume's files, on the host's disk.
         client.create_dir(&volume, "dir").await.unwrap();
@@ -855,16 +883,12 @@ mod tests {
         let client = served.connect();
         let created = client.create_snapshot(Some("work"), Some(1)).await.unwrap();
         assert_eq!(created.name, "work");
-        assert!(
-            served
-                .home
-                .join("project/demo/snapshot/work.ext4")
-                .is_file()
-        );
+        let demo = served.project("demo").await;
+        assert!(demo.join("snapshot/work.ext4").is_file());
         assert_eq!(client.list_snapshot().await.unwrap(), [created]);
 
         client.create_volume(Some("data")).await.unwrap();
-        assert!(served.home.join("project/demo/volume/data/files").is_dir());
+        assert!(demo.join("volume/data/files").is_dir());
         assert_eq!(status(client.create_volume(Some("data")).await), 409);
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it

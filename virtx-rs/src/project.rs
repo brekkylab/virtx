@@ -28,8 +28,19 @@ impl Project {
         &self.client
     }
 
+    /// What names it on any server, given it once.
+    pub fn id(&self) -> &str {
+        &self.info.id
+    }
+
+    /// What its owner names it, among their projects.
     pub fn name(&self) -> &str {
         &self.info.name
+    }
+
+    /// The user whose project it is: none from a server with no users, such as over stdio.
+    pub fn owner(&self) -> Option<&str> {
+        self.info.owner.as_deref()
     }
 
     /// The client's role in it, as the server answered it.
@@ -44,22 +55,22 @@ impl Project {
 
     /// Its members, with their roles.
     pub fn members(&self) -> Call<Vec<ProjectMemberInfo>> {
-        self.client.list_project_member(&self.info.name)
+        self.client.list_project_member(&self.info.id)
     }
 
     /// Give `user` `role` in it, adding them if they are no member.
     pub fn set_member(&self, user: impl AsRef<str>, role: Role) -> Call<ProjectMemberInfo> {
-        self.client.set_project_member(&self.info.name, user, role)
+        self.client.set_project_member(&self.info.id, user, role)
     }
 
     /// Take `user`'s role in it away: theirs to do, leaving it, or an owner's.
     pub fn remove_member(&self, user: impl AsRef<str>) -> Call<()> {
-        self.client.remove_project_member(&self.info.name, user)
+        self.client.remove_project_member(&self.info.id, user)
     }
 
     /// Delete it and everything in it.
     pub fn remove(&self) -> Call<()> {
-        self.client.remove_project(&self.info.name)
+        self.client.remove_project(&self.info.id)
     }
 }
 

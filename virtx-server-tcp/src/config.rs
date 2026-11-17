@@ -9,12 +9,12 @@
 //! }
 //! ```
 //!
-//! A project's snapshots, volumes and images are under its own root, `<home>/project/<name>/`
+//! A project's snapshots, volumes and images are under its own root, `<home>/project/<id>/`
 //! (see [`virtx_uvm::ProjectStore`]). Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! A request's token is an ID token `oidc`'s issuer signed for `client_id`, and the user is its
 //! `username_claim` (`email` unless given): a project's members are users of the provider's,
-//! kept beside its root and changed at `/projects/`, where anyone signed in makes a project and
+//! kept in its root and changed at `/projects/`, where anyone signed in makes a project and
 //! owns it. A request that names no project is in its sender's own, which the server makes the
 //! first time. Without authentication, a client reaches its projects through `virtx-stdio`
 //! instead.

@@ -28,7 +28,10 @@ pub use machine::{
 pub use oci_spec::image::Digest;
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
-pub use project::{Error as ProjectError, Membership, Store as ProjectStore};
+pub use project::{
+    Error as ProjectError, Membership, Owner, Project, ProjectId, Store as ProjectStore,
+    is_name as is_project_name,
+};
 pub use sandbox::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
     LOG_LIMIT, Sandbox, park_after, signal_number,

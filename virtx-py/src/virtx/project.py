@@ -37,37 +37,44 @@ class Project:
     client: Client = field(repr=False, compare=False)
     """The client its requests go through."""
 
+    id: str
+    """What names it on any server, given it once."""
+
     name: str
+    """What its owner names it, among their projects."""
+
+    owner: str | None
+    """The user whose project it is: ``None`` from a server with no users, such as over stdio."""
 
     role: Role
     """The client's role in it, as the server answered it."""
 
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Project:
-        return cls(client, value["name"], Role(value["role"]))
+        return cls(client, value["id"], value["name"], value.get("owner"), Role(value["role"]))
 
     async def members(self) -> list[ProjectMemberListOutputItem]:
         """Its members, with their roles."""
-        items = await self.client._call("virtx_client_list_project_member", args(project=self.name))
+        items = await self.client._call("virtx_client_list_project_member", args(project=self.id))
         return [ProjectMemberListOutputItem.from_dict(item) for item in items]
 
     async def set_member(self, user: str, role: Role) -> ProjectMemberListOutputItem:
         """Give ``user`` ``role`` in it, adding them if they are no member."""
         output = await self.client._call(
             "virtx_client_set_project_member",
-            args(project=self.name, user=user, role=role),
+            args(project=self.id, user=user, role=role),
         )
         return ProjectMemberListOutputItem.from_dict(output)
 
     async def remove_member(self, user: str) -> None:
         """Take ``user``'s role in it away: theirs to do, leaving it, or an owner's."""
         await self.client._call(
-            "virtx_client_remove_project_member", args(project=self.name, user=user)
+            "virtx_client_remove_project_member", args(project=self.id, user=user)
         )
 
     async def remove(self) -> None:
         """Delete it and everything in it."""
-        await self.client._call("virtx_client_remove_project", args(name=self.name))
+        await self.client._call("virtx_client_remove_project", args(name=self.id))
 
 
 @dataclass(frozen=True)

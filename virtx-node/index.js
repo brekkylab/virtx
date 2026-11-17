@@ -649,7 +649,8 @@ class Client {
     return new Project(this, await this._call('virtx_client_create_project', { name }))
   }
 
-  // The project `name`, with the client's role in it.
+  // The project `name` names -- a project of the user's by name, or any by its id -- with the
+  // client's role in it.
   async getProject(name) {
     return new Project(this, await this._call('virtx_client_get_project', { name }))
   }
@@ -895,7 +896,7 @@ class Volume extends Files {
   }
 }
 
-// A project the client has a role in (`name`, `role`), and the client that reaches it: its
+// A project the client has a role in (`id`, `name`, `owner`, `role`), and the client that reaches it: its
 // members, and its removal. What is in it, a client reaches with the project set
 // (`setProject`). Dropping it leaves the project; `remove` removes it.
 class Project {
@@ -905,22 +906,22 @@ class Project {
 
   // Its members, with their roles.
   members() {
-    return this.client._call('virtx_client_list_project_member', { project: this.name })
+    return this.client._call('virtx_client_list_project_member', { project: this.id })
   }
 
   // Gives `user` `role` in it, adding them if they are no member.
   setMember(user, role) {
-    return this.client._call('virtx_client_set_project_member', { project: this.name, user, role })
+    return this.client._call('virtx_client_set_project_member', { project: this.id, user, role })
   }
 
   // Takes `user`'s role in it away: theirs to do, leaving it, or an owner's.
   async removeMember(user) {
-    await this.client._call('virtx_client_remove_project_member', { project: this.name, user })
+    await this.client._call('virtx_client_remove_project_member', { project: this.id, user })
   }
 
   // Deletes it and everything in it.
   async remove() {
-    await this.client._call('virtx_client_remove_project', { name: this.name })
+    await this.client._call('virtx_client_remove_project', { name: this.id })
   }
 }
 

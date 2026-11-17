@@ -427,7 +427,7 @@ describe('against virtx-stdio', () => {
 
 test('a forwarded port nothing listens on says so', async () => {
   const { url, token, project } = fixture()
-  const client = Client.connect(url, { type: 'bearer', token }, { 'virtx-project': project })
+  const client = Client.connect(url, { type: 'bearer', token }, project)
   const warned = []
   const warning = (w) => w.name === 'VirtxWarning' && warned.push(w.message)
   process.on('warning', warning)

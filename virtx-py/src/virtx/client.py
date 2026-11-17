@@ -505,7 +505,6 @@ class Client:
         ephemeral: bool = False,
         auto_stop_minutes: int | None = None,
         auto_delete_days: int | Literal["never"] | None = None,
-        disk_gib: int | None = None,
         network: bool = True,
         ports: Iterable[int | PortSpec | Mapping[str, Any]] = (),
         vcpus: int | None = None,

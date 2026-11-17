@@ -1,4 +1,4 @@
-"""Images, snapshots, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
+"""Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
 against the fixture's ``virtx-stdio``."""
 
 from pathlib import Path
@@ -26,18 +26,6 @@ from virtx import (
 )
 
 
-async def test_a_snapshot_is_created_got_listed_and_removed(client: Client) -> None:
-    name = unique("snapshot")
-    created = await client.create_snapshot(name, disk_gib=4)
-    assert (created.name, created.in_use) == (name, False)
-    assert await client.get_snapshot(name) == created
-    assert created in await client.list_snapshot()
-    await created.remove()
-    with pytest.raises(VirtxError) as refused:
-        await client.get_snapshot(name)
-    assert (refused.value.source, refused.value.status) == ("server", 404)
-
-
 async def test_a_volume_is_created_and_got(client: Client) -> None:
     name = unique("volume")
     created = await client.create_volume(name)
@@ -51,16 +39,15 @@ async def test_a_volume_is_created_and_got(client: Client) -> None:
 
 async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Client) -> None:
     await alpine(client)
-    snapshot = await client.create_snapshot(unique("snapshot"))
     volume = await client.create_volume(unique("volume"))
     sandbox = await client.create_sandbox(
         ALPINE,
-        snapshot=snapshot,
+        disk_gib=4,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
         ports=[8000],
         abins=["index"],
     )
-    assert sandbox.snapshot == snapshot.name and sandbox.running
+    assert sandbox.running
     assert sandbox.abins == ["index"]
     assert [port.port for port in sandbox.ports] == [8000]
     assert SandboxVolume(volume, "/data").to_dict() == {
@@ -95,7 +82,6 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     with pytest.raises(VirtxError) as refused:
         await client.get_sandbox(sandbox.id)
     assert refused.value.status == 404
-    await snapshot.remove()
     await volume.remove()
 
 

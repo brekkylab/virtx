@@ -6,7 +6,7 @@
 //! virtio-fs  /dev/root      an empty root, holding the init and the directories it mounts
 //!                           over -- replaced by the overlay before anything else runs
 //! virtio-blk /dev/vda       the root filesystem's disk, read-only -- the overlay's lower
-//! virtio-blk /dev/vdb       the snapshot -- the overlay's upper layer
+//! virtio-blk /dev/vdb       the upper disk -- the overlay's upper layer
 //! virtio-con hvc0           the guest's console, into libkrun's log, which goes to ctrlout
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
@@ -83,8 +83,6 @@ use serde::{Deserialize, Serialize};
 use super::gpu;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
 use super::{Error, MachineConfig, Network, Result, STOP_TIMEOUT, net};
-use crate::fstree::FsTree;
-use crate::snapshot::Snapshot;
 use crate::volume::{Remote, Served};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
@@ -174,13 +172,6 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
 pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
-    // Before anything is built, so a machine over a snapshot another one holds is refused
-    // with nothing to undo -- unless whoever started it holds the lock for it.
-    let lock = match machine.snapshot_held {
-        true => None,
-        false => machine.snapshot.as_ref().map(Snapshot::lock).transpose()?,
-    };
-
     // What PID 1 does once the guest is up: run the agent, mounted with its filesystem below,
     // and end the machine when it does. The init binary and this config are injected into the
     // root through the overlay
@@ -289,20 +280,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .collect::<io::Result<_>>()
         .map_err(|e| Error::io("reading where the published ports are", e))?;
 
-    let upper = match &machine.snapshot {
-        Some(snapshot) => snapshot.path.clone(),
-        None => {
-            let path =
-                std::env::temp_dir().join(format!("virtx-uvm-upper-{}.ext4", std::process::id()));
-            let file = File::create(&path).map_err(|e| Error::Io {
-                context: format!("creating {}", path.display()),
-                source: e,
-            })?;
-            FsTree::new().to_ext4(Snapshot::sparse(file), Snapshot::SIZE)?;
-            path
-        }
-    };
-
     // The guest kernel, which libkrun `dlopen`s rather than links.
     let mut payload =
         Payload::load_krunfw().map_err(|e| Error::vmm("loading the guest kernel", e))?;
@@ -378,7 +355,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .map_err(|e| Error::vmm(format!("attaching {rootfs}"), e))?;
     lower.set_read_only(true);
 
-    let upper_path = utf8(&upper)?;
+    let upper_path = utf8(&machine.upper)?;
     let upper_device = BlockDevice::new("vdb", upper_path, DiskFormat::Raw)
         .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
 
@@ -426,13 +403,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
 
-    // The disk is open now, so a temporary one can lose its name and go with the
-    // process. Windows will not remove an open file, and leaves it in the temp directory.
-    #[cfg(unix)]
-    if machine.snapshot.is_none() {
-        let _ = std::fs::remove_file(&upper);
-    }
-
     // The host's messages on to the agent, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
     // something unreadable into it, is gone and will hear nothing more: the guest is shut down
@@ -460,7 +430,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // Held for as long as the machine runs -- which is the rest of the process, whose end is
     // what lets them go.
-    let _held = (lock, holds);
+    let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
 }

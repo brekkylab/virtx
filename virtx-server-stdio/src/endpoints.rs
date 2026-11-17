@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,14 +25,13 @@ use tokio::task::{AbortHandle, JoinSet};
 use virtx_core::{
     ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
     ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxSignalArgs, SnapshotCreateArgs, SnapshotListOutputItem, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListOutputItem,
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 /// An image job, with the entries its log carries.
@@ -45,9 +44,10 @@ const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// What the endpoints answer from: the stores, and the sandboxes and jobs made from them.
 pub struct Home {
     images: ImageStore,
-    snapshots: SnapshotStore,
+    /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
+    root: PathBuf,
     volumes: VolumeStore,
-    /// The files of the snapshots and volumes, over WebDAV.
+    /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
@@ -58,15 +58,14 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, and the snapshots and volumes under `root`.
+    /// The images in `images`, and the volumes and the sandboxes' upper disks under `root`.
     pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
-        let snapshots = SnapshotStore::new(root)?;
-        Sandbox::sweep(&snapshots);
+        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
         Ok(Home {
             images,
-            files: Files::new(snapshots.clone(), volumes.clone()),
-            snapshots,
+            files: Files::new(volumes.clone()),
+            root: root.to_owned(),
             volumes,
             vm: vec![
                 std::env::current_exe()?.into(),
@@ -100,22 +99,6 @@ impl Home {
             .get(id)
             .map(|held| Arc::clone(&held.sandbox))
             .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
-    }
-
-    /// Whether a sandbox here stands on the snapshot `name`.
-    fn holds(&self, name: &str) -> bool {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .any(|held| held.sandbox.snapshot() == Some(name))
-    }
-
-    fn snapshot(&self, snapshot: Snapshot) -> Result<SnapshotListOutputItem, Refused> {
-        Ok(SnapshotListOutputItem {
-            size: snapshot.size()?,
-            in_use: snapshot.in_use()? || self.holds(&snapshot.name),
-            name: snapshot.name,
-        })
     }
 }
 
@@ -190,11 +173,6 @@ pub fn router() -> Router {
         )
         .route("/images/jobs/{id}/events", get(image_job_events))
         .route("/images/prune", post(image_prune))
-        .route("/snapshots/", get(snapshot_list).post(snapshot_create))
-        .route(
-            "/snapshots/{name}",
-            get(snapshot_get).delete(snapshot_remove),
-        )
         .route("/volumes/", get(volume_list).post(volume_create))
         .route("/volumes/{name}", get(volume_get).delete(volume_remove))
         .route("/volumes/{name}/mounts/", get(volume_mount_list))
@@ -202,12 +180,9 @@ pub fn router() -> Router {
             "/volumes/{name}/mounts/{*path}",
             put(volume_mount_create).delete(volume_mount_remove),
         )
-        .route("/volumes/{name}/files", any(files))
-        .route("/volumes/{name}/files/", any(files))
-        .route("/volumes/{name}/files/{*path}", any(files))
-        .route("/snapshots/{name}/files", any(files))
-        .route("/snapshots/{name}/files/", any(files))
-        .route("/snapshots/{name}/files/{*path}", any(files))
+        .route("/volumes/{name}/files", any(volume_files))
+        .route("/volumes/{name}/files/", any(volume_files))
+        .route("/volumes/{name}/files/{*path}", any(volume_files))
         .route("/sandboxes/{id}/files", any(sandbox_files))
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
@@ -462,54 +437,6 @@ async fn image_prune(Extension(home): Extension<Arc<Home>>) -> Answer {
     }))
 }
 
-async fn snapshot_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let mut listed = Vec::new();
-    for snapshot in home.snapshots.list()? {
-        listed.push(home.snapshot(snapshot)?);
-    }
-    Ok(json(&listed))
-}
-
-async fn snapshot_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
-    let args: SnapshotCreateArgs = body(&request)?;
-    if args.disk_gib == Some(0) {
-        return Err(invalid("disk_gib: 0 is a disk nothing fits on"));
-    }
-    let size = args
-        .disk_gib
-        .map_or(Snapshot::SIZE, |gib| u64::from(gib) << 30);
-    // Formatting a disk is blocking work.
-    let made = Arc::clone(&home);
-    let snapshot = tokio::task::spawn_blocking(move || {
-        let name = args
-            .name
-            .unwrap_or_else(|| pick(|name| made.snapshots.open(name).is_ok()));
-        made.snapshots.create(&name, size)
-    })
-    .await??;
-    let location = format!("/snapshots/{}", snapshot.name);
-    Ok(created(location, &home.snapshot(snapshot)?))
-}
-
-async fn snapshot_get(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(name): Segments<String>,
-) -> Answer {
-    Ok(json(&home.snapshot(home.snapshots.open(&name)?)?))
-}
-
-async fn snapshot_remove(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(name): Segments<String>,
-) -> Answer {
-    // Held from its sandbox's making until its removal, whether its machine runs or not.
-    if home.holds(&name) {
-        return Err(SnapshotError::InUse(name).into());
-    }
-    home.snapshots.remove(&name)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
 fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
     Ok(VolumeListOutputItem {
         size: home.volumes.open(&name)?.size(),
@@ -588,10 +515,13 @@ async fn volume_mount_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// A request to the files of a volume or a snapshot, over WebDAV: a snapshot a sandbox stands
-/// on answers `423`.
-async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Request) -> Response {
-    home.files.handle(request, &|name| home.holds(name)).await
+/// A request to the files of a volume, over WebDAV.
+async fn volume_files(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(segments): Segments<HashMap<String, String>>,
+    request: axum::extract::Request,
+) -> Response {
+    home.files.volume(&segments["name"], request).await
 }
 
 /// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it
@@ -612,8 +542,8 @@ async fn sandbox_files(
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
     let listed: Vec<_> = sandboxes
-        .iter()
-        .map(|(id, held)| held.sandbox.answer(id.clone()))
+        .values()
+        .map(|held| held.sandbox.answer())
         .collect();
     Ok(json(&listed))
 }
@@ -641,9 +571,8 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
 
     let sandbox = Sandbox::create(
         &home.images,
-        &home.snapshots,
+        &home.root,
         &home.volumes,
-        |name| home.holds(name),
         &args,
         home.vm.clone(),
         park_after(),
@@ -664,19 +593,15 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             }
         });
     }
-    let id = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let id = pick(|id| sandboxes.contains_key(id));
-        let held = Held {
-            sandbox: Arc::clone(&sandbox),
-            _listening: listening,
-        };
-        sandboxes.insert(id.clone(), held);
-        id
+    let id = sandbox.id().to_owned();
+    let held = Held {
+        sandbox: Arc::clone(&sandbox),
+        _listening: listening,
     };
+    home.sandboxes.lock().unwrap().insert(id.clone(), held);
     let answer = virtx_core::Sandbox {
         ports: opened,
-        ..sandbox.answer(id.clone())
+        ..sandbox.answer()
     };
     Ok(created(format!("/sandboxes/{id}"), &answer))
 }
@@ -685,7 +610,7 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.answer(id)))
+    Ok(json(&home.sandbox(&id)?.answer()))
 }
 
 async fn sandbox_remove(
@@ -920,19 +845,6 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
     }
 }
 
-impl From<SnapshotError> for Refused {
-    fn from(e: SnapshotError) -> Refused {
-        match &e {
-            SnapshotError::InvalidName(_) => invalid(e),
-            SnapshotError::Unknown(_) => not_found(e),
-            SnapshotError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
-            SnapshotError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SnapshotError::Io { source, .. } => io_refused(source, &e),
-            SnapshotError::Fstree(_) => internal(e),
-        }
-    }
-}
-
 impl From<VolumeError> for Refused {
     fn from(e: VolumeError) -> Refused {
         match &e {
@@ -990,7 +902,7 @@ impl From<SandboxError> for Refused {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
             SandboxError::Image(e) => e.into(),
-            SandboxError::Snapshot(e) => e.into(),
+            SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),

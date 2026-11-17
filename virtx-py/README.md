@@ -75,7 +75,7 @@ with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
 ```
 
-A volume and a snapshot are answered the same way, as a `Volume` and a `Snapshot` that carry their client. Those two and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
+A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
 ```python
 volume = await client.create_volume("data")
@@ -86,7 +86,7 @@ for entry in await volume.read_dir("in"):
 print(await volume.read_file("in/notes.txt"))
 ```
 
-What acts on a sandbox, a volume, a snapshot or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume`, `get_snapshot` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
+What acts on a sandbox, a volume or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
 
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 

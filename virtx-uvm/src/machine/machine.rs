@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -11,13 +12,11 @@ use std::time::{Duration, Instant};
 use oci_spec::image::Config;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    machine::{
-        Error, Network, Result,
-        boot::{self, BootArgs},
-        wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
-    },
-    snapshot::Snapshot,
+use crate::fstree::FsTree;
+use crate::machine::{
+    Error, Network, Result,
+    boot::{self, BootArgs},
+    wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
 
 /// How many of the last lines the machine process logged a failure is told with.
@@ -42,14 +41,9 @@ pub struct MachineConfig {
     /// command it runs, is given. Its entrypoint and command are not run.
     pub config: Config,
 
-    /// Where the machine's writes go. `None` is a temporary one, gone with the machine.
-    pub snapshot: Option<Snapshot>,
-
-    /// Whether whoever starts the machine holds [`snapshot`](MachineConfig::snapshot)'s lock
-    /// for it, for as long as the machine runs and past it; else the machine takes the lock
-    /// itself, and lets go of it as it ends.
-    #[serde(default)]
-    pub snapshot_held: bool,
+    /// The disk its writes go to, the overlay's upper layer: one [`create_upper`] made, which no
+    /// other machine runs over while this one does.
+    pub upper: PathBuf,
 
     /// How big it is, and where it may connect to.
     pub spec: MachineSpec,
@@ -68,6 +62,50 @@ pub struct MachineConfig {
     /// [`network`](MachineSpec::network).
     #[serde(default)]
     pub ports: Vec<u16>,
+}
+
+/// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
+/// ceiling and not an allocation, since the file is sparse. An ext4, since overlayfs takes
+/// nothing else as an upper layer, formatted here rather than in the guest so that it works
+/// over an image nobody prepared. One that fails to format is removed.
+pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
+    let file =
+        File::create_new(path).map_err(|e| Error::io(format!("creating {}", path.display()), e))?;
+    if let Err(e) = FsTree::new().to_ext4(sparse(file), u64::from(gib) << 30) {
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
+/// allocation.
+///
+/// Unix keeps every file so. NTFS keeps one so only once it is marked: unmarked, a write past
+/// the end fills the gap with zeros first, which is seconds for each GiB, so formatting a 2 GiB
+/// disk -- whose last group's bitmaps are at its end -- writes it whole. A volume that cannot
+/// mark it (FAT) still takes the disk, at that cost.
+fn sparse(file: File) -> File {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+        let mut returned = 0;
+        // SAFETY: the handle is `file`'s, open for the call, and nothing goes in or out.
+        unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+    file
 }
 
 /// How big a machine is and where it may connect to, whatever it boots and runs.
@@ -410,6 +448,21 @@ pub fn enter() -> Result<Infallible> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_new_upper_is_an_empty_filesystem_made_once() {
+        let dir = std::env::temp_dir().join(format!("virtx-uvm-upper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("work.ext4");
+        create_upper(&path, 2).unwrap();
+
+        let read = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+        let paths: Vec<_> = read.walk().into_iter().map(|(path, ..)| path).collect();
+        assert_eq!(paths, [b"".to_vec(), b"lost+found".to_vec()]);
+        assert!(matches!(create_upper(&path, 2), Err(Error::Io { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// What the machine's process is handed is what the parent wrote.
     #[test]
     fn a_config_survives_the_trip_to_the_machine_s_process() {
@@ -418,11 +471,7 @@ mod tests {
         let sent = MachineConfig {
             rootfs: PathBuf::from("/store/rootfs/sha256/abc.vmdk"),
             config,
-            snapshot: Some(Snapshot {
-                name: "work".to_string(),
-                path: PathBuf::from("/snapshot/work.ext4"),
-            }),
-            snapshot_held: true,
+            upper: PathBuf::from("/sandbox/work.ext4"),
             spec: MachineSpec {
                 vcpus: 2,
                 ram_mib: 2048,
@@ -435,14 +484,14 @@ mod tests {
                 at: "/data".to_string(),
                 read_only: true,
             }],
-            abin: Some(PathBuf::from("/snapshot/sandbox/work.abin")),
+            abin: Some(PathBuf::from("/sandbox/abin/work")),
             ports: vec![3000],
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
         assert_eq!(read.rootfs, sent.rootfs);
         assert_eq!(read.config, sent.config);
-        assert_eq!(read.snapshot, sent.snapshot);
+        assert_eq!(read.upper, sent.upper);
         assert_eq!(read.volumes, sent.volumes);
         assert_eq!(read.abin, sent.abin);
         assert_eq!(read.spec.network, sent.spec.network);

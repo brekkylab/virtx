@@ -1,4 +1,4 @@
-// The files of a volume, a snapshot and a sandbox, against the fixture's `virtx-stdio`.
+// The files of a volume and a sandbox, against the fixture's `virtx-stdio`.
 
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test } from 'node:test'
@@ -61,12 +61,6 @@ describe('against virtx-stdio', () => {
     await volume.remove()
   })
 
-  test("a snapshot's files answer every call", async () => {
-    const snapshot = await client.createSnapshot(unique('files'))
-    await everyCall(snapshot, '')
-    await snapshot.remove()
-  })
-
   test("a sandbox's files answer every call", async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
@@ -119,14 +113,5 @@ describe('against virtx-stdio', () => {
     await volume.remove()
     await assert.rejects(client.getVolume(name), { status: 404 })
     await assert.rejects(got.statFile('c.txt'), { status: 404 })
-  })
-
-  test('a snapshot carries its client to its files', async () => {
-    const name = unique('snapshot')
-    const snapshot = await client.createSnapshot(name)
-    await snapshot.writeFile('a.txt', 'kept')
-    assert.equal(await (await client.getSnapshot(name)).readText('a.txt'), 'kept')
-    await snapshot.remove()
-    await assert.rejects(client.getSnapshot(name), { status: 404 })
   })
 })

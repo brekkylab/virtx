@@ -201,6 +201,11 @@ impl DavFileSystem for Fs {
         })
     }
 
+    /// The same as `metadata`: a link is nothing this root answers.
+    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        self.metadata(path)
+    }
+
     fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
             Ok(Box::new(stat(&self.machine, &at(path)).await?) as Box<dyn DavMetaData>)

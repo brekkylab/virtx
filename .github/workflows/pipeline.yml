@@ -198,10 +198,13 @@ jobs:
             own: '["self-hosted", "linux", "x64", "m8i-2xlarge"]'
             hosted: ubuntu-24.04
             targets: linux windows
+            # The targets as a cache key takes them: a space there cuts the key short.
+            kernels: linux-windows
           - arch: aarch64
             own: '["self-hosted", "linux", "arm64", "c7g-2xlarge"]'
             hosted: ubuntu-24.04-arm
             targets: linux macos
+            kernels: linux-macos
     needs: version
     runs-on: ${{ !github.event.pull_request.head.repo.fork && fromJSON(matrix.own) || matrix.hosted }}
     timeout-minutes: 90
@@ -219,7 +222,7 @@ jobs:
         id: cache
         with:
           path: build/krunfw
-          key: kernel-${{ matrix.arch }}-${{ matrix.targets }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
+          key: kernel-${{ matrix.arch }}-${{ matrix.kernels }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
 
       - name: Kernel
         if: steps.cache.outputs.cache-hit != 'true'

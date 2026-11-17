@@ -182,6 +182,8 @@ client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 </TabItem>
 </Tabs>
 
+A server run over TCP (`virtx-server-tcp`) connects only to registries on public addresses, for a pull, a push and a build's base alike. A job that names a registry on the server's own machine or its private network fails with `is not reachable from this server`. To use such a registry, list it in the server's `server.json` as the reference names it, `host` or `host:port`: `"private_registries": ["registry.internal:5000"]`. The local server reaches whatever your machine does.
+
 ## Copy a local image to a remote server
 
 An image built on your machine can go to a server without a registry in between. `download_image` writes it from the local server to an OCI archive, and `upload_image` sends the archive to the remote server and tags it there, uploading only what that server lacks.

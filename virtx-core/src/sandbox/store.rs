@@ -10,7 +10,6 @@ use crate::image::ImageName;
 
 /// A sandbox, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Sandbox {
     /// The sandbox's id, which every request about it names it by.
     pub id: String,
@@ -292,7 +291,6 @@ mod given_or_null {
 
 /// A port opened in a sandbox, and where it is reached from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SandboxPort {
     /// The port in the sandbox.
     pub port: u16,
@@ -489,7 +487,47 @@ pub struct SandboxVolume {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn a_sandbox_is_read_past_members_it_does_not_know() {
+        let value = json!({
+            "id": "s",
+            "image": "sha256:00",
+            "state": "running",
+            "ephemeral": false,
+            "auto_stop_minutes": 15,
+            "auto_delete_days": 30,
+            "used_at": "2026-11-17T00:00:00Z",
+            "ports": [{"port": 80, "url": "http://127.0.0.1:1/", "region": "r1"}],
+            "cell": "c1",
+        });
+        let sandbox: Sandbox = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            sandbox.ports,
+            [SandboxPort {
+                port: 80,
+                url: "http://127.0.0.1:1/".into(),
+                label: None,
+                protocol: PortProtocol::default(),
+                address: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_create_with_a_member_it_does_not_take_is_refused() {
+        let mut value = serde_json::to_value(SandboxCreateArgs::new("img:latest")).unwrap();
+        value["cell"] = json!("c1");
+        assert!(serde_json::from_value::<SandboxCreateArgs>(value).is_err());
+
+        let mut value =
+            serde_json::to_value(SandboxCreateArgs::new("img:latest").volume("a", "/a")).unwrap();
+        value["volumes"][0]["cell"] = json!("c1");
+        assert!(serde_json::from_value::<SandboxCreateArgs>(value).is_err());
+    }
 
     #[test]
     fn a_create_says_only_what_it_asked_for() {

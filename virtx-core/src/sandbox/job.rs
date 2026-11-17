@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 /// A sandbox job, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SandboxJob {
     /// The job's id, which every request about it names it by.
     pub id: String,
@@ -115,7 +114,6 @@ pub enum SandboxJobEntry {
 
 /// How a process ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SandboxJobEnd {
     /// Its exit status; `128 + signal` for one a signal ended.
     pub code: i32,
@@ -147,6 +145,27 @@ mod tests {
                 entry
             );
         }
+    }
+
+    #[test]
+    fn a_job_and_its_end_are_read_past_members_they_do_not_know() {
+        let value = json!({
+            "id": "j",
+            "kind": "exec",
+            "pid": 7,
+            "cmd": ["true"],
+            "running": false,
+            "code": 0,
+            "cell": "c1",
+        });
+        let job: SandboxJob = serde_json::from_value(value).unwrap();
+        assert_eq!(job.code, Some(0));
+
+        let value = json!({"end": {"code": 137, "signal": "SIGKILL"}});
+        assert_eq!(
+            serde_json::from_value::<SandboxJobEntry>(value).unwrap(),
+            SandboxJobEntry::End(SandboxJobEnd { code: 137 })
+        );
     }
 
     #[test]

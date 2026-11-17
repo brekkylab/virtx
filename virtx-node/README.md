@@ -13,7 +13,7 @@ console.log('built', digest)
 await client.close()
 ```
 
-A build, pull, push or commit of an image is a job the server runs.
+A build, pull or push is a job the server runs.
 Its request answers a `StartedJob`, which starts the job at the call and is both a promise of the job and an async iterable of its log, entry by entry until its `end`; used both ways, it is still the one job.
 Its `complete` follows the job to its end and answers what it ended with, printing the log as it is read with `{ print: true }`.
 An image job that fails throws its `VirtxError`, from `complete` and from its log alike, in place of the `end` entry.
@@ -41,43 +41,16 @@ await cat.writeStdin('hello\n', true)
 for await (const entry of cat.log()) console.log(entry)
 ```
 
-A sandbox is kept until it is deleted: its disk, what it writes over its image, outlives its VM, which stops when it is unused or told to, and starts again as it was left, under the same id. `stop` and `start` do that on the handle, as `client.stopSandbox(id)` and `client.startSandbox(id)` do by its id; a job started in a stopped sandbox starts it too. One made with a `name` is found again by it, with `client.findSandbox(name)`. `commit(reference)` makes an image of it, a job as a build is, to start other sandboxes from.
-
-```js
-const dev =
-  (await client.findSandbox('dev')) ?? (await client.createSandbox('alpine:3.20', { name: 'dev' }))
-await dev.stop()
-const again = await dev.start()
-await again.commit('dev:latest')
-```
-
-A sandbox is kept, stopped, once unused, until it is deleted. One the client answered is deleted by `await using` on leaving its block, so a sandbox for one block is one line; one deleted already in the block is left so.
-
-```js
-{
-  await using sandbox = await client.createSandbox('alpine:3.20')
-  await sandbox.exec(['echo', 'hi'])
-}
-```
-
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the port the sandbox answered, or `openPort` for one opened after, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- is closed, and `forwarder.lastError` says why, a `VirtxError` naming the port, also emitted as a process warning of the type `VirtxWarning`.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
 
 const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000] })
-const forwarder = PortForwarder.open(client, sandbox.ports[0])
+const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
 console.log('reach it at', forwarder.address)
 forwarder.close()
-const port = await sandbox.openPort(9000) // kept in sandbox.ports too
-await sandbox.closePort(9000) // its url reaches it no more, and it leaves sandbox.ports
 ```
-
-A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `{ ports: [8080, { port: 5173, label: 'dev server', protocol: 'http' }] }`, or `openPort(5173, { label: 'dev server', protocol: 'http' })`. Each answered port has its `label`, and its `protocol` when it is `'http'`.
-
-A TCP port may also have an `address`, `host:port`, from a server reachable from other machines: any TCP client reaches it there directly, without a `PortForwarder`. Unlike the `url` it is not secret, so what is served there must authenticate whoever connects itself. It is absent when the server gives none.
-
-On virtx cloud, a port has inbound rules: the addresses a TCP port lets in at its `address`, and an HTTP one at its `url`. `{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }` in `ports`, or `openPort(22, { inbound })`, sets them as it opens, `await sandbox.setInbound(22, rules)` replaces them all (`[]` lets in no one), and `await sandbox.inbound(22)` reads them. A self-hosted server keeps none, and refuses `inbound`.
 
 A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 

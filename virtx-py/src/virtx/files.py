@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 
 class Files:
-    """The files of a ``Volume`` or a ``Sandbox``. A path is relative to its root,
-    ``/``-separated, as ``dir/file.txt``; the empty path is the root."""
+    """The files of a ``Volume`` or a ``Sandbox``. A path is relative to its
+    root, ``/``-separated, as ``dir/file.txt``; the empty path is the root."""
 
     if TYPE_CHECKING:
         client: Client

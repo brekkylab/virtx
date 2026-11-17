@@ -20,6 +20,7 @@ clap = { version = "4", features = ["derive"] }
 http = "1"
 # A job's log, as an event stream; and the hooks' and the keeping's futures.
 futures-util = { version = "0.3", default-features = false }
+http-body-util = "0.1"
 # An OpenID Connect provider's tokens, checked against its keys.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 # The host's memory, which its machines' capacity is twice of.
@@ -30,6 +31,8 @@ serde = { workspace = true }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# A member's user, as a segment of the path its `Location` names.
+percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
@@ -41,8 +44,14 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
+# Tokens signed as an issuer signs them.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 # A blob's digest, as a registry's client computes it.
 sha2 = "0.10"
+# A test's own root, removed when it is done.
+tempfile = "3"
+# A request sent to a router as the server would.
+tower = { version = "0.5", default-features = false, features = ["util"] }
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }

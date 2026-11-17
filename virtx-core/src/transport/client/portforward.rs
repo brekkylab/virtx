@@ -696,8 +696,8 @@ mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`, and `args` as in
-    /// `virtx_client_build_image`. `forwarder` and `out` are writable.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held, and
+    /// `args` as in `virtx_client_build_image`. `forwarder` and `out` are writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_port_forwarder_open(
         client: *mut VirtxClient,

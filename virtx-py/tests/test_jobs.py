@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from conftest import ALPINE, alpine, tags, unique
-
 from virtx import (
     BearerAuth,
     Client,

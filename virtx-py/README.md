@@ -4,7 +4,7 @@ A virtx client over the C ABI of `libvirtx_core` (`virtx-core/include/virtx.h`),
 
 The package also installs the `virtx` command, the one in `libvirtx_core`: `uvx virtx images`.
 
-A build, pull, push or commit of an image, and a process in a sandbox, is a job the server runs apart from the request that started it.
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from the request that started it.
 The method that starts one answers a `StartedJob`, sent when it is first awaited, iterated or completed: `complete` follows the job to its end and answers what it ended with; iterated, it yields the job's log, each entry numbered so a reader can resume `after` one, until its end entry; awaited, it is the job.
 Stopping early leaves the job running; `ImageJob.remove` or `SandboxJob.remove` cancels it.
 
@@ -65,30 +65,15 @@ async for entry in cat.log():
     ...
 ```
 
-A sandbox is kept, stopped, once unused, until it is deleted. One the client answered is also an async context manager that deletes it on leaving, so a sandbox for one block is one line; one deleted already in the block is left so.
-
-```python
-async with await client.create_sandbox("alpine:3.20") as sandbox:
-    await sandbox.exec(["echo", "hi"])
-```
-
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the port `create_sandbox` answered, or `open_port` for one opened after, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. `PortForwarder.open` returns at once: opening it asks nothing of the server. A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- is closed, and `forwarder.last_error` says why, a `VirtxError` naming the port, also logged as a warning by the `virtx` logger.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```python
 from virtx import PortForwarder
 
 sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
-with PortForwarder.open(client, sandbox.ports[0]) as forwarder:
+with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
     print("reach it at", forwarder.address)
-port = await sandbox.open_port(9000)  # kept in sandbox.ports too
-await sandbox.close_port(9000)  # its url reaches it no more, and it leaves sandbox.ports
 ```
-
-A port can say what it is for, and be HTTP, reached at its `url` by a browser rather than through a `PortForwarder`: `PortSpec(5173, label="dev server", protocol="http")` in `ports`, beside plain numbers, or `open_port(5173, label="dev server", protocol="http")`. Each answered port has its `label` and `protocol` (`PortProtocol.TCP` unless said).
-
-A TCP port may also have an `address`, `host:port`, from a server reachable from other machines: any TCP client reaches it there directly, without a `PortForwarder`. Unlike the `url` it is not secret, so what is served there must authenticate whoever connects itself. It is `None` when the server gives none.
-
-On virtx cloud, a port has inbound rules: the addresses a TCP port lets in at its `address`, and an HTTP one at its `url`. `PortSpec(22, inbound=[InboundRule("203.0.113.7", "office")])` or `open_port(22, inbound=[...])` sets them as it opens, `await sandbox.set_inbound(22, rules)` replaces them all (`[]` lets in no one), and `await sandbox.inbound(22)` reads them, as a `PortInbound`. A self-hosted server keeps none, and refuses `inbound`.
 
 A volume is answered the same way, as a `Volume` that carries its client. It and a `Sandbox` read and write their files, with a path relative to their root. A sandbox's are its root as its processes see it, while its VM runs. A file is written and read whole, or read in part; a directory lists its entries and goes with everything in it.
 
@@ -101,7 +86,7 @@ for entry in await volume.read_dir("in"):
 print(await volume.read_file("in/notes.txt"))
 ```
 
-What acts on a sandbox, a volume or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `find_sandbox`, `get_volume` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
+What acts on a sandbox, a volume or a sandbox job is its handle. One known only by its id or name is had again with `get_sandbox`, `get_volume` or a sandbox's `job`: `await (await client.get_volume("data")).read_file("in/notes.txt")`.
 
 The library is the one given to `virtx.load(path)`, or `$VIRTX_CORE_LIB`, or the copy in the package, or the system loader's search for `libvirtx_core`. One process opens one, so another module sharing a client opens `virtx.library_path()` and takes the pointer from `client.clone().into_raw()`.
 

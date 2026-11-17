@@ -27,6 +27,7 @@ from .image import (
     image_name,
 )
 from .job import StartedJob
+from .project import Project
 from .sandbox import (
     InboundRule,
     PortInbound,
@@ -165,12 +166,15 @@ class Client:
         cls,
         url: str,
         auth: Auth | None = None,
+        project: str | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> Client:
-        """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the credentials it wants, and ``headers``, whatever else it asks
-        of each request, with every request. ``Authorization`` is ``auth``'s, over one given as
-        a header. Refused when a token would go in the clear: over ``http`` to any host but
-        this machine."""
+        """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the
+        credentials it wants, ``project``, the project every request is in (the user's own
+        without one), and ``headers``, whatever else it asks of each request, with
+        every request. ``Authorization`` is ``auth``'s, and ``virtx-project`` names ``project``,
+        over one given as a header. Refused when a token would go in the clear: over ``http`` to
+        any host but this machine."""
         lib = library()
         auth_json = _auth_bytes(auth)
         array = _header_array(headers)
@@ -185,7 +189,13 @@ class Client:
             ctypes.byref(raw),
             ctypes.byref(error),
         )
-        return cls._opened(lib, status, raw, error)
+        client = cls._opened(lib, status, raw, error)
+        try:
+            client.set_project(project)
+        except BaseException:
+            client.close()
+            raise
+        return client
 
     def set_auth(self, auth: Auth | None) -> None:
         """Send ``auth`` with every request from now on, in place of what was given at
@@ -213,35 +223,47 @@ class Client:
         if status != OK:
             self._lib.take(status, error)
 
+    def set_project(self, project: str | None) -> None:
+        """Name ``project`` in every request from now on, over either transport, in place of a
+        ``virtx-project`` among the headers given. With ``None``, that header names it where
+        there is one, and otherwise none is named, for the user's own project. A name no header
+        carries raises, the project unchanged."""
+        error = _Bytes()
+        status = self._lib.virtx_client_set_project(
+            self._held(), None if project is None else project.encode(), ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
+
     @classmethod
     def from_env(cls) -> Client:
         """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` if set, which names its
-        organization: with ``VIRTX_ORG`` and no key, as the person signed in with ``virtx login``,
-        whose token for that organization ``virtx token --json --org <VIRTX_ORG>`` prints, again
-        as it runs out.
+        project: with ``VIRTX_PROJECT`` and no key, as the person signed in with ``virtx login``,
+        whose token for that project ``virtx token --json --project <VIRTX_PROJECT>`` prints,
+        again as it runs out. ``VIRTX_PROJECT`` names the project of every request.
 
         Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
         cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
         which DNS answers with the cell nearest this machine. A sandbox of another cell is
         reached through it as well."""
         key = os.environ.get("VIRTX_API_KEY") or None
-        org = os.environ.get("VIRTX_ORG") or None
+        project = os.environ.get("VIRTX_PROJECT") or None
         domain = os.environ.get("VIRTX_DOMAIN") or None
         region = os.environ.get("VIRTX_REGION") or None
         url = os.environ.get("VIRTX_URL") or None
         if not url and region:
             url = f"https://{region}.api.{domain or DOMAIN}"
-        if not url and (key or org):
+        if not url and (key or project):
             url = f"https://run.{domain or DOMAIN}"
         if not url:
             raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
         auth: Auth | None = None
         if key:
             auth = BearerAuth(key)
-        elif org:
+        elif project:
             program, args = SIGNED_IN
-            auth = CommandAuth(program, (*args, "--org", org))
-        return cls.connect(url, auth)
+            auth = CommandAuth(program, (*args, "--project", project))
+        return cls.connect(url, auth, project)
 
     @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
@@ -439,6 +461,22 @@ class Client:
         held."""
         return ImagePruneOutput.from_dict(await self._call("virtx_client_prune_image"))
 
+    async def list_project(self) -> list[Project]:
+        """Every project the client has a role in."""
+        items = await self._call("virtx_client_list_project")
+        return [Project.from_dict(self, item) for item in items]
+
+    async def create_project(self, name: str) -> Project:
+        """Make the project ``name``, the client its owner."""
+        output = await self._call("virtx_client_create_project", _args(name=name))
+        return Project.from_dict(self, output)
+
+    async def get_project(self, name: str) -> Project:
+        """The project ``name`` names -- a project of the user's by name, or any by its id --
+        with the client's role in it."""
+        output = await self._call("virtx_client_get_project", _args(name=name))
+        return Project.from_dict(self, output)
+
     async def list_volume(self) -> list[Volume]:
         """Every volume the server holds."""
         items = await self._call("virtx_client_list_volume")
@@ -472,6 +510,7 @@ class Client:
         ports: Iterable[int | PortSpec | Mapping[str, Any]] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
+        disk_gib: int | None = None,
         gpu: bool | None = None,
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),

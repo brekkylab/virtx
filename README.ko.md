@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">코드와 AI 에이전트를 위한 일회용 Linux VM</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -25,8 +28,7 @@
 virtx를 쓰면 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있습니다.
 
 내 컴퓨터에 굳이 설치하고 싶지 않은 무거운 의존성이 필요한 작업이나, AI 에이전트가 스스로 판단해 실행하는 명령처럼 아예 내 컴퓨터에서 돌리고 싶지 않은 코드에 특히 유용합니다.
-VM 안에서 설치하거나 바꾼 것은 샌드박스가 있는 동안 중지를 거쳐도 그대로 남고, 샌드박스를 지우면 사라집니다.
-볼륨에 기록했거나 이미지로 커밋해 둔 것은 예외입니다.
+VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
 
 > [!TIP]
 > virtx로 AI 에이전트를 만들고 있다면 저희가 만든 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 살펴보세요.
@@ -151,12 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 안에는 `virtx-server-tcp`, 게스트 커널, `abin/`, `alib/`이 있습니다.
 별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
 
-서버 머신에서 `server.json`을 작성하고 서버를 시작합니다.
+서버 머신에서 OpenID Connect 제공자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -167,53 +170,8 @@ virtx-server-tcp serve --config server.json
 클라이언트에서는 `Client.spawn()` 대신 서버에 접속합니다.
 나머지는 로컬 예제와 같습니다.
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-루프백 주소에서 듣는 서버는 인증을 요구하지 않습니다.
-다른 머신에 서비스하려면 OpenID Connect 제공자와, 프로젝트마다 접근할 수 있는 사용자를 지정합니다.
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 사용자는 제공자가 `client_id`의 클라이언트에 발급한 ID 토큰의 `email`입니다. 이 클라이언트는 device flow를 쓰는 공개 클라이언트여야 합니다.
-`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰과 프로젝트를 지정해 접속합니다.
+`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰으로 접속합니다.
 
 ```sh
 virtx login https://virtx.example
@@ -228,7 +186,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -240,8 +197,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -254,7 +210,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -275,7 +232,7 @@ let client = Client::connect(
 - **쓰던 이미지를 그대로:** Docker Hub나 어떤 OCI 레지스트리에서든 이미지를 받아 오거나 레시피 또는 Dockerfile로 빌드할 수 있고, 다시 푸시하거나 다른 서버로 복사할 수도 있습니다.
 - **셸 없이 파일 주고받기:** 샌드박스 안의 파일을 코드에서 바로 읽고, 쓰고, 복사하고, 지울 수 있습니다.
 - **안에서 돌아가는 서비스에 바로 접속:** 샌드박스 안의 웹 서버, SSH, VNC 데스크톱, 데이터베이스에 내 컴퓨터의 주소로 접속할 수 있습니다.
-- **하던 작업 이어 가기:** 샌드박스는 중지되어도 쓴 내용을 간직하고, 멈췄던 그대로 다시 시작합니다. 샌드박스를 이미지로 커밋해 다음 샌드박스들에 넘기고, 볼륨 하나를 여러 샌드박스가 함께 쓰고, Notion, Google Drive, OneDrive를 평범한 파일처럼 마운트할 수 있습니다.
+- **하던 작업 이어 가기:** 샌드박스가 쓴 내용을 볼륨에 남겨 다음 샌드박스로 넘기고, 볼륨 하나를 여러 샌드박스가 함께 쓰고, Notion, Google Drive, OneDrive를 평범한 파일처럼 마운트할 수 있습니다.
 - **GPU도 함께:** 샌드박스 안에서 호스트의 GPU로 딥러닝을 비롯한 Vulkan 작업을 돌릴 수 있습니다.
 
 ## 요구 사항
@@ -345,29 +302,26 @@ virtx는 클라이언트-서버 구조로 동작합니다.
 가장 중심이 되는 리소스는 명령을 실행하는 VM인 **샌드박스**입니다.
 
 <p align="center">
-  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 자신만의 쓰기 가능한 디스크를 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="docs/images/core-concepts.svg" width="640">
+  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 쓰기 가능한 레이어를 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="docs/images/core-concepts.svg" width="640">
 </p>
 
 샌드박스의 루트 파일시스템은 두 층을 겹친 오버레이입니다.
-아래층은 읽기 전용인 **이미지**, 위층은 쓰기 내용이 기록되는 샌드박스 자신의 **디스크**입니다.
+아래층은 읽기 전용인 **이미지**, 위층은 쓰기 내용이 기록되는 **쓰기 레이어**입니다.
 
 이미지는 그 위에서 만든 모든 샌드박스의 출발점입니다.
 Docker가 쓰는 것과 같은 OCI 이미지 형식이라서, `alpine:latest`를 비롯해 레지스트리에 있는 이미지라면 무엇이든 쓸 수 있습니다.
 
-디스크에는 샌드박스가 바꾼 내용이 차곡차곡 쌓이고, 디스크는 샌드박스가 있는 동안 계속 남아 있습니다.
-샌드박스는 한동안 쓰이지 않거나 직접 중지하면 멈추고, 명령을 보내거나 시작하면 같은 ID로 멈췄던 그대로 다시 시작합니다.
-임시(ephemeral) 샌드박스는 멈출 때 삭제됩니다.
-한 샌드박스가 만든 것에서 다른 샌드박스들을 시작하려면 이미지로 커밋하세요.
-원래 이미지에 그 샌드박스가 쓴 내용을 레이어 하나로 더 얹은 이미지가 만들어집니다.
+쓰기 레이어에는 샌드박스가 바꾼 내용이 차곡차곡 쌓입니다.
+샌드박스마다 전용 쓰기 레이어가 빈 상태로 생기고, 샌드박스를 지울 때 함께 사라집니다.
 
 루트 파일시스템과 별개로 저장 공간이 필요하다면 **볼륨**을 쓰세요.
-볼륨은 샌드박스의 디스크와 달리 특정 경로에 읽기-쓰기 또는 읽기 전용으로 마운트하며, 여러 샌드박스에 동시에 마운트할 수도 있습니다.
+볼륨은 쓰기 레이어와 달리 특정 경로에 읽기-쓰기 또는 읽기 전용으로 마운트하며, 여러 샌드박스에 동시에 마운트할 수도 있습니다.
 샌드박스를 지워도 볼륨은 남아 있고, 볼륨의 파일은 샌드박스 없이도 코드에서 바로 읽고 쓸 수 있습니다.
 Notion, Google Drive, OneDrive 같은 원격 저장소도 볼륨 안에 읽기 전용으로 마운트할 수 있어서, 샌드박스에서는 이것들이 그냥 파일로 보입니다.
 
 ## 문서
 
-가이드와 API 레퍼런스는 [문서](docs/)에서 볼 수 있습니다.
+가이드와 API 레퍼런스는 [문서](https://virtx.sh/docs)에서 볼 수 있습니다.
 그 밖의 API는 패키지별 문서에 정리되어 있습니다: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
 ## 소스에서 빌드하기

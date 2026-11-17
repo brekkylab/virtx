@@ -1,5 +1,5 @@
-//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the
-//! users its OpenID Connect provider does (see [`virtx_server_tcp::config`]): each request
+//! `virtx-server-tcp` -- a virtx server over HTTP, to the users its OpenID Connect provider
+//! names (see [`virtx_server_tcp::config`]): each request
 //! carries a user's token and names a project, and the endpoints `virtx-core`'s `PROTOCOL.md`
 //! names answer it from that project's home; see [`virtx_server_tcp::serve`] for the rest.
 //!
@@ -41,12 +41,9 @@ async fn run(config: Config) -> anyhow::Result<()> {
     {
         endpoints::set_registry_mirror(mirror);
     }
-    let (projects, access, router) = serve::configured(&config)?;
+    let (access, router) = serve::configured(&config).await?;
     serve::spawn_loops(&access);
     let listener = serve::bind(config.listen).await?;
-    if projects.open() {
-        eprintln!("without authentication: every request reaches every project");
-    }
     let served = serve::serve(listener, router).await;
     // Every sandbox stops with this server, what it wrote on its disk, kept for the next.
     tokio::task::spawn_blocking(move || {

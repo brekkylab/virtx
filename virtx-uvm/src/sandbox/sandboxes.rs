@@ -12,7 +12,7 @@ use super::hooks::{Hooks, Wanted, Written};
 use super::record::{Record, Resized};
 use super::sandbox::{Shared, label_fits, pick, spec_of};
 use super::{Error, Sandbox};
-use crate::{Digest, ImageStore, ImageStoreError, Reference, Snapshot, SnapshotStore, VolumeStore};
+use crate::{Digest, ImageStore, ImageStoreError, Reference, SnapshotStore, VolumeStore};
 
 /// How long a sandbox runs unused before it stops, and how long one is kept stopped and unused
 /// before it is deleted, where its making names neither.
@@ -74,7 +74,6 @@ impl Sandboxes {
     ) -> std::io::Result<Sandboxes> {
         let kept = root.join("sandbox");
         std::fs::create_dir_all(&kept)?;
-        sweep(&kept);
         forget_unrecorded(&snapshots, root);
         let records = Record::load_all(&kept, &images);
         let shared = Arc::new(Shared {
@@ -194,10 +193,19 @@ impl Sandboxes {
             )));
         }
         spec_of(&args)?;
-        if args.disk_gib == Some(0) {
-            return Err(Error::Invalid(
-                "disk_gib: a disk of 0 GiB holds nothing".into(),
-            ));
+        match args.disk_gib {
+            Some(0) => {
+                return Err(Error::Invalid(
+                    "disk_gib: a disk of 0 GiB holds nothing".into(),
+                ));
+            }
+            Some(gib) if gib > super::MAX_DISK_GIB => {
+                return Err(Error::Invalid(format!(
+                    "disk_gib: {gib} is over the {} a sandbox may have",
+                    super::MAX_DISK_GIB
+                )));
+            }
+            _ => {}
         }
         if args.auto_stop_minutes == Some(0) {
             return Err(Error::Invalid(
@@ -657,35 +665,6 @@ pub fn forget_unrecorded(snapshots: &SnapshotStore, root: &Path) {
     }
 }
 
-/// What a server before sandboxes were kept left under `dir`: a disk, `<name>.ext4`, for each
-/// lock file `<name>.owner` that the process that made it no longer holds.
-fn sweep(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let owner = entry.path();
-        if owner.extension().is_none_or(|e| e != "owner") {
-            continue;
-        }
-        let Ok(file) = File::open(&owner) else {
-            continue;
-        };
-        if file.try_lock().is_err() {
-            continue;
-        }
-        let Some(name) = owner.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        Snapshot {
-            name: name.to_owned(),
-            path: dir.join(format!("{name}.ext4")),
-        }
-        .delete();
-        let _ = std::fs::remove_file(&owner);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,8 +754,11 @@ mod tests {
                 .map(|entries| entries.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
                 .unwrap_or_default()
         };
-        assert_eq!(left("snapshot"), Vec::<OsString>::new(), "its disk");
-        assert_eq!(left("sandbox"), Vec::<OsString>::new(), "its record");
+        assert_eq!(
+            left("sandbox"),
+            Vec::<OsString>::new(),
+            "its disk and its record"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -829,12 +811,20 @@ mod tests {
         // Nor does one starting once it is made, nor is anything of its making left.
         drop(sandboxes(&root));
         assert!(here.snapshots().open(&made.id).is_ok(), "its disk");
-        let left: Vec<_> = std::fs::read_dir(root.join("sandbox"))
+        let mut left: Vec<_> = std::fs::read_dir(root.join("sandbox"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name())
+            .filter(|name| !name.to_string_lossy().ends_with(".lock"))
             .collect();
-        assert_eq!(left, [OsString::from(format!("{}.json", made.id))]);
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                OsString::from(format!("{}.ext4", made.id)),
+                OsString::from(format!("{}.json", made.id))
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -851,7 +841,7 @@ mod tests {
         let made = here.create(args.clone(), None, false).await.unwrap();
         assert_eq!(made.state, virtx_core::SandboxState::Stopped);
         assert!(made.image.starts_with("sha256:"));
-        assert!(root.join(format!("snapshot/{}.ext4", made.id)).is_file());
+        assert!(root.join(format!("sandbox/{}.ext4", made.id)).is_file());
         // One name to one sandbox, and one id.
         let again = here.create(args, None, false).await;
         assert!(matches!(again, Err(Error::Exists(_))), "{again:?}");
@@ -891,11 +881,11 @@ mod tests {
         );
         assert_eq!(kept.used_at, made.used_at);
         assert_eq!(next.get(&made.id).unwrap().answer(true).ports, made.ports);
-        assert!(!root.join(format!("snapshot/{}.ext4", gone.id)).exists());
+        assert!(!root.join(format!("sandbox/{}.ext4", gone.id)).exists());
 
         next.delete(&made.id).await.unwrap();
         assert!(matches!(next.get(&made.id), Err(Error::NotFound(_))));
-        assert!(!root.join(format!("snapshot/{}.ext4", made.id)).exists());
+        assert!(!root.join(format!("sandbox/{}.ext4", made.id)).exists());
         assert!(!root.join(format!("sandbox/{}.json", made.id)).exists());
         let _ = std::fs::remove_dir_all(&root);
     }

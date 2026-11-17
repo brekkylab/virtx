@@ -1,7 +1,7 @@
 //! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
-//! made by the module of what it names: [`image`](crate::image),
-//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume
-//! over WebDAV.
+//! made by the module of what it names: [`project`](crate::project), [`image`](crate::image),
+//! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a
+//! sandbox over WebDAV.
 
 use std::{io, path::PathBuf};
 
@@ -16,6 +16,10 @@ use crate::{
         self, Event, ImageBuildArgs, ImageCommitArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
+    },
+    project::{
+        self, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
+        ProjectMemberSetArgs, Role,
     },
     sandbox::{
         self, InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs,
@@ -78,6 +82,69 @@ impl Client {
     /// connection. Over stdio, where none are sent, nothing changes.
     pub fn set_headers(&self, headers: HeaderMap) {
         self.inner.set_headers(headers);
+    }
+
+    /// Name `project` in every request from now on, over either transport -- a project of the
+    /// user's by name, or any by its id -- in place of a `virtx-project` among the headers given.
+    /// With `None`, that header names it where there is one, and otherwise none is named, for
+    /// the user's own project, [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). Refused for a name no
+    /// header carries, the project unchanged.
+    pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
+        self.inner.set_project(project)
+    }
+
+    /// Every project the client has a role in, with the role.
+    pub async fn list_project(&self) -> Result<Vec<ProjectListOutputItem>, Error> {
+        project::client::list(&self.inner).await
+    }
+
+    /// Make the project `name`, the client its owner.
+    pub async fn create_project(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ProjectListOutputItem, Error> {
+        let args = ProjectCreateArgs { name: name.into() };
+        project::client::create(&self.inner, &args).await
+    }
+
+    /// The project `name` names -- a project of the user's by name, or any by its id -- with the
+    /// client's role in it.
+    pub async fn get_project(&self, name: impl AsRef<str>) -> Result<ProjectListOutputItem, Error> {
+        project::client::get(&self.inner, name.as_ref()).await
+    }
+
+    /// Delete the project `name` names, as [`get_project`](Self::get_project) reads it, and
+    /// everything in it.
+    pub async fn remove_project(&self, name: impl AsRef<str>) -> Result<(), Error> {
+        project::client::remove(&self.inner, name.as_ref()).await
+    }
+
+    /// The members of `project`, with their roles.
+    pub async fn list_project_member(
+        &self,
+        project: impl AsRef<str>,
+    ) -> Result<Vec<ProjectMemberListOutputItem>, Error> {
+        project::client::list_member(&self.inner, project.as_ref()).await
+    }
+
+    /// Give `user` `role` in `project`, adding them if they are no member.
+    pub async fn set_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+        role: Role,
+    ) -> Result<ProjectMemberListOutputItem, Error> {
+        let args = ProjectMemberSetArgs { role };
+        project::client::set_member(&self.inner, project.as_ref(), user.as_ref(), &args).await
+    }
+
+    /// Take `user`'s role in `project` away.
+    pub async fn remove_project_member(
+        &self,
+        project: impl AsRef<str>,
+        user: impl AsRef<str>,
+    ) -> Result<(), Error> {
+        project::client::remove_member(&self.inner, project.as_ref(), user.as_ref()).await
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
@@ -594,16 +661,27 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs,
             ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
+        project::{ProjectCreateArgs, Role},
         sandbox::{InboundRule, SandboxCreateArgs, SandboxExecArgs},
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
 
-    /// What names a volume or a sandbox: `{"name": "..."}`.
+    /// What names a project, a volume or a sandbox: `{"name": "..."}`.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Name {
         name: String,
+    }
+
+    /// What names a project's members, or one of them, and the role to give them:
+    /// `{"project": "...", "user": "...", "role": "owner" or "member"}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Member {
+        project: String,
+        user: Option<String>,
+        role: Option<Role>,
     }
 
     /// What names a sandbox or an image job: `{"id": "..."}`.
@@ -869,6 +947,37 @@ pub(crate) mod ffi {
         }
     }
 
+    /// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
+    /// transport, in place of a `virtx-project` among the headers given. With a null one, that
+    /// header names it where there is one, and otherwise none is named, for the user's own
+    /// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+    /// the project unchanged.
+    ///
+    /// # Safety
+    ///
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
+    /// `project` is null or NUL-terminated. `error` is null or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_project(
+        client: *mut VirtxClient,
+        project: *const c_char,
+        error: *mut VirtxBytes,
+    ) -> c_int {
+        let set = match project.is_null() {
+            true => Ok(None),
+            false => unsafe { utf8(project) }.map(Some),
+        }
+        .and_then(|project| unsafe { &(*client).0 }.value().set_project(project));
+        match set {
+            Ok(()) => VIRTX_OK,
+            Err(failed) => {
+                let (status, message) = failure(failed);
+                unsafe { write(error, message) };
+                status
+            }
+        }
+    }
+
     /// Hold `client` once more, for another holder to release.
     ///
     /// # Safety
@@ -904,8 +1013,8 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`. `args` is `args_len` readable bytes, not
-    /// read after this returns.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `args`
+    /// is `args_len` readable bytes, not read after this returns.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_build_image(
         client: *mut VirtxClient,
@@ -966,7 +1075,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image_job(
         client: *mut VirtxClient,
@@ -1045,7 +1154,7 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_image(client: *mut VirtxClient) -> *mut VirtxFuture {
         unsafe { &(*client).0 }.future(|client| async move { client.list_image().await })
@@ -1196,12 +1305,139 @@ pub(crate) mod ffi {
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_prune_image(
         client: *mut VirtxClient,
     ) -> *mut VirtxFuture {
         unsafe { &(*client).0 }.future(|client| async move { client.prune_image().await })
+    }
+
+    /// Answers with each project the client has a role in, as
+    /// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
+    /// `owner` for one of no user's, such as one made over stdio.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_volume`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_project(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }.future(|client| async move { client.list_project().await })
+    }
+
+    /// Makes the project `name`, the client its owner, given `{"name": "..."}`. Answers with
+    /// the project, as `virtx_client_list_project` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<ProjectCreateArgs>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.create_project(args?.name).await })
+    }
+
+    /// Answers with the project `name` names, a project of the user's by name or any by its id,
+    /// given `{"name": "..."}`, as `virtx_client_list_project` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move { client.get_project(args?.name).await })
+    }
+
+    /// Deletes the project `name` and everything in it, given `{"name": "..."}`. Answers with
+    /// `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_project(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_project(args?.name).await })
+    }
+
+    /// Given `{"project": "..."}`, answers with the project's members, as
+    /// `[{"user": "...", "role": "owner" or "member"}, ...]`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_project_member(args?.project).await })
+    }
+
+    /// Given `{"project": "...", "user": "...", "role": "owner" or "member"}`, gives the user
+    /// the role in the project. Answers with the member, as `virtx_client_list_project_member`
+    /// answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_set_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Member {
+                project,
+                user,
+                role,
+            } = args?;
+            let user = user.ok_or_else(|| missing("user"))?;
+            let role = role.ok_or_else(|| missing("role"))?;
+            client.set_project_member(project, user, role).await
+        })
+    }
+
+    /// Given `{"project": "...", "user": "..."}`, takes the user's role in the project away.
+    /// Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_project_member(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Member>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let Member { project, user, .. } = args?;
+            let user = user.ok_or_else(|| missing("user"))?;
+            client.remove_project_member(project, user).await
+        })
     }
 
     /// Answers with the volumes, as `[{"name": "...", "size": n}, ...]`.
@@ -1579,7 +1815,7 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Moves what is at `from` to `to` in the same volume, given
+    /// Moves what is at `from` to `to` in the same volume or sandbox, given
     /// `{"volume": "...", "from": "...", "to": "...", "overwrite": bool}`, `overwrite` optional
     /// and false without it: whether to replace what is at `to`, which is otherwise refused.
     /// Answers with `null`.

@@ -38,6 +38,19 @@ fn mirrored(reference: &str) -> String {
 }
 
 impl Server {
+    /// Where the disk of sandbox `id` is: under its project's directory, whichever project of
+    /// the home it is in, or else where none is.
+    fn disk(&self, id: &str) -> PathBuf {
+        let projects = std::fs::read_dir(self.home.join("project"))
+            .into_iter()
+            .flatten();
+        projects
+            .flatten()
+            .map(|project| project.path().join(format!("sandbox/{id}.ext4")))
+            .find(|disk| disk.is_file())
+            .unwrap_or_else(|| self.home.join(format!("project/none/sandbox/{id}.ext4")))
+    }
+
     fn spawn(name: &str) -> Server {
         Server::spawn_with(name, &[])
     }
@@ -194,7 +207,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
     // Its machine is up from its making.
     assert_eq!(listed[0].state, SandboxState::Running);
     assert_eq!(listed[0].name.as_deref(), Some("work"));
-    assert!(server.home.join(format!("snapshot/{id}.ext4")).is_file());
+    assert!(server.disk(&id).is_file());
 
     let (mut lines, ended) = server
         .exec(&id, &["sh", "-c", "echo one; echo two >&2; exit 3"], None)
@@ -303,7 +316,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
 
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(server.client.remove_sandbox(&id).await), 404);
-    assert!(!server.home.join(format!("snapshot/{id}.ext4")).exists());
+    assert!(!server.disk(&id).exists());
     server.client.remove_sandbox(&other).await.unwrap();
 }
 
@@ -336,12 +349,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         (id.as_str(), SandboxState::Stopped)
     );
     assert_eq!(status(server.client.get_sandbox(&ephemeral).await), 404);
-    assert!(
-        !server
-            .home
-            .join(format!("snapshot/{ephemeral}.ext4"))
-            .exists()
-    );
+    assert!(!server.disk(&ephemeral).exists());
 
     // Started again, as it was left, its port answered where this server answers it.
     let started = server.client.start_sandbox(&id).await.unwrap();
@@ -486,7 +494,7 @@ async fn a_sandbox_stopped_while_it_stops_unused_answers_once_it_has_synced() {
         // so its disk holds all it wrote.
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         server.client.stop_sandbox(&id).await.unwrap();
-        let disk = std::fs::File::open(server.home.join(format!("snapshot/{id}.ext4"))).unwrap();
+        let disk = std::fs::File::open(server.disk(&id)).unwrap();
         let tree = FsTree::from_ext4(disk).unwrap();
         let size = match tree.entry(b"upper/root/big").unwrap() {
             Some(Entry::File { data, .. }) => data.len(),
@@ -875,7 +883,7 @@ async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
     assert_eq!((lines, ended.unwrap()), (vec!["synced".into()], 0));
     server.client.stop_sandbox(&id).await.unwrap();
 
-    let path = server.home.join(format!("snapshot/{id}.ext4"));
+    let path = server.disk(&id);
     let image = std::fs::read(&path).unwrap();
     let incompat = u32::from_le_bytes(image[1024 + 0x60..1024 + 0x64].try_into().unwrap());
     assert_ne!(incompat & 0x4, 0, "left needing its journal replayed");

@@ -25,6 +25,8 @@
     "koffi": "^3.3.3"
   },
   "devDependencies": {
-    "prettier": "3.9.10"
+    "@biomejs/biome": "2.6.7",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
   }
 }

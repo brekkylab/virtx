@@ -14,7 +14,7 @@
 //!
 //! Each command is of a provider when one is named -- `url`, or `--issuer` (`VIRTX_OIDC_ISSUER`)
 //! and `--client-id` (`VIRTX_OIDC_CLIENT_ID`) -- and of virtx cloud when it is named:
-//! `--domain` (`VIRTX_DOMAIN`), or an organization's token, `token --org` (`VIRTX_ORG`), as the
+//! `--domain` (`VIRTX_DOMAIN`), or a project's token, `token --project` (`VIRTX_PROJECT`), as the
 //! SDKs' `from_env` runs it. Named neither, it is of what was signed in to last, and of virtx
 //! cloud where nothing was. virtx cloud's are `virtx_core::cli`'s, the commands the Python and
 //! Node packages' `virtx` runs in `libvirtx_core`, which signs in to virtx cloud alone.
@@ -87,9 +87,9 @@ enum Command {
         /// Print `{"token": ..., "expires_in": <seconds>}`, as the SDKs read it.
         #[arg(long)]
         json: bool,
-        /// virtx cloud's token for the organization of this UUID, which its cells take.
-        #[arg(long, env = "VIRTX_ORG")]
-        org: Option<String>,
+        /// virtx cloud's token for the project of this UUID, which its cells take.
+        #[arg(long, env = "VIRTX_PROJECT")]
+        project: Option<String>,
     },
     /// Say who is signed in.
     Whoami,
@@ -164,7 +164,7 @@ fn sign_in(cli: &Cli, dir: &Path) -> anyhow::Result<Option<SignIn>> {
         _ => None,
     };
     let cloud = cli.domain.is_some()
-        || matches!(&cli.command, Command::Token { org: Some(org), .. } if !org.is_empty());
+        || matches!(&cli.command, Command::Token { project: Some(project), .. } if !project.is_empty());
     let (issuer, client_id) = match (&cli.issuer, &cli.client_id, server) {
         (Some(issuer), Some(client_id), _) => (issuer.clone(), client_id.clone()),
         (None, None, Some(server)) => provider::advertised(server)?
@@ -445,9 +445,9 @@ mod tests {
             of(&named, Some(cloud)).as_deref(),
             Some("https://other.invalid")
         );
-        // An organization's token, as the SDKs' `from_env` asks for one, is virtx cloud's.
-        let org = ["virtx", "token", "--json", "--org", "0193-org"];
-        assert_eq!(of(&org, Some(provider)), None);
+        // A project's token, as the SDKs' `from_env` asks for one, is virtx cloud's.
+        let project = ["virtx", "token", "--json", "--project", "0193-project"];
+        assert_eq!(of(&project, Some(provider)), None);
         assert_eq!(
             of(
                 &["virtx", "whoami", "--domain", "x.invalid"],

@@ -134,10 +134,10 @@ mod tests {
     #[test]
     fn a_path_s_root_is_beside_it() {
         let args = FilePathArgs {
-            root: FileRoot::Volume("s".into()),
+            root: FileRoot::Sandbox("s".into()),
             path: "a/b".into(),
         };
-        let value = json!({"volume": "s", "path": "a/b"});
+        let value = json!({"sandbox": "s", "path": "a/b"});
         assert_eq!(serde_json::to_value(&args).unwrap(), value);
         assert_eq!(serde_json::from_value::<FilePathArgs>(value).unwrap(), args);
         let read: FileReadArgs =

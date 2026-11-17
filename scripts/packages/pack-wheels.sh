@@ -4,7 +4,7 @@
 #
 #   scripts/packages/pack-wheels.sh <lib-dir> <out-dir> [--allow-missing]
 #
-# `<lib-dir>/<platform>/` holds each platform's library, as the `build` workflow's `client`
+# `<lib-dir>/<platform>/` holds each platform's library, as the `pipeline` workflow's platform
 # jobs lay it out; `--allow-missing` builds only the platforms that have one. Needs `build` and
 # `wheel`. hatchling builds a pure wheel, `py3-none-any`, so each is unpacked, retagged
 # `py3-none-<platform>` and not purelib, and packed again.

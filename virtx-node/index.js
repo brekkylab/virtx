@@ -95,6 +95,7 @@ const SIGNATURES = {
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
   virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
+  virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['uintptr_t', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -112,6 +113,13 @@ const SIGNATURES = {
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
   virtx_client_commit_image: WITH_ARGS,
+  virtx_client_list_project: PLAIN,
+  virtx_client_create_project: WITH_ARGS,
+  virtx_client_get_project: WITH_ARGS,
+  virtx_client_remove_project: WITH_ARGS,
+  virtx_client_list_project_member: WITH_ARGS,
+  virtx_client_set_project_member: WITH_ARGS,
+  virtx_client_remove_project_member: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_get_volume: WITH_ARGS,
@@ -493,12 +501,13 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL, sending
-  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
-  // `headers`, a name to a value, whatever else it asks of each request, with every request.
-  // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
-  // the clear: over `http` to any host but this machine.
-  static connect(url, auth = null, headers = {}) {
+  // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+  // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
+  // request is in (the user's own without one), and `headers`, a name to a value,
+  // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
+  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
+  // in the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, project = null, headers = {}) {
     const lib = library()
     const bytes = authBytes(auth)
     const strings = Object.entries(headers).flat()
@@ -513,31 +522,38 @@ class Client {
       raw,
       error,
     )
-    return opening(lib, status, raw, error)
+    const client = opening(lib, status, raw, error)
+    try {
+      client.setProject(project)
+    } catch (e) {
+      client.close()
+      throw e
+    }
+    return client
   }
 
-  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
-  // organization: with `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose
-  // token for that organization `virtx token --json --org <VIRTX_ORG>` prints, again as it runs
-  // out.
+  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its project:
+  // with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token for
+  // that project `virtx token --json --project <VIRTX_PROJECT>` prints, again as it runs out.
+  // `VIRTX_PROJECT` names the project of every request.
   // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
   // `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers
   // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
   static fromEnv() {
     const key = process.env.VIRTX_API_KEY || null
-    const org = process.env.VIRTX_ORG || null
+    const project = process.env.VIRTX_PROJECT || null
     const domain = process.env.VIRTX_DOMAIN || null
     const region = process.env.VIRTX_REGION || null
     let url = process.env.VIRTX_URL || null
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
-    if (!url && (key || org)) url = `https://run.${domain || DOMAIN}`
+    if (!url && (key || project)) url = `https://run.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
     const auth = key
       ? { type: 'bearer', token: key }
-      : org
-        ? { ...SIGNED_IN, args: [...SIGNED_IN.args, '--org', org] }
+      : project
+        ? { ...SIGNED_IN, args: [...SIGNED_IN.args, '--project', project] }
         : null
-    return Client.connect(url, auth, {})
+    return Client.connect(url, auth, project, {})
   }
 
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
@@ -564,6 +580,16 @@ class Client {
       strings.length / 2,
       error,
     )
+    if (status !== OK) this._lib.take(status, error)
+  }
+
+  // Name `project` in every request from now on, over either transport, in place of a
+  // `virtx-project` among the headers given. With null, that header names it where there is one,
+  // and otherwise none is named, for the user's own project. A name no header carries throws,
+  // the project unchanged.
+  setProject(project) {
+    const error = {}
+    const status = this._lib.virtx_client_set_project(this._held(), project, error)
     if (status !== OK) this._lib.take(status, error)
   }
 
@@ -695,6 +721,23 @@ class Client {
 
   pruneImage() {
     return this._call('virtx_client_prune_image')
+  }
+
+  // Every project the client has a role in.
+  async listProject() {
+    const infos = await this._call('virtx_client_list_project')
+    return infos.map((info) => new Project(this, info))
+  }
+
+  // Makes the project `name`, the client its owner.
+  async createProject(name) {
+    return new Project(this, await this._call('virtx_client_create_project', { name }))
+  }
+
+  // The project `name` names -- a project of the user's by name, or any by its id -- with the
+  // client's role in it.
+  async getProject(name) {
+    return new Project(this, await this._call('virtx_client_get_project', { name }))
   }
 
   async listVolume() {
@@ -834,7 +877,8 @@ function held(handle, client, info) {
 }
 
 // The files of a volume or a sandbox, at its `_root`, the `{ volume }` or `{ sandbox }` each
-// request names. A path is relative to the root, as `dir/file.txt`.
+// request names. A path is relative to the root, as
+// `dir/file.txt`.
 class Files {
   _call(name, args, raw = false) {
     return this.client._call(name, { ...this._root, ...args }, raw)
@@ -937,7 +981,8 @@ class ImageJob {
   async complete({ print = false } = {}) {
     for await (const entry of this.log()) {
       if ('log' in entry && print) console.log(entry.log)
-      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('truncated' in entry && print)
+        console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.digest
     }
     throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
@@ -983,6 +1028,35 @@ class Volume extends Files {
   // Deletes it and everything in it.
   async remove() {
     await this.client._call('virtx_client_remove_volume', { name: this.name })
+  }
+}
+
+// A project the client has a role in (`id`, `name`, `owner`, `role`), and the client that reaches it: its
+// members, and its removal. What is in it, a client reaches with the project set
+// (`setProject`). Dropping it leaves the project; `remove` removes it.
+class Project {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // Its members, with their roles.
+  members() {
+    return this.client._call('virtx_client_list_project_member', { project: this.id })
+  }
+
+  // Gives `user` `role` in it, adding them if they are no member.
+  setMember(user, role) {
+    return this.client._call('virtx_client_set_project_member', { project: this.id, user, role })
+  }
+
+  // Takes `user`'s role in it away: theirs to do, leaving it, or an owner's.
+  async removeMember(user) {
+    await this.client._call('virtx_client_remove_project_member', { project: this.id, user })
+  }
+
+  // Deletes it and everything in it.
+  async remove() {
+    await this.client._call('virtx_client_remove_project', { name: this.id })
   }
 }
 
@@ -1173,7 +1247,8 @@ class SandboxJob {
     for await (const entry of this.log()) {
       if ('stdout' in entry && print) console.log(entry.stdout)
       else if ('stderr' in entry && print) console.error(entry.stderr)
-      else if ('truncated' in entry && print) console.error("(the log reached the server's limit; the rest is not kept)")
+      else if ('truncated' in entry && print)
+        console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.code
     }
     throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
@@ -1203,6 +1278,7 @@ module.exports = {
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
+  Project,
   Recipe,
   Sandbox,
   SandboxJob,

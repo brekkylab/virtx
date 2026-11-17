@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -25,7 +28,7 @@
 virtx lets you run tasks in disposable Linux VMs from your own code.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
-Whatever a VM installs or changes is kept while the sandbox is, across its stops, and gone when you remove it -- unless it wrote it to a volume, or you committed it to an image.
+Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
 
 > [!TIP]
 > Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
@@ -149,12 +152,13 @@ Each [release](https://github.com/brekkylab/virtx/releases) carries the server a
 It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
 Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
 
-On the server machine, write a `server.json` and start the server:
+On the server machine, write a `server.json` naming your OpenID Connect provider, and start the server:
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -165,53 +169,8 @@ virtx-server-tcp serve --config server.json
 On the client, connect to it in place of `Client.spawn()`.
 The rest is the same as the local example.
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-A server listening on the loopback takes no credentials.
-To serve other machines, name your OpenID Connect provider and who may reach each project:
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
-Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints and the project:
+Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints:
 
 ```sh
 virtx login https://virtx.example
@@ -226,7 +185,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -238,8 +196,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -252,7 +209,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -273,7 +231,7 @@ A client sends a token over plain `http` only to this machine's loopback, so put
 - **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
 - **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
 - **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
-- **Pick up where you left off:** a sandbox keeps what it wrote across its stops and starts again as it was left; commit it to an image for the next ones, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
+- **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
 - **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
 
 ## Requirements
@@ -339,26 +297,25 @@ Code in it is separated from your machine by a hypervisor, not just by namespace
 The main resource is the **sandbox**: a VM you run commands in.
 
 <p align="center">
-  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made with a writable disk of its own over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
+  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable layer over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
 </p>
 
-A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and the sandbox's own **disk** above, where its writes go.
+A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **writable layer** above, where its writes go.
 
 The image is what every sandbox on it starts from.
 Images are OCI images, the format Docker uses, so `alpine:latest` or any image from a registry works.
 
-The disk is where a sandbox's changes pile up, and it is kept for as long as the sandbox is.
-A sandbox stops after a while unused, or when it is stopped, and starts again as it was left -- by a command, or when it is started -- under the same id; an ephemeral one is deleted when it stops.
-To start other sandboxes from what one made, commit it to an image: its image, with what it wrote as one more layer.
+The writable layer is where a sandbox's changes pile up.
+Each sandbox has its own, which starts empty and goes when the sandbox is removed.
 
 When a sandbox needs storage apart from its root filesystem, use a **volume**.
-Unlike a sandbox's disk, a volume is mounted at a path, read-write or read-only, and can be mounted into several sandboxes at once.
+Unlike the writable layer, a volume is mounted at a path, read-write or read-only, and can be mounted into several sandboxes at once.
 It stays when they are removed, and its files can be read and written from your code without a sandbox at all.
 Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a volume too, read-only, so a sandbox sees them as files.
 
 ## Documentation
 
-See the [documentation](docs/) for guides and the API reference.
+See the [documentation](https://virtx.sh/docs) for guides and the API reference.
 Each package documents the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
 
 ## Building from source

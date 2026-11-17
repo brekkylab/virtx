@@ -240,6 +240,12 @@ impl<'a> Plan<'a> {
                 "ext4 image: {size} bytes is too small to hold a filesystem"
             )));
         }
+        // The superblock counts blocks in 32 bits, without the `64bit` feature.
+        if blocks > u64::from(u32::MAX) {
+            return Err(Error::Unwritable(format!(
+                "ext4 image: {size} bytes is more blocks than a filesystem without `64bit` counts"
+            )));
+        }
 
         // The first block of each group nothing of the filesystem's own is in.
         let first_free = |group: u64| {

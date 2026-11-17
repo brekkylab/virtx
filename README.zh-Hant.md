@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">為你的程式碼與 AI 代理準備的拋棄式 Linux 虛擬機器</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -26,7 +29,7 @@ virtx 讓你直接在自己的程式碼裡，用拋棄式的 Linux 虛擬機器�
 
 有些工作需要一大堆相依套件，你不想裝在自己的電腦上；有些程式碼你根本不想在自己的電腦上執行，例如 AI 代理自行決定要跑的指令。
 這些都很適合交給 virtx。
-虛擬機器裡安裝或修改過的東西，在移除它之後都會消失，只有寫進你保留下來的快照或磁碟區的內容才會留下。
+虛擬機器裡安裝或修改過的東西，在移除它之後都會消失，只有寫進你保留下來的磁碟區的內容才會留下。
 
 > [!TIP]
 > 正在用 virtx 打造 AI 代理嗎？我們的開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是以 virtx 為基礎，會替每個代理配一個專屬沙箱，不需任何設定，代理的指令和檔案工具就會在虛擬機器裡執行。
@@ -150,12 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
 解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
 
-在伺服器那台機器上寫一份 `server.json`，然後啟動伺服器：
+在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者，然後啟動伺服器：
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -166,53 +170,8 @@ virtx-server-tcp serve --config server.json
 在用戶端，改為連線到這台伺服器，取代 `Client.spawn()`。
 其餘部分和本機範例完全相同。
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-監聽回送位址的伺服器不需要驗證。
-要提供給其他機器使用，請指定你的 OpenID Connect 提供者，以及每個專案允許存取的使用者：
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 使用者就是提供者核發給 `client_id` 所指用戶端的 ID 權杖中的 `email`，該用戶端須是使用裝置流程的公開用戶端。
-用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖和專案名稱連線：
+用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖連線：
 
 ```sh
 virtx login https://virtx.example
@@ -227,7 +186,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -239,8 +197,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -253,7 +210,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -275,7 +233,7 @@ let client = Client::connect(
 - **沿用你已經在用的映像檔：** 可以從 Docker Hub 或任何 OCI 映像檔倉庫拉取，也能用配方或 Dockerfile 建置，之後還能推送回去或複製到另一台伺服器。
 - **不開 shell 也能傳檔案：** 直接在程式碼裡讀取、寫入、複製和刪除沙箱中的檔案。
 - **連得到沙箱裡執行的服務：** 沙箱中的網頁伺服器、SSH、VNC 桌面或資料庫，都能透過你電腦上的位址連線。
-- **從上次停下的地方接著做：** 把沙箱寫下的內容存進快照留給下一個沙箱、讓多個沙箱共用一個磁碟區，還能把 Notion、Google Drive、OneDrive 當成一般檔案掛載進來。
+- **從上次停下的地方接著做：** 把沙箱寫下的內容存進磁碟區留給下一個沙箱、讓多個沙箱共用一個磁碟區，還能把 Notion、Google Drive、OneDrive 當成一般檔案掛載進來。
 - **GPU 也能帶進去：** 在沙箱裡使用主機的 GPU 執行深度學習和其他 Vulkan 工作。
 
 ## 系統需求
@@ -343,27 +301,25 @@ virtx 採用用戶端－伺服器架構。
 最主要的資源是**沙箱**：一台讓你執行指令的虛擬機器。
 
 <p align="center">
-  <img alt="使用者向沙箱傳送指令並讀取輸出；沙箱由唯讀的映像檔加上一層可寫入的快照組成，並掛載了一個磁碟區。" src="docs/images/core-concepts.svg" width="640">
+  <img alt="使用者向沙箱傳送指令並讀取輸出；沙箱由唯讀的映像檔加上一層可寫入層組成，並掛載了一個磁碟區。" src="docs/images/core-concepts.svg" width="640">
 </p>
 
-沙箱的根檔案系統由兩層疊加而成：下層是唯讀的**映像檔**，上層是接收寫入的**快照**。
+沙箱的根檔案系統由兩層疊加而成：下層是唯讀的**映像檔**，上層是接收寫入的**可寫入層**。
 
 映像檔是所有以它建立的沙箱共同的起點。
 映像檔採用 OCI 格式，也就是 Docker 所用的格式，所以 `alpine:latest` 或映像檔倉庫裡的任何映像檔都能直接使用。
 
-快照是沙箱變更累積的地方。
-新的快照一開始是空的；之後以它建立的沙箱，會帶著上一個沙箱寫下的所有內容啟動，所以前一個沙箱裝好的東西，下一個沙箱也找得到。
-同一時間，一個快照只能由一個沙箱使用。
-建立沙箱時若沒有指定快照，它會有一個專屬的快照，並在沙箱移除時一併刪除。
+可寫入層是沙箱變更累積的地方。
+每個沙箱都有自己專屬的可寫入層，一開始是空的，並在沙箱移除時一併刪除。
 
 當沙箱需要根檔案系統以外的儲存空間時，就使用**磁碟區**。
-與快照不同，磁碟區會掛載到某個路徑上，可以設為讀寫或唯讀，也能同時掛載到多個沙箱。
+與可寫入層不同，磁碟區會掛載到某個路徑上，可以設為讀寫或唯讀，也能同時掛載到多個沙箱。
 沙箱移除後磁碟區仍會保留，而且不必透過沙箱，就能直接從程式碼讀寫其中的檔案。
 Notion、Google Drive、OneDrive 等遠端儲存空間也能以唯讀方式掛載到磁碟區中，讓沙箱把它們當成一般檔案。
 
 ## 文件
 
-指南和 API 參考請見[文件](docs/)。
+指南和 API 參考請見[文件](https://virtx.sh/docs)。
 其餘 API 記載在各套件的文件中：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
 
 ## 從原始碼建置

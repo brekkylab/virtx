@@ -61,7 +61,7 @@ pub enum SandboxState {
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.
 ///
-/// The machine members (`vcpus`, `memory_mib`, `gpu`, `gpu_memory_mib`) each leave
+/// The machine members (`vcpus`, `memory_mib`, `disk_gib`, `gpu`, `gpu_memory_mib`) each leave
 /// it to the server without one. A server gives exactly what is asked or refuses; `0` for a
 /// number is refused, not another way to leave it out.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,11 +92,6 @@ pub struct SandboxCreateArgs {
     )]
     pub auto_delete_days: Option<Option<u32>>,
 
-    /// How much it may write to its root filesystem over its image, in GiB. Without one the
-    /// server picks it; `0` is refused.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_gib: Option<u32>,
-
     /// Whether its processes reach a network at all: the way out, which `ports` do not need.
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
@@ -114,6 +109,11 @@ pub struct SandboxCreateArgs {
     /// Memory, in MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
+
+    /// How much it may write over its image, in GiB, at most 1024. Without one the server picks
+    /// it; `0` is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
 
     /// Whether it gets a GPU. `false` forbids one on a server that would attach one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,11 +158,11 @@ impl SandboxCreateArgs {
             ephemeral: false,
             auto_stop_minutes: None,
             auto_delete_days: None,
-            disk_gib: None,
             network: true,
             ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
+            disk_gib: None,
             gpu: None,
             gpu_memory_mib: None,
             volumes: Vec::new(),
@@ -194,12 +194,6 @@ impl SandboxCreateArgs {
         self
     }
 
-    /// Its disk `gib` GiB.
-    pub fn disk_gib(mut self, gib: u32) -> Self {
-        self.disk_gib = Some(gib);
-        self
-    }
-
     /// Whether its processes reach a network at all.
     pub fn network(mut self, network: bool) -> Self {
         self.network = network;
@@ -220,6 +214,11 @@ impl SandboxCreateArgs {
 
     pub fn memory_mib(mut self, mib: u32) -> Self {
         self.memory_mib = Some(mib);
+        self
+    }
+
+    pub fn disk_gib(mut self, gib: u32) -> Self {
+        self.disk_gib = Some(gib);
         self
     }
 
@@ -586,6 +585,7 @@ mod tests {
             .port(443)
             .vcpus(2)
             .memory_mib(512)
+            .disk_gib(8)
             .gpu(true)
             .gpu_memory_mib(256)
             .volume("a", "/a")
@@ -595,6 +595,7 @@ mod tests {
         expected.ports = vec![80.into(), 443.into()];
         expected.vcpus = Some(2);
         expected.memory_mib = Some(512);
+        expected.disk_gib = Some(8);
         expected.gpu = Some(true);
         expected.gpu_memory_mib = Some(256);
         expected.volumes = vec![

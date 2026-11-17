@@ -151,10 +151,10 @@ sandbox.remove_file("work", true).await?;
 
 Pass a file's `etag` from `stat_file` as `if_match` to `write_file`, and the write goes through only while the file still has that tag.
 If something changed it in between, the write is refused with `412`, and nothing is overwritten.
+Of two such writes sent at once with one tag, one goes through and the other is refused with `412`: read the file again and retry.
+The tag is checked before the content is written, and again once all of it has arrived, just before it replaces the file.
 
 ## Reading while the sandbox is stopped
 
-A sandbox's files are read and written through its VM, while it runs.
-A request to the files of a sandbox that has stopped, told to or for being unused, is refused with `409`, `stopped`, and does not start it: `start` it first, and its files are as it left them; see [Keeping sandboxes](/docs/guides/keeping-sandboxes/#find-it-again-and-start-it).
-A request to its files uses it, as a job does, so a sandbox is not stopped for being unused while you read and write them.
-To read a task's output with no sandbox running, have it write the output to a [volume](/docs/guides/mounting-volumes/).
+A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
+To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/guides/mounting-volumes/).

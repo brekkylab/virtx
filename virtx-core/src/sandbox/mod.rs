@@ -1,6 +1,6 @@
-//! Sandboxes: a VM booted from an image, with volumes mounted into it and a disk of its own
-//! that outlives the VM, made, stopped, started and removed at `/sandboxes/`; and the processes run in one, each a job at
-//! `/sandboxes/{id}/jobs/`. Its files are read and written through the volumes it mounts.
+//! Sandboxes: a VM booted from an image, with volumes mounted into it, made and removed at
+//! `/sandboxes/`; and the processes run in one, each a job at `/sandboxes/{id}/jobs/`. Its
+//! files are reached at `/sandboxes/{id}/files/` with WebDAV.
 
 #[cfg(feature = "client")]
 pub(crate) mod client;

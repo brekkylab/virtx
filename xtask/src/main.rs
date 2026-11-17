@@ -9,14 +9,18 @@ use std::{
 
 use anyhow::{Context, bail, ensure};
 
+mod abin;
+
 const USAGE: &str = "\
 usage: cargo xtask init     [--force]
        cargo xtask build    <component>... [--debug] [--target <triple>] [--locked]
        cargo xtask install  [--prefix <dir>] [--debug]
        cargo xtask check    [--client]
+       cargo xtask clippy   [--gpu]
        cargo xtask archive  [<server>...] [--with-abin]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
+       cargo xtask test     --no-run
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
@@ -25,7 +29,12 @@ usage: cargo xtask init     [--force]
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
-            of the client always and of the servers once `init` has run
+            of the client always and of the servers once `init` has run; and the bindings'
+            lint -- ruff, biome and tsc -- where uv and npm are on PATH
+  clippy    check's clippy alone: the client's, and the servers' once `init` has run. With
+            --gpu, the servers' with the `gpu` feature a release builds them with, the GPU
+            libraries built first as `build` builds them; for this host's own code, the
+            `cfg`s a Linux check never sees
   archive   archives each <server> named (server-stdio, server-tcp; both when none is) with
             the guest kernel, for this platform, as a release carries them:
             target/release/dist/virtx-stdio-<os>-<arch>.tar.gz and
@@ -33,7 +42,9 @@ usage: cargo xtask init     [--force]
   run       cargo run, with what a binary needs to boot a VM on this machine
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
-            the fixture where they name virtx or virtx-cli
+            the fixture where they name virtx or virtx-cli. With --no-run alone, compiles
+            everything `test` would -- the crates' tests, the servers, the packages' cargo
+            tests -- and runs none, which needs no guest kernel
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -64,6 +75,7 @@ components:
                       built for this host and its guest only
   --locked        (build) passes --locked to cargo
   --client        (check) checks the client only, even where the servers could be checked
+  --gpu           (clippy) the servers with their `gpu` feature, the GPU libraries built first
   --with-abin     (archive) puts the abin and alib that were built in the archives too;
                   without it the archives have neither, and sessions from the release no
                   /abin and no /alib";
@@ -85,11 +97,6 @@ const SERVER_PACKAGES: &[&str] = &[
 const SERVERS: &[(Component, &str, &str)] = &[
     (Component::ServerStdio, "virtx-server-stdio", "virtx-stdio"),
     (Component::ServerTcp, "virtx-server-tcp", "virtx-server-tcp"),
-];
-const ABINS: &[(&str, &str)] = &[
-    ("virtx-exec-index", "index"),
-    ("virtx-exec-docread", "docread"),
-    ("virtx-exec-display", "display"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -181,6 +188,15 @@ fn main() -> anyhow::Result<()> {
             );
             check(client_only)
         }
+        Some("clippy") => {
+            let gpu = match args.next() {
+                None => false,
+                Some(arg) if arg == "--gpu" => true,
+                Some(arg) => bail!("unknown argument {}\n\n{USAGE}", arg.to_string_lossy()),
+            };
+            ensure!(args.next().is_none(), "clippy takes only --gpu\n\n{USAGE}");
+            clippy(gpu)
+        }
         Some("archive") => {
             let mut abin = false;
             let mut servers = Vec::new();
@@ -199,6 +215,7 @@ fn main() -> anyhow::Result<()> {
             let args: Vec<OsString> = args.collect();
             match args.as_slice() {
                 [] => test_all(),
+                [no_run] if no_run == "--no-run" => compile_tests(),
                 // virtx-rs's tests are against the fixture too, and virtx-cli's.
                 _ if args.iter().any(|arg| arg == "virtx" || arg == "virtx-cli") => {
                     let fixture = Fixture::start()?;
@@ -290,19 +307,6 @@ fn guest_target() -> anyhow::Result<&'static str> {
 
 fn cargo() -> Command {
     Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-}
-
-fn cross_cargo(crate_dir: &Path) -> Command {
-    let mut cargo = cargo();
-    cargo
-        .current_dir(crate_dir)
-        .env("CARGO_TARGET_DIR", target_path())
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("CARGO_BUILD_TARGET")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER");
-    cargo
 }
 
 fn run(mut command: Command, what: &str) -> anyhow::Result<()> {
@@ -421,26 +425,10 @@ fn servers_unready() -> anyhow::Result<Option<String>> {
 /// servers' own tests boot machines, which takes a kernel and a signed binary: they are
 /// `cargo xtask test -p <server>`, run when a change reaches them.
 fn check(client_only: bool) -> anyhow::Result<()> {
-    let cargo_in_root = |args: &[&str], what: &str| -> anyhow::Result<()> {
-        eprintln!("xtask: {what}");
-        let mut command = cargo();
-        command.current_dir(root_path()).args(args);
-        let status = command.status().context("running cargo")?;
-        ensure!(status.success(), "{what} failed");
-        Ok(())
-    };
-    let packages = |list: &[&'static str]| -> Vec<&'static str> {
-        list.iter().flat_map(|p| ["-p", *p]).collect()
-    };
-
     cargo_in_root(&["fmt", "--check"], "the format")?;
-
-    let client = packages(CLIENT_PACKAGES);
-    let mut clippy = vec!["clippy"];
-    clippy.extend(&client);
-    clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    cargo_in_root(&clippy, "clippy of the client")?;
+    clippy_client()?;
     cargo_in_root(&["test", "-p", CLIENT_PACKAGE], "the tests of virtx-core")?;
+    lint_bindings()?;
 
     if client_only {
         eprintln!("xtask: the servers left out (--client)");
@@ -450,16 +438,174 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
         return Ok(());
     }
-    let servers = packages(SERVER_PACKAGES);
-    let mut clippy = vec!["clippy"];
-    clippy.extend(&servers);
-    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
-    cargo_in_root(&clippy, "clippy of the servers")?;
+    clippy_servers(false)?;
     cargo_in_root(
         &["test", "-p", "virtx-uvm", "--lib"],
         "the unit tests of virtx-uvm",
     )?;
     eprintln!("xtask: checked");
+    Ok(())
+}
+
+/// `check`'s clippy, alone: the client's, and the servers' once `init` has run -- with `gpu`,
+/// as a release builds them, the GPU libraries built first. Run on each host, it is the lint of
+/// that host's own `cfg`s, which a check on Linux never compiles.
+fn clippy(gpu: bool) -> anyhow::Result<()> {
+    clippy_client()?;
+    if let Some(why) = servers_unready()? {
+        ensure!(!gpu, "--gpu, but {why} -- `cargo xtask init` readies it");
+        eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
+        return Ok(());
+    }
+    if gpu {
+        build_gpu_deps()?;
+    }
+    clippy_servers(gpu)
+}
+
+fn clippy_client() -> anyhow::Result<()> {
+    let mut clippy = vec!["clippy"];
+    clippy.extend(CLIENT_PACKAGES.iter().flat_map(|p| ["-p", *p]));
+    clippy.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    cargo_in_root(&clippy, "clippy of the client")?;
+    cargo_in_root(
+        &[
+            "clippy",
+            "-p",
+            "virtx",
+            "--all-targets",
+            "--no-default-features",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        "clippy of virtx over an opened library",
+    )
+}
+
+/// The servers' clippy; with `gpu`, each with its `gpu` feature -- the only feature they have,
+/// and the one a release builds them with -- which takes the GPU libraries built.
+fn clippy_servers(gpu: bool) -> anyhow::Result<()> {
+    let features: Vec<String> = SERVER_PACKAGES
+        .iter()
+        .filter(|p| gpu && **p != "xtask")
+        .map(|p| format!("{p}/gpu"))
+        .collect();
+    let features = features.join(",");
+    let mut clippy = vec!["clippy"];
+    clippy.extend(SERVER_PACKAGES.iter().flat_map(|p| ["-p", *p]));
+    if gpu {
+        clippy.extend(["--features", features.as_str()]);
+    }
+    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
+    let what = if gpu {
+        "clippy of the servers, with gpu"
+    } else {
+        "clippy of the servers"
+    };
+    cargo_in_root(&clippy, what)
+}
+
+/// The Python and the JavaScript beside the crates: `virtx-py`, `virtx-node` and the packages'
+/// scripts under `scripts/packages`. ruff lints and checks the format of the Python (`ruff.toml`);
+/// biome the JavaScript (`biome.json`), handed the two directories it lints, since from the root
+/// it would walk the submodules too and warn of MoltenVK's broken links; and tsc type-checks
+/// `virtx-node/index.d.ts`, the declarations written by hand beside `index.js`. Each tool is the
+/// version its lockfile pins: ruff `virtx-py`'s dev group, biome and tsc `virtx-node`'s
+/// devDependencies.
+///
+/// Left out, saying so, where uv or npm is not on PATH -- except under CI, where that is a
+/// runner without what it needs.
+fn lint_bindings() -> anyhow::Result<()> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let missing: Vec<&str> = ["uv", npm]
+        .into_iter()
+        .filter(|tool| {
+            Command::new(tool)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_err()
+        })
+        .collect();
+    if !missing.is_empty() {
+        let why = format!("no {} on PATH", missing.join(" or "));
+        ensure!(env::var_os("CI").is_none(), "the bindings' lint: {why}");
+        eprintln!("xtask: the bindings' lint left out: {why}");
+        return Ok(());
+    }
+    let tool = |program: &str, args: &[&str], what: &str| -> anyhow::Result<()> {
+        eprintln!("xtask: {what}");
+        let status = Command::new(program)
+            .current_dir(root_path())
+            .args(args)
+            .status()
+            .with_context(|| format!("running {program}"))?;
+        ensure!(status.success(), "{what} failed");
+        Ok(())
+    };
+    let ruff = [
+        "run",
+        "--project",
+        "virtx-py",
+        "--only-group",
+        "dev",
+        "ruff",
+    ];
+    let python = ["virtx-py", "scripts/packages"];
+    tool(
+        "uv",
+        &[&ruff[..], &["check"], &python].concat(),
+        "ruff of the Python",
+    )?;
+    tool(
+        "uv",
+        &[&ruff[..], &["format", "--check"], &python].concat(),
+        "the format of the Python",
+    )?;
+    tool(
+        npm,
+        &[
+            "install",
+            "--prefix",
+            "virtx-node",
+            "--no-audit",
+            "--no-fund",
+            "--silent",
+        ],
+        "virtx-node's tools",
+    )?;
+    let exec = ["exec", "--prefix", "virtx-node", "--"];
+    tool(
+        npm,
+        &[
+            &exec[..],
+            &[
+                "biome",
+                "ci",
+                "--error-on-warnings",
+                "virtx-node",
+                "scripts/packages",
+            ],
+        ]
+        .concat(),
+        "biome of the JavaScript",
+    )?;
+    tool(
+        npm,
+        &[&exec[..], &["tsc", "-p", "virtx-node/tsconfig.json"]].concat(),
+        "tsc of index.d.ts",
+    )
+}
+
+/// `cargo <args>` at the root, said first as `what`, which it fails as.
+fn cargo_in_root(args: &[&str], what: &str) -> anyhow::Result<()> {
+    eprintln!("xtask: {what}");
+    let mut command = cargo();
+    command.current_dir(root_path()).args(args);
+    let status = command.status().context("running cargo")?;
+    ensure!(status.success(), "{what} failed");
     Ok(())
 }
 
@@ -478,7 +624,7 @@ fn build(options: &Options) -> anyhow::Result<()> {
         build_servers(options)?;
     }
     if options.has(Component::Abin) {
-        build_abin(options.debug, &options.out().join("abin"))?;
+        abin::build(options.debug, &options.out().join("abin"))?;
     }
     let out = match &options.target {
         Some(target) => target_path().join(target).join(options.profile()),
@@ -516,11 +662,9 @@ fn build_client(options: &Options) -> anyhow::Result<()> {
     run(cargo, "the client")
 }
 
-/// The servers named, in one cargo run, each signed. Always with the GPU. A host without a
-/// Vulkan loader still runs the build -- the boot opens the loader at run time and reports
-/// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
-/// is no second one to keep working.
-fn build_servers(options: &Options) -> anyhow::Result<()> {
+/// The GPU libraries the servers' `gpu` feature links, built under `build/` by this host's
+/// script; each script builds only what is not built yet.
+fn build_gpu_deps() -> anyhow::Result<()> {
     let scripts = root_path().join("xtask/scripts");
     let mut deps = if cfg!(windows) {
         let mut ps = Command::new("powershell");
@@ -534,6 +678,29 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
     };
     let status = deps.status().context("running build-deps")?;
     ensure!(status.success(), "building the GPU libraries failed");
+    Ok(())
+}
+
+/// The servers named, in one cargo run, each signed. Always with the GPU. A host without a
+/// Vulkan loader still runs the build -- the boot opens the loader at run time and reports
+/// `gpu` only where it finds one -- so one build serves hosts with a GPU and without, and there
+/// is no second one to keep working.
+fn build_servers(options: &Options) -> anyhow::Result<()> {
+    compile_servers(options)?;
+    for (_, _, binary) in options.servers() {
+        ready(
+            &options
+                .out()
+                .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
+        )?;
+    }
+    Ok(())
+}
+
+/// The servers' cargo build alone, the GPU libraries first: what [`build_servers`] does before
+/// readying each, which takes the guest kernel.
+fn compile_servers(options: &Options) -> anyhow::Result<()> {
+    build_gpu_deps()?;
 
     let mut cargo = cargo();
     cargo.current_dir(root_path()).arg("build");
@@ -547,16 +714,7 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
     if options.locked {
         cargo.arg("--locked");
     }
-    run(cargo, "the servers")?;
-
-    for (_, _, binary) in options.servers() {
-        ready(
-            &options
-                .out()
-                .join(format!("{binary}{}", env::consts::EXE_SUFFIX)),
-        )?;
-    }
-    Ok(())
+    run(cargo, "the servers")
 }
 
 /// Make the server binary `exe` one that boots: the guest kernel beside it, where libkrun
@@ -701,75 +859,6 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
         }
     }
     ensure!(failed == 0, "{failed} test binaries failed");
-    Ok(())
-}
-
-/// Build the `/abin` programs for the guest, in the debug or release profile, and place them
-/// and their `SKILL.md` in `out`.
-fn build_abin(debug: bool, out: &Path) -> anyhow::Result<()> {
-    let root = root_path();
-    let target = guest_target()?;
-    let arch = target.split('-').next().unwrap_or_default();
-    let sysroot = root.join(format!("build/musl-sysroot/{arch}/usr/include/stdio.h"));
-    if !sysroot.exists() {
-        let status = Command::new("sh")
-            .arg(root.join("xtask/scripts/fetch-musl-sysroot.sh"))
-            .status()
-            .context("running fetch-musl-sysroot.sh")?;
-        ensure!(status.success(), "fetching the musl sysroot failed");
-        ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
-    }
-
-    // What `musl-cc.sh` and `musl-ar.sh` run, asked for here rather than failing deep in
-    // cc-rs's output. Not where `CC_<triple>` names a compiler of the caller's own, which
-    // `virtx-abins/.cargo/config.toml` leaves to win.
-    let own_cc = env::var_os(format!("CC_{}", target.replace('-', "_"))).is_some();
-    let llvm_ar = [
-        "llvm-ar",
-        "/opt/homebrew/opt/llvm/bin/llvm-ar",
-        "/usr/local/opt/llvm/bin/llvm-ar",
-    ];
-    let on_path = |name: &str| Command::new(name).arg("--version").output().is_ok();
-    if !own_cc && (!Path::new("/usr/bin/clang").is_file() || !llvm_ar.iter().any(|ar| on_path(ar)))
-    {
-        bail!(
-            "building abin needs /usr/bin/clang and llvm-ar -- {}",
-            if cfg!(target_os = "macos") {
-                "xcode-select --install, and brew install lld llvm"
-            } else {
-                "install the clang, lld and llvm packages (apt-get install clang lld llvm)"
-            }
-        );
-    }
-
-    let crate_dir = root.join("virtx-abins");
-    let mut cargo = cross_cargo(&crate_dir);
-    cargo.args(["build", "--target", target]);
-    if !debug {
-        cargo.arg("--release");
-    }
-    for (package, _) in ABINS {
-        cargo.args(["-p", package]);
-    }
-    run(cargo, &format!("abin for {target}"))?;
-
-    let profile = if debug { "debug" } else { "release" };
-    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-    let built = target_path().join(format!("{target}/{profile}"));
-    for (_, program) in ABINS {
-        place(&built.join(program), &out.join(program))?;
-
-        let skill = crate_dir.join(program).join("SKILL.md");
-        let at = out.join("skills").join(program);
-        if skill.is_file() {
-            fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
-            place(&skill, &at.join("SKILL.md"))?;
-        } else {
-            let _ = fs::remove_file(at.join("SKILL.md"));
-            let _ = fs::remove_dir(&at);
-        }
-    }
-
     Ok(())
 }
 
@@ -1069,8 +1158,9 @@ const FIXTURE_CLIENT: &str = "virtx-test";
 /// The key the fixture's provider signs with, made up and no one's.
 const FIXTURE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2VGrzT1wOXvQVtaT\nL+shE0n9BR9/rn3Qn7RrXiJOcHKhRANCAAQCHMHdyNbFbHDPyRIdE7zhyTcL7XuZ\nlymVLSds5EVclDhHznH6nXaR6DUzWH+gad5rKfYNLAnnobLUNbrydOJS\n-----END PRIVATE KEY-----";
 const FIXTURE_KEY_ID: &str = "fixture";
-/// The projects of the fixture's server, and the members of each: [`FIXTURE_PROJECT`] for
-/// every suite, and two that share nothing for the tests of who reaches what.
+/// The projects of the fixture's server, each made by its first member, who adds the others:
+/// [`FIXTURE_PROJECT`] for every suite, and two that share nothing for the tests of who reaches
+/// what.
 const FIXTURE_PROJECTS: &[(&str, &[&str])] = &[
     (FIXTURE_PROJECT, &[FIXTURE_USER]),
     ("demo", &["alice", "carol"]),
@@ -1353,10 +1443,26 @@ fn serve_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's and
-/// virtx-cli's with cargo, virtx-py's with pytest, and virtx-node's with Node's own runner.
+/// The crates whose own tests [`test_all`] runs first, each by itself.
+const TEST_CRATES: &[&str] = &[
+    "virtx-core",
+    "virtx-uvm",
+    "virtx-server-stdio",
+    "virtx-server-tcp",
+];
+
+/// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
+/// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
+/// pytest, and virtx-node's with Node's own runner.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
-    ("virtx-rs", ".", &[&["cargo", "test", "-p", "virtx"]]),
+    (
+        "virtx-rs",
+        ".",
+        &[
+            &["cargo", "test", "-p", "virtx"],
+            &["cargo", "test", "-p", "virtx", "--no-default-features"],
+        ],
+    ),
     ("virtx-cli", ".", &[&["cargo", "test", "-p", "virtx-cli"]]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (
@@ -1373,6 +1479,45 @@ enum Outcome {
     Skipped(String),
 }
 
+/// The servers the fixture serves, as it builds them.
+fn fixture_servers() -> Options {
+    Options {
+        components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
+        prefix: None,
+        debug: false,
+        target: None,
+        locked: false,
+    }
+}
+
+/// Everything [`test_all`] compiles, compiled the same way and run not at all: the crates'
+/// tests, the fixture's servers and the packages' cargo tests. It takes no guest kernel, so CI
+/// does it while the kernel is still being built elsewhere.
+fn compile_tests() -> anyhow::Result<()> {
+    if let Some(why) = servers_unready()? {
+        bail!("{why} -- `cargo xtask init` readies the servers");
+    }
+    for &name in TEST_CRATES {
+        cargo_in_root(
+            &["test", "--no-run", "-p", name],
+            &format!("the tests of {name}"),
+        )?;
+    }
+    compile_servers(&fixture_servers())?;
+    for (name, _, commands) in PACKAGES {
+        for argv in commands
+            .iter()
+            .filter(|argv| argv[..2] == ["cargo", "test"])
+        {
+            let mut args = vec!["test", "--no-run"];
+            args.extend(&argv[2..]);
+            cargo_in_root(&args, &format!("the tests of {name}"))?;
+        }
+    }
+    eprintln!("xtask: compiled, nothing run");
+    Ok(())
+}
+
 /// Every suite: the crates' own tests, then the packages' against one fixture, each run whatever
 /// came before, and how each ended. The servers' suites and the packages' are skipped until the
 /// servers can be built here.
@@ -1386,13 +1531,7 @@ fn test_all() -> anyhow::Result<()> {
         }
         None => None,
     };
-    let crates = [
-        "virtx-core",
-        "virtx-uvm",
-        "virtx-server-stdio",
-        "virtx-server-tcp",
-    ];
-    for name in crates {
+    for &name in TEST_CRATES {
         let outcome = match &unready {
             Some(why) if name != CLIENT_PACKAGE => Outcome::Skipped(why.clone()),
             _ => match run_target(vec!["-p".into(), name.into()], true, &[]) {
@@ -1472,16 +1611,17 @@ impl Fixture {
             bail!("{why} -- `cargo xtask init` readies the servers");
         }
         kernel_library().context("no guest kernel -- `cargo xtask build kernel` builds it")?;
-        let options = Options {
-            components: SERVERS.iter().map(|(component, _, _)| *component).collect(),
-            prefix: None,
-            debug: false,
-            target: None,
-            locked: false,
-        };
+        let options = fixture_servers();
         build_servers(&options)?;
-        // The programs as they stand, for the tests that make a sandbox with them.
-        build_abin(options.debug, &options.out().join("abin"))?;
+        // The programs as they stand, for the tests that make a sandbox with them -- unless
+        // `XTASK_ABIN_BUILT` says the ones there were built from this tree already (CI hands
+        // them on from the job that built them).
+        let abin = options.out().join("abin");
+        if env::var_os("XTASK_ABIN_BUILT").is_some() && abin.is_dir() {
+            eprintln!("xtask: abin as built already, in {}", abin.display());
+        } else {
+            abin::build(options.debug, &abin)?;
+        }
         let built = |name: &str| {
             options
                 .out()
@@ -1496,20 +1636,9 @@ impl Fixture {
         let home = scratch.join("home");
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         let provider = FixtureProvider::serve()?;
-        let projects: serde_json::Map<_, _> = FIXTURE_PROJECTS
-            .iter()
-            .map(|(name, members)| {
-                let members: Vec<_> = members.iter().map(|user| fixture_email(user)).collect();
-                (
-                    (*name).to_owned(),
-                    serde_json::json!({ "members": members }),
-                )
-            })
-            .collect();
         let config = serde_json::json!({
             "listen": "127.0.0.1:0",
             "oidc": { "issuer": provider.issuer, "client_id": FIXTURE_CLIENT },
-            "projects": projects,
         });
         let config_path = scratch.join("config.json");
         fs::write(&config_path, config.to_string())
@@ -1546,12 +1675,58 @@ impl Fixture {
             .with_context(|| format!("virtx-server-tcp said {line:?}, not where it serves"))?
             .to_owned();
         std::thread::spawn(move || lines.for_each(drop));
+        for (name, members) in FIXTURE_PROJECTS {
+            let (owner, others) = members.split_first().expect("a project has a member");
+            let token = provider.token(owner, DAY)?;
+            let project = serde_json::json!({ "name": name });
+            fixture.send(&token, "POST", "/projects/", &project)?;
+            for member in others {
+                let path = format!("/projects/{name}/members/{}", fixture_email(member));
+                let role = serde_json::json!({ "role": "owner" });
+                fixture.send(&token, "PUT", &path, &role)?;
+            }
+        }
         eprintln!(
             "xtask: the fixture is served at {}, over {}",
             fixture.url,
             home.display()
         );
         Ok(fixture)
+    }
+
+    /// `method` sent to `path` on its `virtx-server-tcp` with `body`, as the user `token` is:
+    /// refused unless the server answers `2xx`. Plain HTTP/1.1, as its provider is served.
+    fn send(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        use std::io::{Read as _, Write as _};
+
+        let address = self.url.trim_start_matches("http://").trim_end_matches('/');
+        let mut stream = std::net::TcpStream::connect(address)
+            .with_context(|| format!("reaching virtx-server-tcp at {address}"))?;
+        let body = body.to_string();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n\
+             {body}",
+            body.len()
+        )?;
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer)?;
+        let status = answer.lines().next().unwrap_or_default();
+        ensure!(
+            status
+                .split(' ')
+                .nth(1)
+                .is_some_and(|code| code.starts_with('2')),
+            "{method} {path}: virtx-server-tcp answered {status:?}"
+        );
+        Ok(())
     }
 
     /// What it names to a command in its environment: the home both servers keep, where

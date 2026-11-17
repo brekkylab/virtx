@@ -505,7 +505,7 @@ impl<'a> Planner<'a> {
         if !len.is_multiple_of(BLOCK_SIZE) {
             return Err(Error::Unwritable(format!(
                 "EROFS image: {} is {len} bytes, which puts whatever follows it off a block",
-                path.display()
+                path.file_name().unwrap_or(path.as_os_str()).display()
             )));
         }
 

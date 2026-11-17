@@ -27,6 +27,52 @@ struct Served {
     /// Its base URL, ending in `/`.
     url: String,
     home: PathBuf,
+    /// The issuer whose tokens it takes, serving its keys.
+    issuer: tokio::task::JoinHandle<()>,
+    /// The directory of the project `demo`, the tests' own.
+    demo: PathBuf,
+}
+
+/// The issuer the server's config names, and a P-256 key of its, with its public half as a
+/// JWK's `x` and `y`.
+const ISSUER: &str = "https://issuer.example";
+const KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTFNNLGR4z9BOxmmG
+kWTAwIsXQv7M5AnnFYbw7KqIAduhRANCAARm+2fsK24SWK8QJjqyNzhrBvlhw8UG
+rABUOPQZw+SIzclThn/7Vcn7i0rAcmmlVj8sdMeJsFeMZ3CehtnTDGVK
+-----END PRIVATE KEY-----
+";
+const X: &str = "Zvtn7CtuElivECY6sjc4awb5YcPFBqwAVDj0GcPkiM0";
+const Y: &str = "yVOGf_tVyfuLSsByaaVWPyx0x4mwV4xncJ6G2dMMZUo";
+
+/// A token of `user`'s, as the issuer signs one for the server, good for an hour.
+fn token(user: &str) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = Some("k1".into());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = json!({"iss": ISSUER, "aud": "virtx", "exp": now + 3600, "sub": user});
+    let key = jsonwebtoken::EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap();
+    jsonwebtoken::encode(&header, &claims, &key).unwrap()
+}
+
+/// The issuer's keys, served on the loopback: their URL, and the task serving them.
+async fn issuer() -> (String, tokio::task::JoinHandle<()>) {
+    let keys = json!({"keys": [{
+        "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig", "x": X, "y": Y,
+    }]});
+    let served = axum::Router::new().route(
+        "/keys",
+        axum::routing::get(move || async move { keys.to_string() }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/keys", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, served).await;
+    });
+    (url, task)
 }
 
 /// Where a test pulls `reference` from: Docker Hub's official images from Google's mirror of
@@ -56,8 +102,13 @@ impl Served {
             "listen": "127.0.0.1:0",
             "home": home,
             "origins": ["https://allowed.example"],
-            // On the loopback and naming no provider: anyone reaches it, the token sent unread.
-            "projects": { "demo": {} },
+            // The issuer's keys are where `start` serves them.
+            "oidc": {
+                "issuer": ISSUER,
+                "client_id": "virtx",
+                "username_claim": "sub",
+                "jwks_uri": "",
+            },
         });
         for (key, value) in more.as_object().unwrap() {
             config[key] = value.clone();
@@ -69,6 +120,11 @@ impl Served {
     /// A server over `home`, as its `config.json` says.
     async fn start(home: PathBuf) -> Served {
         let path = home.join("config.json");
+        // The issuer's keys served anew, at the address the config now names.
+        let (keys, issuer) = issuer().await;
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["oidc"]["jwks_uri"] = json!(keys);
+        std::fs::write(&path, config.to_string()).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_virtx-server-tcp"));
         command
             .arg("serve")
@@ -98,7 +154,37 @@ impl Served {
                 eprintln!("{line}");
             }
         });
-        Served { process, url, home }
+        // The tests' project, `demo`, made the first time; kept across a restart.
+        let http = reqwest::Client::new();
+        let made = http
+            .post(format!("{url}projects/"))
+            .bearer_auth(token("tester"))
+            .json(&json!({ "name": "demo" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            made.status().is_success() || made.status() == StatusCode::CONFLICT,
+            "{}",
+            made.status()
+        );
+        let demo: Value = http
+            .get(format!("{url}projects/demo"))
+            .bearer_auth(token("tester"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let demo = home.join("project").join(demo["id"].as_str().unwrap());
+        Served {
+            process,
+            url,
+            home,
+            issuer,
+            demo,
+        }
     }
 
     /// This server interrupted, as its operator stops it, and another started over its home.
@@ -123,19 +209,19 @@ impl Served {
         Served::start(home).await
     }
 
-    /// A client of `token`'s, in `demo`.
-    fn connect(&self, token: &str) -> Client {
-        let mut headers = http::HeaderMap::new();
-        headers.insert("virtx-project", "demo".parse().unwrap());
-        let auth = Auth::Bearer {
-            token: token.into(),
-        };
-        Client::connect(&self.url, auth, headers).unwrap()
+    /// A client of `user`'s, in `demo`.
+    fn connect(&self, user: &str) -> Client {
+        let auth = Auth::Bearer { token: token(user) };
+        {
+            let client = Client::connect(&self.url, auth, http::HeaderMap::new()).unwrap();
+            client.set_project(Some("demo")).unwrap();
+            client
+        }
     }
 
     /// Pull `reference` from its registry into `demo`'s images.
     async fn pull_image(&self, reference: &str) {
-        let store = ImageStore::new(self.home.join("project/demo/images")).unwrap();
+        let store = ImageStore::new(self.demo.join("images")).unwrap();
         let named = reference.parse().unwrap();
         let reference = mirrored(reference).parse().unwrap();
         let registry = RegistryClient::new(store.clone(), None);
@@ -176,6 +262,7 @@ impl Served {
 
 impl Drop for Served {
     fn drop(&mut self) {
+        self.issuer.abort();
         let _ = self.process.start_kill();
         if !self.home.as_os_str().is_empty() {
             let _ = std::fs::remove_dir_all(&self.home);
@@ -200,7 +287,7 @@ fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
 async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let served = Served::spawn("port-reached").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = client.create_sandbox(&args).await.unwrap();
@@ -248,7 +335,7 @@ async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() 
 async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
     let served = Served::spawn("port-listened-twice").await;
     served.pull_image("nginx:1.27-alpine").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("nginx:1.27-alpine");
     args.ports = vec![80.into()];
     let created = client.create_sandbox(&args).await.unwrap();
@@ -291,7 +378,7 @@ async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
 async fn a_port_reaches_a_program_that_listened_before_it_was_opened() {
     let served = Served::spawn("port-listened-before").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let created = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -337,7 +424,7 @@ async fn a_port_reaches_a_program_that_listened_before_it_was_opened() {
 async fn a_port_opened_after_the_sandbox_reaches_what_listens_on_it() {
     let served = Served::spawn("port-opened").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let created = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -464,7 +551,7 @@ async fn a_port_opened_after_the_sandbox_reaches_what_listens_on_it() {
 async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
     let served = Served::spawn("recipe").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let recipe = Recipe::new("alpine:3.20")
         .step("echo built > /root/built")
         .step(Step::env("GREETING", "hello"));
@@ -493,7 +580,7 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
         let http = reqwest::Client::new();
         let manifest: Value = http
             .get(format!("{base}/{repository}/manifests/{tag}"))
-            .bearer_auth("a-token")
+            .bearer_auth(token("tester"))
             .header("virtx-project", "demo")
             .send()
             .await
@@ -505,7 +592,7 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
             "{base}/{repository}/blobs/{}",
             manifest["config"]["digest"].as_str().unwrap()
         ))
-        .bearer_auth("a-token")
+        .bearer_auth(token("tester"))
         .header("virtx-project", "demo")
         .send()
         .await
@@ -592,7 +679,7 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
 async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
     let served = Served::spawn("resize").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.vcpus = Some(2);
     let id = client.create_sandbox(&args).await.unwrap().id;
@@ -620,7 +707,7 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
                 "{}/sandboxes/{id}/resources",
                 served.url.trim_end_matches('/')
             ))
-            .bearer_auth("a-token")
+            .bearer_auth(token("tester"))
             .header("virtx-project", "demo")
             .json(&body)
             .send()
@@ -660,7 +747,7 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
 async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
     let served = Served::spawn("disk").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.disk_gib = Some(1);
     let id = client.create_sandbox(&args).await.unwrap().id;
@@ -701,7 +788,7 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
                 "{}/sandboxes/{id}/disk",
                 served.url.trim_end_matches('/')
             ))
-            .bearer_auth("a-token")
+            .bearer_auth(token("tester"))
             .header("virtx-project", "demo")
             .json(&json!({ "disk_gib": n }))
             .send()
@@ -734,7 +821,7 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
 async fn a_running_sandbox_s_files_are_read_and_written() {
     let served = Served::spawn("files").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let id = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -762,7 +849,7 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
                     served.url.trim_end_matches('/')
                 ),
             )
-            .bearer_auth("a-token")
+            .bearer_auth(token("tester"))
             .header("virtx-project", "demo")
     };
     // Listed: what it wrote.
@@ -833,7 +920,7 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
 async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     let served = Served::spawn("job-cancelled").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let id = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -860,7 +947,7 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
 async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
     let served = Served::spawn("lifecycle").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.name = Some("work".into());
     args.ports = vec![8000.into()];
@@ -936,12 +1023,7 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
     // Deleted: gone, its disk with it.
     client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.get_sandbox(&id).await), 404);
-    assert!(
-        !served
-            .home
-            .join(format!("project/demo/snapshot/{id}.ext4"))
-            .exists()
-    );
+    assert!(!served.demo.join(format!("sandbox/{id}.ext4")).exists());
     client.remove_sandbox(&other.id).await.unwrap();
 
     // Ephemeral: deleted when it stops.
@@ -958,7 +1040,7 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
 async fn a_sandbox_is_kept_across_a_server_started_again() {
     let served = Served::spawn("kept").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.name = Some("kept".into());
     args.ports = vec![8000.into()];
@@ -984,7 +1066,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
     // Stopped with its server, and known stopped to the next, its job with it -- but an
     // ephemeral one, deleted.
     let served = served.again().await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let found = client.find_sandbox("kept").await.unwrap().unwrap();
     assert_eq!(
         (found.id.as_str(), found.state),
@@ -1015,7 +1097,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
 async fn a_terminal_s_history_is_written_as_each_command_runs() {
     let served = Served::spawn("history").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let id = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -1049,7 +1131,10 @@ async fn a_terminal_s_history_is_written_as_each_command_runs() {
     let mut request = url.as_str().into_client_request().unwrap();
     let headers = request.headers_mut();
     headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert("authorization", "Bearer a-token".parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", token("tester")).parse().unwrap(),
+    );
     headers.insert("virtx-project", "demo".parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let mut shown = Vec::new();
@@ -1094,7 +1179,7 @@ async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
     let served = Served::spawn("terminal").await;
     served.pull_image("alpine:3.20").await;
     let created = served
-        .connect("a-token")
+        .connect("tester")
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
         .unwrap();
@@ -1112,7 +1197,10 @@ async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
         let mut request = url.as_str().into_client_request().unwrap();
         let headers = request.headers_mut();
         headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert("authorization", "Bearer a-token".parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", token("tester")).parse().unwrap(),
+        );
         headers.insert("virtx-project", "demo".parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         let hello = match socket.next().await {
@@ -1219,7 +1307,7 @@ async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
 async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
     let served = Served::spawn_with("terminal-idle", json!({ "minute_secs": 1 })).await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.auto_stop_minutes = Some(1);
     let idle = client.create_sandbox(&args).await.unwrap();
@@ -1234,7 +1322,10 @@ async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
         let mut request = url.as_str().into_client_request().unwrap();
         let headers = request.headers_mut();
         headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert("authorization", "Bearer a-token".parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", token("tester")).parse().unwrap(),
+        );
         headers.insert("virtx-project", "demo".parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         let mut said = Vec::new();
@@ -1273,13 +1364,13 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
     let served = Served::spawn("exec-streamed").await;
     served.pull_image("alpine:3.20").await;
     let created = served
-        .connect("a-token")
+        .connect("tester")
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
         .unwrap();
     let answer = reqwest::Client::new()
         .post(format!("{}sandboxes/{}/jobs/exec/", served.url, created.id))
-        .bearer_auth("a-token")
+        .bearer_auth(token("tester"))
         .header("virtx-project", "demo")
         .header("accept", "text/event-stream")
         .json(&json!({"cmd": ["sh", "-c", "echo héllo; echo two >&2; exit 3"]}))
@@ -1305,7 +1396,7 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
     // Without it, the job alone, as the protocol says.
     let answer = reqwest::Client::new()
         .post(format!("{}sandboxes/{}/jobs/exec/", served.url, created.id))
-        .bearer_auth("a-token")
+        .bearer_auth(token("tester"))
         .header("virtx-project", "demo")
         .json(&json!({"cmd": ["true"]}))
         .send()
@@ -1323,7 +1414,7 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
     let served = Served::spawn("exec-background").await;
     served.pull_image("alpine:3.20").await;
     let created = served
-        .connect("a-token")
+        .connect("tester")
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
         .unwrap();
@@ -1331,7 +1422,7 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
         let started = std::time::Instant::now();
         let log = reqwest::Client::new()
             .post(format!("{}sandboxes/{}/jobs/exec/", served.url, created.id))
-            .bearer_auth("a-token")
+            .bearer_auth(token("tester"))
             .header("virtx-project", "demo")
             .header("accept", "text/event-stream")
             .json(&json!({ "cmd": ["sh", "-c", cmd] }))
@@ -1394,7 +1485,7 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
 async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
     let served = Served::spawn("exec-stdin").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let id = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -1468,7 +1559,7 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
 async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() {
     let served = Served::spawn("unread-input").await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let id = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
         .await
@@ -1494,7 +1585,7 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     args.stdin = true;
     let sleeper = client.exec_sandbox(&id, &args).await.unwrap();
     let writing = {
-        let (client, id, job) = (served.connect("a-token"), id.clone(), sleeper.id.clone());
+        let (client, id, job) = (served.connect("tester"), id.clone(), sleeper.id.clone());
         tokio::spawn(async move {
             client
                 .write_sandbox_job_stdin(&id, &job, Some("x".repeat(1 << 20)), false)
@@ -1511,7 +1602,10 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     let mut request = url.as_str().into_client_request().unwrap();
     let headers = request.headers_mut();
     headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert("authorization", "Bearer a-token".parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", token("tester")).parse().unwrap(),
+    );
     headers.insert("virtx-project", "demo".parse().unwrap());
     let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let (mut typing, mut shown) = socket.split();
@@ -1587,7 +1681,7 @@ async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering() {
 async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
     let served = Served::spawn(name).await;
     served.pull_image("alpine:3.20").await;
-    let client = served.connect("a-token");
+    let client = served.connect("tester");
     let mut args = SandboxCreateArgs::new("alpine:3.20");
     args.memory_mib = Some(memory_mib);
     let id = client.create_sandbox(&args).await.unwrap().id;

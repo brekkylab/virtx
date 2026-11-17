@@ -1,5 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, answered from this
-//! host's [`Home`]: one client is on the other end of stdio, so all of it is its.
+//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
+//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
+//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
+//! of stdio, so all of it is its.
 //!
 //! A sandbox's disk is a snapshot of the store's, named by its id, and what lasts past its
 //! machine is kept on disk beside it ([`Sandboxes`]): a server spawned again knows each,
@@ -12,34 +14,39 @@ use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Path as Segments, RawQuery};
+use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
+use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpListener;
 use tokio::task::AbortHandle;
 
 use virtx_core::{
-    ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry,
+    ImageJobKind, ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs,
+    ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
+    SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::sandbox::{Held, Hooks};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Reference, RegistryClient,
-    Sandbox, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError, VolumeStore,
-    build_step, signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
+    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, Sandboxes, SnapshotError,
+    SnapshotStore, VolumeError, VolumeStore, build_step, signal_number,
 };
+
+use crate::Host;
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -51,22 +58,33 @@ const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// The header an exec answered with its log carries its job in, as JSON.
 const JOB_HEADER: &str = "virtx-job";
 
-/// What the endpoints answer from: the stores, and the sandboxes and jobs made from them.
+/// What the endpoints answer from, for one project: the stores, and the sandboxes and jobs made
+/// from them.
 pub struct Home {
     images: ImageStore,
+    registry: Arc<RegistryServer>,
+    /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
+    root: PathBuf,
     volumes: VolumeStore,
-    /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
+    /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
     sandboxes: Sandboxes,
     /// The image jobs, by id, and what cancels each, until each is removed.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    /// Set once its project is to be removed: no sandbox or image job is added after.
+    closed: AtomicBool,
 }
 
 impl Home {
-    /// The images in `images`, and the volumes, sandboxes' disks and records under `root`.
-    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
+    /// The images in `images`, which `registry` answers for, and the volumes, sandboxes' disks
+    /// and records under `root`.
+    pub fn new(
+        images: ImageStore,
+        registry: Arc<RegistryServer>,
+        root: &Path,
+    ) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         let volumes = VolumeStore::new(root)?;
         let vm: Vec<OsString> = vec![
@@ -83,12 +101,31 @@ impl Home {
         )?;
         Ok(Home {
             images,
-            files: Files::new(snapshots, volumes.clone()),
+            registry,
+            files: Files::new(volumes.clone()),
+            root: root.to_owned(),
             volumes,
             vm,
             sandboxes,
             image_jobs: Mutex::default(),
+            closed: AtomicBool::default(),
         })
+    }
+
+    /// What answers this home's `/images/oci/v2/`.
+    pub fn registry(&self) -> &Arc<RegistryServer> {
+        &self.registry
+    }
+
+    /// Close it to every sandbox and image job from now on, for its project to be removed:
+    /// `false`, and left open, while a sandbox lives here -- running or stopped, of this process
+    /// or another.
+    pub fn close(&self) -> bool {
+        if !self.sandboxes.list(None).is_empty() || Sandbox::lives_under(&self.root) {
+            return false;
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        true
     }
 
     /// Its sandboxes, stopped once unused for their `auto_stop_minutes` and deleted once kept
@@ -236,9 +273,9 @@ pub fn router() -> Router {
             "/volumes/{name}/mounts/{*path}",
             put(volume_mount_create).delete(volume_mount_remove),
         )
-        .route("/volumes/{name}/files", any(files))
-        .route("/volumes/{name}/files/", any(files))
-        .route("/volumes/{name}/files/{*path}", any(files))
+        .route("/volumes/{name}/files", any(volume_files))
+        .route("/volumes/{name}/files/", any(volume_files))
+        .route("/volumes/{name}/files/{*path}", any(volume_files))
         .route("/sandboxes/{id}/files", any(sandbox_files))
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
@@ -272,7 +309,94 @@ pub fn router() -> Router {
         .fallback(async || not_found("no endpoint here"))
 }
 
+/// The projects, each the client's, answered from the [`Host`] in each request's extensions.
+pub fn projects() -> Router {
+    Router::new()
+        .route("/projects/", get(project_list).post(project_create))
+        .route(
+            "/projects/{project}",
+            get(project_get).delete(project_remove),
+        )
+}
+
 type Answer = Result<Response, Refused>;
+
+/// The client's project `named` names: `403` for one not here.
+async fn here(host: &Host, named: &str) -> Result<Project, Refused> {
+    host.project(Some(named))?
+        .ok_or_else(|| forbidden(format!("no project here is {named}")))
+}
+
+/// `project` as the server answers it: the admin's to own, whoever's it is, and a user's of a
+/// server over the same cache named so.
+fn answer(project: Project) -> ProjectListOutputItem {
+    ProjectListOutputItem {
+        id: project.id.to_string(),
+        owner: project.owner.user().map(str::to_owned),
+        name: project.name,
+        role: Role::Owner,
+    }
+}
+
+/// Every project, the client's own among them, made if it is not there.
+async fn project_list(Extension(host): Extension<Arc<Host>>) -> Answer {
+    host.project(None)?;
+    let listed = host.projects()?;
+    Ok(json(&listed.into_iter().map(answer).collect::<Vec<_>>()))
+}
+
+/// Make a project: refused for [`DEFAULT_PROJECT`], the client's own.
+async fn project_create(Extension(host): Extension<Arc<Host>>, request: Bytes) -> Answer {
+    let args: ProjectCreateArgs = body(&request)?;
+    if args.name == DEFAULT_PROJECT {
+        return Err(invalid(format!(
+            "{DEFAULT_PROJECT:?} is the client's own project, made for it"
+        )));
+    }
+    let made = answer(host.create(&args.name)?);
+    Ok(created(format!("/projects/{}", made.id), &made))
+}
+
+async fn project_get(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    Ok(json(&answer(here(&host, &named).await?)))
+}
+
+/// Remove a project and everything in it, its image jobs cancelled: refused while a sandbox
+/// lives in it. The client's own is made again, empty, as it is next reached.
+async fn project_remove(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    let id = here(&host, &named).await?.id;
+    if !host.close(&id) {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            "in_use",
+            format!("a sandbox lives in project {named}"),
+        ));
+    }
+    // Forgotten under the lock a record changes under, so that no change of a server beside
+    // this one writes it back.
+    let store = host.store().clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        {
+            let _lock = store.lock()?;
+            store.forget(&id)?;
+        }
+        store.remove(&id)
+    })
+    .await;
+    // Once removed, its id stays taken: no id is given again, and a request that read the
+    // record before it was forgotten makes no home for it.
+    if !matches!(removed, Ok(Ok(()))) {
+        host.release(&id);
+    }
+    removed.map_err(internal)??;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
 
 async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let jobs = home.image_jobs.lock().unwrap();
@@ -290,11 +414,15 @@ fn image_job<Fut>(
     kind: ImageJobKind,
     reference: String,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
-) -> Response
+) -> Answer
 where
     Fut: Future<Output = Result<Digest, Failure>> + Send + 'static,
 {
     let mut jobs = home.image_jobs.lock().unwrap();
+    // Under the jobs' lock, which closing the home cancels them under after.
+    if home.closed.load(Ordering::SeqCst) {
+        return Err(forbidden("this project is being removed"));
+    }
     let id = pick(|id| jobs.contains_key(id));
     let job = Job::new(
         ImageJob {
@@ -331,14 +459,17 @@ where
         );
     });
     jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
-    created(format!("/images/jobs/{id}"), &*job.job.lock().unwrap())
+    Ok(created(
+        format!("/images/jobs/{id}"),
+        &*job.job.lock().unwrap(),
+    ))
 }
 
-async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
@@ -349,14 +480,14 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
-    ))
+    )
 }
 
-async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
@@ -364,10 +495,10 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, request: Bytes) -> An
             let registry = RegistryClient::new(images, args.auth);
             Ok(registry.push(&reference, report).await?)
         },
-    ))
+    )
 }
 
-async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImageBuildArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     if args.recipe.base != "scratch" {
@@ -375,7 +506,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let recipe = args.recipe;
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
@@ -413,7 +544,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, request: Bytes) -> A
             .await??;
             Ok(digest)
         },
-    ))
+    )
 }
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
@@ -448,16 +579,16 @@ async fn base(
 
 /// A commit: the image the sandbox stands on, with what it has written as one more layer, and
 /// that image's config, tagged `reference`; see [`Sandbox::commit`].
-async fn image_commit(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn image_commit(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImageCommitArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let sandbox = home.sandboxes.get(&args.sandbox)?;
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Commit,
         args.reference,
         move |mut report| async move { Ok(sandbox.commit(&reference, &mut *report).await?) },
-    ))
+    )
 }
 
 async fn image_job_get(
@@ -479,6 +610,12 @@ async fn image_job_remove(
     let removed = home.image_jobs.lock().unwrap().remove(&id);
     let (job, task) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
+    cancel(&job, &task);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
+fn cancel(job: &ImageJobOf, task: &AbortHandle) {
     task.abort();
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
@@ -488,7 +625,6 @@ async fn image_job_remove(
         }),
     );
     job.remove();
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn image_job_events(
@@ -532,7 +668,7 @@ async fn volume_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     Ok(json(&listed))
 }
 
-async fn volume_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn volume_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: VolumeCreateArgs = body(&request)?;
     let name = args
         .name
@@ -575,7 +711,7 @@ async fn volume_mount_list(
 async fn volume_mount_create(
     Extension(home): Extension<Arc<Home>>,
     Segments((name, path)): Segments<(String, String)>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: VolumeMountCreateArgs = body(&request)?;
     let mount_type = args.source.mount_type();
@@ -596,8 +732,12 @@ async fn volume_mount_remove(
 }
 
 /// A request to the files of a volume, over WebDAV.
-async fn files(Extension(home): Extension<Arc<Home>>, request: axum::extract::Request) -> Response {
-    home.files.handle(request, &|_| false).await
+async fn volume_files(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(segments): Segments<HashMap<String, String>>,
+    request: axum::extract::Request,
+) -> Response {
+    home.files.volume(&segments["name"], request).await
 }
 
 /// A request to the files of a sandbox, over WebDAV, asked of its machine while it runs: one
@@ -648,8 +788,11 @@ fn percent_decode(value: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-async fn sandbox_create(Extension(home): Extension<Arc<Home>>, request: Bytes) -> Answer {
+async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    if home.closed.load(Ordering::SeqCst) {
+        return Err(forbidden("this project is being removed"));
+    }
     let answer = home.sandboxes.create(args, None, true).await?;
     Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
@@ -738,7 +881,7 @@ async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
     headers: HeaderMap,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
     if args.cmd.is_empty() {
@@ -801,7 +944,7 @@ async fn sandbox_job_remove(
 async fn sandbox_job_signal(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: SandboxSignalArgs = body(&request)?;
     let signal = signal_number(&args.signal)
@@ -848,6 +991,78 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
         .map_err(|e| invalid(format!("{reference}: {e}")))
 }
 
+/// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
+const BODY_LIMIT: usize = 2 << 20;
+
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
+/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+///
+/// A body past the limit is still read to its end, and what comes after the limit let go of as
+/// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
+/// with a body unread is reset, and a client still sending never sees the `413`. This server's
+/// one connection is HTTP/2 over the process's pipes, where that does not happen; the body is
+/// read to its end here too, so the two servers answer it alike.
+struct Whole(Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for Whole {
+    type Rejection = Refused;
+
+    async fn from_request(request: Request, _: &S) -> Result<Self, Refused> {
+        let mut body = request.into_body();
+        let mut whole = Vec::new();
+        let mut over = false;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| invalid(format!("the body broke off: {e}")))?;
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            if over {
+                continue;
+            }
+            if whole.len() + data.len() > BODY_LIMIT {
+                over = true;
+                whole = Vec::new();
+                continue;
+            }
+            whole.extend_from_slice(&data);
+        }
+        if over {
+            return Err(refused(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                format!(
+                    "the body is over the server's limit of {} MiB",
+                    BODY_LIMIT >> 20
+                ),
+            ));
+        }
+        Ok(Whole(Bytes::from(whole)))
+    }
+}
+
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
+/// they do not read as one, in PROTOCOL.md's envelope rather than as text.
+struct Segments<T>(T);
+
+impl<T, S> FromRequestParts<S> for Segments<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = Refused;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Refused> {
+        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(segments)) => Ok(Segments(segments)),
+            Err(e) if e.status().is_server_error() => Err(internal(e.body_text())),
+            Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
+        }
+    }
+}
+
 /// `request` read as a `T`.
 fn body<T: DeserializeOwned>(request: &Bytes) -> Result<T, Refused> {
     serde_json::from_slice(request).map_err(invalid)
@@ -879,7 +1094,11 @@ pub fn refused(status: StatusCode, code: &'static str, message: impl Display) ->
     Refused(status, code, message.to_string())
 }
 
-fn invalid(message: impl Display) -> Refused {
+pub fn forbidden(message: impl Display) -> Refused {
+    refused(StatusCode::FORBIDDEN, "forbidden", message)
+}
+
+pub fn invalid(message: impl Display) -> Refused {
     refused(StatusCode::BAD_REQUEST, "invalid", message)
 }
 
@@ -887,7 +1106,7 @@ fn not_found(message: impl Display) -> Refused {
     refused(StatusCode::NOT_FOUND, "not_found", message)
 }
 
-fn internal(message: impl Display) -> Refused {
+pub fn internal(message: impl Display) -> Refused {
     refused(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
 }
 
@@ -905,6 +1124,18 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
         std::io::ErrorKind::NotFound => not_found(message),
         std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", message),
         _ => internal(message),
+    }
+}
+
+impl From<ProjectError> for Refused {
+    fn from(e: ProjectError) -> Refused {
+        match &e {
+            ProjectError::InvalidName(_) => invalid(e),
+            ProjectError::Unknown(_) => forbidden(e),
+            ProjectError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            ProjectError::NoOwner(_) => refused(StatusCode::CONFLICT, "in_use", e),
+            ProjectError::Io { .. } | ProjectError::Other(_) => internal(e),
+        }
     }
 }
 

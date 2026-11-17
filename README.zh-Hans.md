@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="virtx" src="assets/virtx-logo-signature-black.svg#gh-light-mode-only" width="352" style="max-width: 50%;">
-  <img alt="virtx" src="assets/virtx-logo-signature-white.svg#gh-dark-mode-only" width="352" style="max-width: 50%;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-white.svg">
+    <img alt="virtx" src="https://raw.githubusercontent.com/brekkylab/virtx/main/assets/virtx-logo-signature-black.svg" width="352" style="max-width: 50%;">
+  </picture>
 </p>
 
 <h3 align="center">供代码和 AI 智能体使用的一次性 Linux 虚拟机</h3>
@@ -12,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://virtx.sh/docs"><img src="https://img.shields.io/badge/docs-eng-5a9cae" alt="Documentation"></a>
   <a href="https://discord.gg/27rx3EJy3P"><img src="https://img.shields.io/badge/Discord-7289DA?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/brekkylab"><img src="https://img.shields.io/badge/X-000000?logo=x&logoColor=white" alt="X"></a>
 </p>
@@ -24,7 +27,7 @@
 
 有了 virtx，你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务。
 
-有些任务需要装一大堆依赖，你不想把它们装在本机上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。这些都很适合交给 virtx。虚拟机里装过、改过的东西，只要沙箱还在，即使中途停止过也会一直保留，删除沙箱后才会清掉；写进卷里的内容，或者你提交成镜像的内容除外。
+有些任务需要装一大堆依赖，你不想把它们装在本机上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。这些都很适合交给 virtx。虚拟机里装过、改过的东西，在删除虚拟机后都会一并清掉，只有写进你保留下来的卷里的内容才会留下。
 
 > [!TIP]
 > 正在用 virtx 开发 AI 智能体？不妨看看我们的开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy)。它基于 virtx 构建，会给每个智能体分配一个专属沙箱，不用做任何配置，智能体的命令和文件工具就会在虚拟机里运行。
@@ -148,12 +151,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 其中包含 `virtx-server-tcp`、客户机内核、`abin/` 和 `alib/`。
 解压到单独的目录后，`virtx-server-tcp` 会在自身旁边找到客户机内核，因此无需设置 `PATH` 或库路径即可直接运行。
 
-在服务器上写一份 `server.json`，然后启动服务器：
+在服务器上写一份 `server.json`，指定 OpenID Connect 提供方，然后启动服务器：
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -163,53 +167,8 @@ virtx-server-tcp serve --config server.json
 
 在客户端，不再调用 `Client.spawn()`，而是连接到这台服务器。其余部分和本地示例完全一样。
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-监听回环地址的服务器不要求认证。
-要给其他机器提供服务，请指定你的 OpenID Connect 提供方，以及每个项目允许访问的用户：
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 用户就是提供方签发给 `client_id` 这个客户端的 ID 令牌里的 `email`。该客户端需要是使用设备流程的公开客户端。
-用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌和项目名去连接：
+用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌去连接：
 
 ```sh
 virtx login https://virtx.example
@@ -224,7 +183,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -236,8 +194,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -250,7 +207,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -271,7 +229,7 @@ let client = Client::connect(
 - **现有镜像拿来就用：** 可以从 Docker Hub 或任意 OCI 镜像仓库拉取，也可以用配方或 Dockerfile 构建，之后还能推回仓库或复制到另一台服务器。
 - **不开 shell 也能传文件：** 直接在代码里读写、复制和删除沙箱中的文件。
 - **沙箱里跑的服务都能访问：** 沙箱里的 Web 服务器、SSH、VNC 桌面或数据库，都可以通过本机上的地址直接访问。
-- **从上次中断的地方继续：** 沙箱停止后仍会保留它写下的内容，再次启动时还是停下时的样子；你可以把它提交成镜像留给之后的沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
+- **从上次中断的地方继续：** 把沙箱写下的内容存进卷留给下一个沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
 - **同样能用 GPU：** 在沙箱里用宿主机的 GPU 跑深度学习等 Vulkan 任务。
 
 ## 环境要求
@@ -329,20 +287,20 @@ virtx 采用客户端-服务器模型。你的代码作为客户端，告诉 vir
 最核心的资源是**沙箱**，也就是用来执行命令的虚拟机。
 
 <p align="center">
-  <img alt="用户向沙箱发送命令并读取输出；沙箱由只读镜像加上一层它专属的可写磁盘组成，并挂载了一个卷。" src="docs/images/core-concepts.svg" width="640">
+  <img alt="用户向沙箱发送命令并读取输出；沙箱由只读镜像加上一层可写层组成，并挂载了一个卷。" src="docs/images/core-concepts.svg" width="640">
 </p>
 
-沙箱的根文件系统由两层叠加而成。下层是只读的**镜像**，上层是沙箱专属、接收写入的**磁盘**。
+沙箱的根文件系统由两层叠加而成。下层是只读的**镜像**，上层是接收写入的**可写层**。
 
 镜像是基于它创建的所有沙箱的起点。镜像采用 OCI 格式，与 Docker 使用的格式相同，所以 `alpine:latest` 或者镜像仓库里的任何镜像都能直接用。
 
-磁盘用来积累沙箱做出的改动，只要沙箱还在，磁盘就一直保留。沙箱闲置一段时间后，或者被手动停止时，就会停下来；之后收到命令或被启动时，会以同一个 ID、按停下时的样子重新运行。临时（ephemeral）沙箱则会在停止时被删除。如果想基于某个沙箱的成果启动其他沙箱，就把它提交成镜像：也就是在它原来的镜像上，再加一层它写下的内容。
+可写层用来积累沙箱做出的改动。每个沙箱都有自己专属的可写层，一开始是空的，沙箱删除时也随之删除。
 
-如果沙箱需要根文件系统以外的存储空间，就用**卷**。和沙箱的磁盘不同，卷是挂载到某个路径上的，可以读写，也可以只读，还能同时挂载到多个沙箱。沙箱删除后卷依然保留，而且不需要沙箱，也能直接在代码里读写卷中的文件。Notion、Google Drive、OneDrive 这类远程存储也可以以只读方式挂载到卷里，在沙箱看来它们就是普通文件。
+如果沙箱需要根文件系统以外的存储空间，就用**卷**。和可写层不同，卷是挂载到某个路径上的，可以读写，也可以只读，还能同时挂载到多个沙箱。沙箱删除后卷依然保留，而且不需要沙箱，也能直接在代码里读写卷中的文件。Notion、Google Drive、OneDrive 这类远程存储也可以以只读方式挂载到卷里，在沙箱看来它们就是普通文件。
 
 ## 文档
 
-指南和 API 参考请查看[文档](docs/)。其余 API 分别写在各个包的文档里：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
+指南和 API 参考请查看[文档](https://virtx.sh/docs)。其余 API 分别写在各个包的文档里：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
 
 ## 从源码构建
 

@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // A virtx client over the C ABI of `libvirtx_core`. Field names are the wire's, camelCased.
 
 /** The variable naming the library to open when `load` was not called first. */
@@ -169,6 +170,51 @@ export interface ImagePruneOutput {
   images: string[]
   /** How many bytes the server freed. */
   reclaimed: number
+}
+
+/** A user's role in a project: an owner manages its members and removes it; a member uses what is in it. */
+export type Role = 'owner' | 'member'
+
+/** What the server answers about a project. */
+export interface ProjectInfo {
+  /** What names it on any server, given it once. */
+  id: string
+  /** What its owner names it, among their projects. */
+  name: string
+  /** The user whose project it is: absent for one of no user's, such as one made over stdio. */
+  owner?: string
+  /** The client's role in it. */
+  role: Role
+}
+
+/** What the server answers about a member of a project. */
+export interface ProjectMemberInfo {
+  /** The user, as the server names them, such as an email address. */
+  user: string
+  role: Role
+}
+
+/**
+ * A project the client has a role in, as making it or asking for it answered, and the client
+ * that reaches it: its members, and its removal. What is in it, a client reaches with the
+ * project set (`setProject`). Dropping it leaves the project; `remove` removes it.
+ */
+export class Project implements ProjectInfo {
+  private constructor()
+  /** The client its requests go through. */
+  readonly client: Client
+  id: string
+  name: string
+  owner?: string
+  role: Role
+  /** Its members, with their roles. */
+  members(): Promise<ProjectMemberInfo[]>
+  /** Give `user` `role` in it, adding them if they are no member. */
+  setMember(user: string, role: Role): Promise<ProjectMemberInfo>
+  /** Take `user`'s role in it away: theirs to do, leaving it, or an owner's. */
+  removeMember(user: string): Promise<void>
+  /** Delete it and everything in it. */
+  remove(): Promise<void>
 }
 
 /** What the server answers about a volume. */
@@ -415,6 +461,8 @@ export interface SandboxCreateOptions {
   ports?: PortSpec[]
   vcpus?: number
   memoryMib?: number
+  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
+  diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number
   /** Each volume, or its name, and where it is mounted. */
@@ -498,7 +546,10 @@ export interface CompleteOptions {
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   /** Start the job and follow it to its end, as its `complete` does. */
-  complete<T>(this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>, options?: CompleteOptions): Promise<T>
+  complete<T>(
+    this: StartedJob<{ complete(options?: CompleteOptions): Promise<T> }, E>,
+    options?: CompleteOptions,
+  ): Promise<T>
   [Symbol.asyncIterator](): AsyncGenerator<E>
 }
 
@@ -516,21 +567,27 @@ export class Client {
    */
   static spawn(program?: string | null, args?: string[]): Client
   /**
-   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
-   * organization: with `VIRTX_ORG` and no key, as the person signed in with `virtx login`, whose
-   * token for that organization `virtx token --json --org <VIRTX_ORG>` prints, again as it runs
-   * out. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its project:
+   * with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token for
+   * that project `virtx token --json --project <VIRTX_PROJECT>` prints, again as it runs out.
+   * `VIRTX_PROJECT` names the project of every request. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
    * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
    * nearest this machine.
    */
   static fromEnv(): Client
   /**
-   * Reach the server at `url`, its base `http` or `https` URL, sending
-   * `auth`, the credentials it wants, and `headers`, whatever else it asks of each request, with
-   * every request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
-   * would go in the clear: over `http` to any host but this machine.
+   * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+   * it wants, `project`, the project every request is in (the user's own without one),
+   * and `headers`, whatever else it asks of each request, with every request. `Authorization`
+   * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
+   * token would go in the clear: over `http` to any host but this machine.
    */
-  static connect(url: string, auth?: Auth | null, headers?: Record<string, string>): Client
+  static connect(
+    url: string,
+    auth?: Auth | null,
+    project?: string | null,
+    headers?: Record<string, string>,
+  ): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -544,6 +601,13 @@ export class Client {
    * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
    */
   setHeaders(headers: Record<string, string>): void
+  /**
+   * Name `project` in every request from now on, over either transport, in place of a
+   * `virtx-project` among the headers given. With null, that header names it where there is one,
+   * and otherwise none is named, for the user's own project. A name no header carries throws,
+   * the project unchanged.
+   */
+  setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
   static fromRaw(raw: number): Client
   /** The `VirtxClient*` this holds, still held by it. */
@@ -588,6 +652,12 @@ export class Client {
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
   /** Delete each image no tag points at and no sandbox stands on, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
+  /** Every project the client has a role in. */
+  listProject(): Promise<Project[]>
+  /** Make the project `name`, the client its owner. */
+  createProject(name: string): Promise<Project>
+  /** The project `name` names -- a project of the user's by name, or any by its id -- with the client's role in it. */
+  getProject(name: string): Promise<Project>
   listVolume(): Promise<Volume[]>
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>

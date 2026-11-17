@@ -207,18 +207,16 @@ impl Snapshot {
         Ok(size)
     }
 
-    /// Delete its disk and its lock, whoever holds them: for a snapshot nothing else names.
-    pub(crate) fn delete(&self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(self.lock_path());
-    }
-
     fn lock_path(&self) -> PathBuf {
         let mut path = self.path.as_os_str().to_owned();
         path.push(".lock");
         PathBuf::from(path)
     }
 }
+
+/// Where a store's disks are under its root: beside the sandboxes' records, each disk named
+/// for its sandbox.
+const DIR: &str = "sandbox";
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -228,7 +226,7 @@ pub struct Store {
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Result<Store> {
         let root = root.into();
-        let dir = root.join("snapshot");
+        let dir = root.join(DIR);
         fs::create_dir_all(&dir).map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
         Ok(Store { root })
     }
@@ -291,7 +289,7 @@ impl Store {
 
     /// Every snapshot here, in no set order.
     pub fn list(&self) -> Result<Vec<Snapshot>> {
-        let dir = self.root.join("snapshot");
+        let dir = self.root.join(DIR);
         let mut snapshots = Vec::new();
         for entry in
             fs::read_dir(&dir).map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
@@ -356,7 +354,7 @@ impl Store {
     /// Snapshot `name`'s disk, refused unless `name` [is one](crate::is_name).
     fn path(&self, name: &str) -> Result<PathBuf> {
         match crate::is_name(name) {
-            true => Ok(self.root.join("snapshot").join(format!("{name}.ext4"))),
+            true => Ok(self.root.join(DIR).join(format!("{name}.ext4"))),
             false => Err(Error::InvalidName(name.to_owned())),
         }
     }
@@ -387,10 +385,7 @@ mod tests {
     fn a_new_snapshot_is_an_empty_filesystem() {
         let scratch = Scratch::new("empty");
         let snapshot = scratch.0.create("work", Snapshot::SIZE).unwrap();
-        assert_eq!(
-            snapshot.path,
-            scratch.0.root().join("snapshot").join("work.ext4")
-        );
+        assert_eq!(snapshot.path, scratch.0.root().join(DIR).join("work.ext4"));
 
         let read = FsTree::from_ext4(File::open(&snapshot.path).unwrap()).unwrap();
         let paths: Vec<_> = read.walk().into_iter().map(|(path, ..)| path).collect();
@@ -453,7 +448,7 @@ mod tests {
         drop(held);
         store.remove("held").unwrap();
         assert!(
-            fs::read_dir(store.root().join("snapshot"))
+            fs::read_dir(store.root().join(DIR))
                 .unwrap()
                 .next()
                 .is_none()

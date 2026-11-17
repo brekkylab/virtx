@@ -19,7 +19,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::access::{self, Access};
+use crate::config::Config;
+use crate::endpoints::{self, Tunnel};
 use anyhow::Context as _;
+use axum::Extension;
 use axum::extract::Path;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -30,9 +34,6 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower_http::cors::CorsLayer;
 
-use crate::access::{self, Access, Homes, Projects};
-use crate::config::Config;
-use crate::endpoints::{self, Tunnel};
 use crate::terminals::{Session, Shown};
 
 /// What this binary is spawned with to be a machine.
@@ -59,34 +60,50 @@ const CHUNK: usize = 64 << 10;
 /// How often each project's images are pruned, as `POST /images/prune` does.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// The server `config` alone makes: its [`Projects`] behind [`router`], and beside it where a
-/// client signs in for its tokens, answered without any -- the provider and the client to
-/// sign in as, or nothing where no one signs in.
-pub fn configured(config: &Config) -> anyhow::Result<(Arc<Projects>, Arc<Access>, axum::Router)> {
-    let homes = Arc::new(Homes::new(config.home().join("project")));
-    let projects = Arc::new(Projects::new(config, &homes)?);
-    let advertised = match &config.oidc {
-        Some(oidc) => serde_json::json!({
-            "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
-        }),
-        None => serde_json::json!({}),
-    };
+/// This process become a machine, never to come back, if it was spawned to be one: called
+/// before any runtime is made.
+pub fn become_machine_if_spawned() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == MACHINE_SUBCOMMAND)
+    {
+        // Why it could not be is the host's already, told on the control channel; stderr is
+        // the guest command's, and nothing of this process's goes there.
+        let Err(_) = virtx_uvm::enter_machine();
+        std::process::exit(1);
+    }
+}
+
+/// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
+/// where a client signs in for its tokens, answered without any -- the provider and the client
+/// to sign in as.
+pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
+    let access = Arc::new(Access::configured(config).await?);
+    let oidc = &config.oidc;
+    let advertised = serde_json::json!({
+        "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
+    });
     let advertised = (
         [(header::CONTENT_TYPE, "application/json")],
         advertised.to_string(),
     );
-    let own = axum::Router::new().route(
-        "/auth",
-        axum::routing::get(move || async move { advertised }),
-    );
-    let access = Arc::new(Access::new(config.origins.clone(), projects.clone(), homes));
-    let router = router(Arc::clone(&access), &config.origins, own);
-    Ok((projects, access, router))
+    // The projects themselves, which a server built on this one may keep elsewhere and serve
+    // none of: beside the server's routes here, not among them.
+    let own = axum::Router::new()
+        .route(
+            "/auth",
+            axum::routing::get(move || async move { advertised }),
+        )
+        .merge(endpoints::projects().layer(Extension(Arc::clone(&access))));
+    let router = router(Arc::clone(&access), own);
+    Ok((access, router))
 }
 
-/// The routes, for `access`, a browser at one of `origins` let in, with `own` beside them:
-/// a server built on this one's, which take no home.
-pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axum::Router {
+/// Everything served, each request checked against `access`: the endpoints, in the home a
+/// request reaches, the images' registry at `/images/oci/v2/`, the ports, the terminals, and the CORS a browser at one of its origins has -- with `own` beside them, routes
+/// that take no home and check for themselves.
+pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
+    let origins = access.origins().to_vec();
     let registry = format!("{}/v2", access::REGISTRY_PATH);
     let checked = Arc::clone(&access);
     let reaching = Arc::clone(&access);
@@ -137,7 +154,7 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
                     }
                     answered
                 }
-                Err(status) => refusal(status),
+                Err(status) => endpoints::refusal(status).into_response(),
             }
         }
     };
@@ -151,7 +168,7 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
                             request.extensions_mut().insert(home);
                             next.run(request).await
                         }
-                        Err(status) => refusal(status),
+                        Err(status) => endpoints::refusal(status).into_response(),
                     }
                 }
             },
@@ -184,7 +201,7 @@ pub fn router(access: Arc<Access>, origins: &[String], own: axum::Router) -> axu
             ),
         )
         .merge(own)
-        .layer(cors(origins))
+        .layer(cors(&origins))
 }
 
 /// The loops every server runs: each home's sandboxes tended -- stopped once unused, deleted once
@@ -267,19 +284,6 @@ async fn interrupted() {
         return;
     }
     let _ = tokio::signal::ctrl_c().await;
-}
-
-/// Before any runtime: if this process was spawned by itself to be a machine, become it and
-/// never come back ([`virtx_uvm::Machine`]).
-pub fn become_machine_if_spawned() {
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == MACHINE_SUBCOMMAND)
-    {
-        // Why it could not be is the host's already, told on the control channel.
-        let Err(_) = virtx_uvm::enter_machine();
-        std::process::exit(1);
-    }
 }
 
 /// The size a terminal is opened at, and the session it attaches to, if any.
@@ -580,8 +584,9 @@ fn cors(origins: &[String]) -> CorsLayer {
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::IF_MATCH,
+            header::IF_NONE_MATCH,
             header::RANGE,
-            HeaderName::from_static(access::PROJECT_HEADER),
+            HeaderName::from_static(virtx_core::PROJECT_HEADER),
             HeaderName::from_static("depth"),
             HeaderName::from_static("destination"),
             HeaderName::from_static("overwrite"),
@@ -605,7 +610,7 @@ fn port(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if let Err(status) = access.origin(headers) {
-        return refusal(status);
+        return endpoints::refusal(status).into_response();
     }
     let Ok(upgrade) = upgrade else {
         return StatusCode::UPGRADE_REQUIRED.into_response();
@@ -678,12 +683,12 @@ async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
 
 #[cfg(test)]
 mod tests {
-    //! The app, served on the loopback over a config of its own that authenticates no one, and
-    //! called over HTTP as a client would: each request to an endpoint in a project -- by
-    //! hand, and through `virtx-core`'s client given it at connect. Who reaches which project
-    //! is `virtx-rs`'s `tests/projects.rs`, against the fixture.
+    //! The app, served on the loopback over an identity of the test's own, and called over HTTP
+    //! as a client would: each request to an endpoint in a project -- by hand, and through
+    //! `virtx-core`'s client given it at connect -- and to the projects themselves. Who a
+    //! provider's token is, is `virtx-rs`'s `tests/projects.rs`, against the fixture's.
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use reqwest::{Method, StatusCode, Url};
@@ -695,7 +700,23 @@ mod tests {
     use virtx_uvm::{FsTree, ImageStore};
 
     use super::{Part, digest_named, tag_named};
+
+    use futures_util::future::BoxFuture;
+
+    use virtx_uvm::ProjectStore;
+
+    use crate::access::{Access, Identity, Principal, TokenIsUser};
     use crate::config::Config;
+    use crate::project::{Membership as _, TcpMembership};
+
+    /// Every request the tester's, whatever it carries.
+    struct Tester;
+
+    impl Identity for Tester {
+        fn identify<'a>(&'a self, _token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+            Box::pin(async { Some(Principal::new("tester")) })
+        }
+    }
 
     type Socket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -710,30 +731,38 @@ mod tests {
     }
 
     impl Served {
-        /// Of the projects `demo` and `other`.
+        /// With every request the tester's, the owner of `demo` and `other`, from
+        /// `https://allowed.example`.
         async fn spawn(name: &str) -> Served {
-            Served::spawn_with(name, json!({ "projects": { "demo": {}, "other": {} } })).await
+            Served::spawn_over(name, async |home| {
+                let projects = TcpMembership::new(home);
+                let tester = Principal::new("tester");
+                for project in ["demo", "other"] {
+                    projects.create(&tester, project).await.unwrap();
+                }
+                let store = ProjectStore::new(home);
+                let access = Access::new(
+                    vec!["https://allowed.example".to_owned()],
+                    Arc::new(Tester),
+                    Arc::new(projects),
+                    store.clone(),
+                    Arc::new(store),
+                );
+                super::router(Arc::new(access), axum::Router::new())
+            })
+            .await
         }
 
-        /// With `who` in the config, for who is let in and to which projects.
-        async fn spawn_with(name: &str, who: Value) -> Served {
+        /// What `serving` makes over an empty home of its own.
+        async fn spawn_over(
+            name: &str,
+            serving: impl AsyncFnOnce(&Path) -> axum::Router,
+        ) -> Served {
             let home =
                 std::env::temp_dir().join(format!("virtx-tcp-app-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
-            let mut config = json!({
-                "listen": "127.0.0.1:0",
-                "home": home,
-                "origins": ["https://allowed.example"],
-            });
-            for (name, value) in who.as_object().unwrap() {
-                config[name] = value.clone();
-            }
-            let path = home.join("config.json");
-            std::fs::write(&path, config.to_string()).unwrap();
-            let config = Config::read(&path).unwrap();
-
-            let (_, _, router) = super::configured(&config).unwrap();
+            let router = serving(&home).await;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -767,9 +796,17 @@ mod tests {
             Client::connect(&self.url, Auth::None, headers).unwrap()
         }
 
+        /// The directory of the tester's project `name`.
+        async fn project(&self, name: &str) -> PathBuf {
+            let tester = Principal::new("tester");
+            let projects = TcpMembership::new(&self.home);
+            let id = projects.resolve(&tester, name).await.unwrap().unwrap();
+            ProjectStore::new(&self.home).path(&id)
+        }
+
         /// File an empty image under `tag` in `demo`'s images.
-        fn file_image(&self, tag: &str) {
-            let store = ImageStore::new(self.home.join("project/demo/images")).unwrap();
+        async fn file_image(&self, tag: &str) {
+            let store = ImageStore::new(self.project("demo").await.join("images")).unwrap();
             let layer = store.insert_layer(&FsTree::new()).unwrap();
             let config = serde_json::from_str(
                 r#"{"architecture": "arm64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}"#,
@@ -825,23 +862,174 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_says_where_to_sign_in_and_without_authentication_takes_any_request() {
-        let asked = async |served: &Served| {
-            let (status, body) = served.send("GET", "auth", None, "").await;
-            assert_eq!(status, StatusCode::OK);
-            serde_json::from_str::<Value>(&body).unwrap()
-        };
-
+    async fn a_server_says_where_to_sign_in_and_takes_no_request_without_a_token() {
         let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let signed_in = Served::spawn_with("advertised", json!({ "oidc": oidc })).await;
-        assert_eq!(asked(&signed_in).await, json!({ "oidc": oidc }));
-        let list = signed_in.send("GET", "volumes/", None, "").await;
+        let served = Served::spawn_over("advertised", async |home| {
+            let config = json!({ "listen": "127.0.0.1:0", "home": home, "oidc": oidc });
+            super::configured(&Config::parse(config).unwrap())
+                .await
+                .unwrap()
+                .1
+        })
+        .await;
+        let (status, body) = served.send("GET", "auth", None, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "oidc": oidc })
+        );
+        let list = served.send("GET", "volumes/", None, "").await;
         assert_eq!(list.0, StatusCode::UNAUTHORIZED);
+    }
 
-        let open = Served::spawn_with("open", json!({})).await;
-        assert_eq!(asked(&open).await, json!({}));
-        let list = open.send("GET", "volumes/", None, "").await;
-        assert_eq!((list.0, list.1.as_str()), (StatusCode::OK, "[]"));
+    #[tokio::test]
+    async fn members_make_read_and_remove_projects_as_their_roles_let_them() {
+        let served = Served::spawn_over("projects", async |home| {
+            let users = ["alice", "bob", "carol"].map(str::to_owned).into();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(TokenIsUser(users)),
+                Arc::new(TcpMembership::new(home)),
+                store.clone(),
+                Arc::new(store),
+            );
+            let access = Arc::new(access);
+            let projects = crate::endpoints::projects().layer(axum::Extension(Arc::clone(&access)));
+            super::router(access, projects)
+        })
+        .await;
+        let send = async |method: &str, path: &str, token: &str, body: Value| {
+            let method = Method::from_bytes(method.as_bytes()).unwrap();
+            let mut request = reqwest::Client::new()
+                .request(method, format!("{}{path}", served.url))
+                .bearer_auth(token);
+            if !body.is_null() {
+                request = request.json(&body);
+            }
+            let response = request.send().await.unwrap();
+            let location = response.headers().get("location").cloned();
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap();
+            (
+                status,
+                serde_json::from_str(&text).unwrap_or(Value::Null),
+                location,
+            )
+        };
+        let status = async |method, path, token, body| send(method, path, token, body).await.0;
+        let none = Value::Null;
+
+        // Whoever signs in makes a project, and owns it: one of a name in use of theirs is
+        // refused, and of another's is another project.
+        let demo = json!({ "name": "demo" });
+        let (made, answer, location) = send("POST", "projects/", "alice", demo.clone()).await;
+        let id = answer["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            (made, &answer),
+            (
+                201,
+                &json!({ "id": id, "name": "demo", "owner": "alice", "role": "owner" })
+            )
+        );
+        assert_eq!(location.unwrap(), format!("/projects/{id}"));
+        assert_eq!(
+            status("POST", "projects/", "alice", demo.clone()).await,
+            409
+        );
+        let (made, his, _) = send("POST", "projects/", "bob", demo.clone()).await;
+        assert_eq!(made, 201);
+        assert_ne!(his["id"], answer["id"]);
+        for name in ["default", "Demo", "0f6a3b8e-1c2d-4e5f-8a9b-0c1d2e3f4a5b"] {
+            let made = status("POST", "projects/", "alice", json!({ "name": name })).await;
+            assert_eq!(made, 400, "{name}");
+        }
+        assert_eq!(status("POST", "projects/", "nobody", demo).await, 401);
+        // Each lists their own, made for them, and theirs by name.
+        let listed = async |token| {
+            let listed = send("GET", "projects/", token, Value::Null).await.1;
+            let listed = listed.as_array().unwrap().iter();
+            listed
+                .map(|project| (project["name"].clone(), project["owner"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed("alice").await,
+            [
+                (json!("default"), json!("alice")),
+                (json!("demo"), json!("alice"))
+            ]
+        );
+        assert_eq!(
+            listed("bob").await,
+            [
+                (json!("default"), json!("bob")),
+                (json!("demo"), json!("bob"))
+            ]
+        );
+
+        // Bob reaches it by its id, and what is in it, once Alice adds him; by its name, he
+        // names his own.
+        let project = format!("projects/{id}");
+        let volumes = async |token: &str| {
+            let request = reqwest::Client::new()
+                .get(format!("{}volumes/", served.url))
+                .bearer_auth(token)
+                .header("virtx-project", &id);
+            request.send().await.unwrap().status().as_u16()
+        };
+        assert_eq!(status("GET", &project, "bob", none.clone()).await, 403);
+        assert_eq!(volumes("bob").await, 403);
+        let member = json!({ "role": "member" });
+        let bob = format!("{project}/members/bob");
+        let (added, answer, location) = send("PUT", &bob, "alice", member.clone()).await;
+        assert_eq!(
+            (added, &answer),
+            (201, &json!({ "user": "bob", "role": "member" }))
+        );
+        assert_eq!(location.unwrap(), format!("/{bob}"));
+        assert_eq!(status("PUT", &bob, "alice", member.clone()).await, 200);
+        assert_eq!(
+            send("GET", &project, "bob", none.clone()).await.1,
+            json!({ "id": id, "name": "demo", "owner": "alice", "role": "member" })
+        );
+        assert_eq!(
+            send("GET", "projects/demo", "bob", none.clone()).await.1["id"],
+            his["id"]
+        );
+        assert_eq!(volumes("bob").await, 200);
+        assert_eq!(
+            send("GET", &format!("{project}/members/"), "bob", none.clone())
+                .await
+                .1,
+            json!([{ "user": "alice", "role": "owner" }, { "user": "bob", "role": "member" }])
+        );
+
+        // A member neither changes the members nor removes the project; its owner stays one.
+        let (alice, carol) = (
+            format!("{project}/members/alice"),
+            format!("{project}/members/carol"),
+        );
+        assert_eq!(status("PUT", &carol, "bob", member).await, 403);
+        assert_eq!(status("DELETE", &alice, "bob", none.clone()).await, 403);
+        assert_eq!(status("DELETE", &project, "bob", none.clone()).await, 403);
+        assert_eq!(status("DELETE", &alice, "alice", none.clone()).await, 409);
+        let demoted = json!({ "role": "member" });
+        assert_eq!(status("PUT", &alice, "alice", demoted).await, 409);
+        assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 404);
+
+        // Bob leaves; Alice removes the project, and everything in it.
+        assert_eq!(status("DELETE", &bob, "bob", none.clone()).await, 204);
+        assert_eq!(volumes("bob").await, 403);
+        let dir = served.home.join("project").join(&id);
+        assert!(dir.is_dir());
+        assert_eq!(
+            status("DELETE", "projects/demo", "alice", none.clone()).await,
+            204
+        );
+        assert!(!dir.exists());
+        assert_eq!(status("GET", &project, "alice", none).await, 403);
+        assert_eq!(listed("alice").await, [(json!("default"), json!("alice"))]);
     }
 
     #[tokio::test]
@@ -929,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn a_project_s_images_are_a_registry() {
         let served = Served::spawn("registry").await;
-        served.file_image("alpine:3.21");
+        served.file_image("alpine:3.21").await;
         let base = format!("{}images/oci/v2", served.url);
         let get = async |path: &str, project: &str| {
             reqwest::Client::new()
@@ -962,6 +1150,134 @@ mod tests {
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
     }
 
+    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
+    /// and a path whose segment does not read as one is `400` `invalid`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
+        let served = Served::spawn("envelope").await;
+        let send = async |request: reqwest::RequestBuilder| {
+            let response = request
+                .header("virtx-project", "demo")
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, kind, body["error"].clone())
+        };
+        let client = reqwest::Client::new();
+
+        let over = client
+            .post(format!("{}sandboxes/", served.url))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(vec![b' '; 3 << 20]);
+        let (status, kind, error) = send(over).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "too_large", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("2 MiB"),
+            "{error}"
+        );
+
+        let unreadable = client.get(format!("{}sandboxes/%FF", served.url));
+        let (status, kind, error) = send(unreadable).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(kind.to_str().unwrap(), "application/json");
+        assert_eq!(error["code"], "invalid", "{error}");
+    }
+
+    /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
+    /// `too_large`, one at the limit is not, each in the envelope. The body is refused before
+    /// the handler looks anything up, so no sandbox, volume or job has to be there.
+    #[tokio::test]
+    async fn every_route_that_takes_a_body_holds_it_to_the_limit() {
+        let served = Served::spawn("limit").await;
+        let client = reqwest::Client::new();
+        let limit = 2 << 20;
+        for (method, path) in [
+            (Method::POST, "images/jobs/pull/"),
+            (Method::POST, "images/jobs/push/"),
+            (Method::POST, "images/jobs/build/"),
+            (Method::POST, "volumes/"),
+            (Method::PUT, "volumes/nobody/mounts/m"),
+            (Method::POST, "sandboxes/"),
+            (Method::POST, "sandboxes/nobody/jobs/exec/"),
+            (Method::POST, "sandboxes/nobody/jobs/j/signal"),
+        ] {
+            for (size, status, code) in [
+                (limit + 1, StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+                (limit, StatusCode::BAD_REQUEST, "invalid"),
+            ] {
+                let response = client
+                    .request(method.clone(), format!("{}{path}", served.url))
+                    .header("virtx-project", "demo")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(vec![b' '; size])
+                    .send()
+                    .await
+                    .unwrap();
+                let how = format!("{method} {path}, {size} bytes");
+                assert_eq!(response.status(), status, "{how}");
+                let kind = response.headers()[http::header::CONTENT_TYPE].clone();
+                assert_eq!(kind, "application/json", "{how}");
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["error"]["code"], code, "{how}");
+            }
+        }
+    }
+
+    /// A body is read to its end before it is refused, over a socket as a client sends it: with
+    /// part of a body over the limit sent, nothing is answered; with the rest, `413`. A body that
+    /// breaks off is `400` `invalid`.
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_read_to_its_end_before_it_is_refused() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let served = Served::spawn("read-to-end").await;
+        let at = served
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let head = |length: usize| {
+            format!(
+                "POST /sandboxes/ HTTP/1.1\r\nhost: virtx\r\nvirtx-project: demo\r\n\
+                 content-type: application/json\r\ncontent-length: {length}\r\n\r\n"
+            )
+        };
+
+        let whole = 3 << 20;
+        let first = (2 << 20) + (64 << 10);
+        let mut socket = tokio::net::TcpStream::connect(at).await.unwrap();
+        socket.write_all(head(whole).as_bytes()).await.unwrap();
+        socket.write_all(&vec![b' '; first]).await.unwrap();
+        let mut answer = [0u8; 64];
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            socket.read(&mut answer),
+        );
+        assert!(
+            early.await.is_err(),
+            "answered while the body was still owed"
+        );
+        socket.write_all(&vec![b' '; whole - first]).await.unwrap();
+        let read = socket.read(&mut answer).await.unwrap();
+        let line = String::from_utf8_lossy(&answer[..read]);
+        assert!(line.starts_with("HTTP/1.1 413"), "{line}");
+
+        let mut socket = tokio::net::TcpStream::connect(at).await.unwrap();
+        socket.write_all(head(100).as_bytes()).await.unwrap();
+        socket.write_all(b"{\"cmd\": [").await.unwrap();
+        socket.shutdown().await.unwrap();
+        let mut answer = Vec::new();
+        socket.read_to_end(&mut answer).await.unwrap();
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(answer.contains("\"invalid\""), "{answer}");
+    }
+
     /// The files of a volume through `virtx-core`'s client, given the project at connect, as a
     /// program over the bindings reaches them.
     #[tokio::test]
@@ -970,7 +1286,7 @@ mod tests {
         let client = served.connect();
         client.create_volume(Some("data")).await.unwrap();
         let volume = FileRoot::Volume("data".into());
-        let home = served.home.join("project/demo");
+        let home = served.project("demo").await;
 
         // A volume's files, on the host's disk.
         client.create_dir(&volume, "dir").await.unwrap();
@@ -1027,8 +1343,9 @@ mod tests {
     async fn a_project_keeps_its_volumes() {
         let served = Served::spawn("project").await;
         let client = served.connect();
+        let demo = served.project("demo").await;
         client.create_volume(Some("data")).await.unwrap();
-        assert!(served.home.join("project/demo/volume/data/files").is_dir());
+        assert!(demo.join("volume/data/files").is_dir());
         assert_eq!(status(client.create_volume(Some("data")).await), 409);
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
@@ -1153,8 +1470,8 @@ mod tests {
         );
     }
 
-    /// Two clients writing over one etag at once: the first to write lands, and the other is
-    /// refused the etag it read, gone stale under it.
+    /// Two clients writing over one etag at once: the one whose body has all arrived first
+    /// lands, and the other is refused the etag it read, gone stale under it.
     #[tokio::test]
     async fn of_two_writes_over_one_etag_one_lands() {
         let served = Served::spawn("etag").await;

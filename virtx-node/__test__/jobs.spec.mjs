@@ -167,7 +167,7 @@ describe('against virtx-stdio', () => {
 
   test('a command in a sandbox is a job whose log ends with its code', async () => {
     await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { abins: ['index'] })
+    const sandbox = await client.createSandbox(ALPINE, { diskGib: 4, abins: ['index'] })
     assert.equal(sandbox.state, 'running')
     assert.deepEqual(sandbox.abins, ['index'])
     assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
@@ -231,8 +231,14 @@ describe('against virtx-stdio', () => {
       assert.equal(await sandbox.exec(cmd).complete(), 3)
       assert.equal(log.mock.callCount() + error.mock.callCount(), 0)
       assert.equal(await sandbox.exec(cmd).complete({ print: true }), 3)
-      assert.deepEqual(log.mock.calls.map((call) => call.arguments), [['out']])
-      assert.deepEqual(error.mock.calls.map((call) => call.arguments), [['err']])
+      assert.deepEqual(
+        log.mock.calls.map((call) => call.arguments),
+        [['out']],
+      )
+      assert.deepEqual(
+        error.mock.calls.map((call) => call.arguments),
+        [['err']],
+      )
     } finally {
       await sandbox.remove()
     }
@@ -292,7 +298,9 @@ describe('against virtx-stdio', () => {
     const recipe = new virtx.Recipe(ALPINE).run(`echo ${reference}-step | tee /built`)
     const digest = await client.buildImage(recipe, reference).complete({ print: true })
     assert.equal((await tags(client))[reference], digest)
-    assert.ok(printed.mock.calls.some((call) => String(call.arguments[0]).includes(`${reference}-step`)))
+    assert.ok(
+      printed.mock.calls.some((call) => String(call.arguments[0]).includes(`${reference}-step`)),
+    )
     await client.removeImage(reference)
   })
 

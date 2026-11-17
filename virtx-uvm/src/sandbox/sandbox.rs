@@ -26,6 +26,9 @@ use crate::{
 /// A machine's size where a sandbox leaves it to the server.
 pub const DEFAULT_VCPUS: u8 = 4;
 pub const DEFAULT_MEMORY_MIB: u32 = 4096;
+/// The most `disk_gib` a sandbox may ask for. Formatting a disk keeps 64 KiB of its bitmaps in
+/// memory for each GiB.
+pub const MAX_DISK_GIB: u32 = 1024;
 /// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
 const MIN_MEMORY_MIB: u32 = 64;
 
@@ -221,6 +224,9 @@ pub struct Sandbox {
     listening: Mutex<HashMap<u16, Held>>,
     /// How many [`Activity`]s are under way.
     active: AtomicUsize,
+    /// What a conditional write to its files holds first as it lands (see
+    /// [`Files`](crate::Files)).
+    writing: Arc<tokio::sync::Mutex<()>>,
     /// Whether its terminals were asked if a command runs in them, and none has answered that
     /// one does, nor been typed in, since.
     pub(super) asked: AtomicBool,
@@ -237,12 +243,59 @@ impl Sandbox {
             ports: Ports::default(),
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
+            writing: Arc::default(),
             asked: AtomicBool::new(false),
         })
     }
 
+    /// What a conditional write to its files holds first as it lands (see
+    /// [`Files`](crate::Files)).
+    pub(crate) fn writing(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.writing
+    }
+
+    /// Each volume it mounts writable: where in the guest, spelled as the guest is given it,
+    /// and the volume's own directory.
+    pub(crate) fn mounts(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.record
+            .args
+            .volumes
+            .iter()
+            .filter(|asked| !asked.readonly)
+            .filter_map(|asked| {
+                let dir = self
+                    .shared
+                    .volumes
+                    .open(&asked.volume)
+                    .ok()?
+                    .path()
+                    .to_owned();
+                Some((crate::mount_point(&asked.path).ok()?, dir))
+            })
+            .collect()
+    }
+
     pub fn id(&self) -> &str {
         &self.record.id
+    }
+
+    /// Whether a sandbox lives under the home `root`, running or stopped, of this process or
+    /// another: a record of one kept there, or a disk there a machine holds.
+    pub fn lives_under(root: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(root.join("sandbox")) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".json") {
+                return true;
+            }
+            name.ends_with(".ext4.lock")
+                && std::fs::File::open(entry.path()).is_ok_and(|file| {
+                    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+                })
+        })
     }
 
     pub fn name(&self) -> Option<&str> {

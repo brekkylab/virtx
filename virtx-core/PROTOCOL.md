@@ -14,6 +14,8 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/commit/` | [HTTP](#image-jobs) | Starting an image made of a sandbox |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
+| `/projects/` | [HTTP](#projects) | Project CRUD |
+| `/projects/{name}/members/` | [HTTP](#projects) | Project member CRUD |
 | `/volumes/` | [HTTP](#volumes) | Volume CRUD |
 | `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
 | `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
@@ -59,7 +61,7 @@ The client starts the server as a child process, and the server's stdin and stdo
 - The connection starts with prior knowledge (RFC 9113, section 3.3): the client sends the connection preface first, with no TLS and no upgrade. Requests use the `http` scheme. The authority is not checked.
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
-- The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin).
+- The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin), and the client reaches every [project](#projects) it has.
 - The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then stop every sandbox, as [`stop`](#sandboxes) does -- deleting those that are ephemeral -- cancel every job, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
 
 ## Authentication
@@ -74,8 +76,51 @@ How the client obtains the token is outside this protocol, but a server MAY say 
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
-A server that keeps organizations apart, each with its own images, volumes and sandboxes, takes the organization a request is for from its credentials: an organization's own, such as an API key, or a person's issued for one organization.
-A server answers `400 Bad Request` to a request whose credentials are for no organization when it needs one, and `403 Forbidden` to one whose credentials do not reach the organization they name.
+## Projects
+
+Everything a server keeps, its images, volumes and sandboxes, belongs to a project, and a project to its members, each in a role.
+A request names its project in the `virtx-project` header, the same over either transport.
+A server that answers browsers from other [origins](#origin) lists `virtx-project` in its CORS preflight's `Access-Control-Allow-Headers`, or a browser sends no request naming a project.
+A request that names none belongs to its sender's own project, `default`, which the server makes the first time it is reached, its sender its owner.
+
+- A project has an `id`, a UUID the server gives it once, and a `name`, which the user whose project it is, its `owner`, gives it.
+- A project's name is lower-case letters, digits, `.`, `_` and `-`, up to 128 characters, starts with neither `.` nor `-`, and is no UUID.
+- No two projects of one owner share a name: another user's project of the same name is another project.
+- `virtx-project`, and `{project}` in the paths below, name a project by its id, or a project of the sender's by its name. `default` names the sender's own, and no request makes a project of that name: it is refused with `400`, `invalid`.
+- Projects are apart: the volume `data` of one project is not that of another, and nothing in one is reached from another.
+- A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
+- A [port's](#ports) URL names no project: the capability in it alone finds the port.
+
+Each member of a project has a role:
+
+- `member` reaches everything in it, reads it and its members, and leaves it.
+- `owner` does what a member does, and also adds, changes and removes members, and removes the project.
+
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), has no members: its one client is the host's admin, and owns every project the server keeps.
+Those are its own, which it names by name and answers with no `owner`, and those a server with users over the same home keeps for them, which it names by id alone and answers with their `owner`.
+The client's `role` in each is `owner`, and the server serves no `/projects/{project}/members/`.
+
+Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
+They name the project in their path, and take no `virtx-project`.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /projects/` | | `200`, array of `{id, name, owner, role}` |
+| `POST /projects/` | `{name}` | `201`, `{id, name, owner, role}` |
+| `GET /projects/{project}` | | `200`, `{id, name, owner, role}` |
+| `DELETE /projects/{project}` | | `204` |
+| `GET /projects/{project}/members/` | | `200`, array of `{user, role}` |
+| `PUT /projects/{project}/members/{user}` | `{role}` | `201` or `200`, `{user, role}` |
+| `DELETE /projects/{project}/members/{user}` | | `204` |
+
+- `role` in a project's answer is the role of who asked; `GET /projects/` answers each project they have one in, their own among them.
+- `POST` makes a project of who asked, its owner and its one member. A name of theirs in use is refused with `409`, `exists`.
+- `DELETE` of a project removes everything in it, its image jobs cancelled, and is refused with `409`, `in_use`, while a sandbox lives in it. The sender's own is made again, empty, as it is next reached.
+- `{user}` is a user as the server names them, such as an email address.
+- `PUT` gives `user` the role: `201` adds them, `200` changes theirs.
+- `DELETE` of a member takes their role away. A user who is no member is refused with `404`, `not_found`.
+- Only an owner adds, changes and removes members, and removes the project, but a member removes themself, leaving it. Anyone else is refused with `403`, `forbidden`.
+- A change that takes the `owner` role from the user whose project it is is refused with `409`, `in_use`.
 
 ## Resources
 
@@ -90,7 +135,7 @@ A `DELETE` answers `204 No Content` once what it names is gone.
 A request that fails is answered with an HTTP error status and a body:
 
 ```text
-{"error": {"code": "in_use", "message": "volume `data` is mounted by a sandbox"}}
+{"error": {"code": "in_use", "message": "volume `dev` is mounted by a sandbox"}}
 ```
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
@@ -98,12 +143,12 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member. |
-| `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication) and [Origin](#origin). |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. |
+| `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication), [Projects](#projects) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
 | `409 Conflict` | `exists`, `in_use`, `ended`, `stopped` | A name already in use, something held by a sandbox, a job or a sandbox's VM that has ended, or what is asked of a sandbox while it runs and it is stopped. |
-| `413 Content Too Large` | `too_large` | The body is over the server's limit. |
+| `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
 
@@ -260,7 +305,7 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at, abins?}`, and in the answer to its `POST` and to `start`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `name`, if given, names it among its organization's sandboxes -- the server's, on one that keeps no organizations apart -- so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
+- `name`, if given, names it among its project's sandboxes, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
 - `state` is `"running"`, its VM up, or `"stopped"`, its VM down and its disk kept.
 - `ephemeral`, `false` without it, is whether it is deleted when it stops, rather than kept.
 - `auto_stop_minutes` is how long it runs [unused](#use) before it stops. Without it the server picks it; the server MAY refuse a longer one than it allows.
@@ -268,7 +313,7 @@ A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delet
 - `used_at` is when it was last [used](#use), as RFC 3339.
 - `disk_gib` is how much it may write to its root filesystem over its image, in GiB. Without it the server picks it, and `0` is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.
-- `vcpus`, `memory_mib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
+- `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 Its files are reached at [`/sandboxes/{id}/files/`](#files) while it runs.
@@ -414,7 +459,7 @@ A request that fails is answered with the specification's error codes, in its `{
 
 ## Files
 
-The files in a volume are reached at `/volumes/{name}/files/`, and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
+The files in a volume are reached at `/volumes/{name}/files/` and those in a sandbox at `/sandboxes/{id}/files/`, with [WebDAV](https://www.rfc-editor.org/rfc/rfc4918) (RFC 4918).
 The path after the root is the file's path in the volume or sandbox, each segment percent-encoded.
 A client resolves a path's `.` and `..` segments before it sends it, as a file's path is read: empty segments are dropped, and each `..` takes the segment before it, so `a/../b` and `a//../b` are both sent as `b`; a path that goes above the root is not sent.
 The server refuses with `400 Bad Request` a path, or the `Destination` of a `MOVE` or `COPY` up to its `?` or `#`, with a `.` or `..` segment, plain or percent-encoded, `/` and `\` both separating segments; and one that is not in the root (of a URL, its path alone, with consecutive slashes taken as one). It does so before anything in the volume or sandbox is touched.
@@ -433,7 +478,8 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 | Copy | `COPY`, with `Overwrite` |
 
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
-- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read.
+- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read. A `getetag` is an entity-tag in quotes, the same as the file's `ETag` header, and is sent in `If-Match` as it was read. One with `If-None-Match: *` is refused with `412` when anything is at the path: how a client creates a file only if no other did. A `PUT` that answers an `ETag` answers the one a `GET` of the file it wrote does, so a client can send it as `If-Match` on its next write without reading the file again.
+- A `PUT` with `If-Match` or `If-None-Match` to a volume or a sandbox is checked before its body is read, and again once all of it has arrived, against the file as it is then, and lands in the same step, so no other write with a condition lands between the two: none from another client of the server, and, to a volume, none from another server over one home. Of two sent at once to one file, one lands, and the other is checked against what it wrote and refused `412` if its condition no longer holds: read the file again, and retry. On one server, the one whose body has all arrived first, and to a sandbox been sent on to it, is checked first. A write to a sandbox holds each volume the sandbox mounts writable as well, so a file in such a volume is held the same whether it is written through the sandbox's files or the volume's, and a `PUT` to a path in it is checked against the volume's own files as it lands. The rest is checked as the sandbox sees the file, which can trail a write through the volume's files by a few seconds: the check before a `PUT`'s body is read, the condition of a `DELETE`, `MOVE` or `COPY`, and a `PUT` to a path the volume's files do not answer for, such as one through a symbolic link. For those few seconds after such a write, a `DELETE` or `MOVE` naming the replaced file's tag can go through, and a `PUT` naming the new one can be refused `412`. A `DELETE`, `MOVE` or `COPY` with either condition is held the same way while it is answered, but one of a directory that fails on a member, answered `207`, may go on with the rest after. A sandbox's processes write its files without asking, and a write without a condition is not held, so either may land between the check and the write.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
 - `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume or sandbox is removed through [Resources](#resources).
 - `MOVE` and `COPY` take a `Destination` in the same volume or sandbox, and refuse any other with `400 Bad Request`.

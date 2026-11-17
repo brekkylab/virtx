@@ -1,152 +1,154 @@
 //! Who may send a request, and which project's [`Home`] it reaches. [`Access`] lets a request
-//! in from where a browser may call, asks its [`Authenticator`] who the token is and which
-//! project it reaches, and takes that project's home from its [`Homes`].
+//! in from where a browser may call, asks its [`Identity`] who the token is, asks its
+//! [`Membership`] which project the request names and what they are in it, and takes that
+//! project's home, made by its [`Homes`] as it is first reached.
 //!
-//! The server's own authenticator is [`Projects`]: the projects its config names, each to its
-//! members among the users of the config's OpenID Connect provider ([`Oidc`]) -- or, of a
-//! config that names no provider, to [`ANYONE`]. A server built on this one gives its own.
-//!
-//! Or it gives [`Tenants`] in place of both, who say who a token is and make the home it
-//! reaches themselves ([`Access::with_tenants`]): virtx cloud's node takes its gateway's tokens
-//! so, each project's home kept past the node.
+//! The server's own are [`Access::configured`]'s: the config's token issuer ([`Oidc`]), the
+//! projects kept beside their directories ([`TcpMembership`]), and each home in its directory
+//! ([`ProjectStore`]). A server built on this one gives its own of any, such as a membership
+//! kept in a database.
 
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
-use anyhow::bail;
+use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
-use virtx_uvm::ImageStore;
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
+use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, Sandbox};
 
-use crate::config::{Auth, Config, DEFAULT_PROJECT};
+use crate::config::Config;
 use crate::endpoints::Home;
 use crate::oidc::Oidc;
-
-/// The header a request names its project in.
-pub const PROJECT_HEADER: &str = "virtx-project";
-
-/// Who a request is sent by where no one is authenticated.
-pub const ANYONE: &str = "anyone";
+use crate::project::{Membership, TcpMembership};
 
 /// Where a home's images are served as a registry.
 pub const REGISTRY_PATH: &str = "/images/oci";
 
-/// What an [`Authenticator`] answers, once it has checked a token.
-pub type Checked<'a, T> = Pin<Box<dyn Future<Output = Result<T, StatusCode>> + Send + 'a>>;
-
-/// Who a server's tokens are, and the projects they reach.
-pub trait Authenticator: Send + Sync {
-    /// Who a request carrying `token`, naming project `named` if it names one, is sent by,
-    /// and the project it reaches: `401` for a token that is no one's, `400` naming no project
-    /// where one must be named, and `403` naming one its sender does not reach.
-    fn authenticate<'a>(
-        &'a self,
-        token: Option<&'a str>,
-        named: Option<&'a str>,
-    ) -> Checked<'a, (String, String)>;
+/// Who a request is from, as its token was verified: its user, and the claims the token
+/// carries, for a [`Membership`] to decide from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Principal {
+    pub user: String,
+    pub claims: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Who a server's tokens are, and the homes they reach, which they make: in place of an
-/// [`Authenticator`] and [`Homes`].
-pub trait Tenants: Send + Sync {
-    /// What a request carrying `token`, naming project `named` if it names one, is sent as,
-    /// and the home it reaches -- made the first time: `401` for a token that is none of
-    /// these, `403` for one that names another project.
-    fn home<'a>(
-        &'a self,
-        token: &'a str,
-        named: Option<&'a str>,
-    ) -> Checked<'a, (String, Arc<Home>)>;
-
-    /// Every home they have made.
-    fn homes(&self) -> Vec<Arc<Home>>;
-}
-
-/// Each project's home, in a directory of its name under a root, made as it is first reached.
-pub struct Homes {
-    root: PathBuf,
-    made: Mutex<HashMap<String, Arc<Home>>>,
-}
-
-impl Homes {
-    pub fn new(root: PathBuf) -> Homes {
-        Homes {
-            root,
-            made: Mutex::default(),
+impl Principal {
+    /// `user`, with no claims.
+    pub fn new(user: impl Into<String>) -> Principal {
+        Principal {
+            user: user.into(),
+            claims: serde_json::Map::new(),
         }
     }
+}
 
-    /// Project `project`'s home, its images its own.
-    pub fn home(&self, project: &str) -> anyhow::Result<Arc<Home>> {
-        let mut made = self.made.lock().unwrap();
-        if let Some(home) = made.get(project) {
-            return Ok(Arc::clone(home));
-        }
-        let dir = self.root.join(project);
-        let images = ImageStore::new(dir.join("images"))?;
-        let home = Arc::new(Home::new(images, &dir, None)?);
-        made.insert(project.to_owned(), Arc::clone(&home));
-        Ok(home)
+/// Who a server's tokens are from: it authenticates, and the [`Membership`] authorizes.
+pub trait Identity: Send + Sync {
+    /// Who a request carrying `token` is from: `None` for a token that is no one's, or for none
+    /// where one is needed.
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>>;
+}
+
+impl Identity for Oidc {
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
+        Box::pin(async move { self.principal(token?).await })
     }
+}
 
-    /// Every home made.
-    pub fn all(&self) -> Vec<Arc<Home>> {
-        self.made.lock().unwrap().values().cloned().collect()
+/// What makes a project's home, as the project is first reached.
+pub trait Homes: Send + Sync {
+    /// Project `id`'s home: `None` where it is to have none, which no request then reaches.
+    fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>>;
+}
+
+/// Each home in the project's directory, its images its own.
+impl Homes for ProjectStore {
+    fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>> {
+        Box::pin(async move {
+            let dir = self.path(id);
+            let images = ImageStore::new(dir.join("images"))?;
+            Ok(Some(Home::new(images, &dir, None)?))
+        })
     }
 }
 
 pub struct Access {
     /// The `Origin`s a browser may call from.
     origins: Vec<String>,
-    who: Who,
-}
-
-/// Who says who a token is, and makes the home it reaches.
-enum Who {
-    Authenticated {
-        authenticator: Arc<dyn Authenticator>,
-        homes: Arc<Homes>,
-    },
-    Tenants(Arc<dyn Tenants>),
+    identity: Arc<dyn Identity>,
+    membership: Arc<dyn Membership>,
+    /// Where the projects' directories are, each deleted as its project is removed.
+    store: ProjectStore,
+    maker: Arc<dyn Homes>,
+    /// Each project's home, by id, made as it is first reached.
+    /// `None` for a project being removed or removed, which no request reaches.
+    homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
+    /// Held while a home is made, so that each is made once.
+    making: tokio::sync::Mutex<()>,
 }
 
 impl Access {
-    /// Requests from the `origins` a browser may call from, let in by `authenticator` to `homes`.
+    /// Requests from the `origins` a browser may call from, sent by whom `identity` says, to the
+    /// projects `membership` names, kept in `store`, the home of each made by `maker` as it is
+    /// first reached.
     pub fn new(
         origins: Vec<String>,
-        authenticator: Arc<dyn Authenticator>,
-        homes: Arc<Homes>,
+        identity: Arc<dyn Identity>,
+        membership: Arc<dyn Membership>,
+        store: ProjectStore,
+        maker: Arc<dyn Homes>,
     ) -> Access {
         Access {
             origins,
-            who: Who::Authenticated {
-                authenticator,
-                homes,
-            },
+            identity,
+            membership,
+            store,
+            maker,
+            homes: Mutex::default(),
+            making: tokio::sync::Mutex::default(),
         }
     }
 
-    /// Requests from the `origins` of `config` a browser may call from, each token's sender and
-    /// home as `tenants` say.
-    pub fn with_tenants(config: &Config, tenants: Arc<dyn Tenants>) -> anyhow::Result<Access> {
-        Ok(Access {
-            origins: config.origins.clone(),
-            who: Who::Tenants(tenants),
-        })
+    /// What `config` says: the users of its issuer, the projects kept at its home, each home in
+    /// its directory. The home of each project there is made now, so that its sandboxes left
+    /// from before are swept as the server starts.
+    pub async fn configured(config: &Config) -> anyhow::Result<Access> {
+        let store = ProjectStore::new(config.home());
+        let access = Access::new(
+            config.origins.clone(),
+            Arc::new(Oidc::new(config.oidc.clone())),
+            Arc::new(TcpMembership::new(config.home())),
+            store.clone(),
+            Arc::new(store),
+        );
+        for id in access.store.list()? {
+            access.home_of(&id).await?;
+        }
+        Ok(access)
     }
 
     pub fn origins(&self) -> &[String] {
         &self.origins
     }
 
+    pub fn membership(&self) -> &dyn Membership {
+        &*self.membership
+    }
+
+    pub fn store(&self) -> &ProjectStore {
+        &self.store
+    }
+
     /// Every home made.
     pub fn homes(&self) -> Vec<Arc<Home>> {
-        match &self.who {
-            Who::Authenticated { homes, .. } => homes.all(),
-            Who::Tenants(tenants) => tenants.homes(),
-        }
+        self.homes
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// `403` for a request with `headers` from an `Origin` not let in.
@@ -162,124 +164,124 @@ impl Access {
         Ok(())
     }
 
-    /// Who a request with `headers` is sent by, and the home it reaches: `403` from an
-    /// `Origin` not let in, and otherwise as [`Authenticator::authenticate`] says -- or, with
-    /// [`Tenants`], `401` without a token, and otherwise as [`Tenants::home`] says.
-    pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
+    /// Who a request with `headers` is from: `403` from an `Origin` not let in, and `401` for a
+    /// token that is no one's.
+    pub async fn principal(&self, headers: &HeaderMap) -> Result<Principal, StatusCode> {
         self.origin(headers)?;
-        let named = project_named(headers)?;
-        let (authenticator, homes) = match &self.who {
-            Who::Authenticated {
-                authenticator,
-                homes,
-            } => (authenticator, homes),
-            Who::Tenants(tenants) => return tenants.home(bearer(headers)?, named).await,
+        self.identity
+            .identify(bearer(headers))
+            .await
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+
+    /// The project `named` names to `who`, and their role in it, if they have one: their own,
+    /// [`DEFAULT_PROJECT`], where it is `None`; the project of that id, where it is one; and
+    /// otherwise the one the [`Membership`] resolves the name to. The membership decides both.
+    pub async fn project(
+        &self,
+        who: &Principal,
+        named: Option<&str>,
+    ) -> Result<Option<(ProjectId, Role)>, ProjectError> {
+        let named = named.unwrap_or(DEFAULT_PROJECT);
+        let id = match named.parse::<ProjectId>() {
+            Ok(id) => id,
+            Err(_) => match self.membership.resolve(who, named).await? {
+                Some(id) => id,
+                None => return Ok(None),
+            },
         };
-        let (user, project) = authenticator
-            .authenticate(bearer(headers).ok(), named)
-            .await?;
-        let home = homes.home(&project).map_err(|e| {
-            eprintln!("making project {project}'s home: {e:#}");
+        Ok(self.membership.role(&id, who).await?.map(|role| (id, role)))
+    }
+
+    /// Who a request with `headers` is from, and the home of the project it names, as
+    /// [`project`](Access::project) reads it: as [`principal`](Access::principal) refuses, `400`
+    /// for a project that is no string, and `403` for one its sender has no role in -- or that
+    /// does not exist, or has no home, which is not told apart.
+    pub async fn home(&self, headers: &HeaderMap) -> Result<(Principal, Arc<Home>), StatusCode> {
+        let who = self.principal(headers).await?;
+        let named = match headers.get(PROJECT_HEADER) {
+            Some(named) => Some(named.to_str().map_err(|_| StatusCode::BAD_REQUEST)?),
+            None => None,
+        };
+        let (id, _) = self
+            .project(&who, named)
+            .await
+            .map_err(|e| {
+                eprintln!("reaching {}'s project {named:?}: {e:#}", who.user);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::FORBIDDEN)?;
+        let home = self.home_of(&id).await.map_err(|e| {
+            eprintln!("making project {id}'s home: {e:#}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        Ok((user, home))
+        Ok((who, home.ok_or(StatusCode::FORBIDDEN)?))
+    }
+
+    /// Project `id`'s home, made as it is first reached: `None` once it is being removed, or
+    /// where it is to have none.
+    async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+        if let Some(home) = self.homes.lock().unwrap().get(id) {
+            return Ok(home.clone());
+        }
+        let _making = self.making.lock().await;
+        if let Some(home) = self.homes.lock().unwrap().get(id) {
+            return Ok(home.clone());
+        }
+        let Some(made) = self.maker.make(id).await? else {
+            return Ok(None);
+        };
+        match self.homes.lock().unwrap().entry(*id) {
+            // Taken away for its removal while it was made.
+            Entry::Occupied(taken) => Ok(taken.get().clone()),
+            Entry::Vacant(vacant) => Ok(vacant.insert(Some(Arc::new(made))).clone()),
+        }
+    }
+
+    /// Take project `id`'s home away, closed and its image jobs cancelled, for it to be removed:
+    /// no request reaches it from now on, or until [`release`](Access::release) where the
+    /// removal fails. `false`, and nothing taken, while a sandbox lives or is being made in it,
+    /// or it is being removed already.
+    pub fn close(&self, id: &ProjectId) -> bool {
+        let mut homes = self.homes.lock().unwrap();
+        match homes.get(id) {
+            Some(None) => return false,
+            Some(Some(home)) if !home.close() => return false,
+            None if Sandbox::lives_under(&self.store.path(id)) => return false,
+            _ => {}
+        }
+        if let Some(Some(home)) = homes.insert(*id, None) {
+            home.close_all();
+        }
+        true
+    }
+
+    /// Let requests reach project `id` again, once its removal has failed.
+    pub fn release(&self, id: &ProjectId) {
+        self.homes.lock().unwrap().remove(id);
     }
 }
 
-/// The bearer token `headers` carry: `401` without one.
-pub fn bearer(headers: &HeaderMap) -> Result<&str, StatusCode> {
+/// The bearer token `headers` carry, if any.
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
-/// The project `headers` name, if any: `400` for one that is no string.
-pub fn project_named(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
-    headers
-        .get(PROJECT_HEADER)
-        .map(|value| value.to_str().map_err(|_| StatusCode::BAD_REQUEST))
-        .transpose()
-}
+/// The users a set of tokens names, each token the user it names: for a test's requests, as
+/// different users would send them.
+#[cfg(test)]
+pub(crate) struct TokenIsUser(pub std::collections::HashSet<String>);
 
-/// The projects a config names.
-pub struct Projects {
-    /// Who a token is, if the config names a provider: without one, requests are let
-    /// through without credentials.
-    oidc: Option<Oidc>,
-    /// Each project's members.
-    members: HashMap<String, HashSet<String>>,
-}
-
-impl Projects {
-    /// The projects `config` names, each one's home made in `homes`. Naming no provider, it
-    /// authenticates no one, and has the project [`DEFAULT_PROJECT`] if it names none:
-    /// refused listening off the loopback, unless the config says so.
-    pub fn new(config: &Config, homes: &Homes) -> anyhow::Result<Projects> {
-        match (&config.auth, &config.oidc) {
-            (Some(Auth::None), Some(_)) => bail!("auth is none, with oidc to authenticate"),
-            (None, None) if !config.listen.ip().is_loopback() => bail!(
-                "listening at {} for other machines with no oidc: \
-                 say `\"auth\": \"none\"` to serve them without authentication",
-                config.listen
-            ),
-            _ => {}
-        }
-        let mut members: HashMap<String, HashSet<String>> = config
-            .projects
-            .iter()
-            .map(|(name, named)| (name.clone(), named.members.iter().cloned().collect()))
-            .collect();
-        if config.oidc.is_none() && members.is_empty() {
-            members.insert(DEFAULT_PROJECT.to_owned(), HashSet::new());
-        }
-        // Made now, not as first reached: a project's sandboxes left from before are swept as
-        // the server starts.
-        for name in members.keys() {
-            homes.home(name)?;
-        }
-        Ok(Projects {
-            oidc: config.oidc.clone().map(Oidc::new),
-            members,
-        })
-    }
-
-    /// Whether requests are let through without credentials.
-    pub fn open(&self) -> bool {
-        self.oidc.is_none()
-    }
-
-    /// The user `token` is: `401` unless the provider signed it.
-    async fn user(&self, token: Option<&str>) -> Result<String, StatusCode> {
-        let Some(oidc) = &self.oidc else {
-            return Ok(ANYONE.to_owned());
-        };
-        let token = token.ok_or(StatusCode::UNAUTHORIZED)?;
-        oidc.user(token).await.ok_or(StatusCode::UNAUTHORIZED)
-    }
-}
-
-impl Authenticator for Projects {
-    /// `403` for a project the user is not a member of -- or none at all, which is not told
-    /// apart. Where no one is authenticated, everyone is a member, and a request naming no
-    /// project reaches [`DEFAULT_PROJECT`].
-    fn authenticate<'a>(
-        &'a self,
-        token: Option<&'a str>,
-        named: Option<&'a str>,
-    ) -> Checked<'a, (String, String)> {
+#[cfg(test)]
+impl Identity for TokenIsUser {
+    fn identify<'a>(&'a self, token: Option<&'a str>) -> BoxFuture<'a, Option<Principal>> {
         Box::pin(async move {
-            let user = self.user(token).await?;
-            let project = named
-                .or(self.open().then_some(DEFAULT_PROJECT))
-                .ok_or(StatusCode::BAD_REQUEST)?;
-            match self.members.get(project) {
-                Some(members) if self.open() || members.contains(&user) => {
-                    Ok((user, project.to_owned()))
-                }
-                _ => Err(StatusCode::FORBIDDEN),
-            }
+            token
+                .filter(|user| self.0.contains(*user))
+                .map(Principal::new)
         })
     }
 }
@@ -288,16 +290,9 @@ impl Authenticator for Projects {
 mod tests {
     use http::HeaderValue;
     use serde_json::json;
+    use virtx_core::Role;
 
     use super::*;
-
-    /// The access the config at `path` makes, over its own projects.
-    fn configured(path: &std::path::Path) -> anyhow::Result<Access> {
-        let config = Config::read(path)?;
-        let homes = Arc::new(Homes::new(config.home().join("project")));
-        let projects = Arc::new(Projects::new(&config, &homes)?);
-        Ok(Access::new(config.origins, projects, homes))
-    }
 
     fn headers(token: Option<&str>, project: Option<&str>, origin: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -314,119 +309,193 @@ mod tests {
         headers
     }
 
-    #[tokio::test]
-    async fn without_authentication_anyone_reaches_every_project_and_default_by_no_name() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-open-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        let config = json!({ "listen": "127.0.0.1:0", "home": dir });
-        std::fs::write(&path, config.to_string()).unwrap();
-        let access = configured(&path).unwrap();
-        let home = async |token, project| access.home(&headers(token, project, None)).await;
+    #[test]
+    fn a_config_names_its_provider() {
+        let refused = Config::parse(json!({ "listen": "127.0.0.1:0" }))
+            .err()
+            .unwrap();
+        assert!(refused.to_string().contains("oidc"), "{refused}");
+    }
 
-        let (user, reached) = home(None, None).await.unwrap();
-        assert_eq!(user, ANYONE);
-        assert_eq!(
-            reached.snapshots.root(),
-            dir.join("project").join(DEFAULT_PROJECT).as_path()
+    #[tokio::test]
+    async fn a_member_reaches_their_project_and_none_other_and_their_own_by_no_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let users = [
+            "alice@example.com",
+            "bob@example.com",
+            "a+b@x.com",
+            "a-b@x.com",
+        ]
+        .map(str::to_owned)
+        .into();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice_is = Principal::new("alice@example.com");
+        let demo = projects.create(&alice_is, "demo").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(users)),
+            projects,
+            store.clone(),
+            Arc::new(store),
         );
-        assert!(home(Some("whatever"), Some(DEFAULT_PROJECT)).await.is_ok());
+        let home = async |token, project| access.home(&headers(token, project, None)).await;
+        let (alice, bob) = (Some("alice@example.com"), Some("bob@example.com"));
+        let id = demo.to_string();
+
         assert_eq!(
-            home(None, Some("other")).await.err(),
+            home(None, Some("demo")).await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            home(Some("mallory"), Some("demo")).await.err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        let (who, reached) = home(alice, Some("demo")).await.unwrap();
+        assert_eq!(who, alice_is);
+        assert_eq!(reached.root, access.store().path(&demo));
+        // By its id, the same home.
+        assert!(Arc::ptr_eq(
+            &home(alice, Some(&id)).await.unwrap().1,
+            &reached
+        ));
+        assert_eq!(
+            home(bob, Some(&id)).await.err(),
             Some(StatusCode::FORBIDDEN)
         );
-        let elsewhere = headers(None, None, Some("https://evil.example"));
+        assert_eq!(
+            home(alice, Some("nowhere")).await.err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let elsewhere = headers(alice, Some("demo"), Some("https://evil.example"));
         assert_eq!(
             access.home(&elsewhere).await.err(),
             Some(StatusCode::FORBIDDEN)
         );
-        let _ = std::fs::remove_dir_all(&dir);
+
+        // Naming none, each reaches a project of their own, made as first reached, theirs alone.
+        let (_, own) = home(alice, None).await.unwrap();
+        let own_id = access
+            .membership()
+            .resolve(&alice_is, DEFAULT_PROJECT)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.root, access.store().path(&own_id));
+        assert!(Arc::ptr_eq(
+            &home(alice, Some(DEFAULT_PROJECT)).await.unwrap().1,
+            &own
+        ));
+        let kept = access.membership().project(&own_id).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                kept.name.as_str(),
+                kept.members.into_iter().collect::<Vec<_>>()
+            ),
+            (
+                DEFAULT_PROJECT,
+                vec![("alice@example.com".to_owned(), Role::Owner)]
+            )
+        );
+        let own_id = own_id.to_string();
+        assert_eq!(
+            home(bob, Some(&own_id)).await.err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let (_, theirs) = home(bob, None).await.unwrap();
+        assert!(!Arc::ptr_eq(&theirs, &own));
+        // Users whose names differ only in what a name has not have each their own.
+        let (_, plus) = home(Some("a+b@x.com"), None).await.unwrap();
+        let (_, minus) = home(Some("a-b@x.com"), None).await.unwrap();
+        assert!(!Arc::ptr_eq(&plus, &minus));
     }
 
-    #[test]
-    fn without_a_provider_it_is_open_on_the_loopback_alone_unless_it_says_so() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-rule-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let projects = |mut config: serde_json::Value| {
-            config["home"] = json!(dir);
-            let path = dir.join("config.json");
-            std::fs::write(&path, config.to_string()).unwrap();
-            let config = Config::read(&path).unwrap();
-            Projects::new(&config, &Homes::new(config.home().join("project")))
-        };
+    /// A project is closed for its removal only while no sandbox of this process or another lives
+    /// in it; closed, a request already in its home starts nothing, and removed, it gets no home
+    /// again.
+    #[tokio::test]
+    async fn a_project_is_closed_only_while_no_sandbox_lives_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let demo = projects.create(&alice, "demo").await.unwrap().id;
+        let unreached = projects.create(&alice, "unreached").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let (_, home) = access
+            .home(&headers(Some("alice"), Some("demo"), None))
+            .await
+            .unwrap();
 
-        let local = projects(json!({ "listen": "127.0.0.1:0" })).unwrap();
-        assert!(local.open());
-        assert!(local.members.contains_key(DEFAULT_PROJECT));
-
-        let refused = projects(json!({ "listen": "0.0.0.0:0" })).err().unwrap();
-        assert!(refused.to_string().contains("auth"), "{refused}");
-        let said = projects(json!({ "listen": "0.0.0.0:0", "auth": "none" })).unwrap();
-        assert!(said.open());
-
-        let oidc = json!({ "issuer": "https://idp.example", "client_id": "virtx" });
-        let checked = projects(json!({ "listen": "0.0.0.0:0", "oidc": oidc })).unwrap();
-        assert!(!checked.open());
-        assert!(checked.members.is_empty());
-        let both = json!({ "listen": "127.0.0.1:0", "oidc": oidc, "auth": "none" });
-        assert!(projects(both).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Tenants who know one token, which reaches project `p`'s home and no other.
-    struct OneToken(Arc<Home>);
-
-    impl Tenants for OneToken {
-        fn home<'a>(
-            &'a self,
-            token: &'a str,
-            named: Option<&'a str>,
-        ) -> Checked<'a, (String, Arc<Home>)> {
-            Box::pin(async move {
-                if token != "t" {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-                if named.is_some_and(|named| named != "p") {
-                    return Err(StatusCode::FORBIDDEN);
-                }
-                Ok(("project:p".to_owned(), Arc::clone(&self.0)))
-            })
+        // An upper disk another process's sandbox holds, in a project with a home here or not.
+        for id in [demo, unreached] {
+            let sandbox = store.path(&id).join("sandbox");
+            std::fs::create_dir_all(&sandbox).unwrap();
+            let held = std::fs::File::create(sandbox.join("other.ext4.lock")).unwrap();
+            held.lock().unwrap();
+            assert!(!access.close(&id));
+            drop(held);
         }
 
-        fn homes(&self) -> Vec<Arc<Home>> {
-            vec![Arc::clone(&self.0)]
+        assert!(access.close(&demo));
+        let pull = http::Request::post("/images/jobs/pull/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))
+            .unwrap();
+        let in_home = crate::endpoints::router().layer(axum::Extension(home));
+        let Ok(refused) = tower::ServiceExt::oneshot(in_home, pull).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(!access.close(&demo));
+        assert!(access.home_of(&demo).await.unwrap().is_none());
+    }
+
+    /// Homes made only for the projects listed, none for any other.
+    struct Only(ProjectStore, Vec<ProjectId>);
+
+    impl Homes for Only {
+        fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>> {
+            Box::pin(async move {
+                if !self.1.contains(id) {
+                    return Ok(None);
+                }
+                self.0.make(id).await
+            })
         }
     }
 
     #[tokio::test]
-    async fn with_tenants_a_token_is_theirs_to_say_and_none_is_no_one() {
-        let dir = std::env::temp_dir().join(format!("virtx-http-tenants-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        let config = json!({ "listen": "127.0.0.1:0", "home": dir });
-        std::fs::write(&path, config.to_string()).unwrap();
-        let home = Homes::new(dir.join("project")).home("p").unwrap();
-        let tenants = Arc::new(OneToken(Arc::clone(&home)));
-        let access = Access::with_tenants(&Config::read(&path).unwrap(), tenants).unwrap();
-        let reach = async |token, project| access.home(&headers(token, project, None)).await;
+    async fn a_project_its_homes_make_none_of_is_reached_by_no_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let kept = projects.create(&alice, "kept").await.unwrap().id;
+        let gone = projects.create(&alice, "gone").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(Only(store.clone(), vec![kept])),
+        );
+        let home = async |project| {
+            access
+                .home(&headers(Some("alice"), Some(project), None))
+                .await
+        };
 
-        let (user, reached) = reach(Some("t"), None).await.unwrap();
-        assert_eq!(user, "project:p");
-        assert!(Arc::ptr_eq(&reached, &home));
+        // Made as first reached, and no sooner.
+        assert!(access.homes().is_empty());
+        let (_, reached) = home("kept").await.unwrap();
+        assert!(Arc::ptr_eq(&home("kept").await.unwrap().1, &reached));
         assert_eq!(access.homes().len(), 1);
-        // Where a config alone would let anyone in, no token is no one's.
-        assert_eq!(
-            reach(None, None).await.err(),
-            Some(StatusCode::UNAUTHORIZED)
-        );
-        assert_eq!(
-            reach(Some("x"), None).await.err(),
-            Some(StatusCode::UNAUTHORIZED)
-        );
-        assert_eq!(
-            reach(Some("t"), Some("q")).await.err(),
-            Some(StatusCode::FORBIDDEN)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(home("gone").await.err(), Some(StatusCode::FORBIDDEN));
+        assert!(!store.path(&gone).join("images").exists());
     }
 }

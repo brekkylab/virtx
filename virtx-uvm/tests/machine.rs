@@ -70,17 +70,23 @@ impl Home {
 
     /// Where `sandbox`'s disk is.
     fn disk(&self, sandbox: &Sandbox) -> PathBuf {
-        self.root.join(format!("snapshot/{}.ext4", sandbox.id()))
+        self.root.join(format!("sandbox/{}.ext4", sandbox.id()))
     }
 
     /// What is kept of the sandboxes here: a record and a disk each.
     fn kept(&self) -> usize {
-        let count = |dir: &str| {
-            std::fs::read_dir(self.root.join(dir))
-                .map(|entries| entries.count())
-                .unwrap_or(0)
-        };
-        count("sandbox") + count("snapshot")
+        std::fs::read_dir(self.root.join("sandbox"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.ends_with(".json") || name.ends_with(".ext4")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 }
 

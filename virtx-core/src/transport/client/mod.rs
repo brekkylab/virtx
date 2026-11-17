@@ -7,15 +7,16 @@ mod stdio;
 mod tcp;
 
 use std::io;
+use std::sync::{PoisonError, RwLock};
 
 use bytes::Bytes;
-use http::{HeaderMap, StatusCode};
+use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
 pub use self::portforward::PortForwarder;
 use self::{stdio::Stdio, tcp::Tcp};
 use super::http::refused;
-use crate::{Auth, Error};
+use crate::{Auth, Error, PROJECT_HEADER};
 
 /// A request's or a response's body, as either transport carries it.
 pub(crate) type Body = BoxBody<Bytes, io::Error>;
@@ -49,11 +50,17 @@ impl Connection {
 /// and all they share.
 pub struct TransportClient {
     connection: Connection,
+    /// The project every request names, over either transport, in place of one among the
+    /// headers given: the user's own project while there is none.
+    project: RwLock<Option<HeaderValue>>,
 }
 
 impl TransportClient {
     fn new(connection: Connection) -> Self {
-        TransportClient { connection }
+        TransportClient {
+            connection,
+            project: RwLock::new(None),
+        }
     }
 
     /// Start `command`, a [`std::process::Command`] or a tokio one, as the server, and talk to
@@ -92,6 +99,19 @@ impl TransportClient {
         if let Connection::Tcp(tcp) = &self.connection {
             tcp.set_headers(headers);
         }
+    }
+
+    /// Name `project` in every request from now on, in place of a `virtx-project` among the
+    /// headers given. With `None`, that header names it where there is one, and otherwise none
+    /// is named, for the user's own project. Refused for a name no header carries, the project
+    /// unchanged.
+    pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
+        let project = project
+            .map(HeaderValue::from_str)
+            .transpose()
+            .map_err(|_| Error::Client(format!("{project:?} is no project's name")))?;
+        *self.project.write().unwrap_or_else(PoisonError::into_inner) = project;
+        Ok(())
     }
 
     /// A client of the server at the other end of `io`, one HTTP/2 connection as over stdio.
@@ -148,7 +168,18 @@ impl TransportClient {
         }
     }
 
-    async fn send_once(&self, request: http::Request<Body>) -> Result<http::Response<Body>, Error> {
+    async fn send_once(
+        &self,
+        mut request: http::Request<Body>,
+    ) -> Result<http::Response<Body>, Error> {
+        let project = self
+            .project
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(project) = project {
+            request.headers_mut().insert(PROJECT_HEADER, project);
+        }
         let response = self.connection.send(request).await?;
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {

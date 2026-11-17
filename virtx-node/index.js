@@ -87,6 +87,7 @@ const SIGNATURES = {
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
   virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
+  virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['uintptr_t', ['uintptr_t']],
   virtx_client_build_image: WITH_ARGS,
@@ -103,6 +104,13 @@ const SIGNATURES = {
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
+  virtx_client_list_project: PLAIN,
+  virtx_client_create_project: WITH_ARGS,
+  virtx_client_get_project: WITH_ARGS,
+  virtx_client_remove_project: WITH_ARGS,
+  virtx_client_list_project_member: WITH_ARGS,
+  virtx_client_set_project_member: WITH_ARGS,
+  virtx_client_remove_project_member: WITH_ARGS,
   virtx_client_list_volume: PLAIN,
   virtx_client_create_volume: WITH_ARGS,
   virtx_client_get_volume: WITH_ARGS,
@@ -433,12 +441,13 @@ class Client {
     return opening(lib, status, raw, error)
   }
 
-  // Reach the server at `url`, its base `http` or `https` URL, sending
-  // `auth`, the credentials it wants as `{ type: 'bearer', token }` or null for none, and
-  // `headers`, a name to a value, whatever else it asks of each request, with every request.
-  // `Authorization` is `auth`'s, over one given as a header. Refused when a token would go in
-  // the clear: over `http` to any host but this machine.
-  static connect(url, auth = null, headers = {}) {
+  // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
+  // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
+  // request is in (the user's own without one), and `headers`, a name to a value,
+  // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
+  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
+  // in the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, project = null, headers = {}) {
     const lib = library()
     const bytes = authBytes(auth)
     const strings = Object.entries(headers).flat()
@@ -453,7 +462,14 @@ class Client {
       raw,
       error,
     )
-    return opening(lib, status, raw, error)
+    const client = opening(lib, status, raw, error)
+    try {
+      client.setProject(project)
+    } catch (e) {
+      client.close()
+      throw e
+    }
+    return client
   }
 
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
@@ -475,6 +491,16 @@ class Client {
     const strings = Object.entries(headers).flat()
     const error = {}
     const status = this._lib.virtx_client_set_headers(this._held(), strings, strings.length / 2, error)
+    if (status !== OK) this._lib.take(status, error)
+  }
+
+  // Name `project` in every request from now on, over either transport, in place of a
+  // `virtx-project` among the headers given. With null, that header names it where there is one,
+  // and otherwise none is named, for the user's own project. A name no header carries throws,
+  // the project unchanged.
+  setProject(project) {
+    const error = {}
+    const status = this._lib.virtx_client_set_project(this._held(), project, error)
     if (status !== OK) this._lib.take(status, error)
   }
 
@@ -599,6 +625,23 @@ class Client {
 
   pruneImage() {
     return this._call('virtx_client_prune_image')
+  }
+
+  // Every project the client has a role in.
+  async listProject() {
+    const infos = await this._call('virtx_client_list_project')
+    return infos.map((info) => new Project(this, info))
+  }
+
+  // Makes the project `name`, the client its owner.
+  async createProject(name) {
+    return new Project(this, await this._call('virtx_client_create_project', { name }))
+  }
+
+  // The project `name` names -- a project of the user's by name, or any by its id -- with the
+  // client's role in it.
+  async getProject(name) {
+    return new Project(this, await this._call('virtx_client_get_project', { name }))
   }
 
   async listVolume() {
@@ -841,6 +884,35 @@ class Volume extends Files {
   }
 }
 
+// A project the client has a role in (`id`, `name`, `owner`, `role`), and the client that reaches it: its
+// members, and its removal. What is in it, a client reaches with the project set
+// (`setProject`). Dropping it leaves the project; `remove` removes it.
+class Project {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // Its members, with their roles.
+  members() {
+    return this.client._call('virtx_client_list_project_member', { project: this.id })
+  }
+
+  // Gives `user` `role` in it, adding them if they are no member.
+  setMember(user, role) {
+    return this.client._call('virtx_client_set_project_member', { project: this.id, user, role })
+  }
+
+  // Takes `user`'s role in it away: theirs to do, leaving it, or an owner's.
+  async removeMember(user) {
+    await this.client._call('virtx_client_remove_project_member', { project: this.id, user })
+  }
+
+  // Deletes it and everything in it.
+  async remove() {
+    await this.client._call('virtx_client_remove_project', { name: this.id })
+  }
+}
+
 // A sandbox the server holds, as making it or asking for it answered (`id`, `image`, `running`,
 // `ports`), and the client that reaches it, to run processes in it and
 // read and write its files, its root as its processes see it. Dropping it leaves the sandbox;
@@ -944,6 +1016,7 @@ module.exports = {
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
+  Project,
   Recipe,
   Sandbox,
   SandboxJob,

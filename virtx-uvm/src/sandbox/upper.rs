@@ -69,6 +69,23 @@ impl Upper {
             }
         }
     }
+
+    /// Whether a sandbox of any process holds a disk under `dir`: true where `dir` cannot be
+    /// read, since what is in it is then not known.
+    pub(super) fn held(dir: &Path) -> bool {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => return e.kind() != io::ErrorKind::NotFound,
+        };
+        entries.flatten().any(|entry| {
+            let lock = entry.path();
+            if !lock.to_string_lossy().ends_with(".ext4.lock") {
+                return false;
+            }
+            File::open(&lock)
+                .is_ok_and(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)))
+        })
+    }
 }
 
 impl Drop for Upper {
@@ -136,9 +153,12 @@ mod tests {
         assert!(Upper::create(dir.path(), "work", 2).unwrap().is_none());
         Upper::sweep(dir.path());
         assert!(upper.path.is_file(), "one held is not swept");
+        assert!(Upper::held(dir.path()));
 
         drop(upper);
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+        assert!(!Upper::held(dir.path()));
+        assert!(!Upper::held(&dir.path().join("none")));
         assert!(Upper::create(dir.path(), "work", 2).unwrap().is_some());
     }
 
@@ -150,6 +170,10 @@ mod tests {
         crate::machine::create_upper(&path, 2).unwrap();
         fs::write(lock_path(&path), b"").unwrap();
         assert!(Upper::create(dir.path(), "left", 2).unwrap().is_none());
+        assert!(
+            !Upper::held(dir.path()),
+            "one nothing holds is no sandbox's"
+        );
 
         Upper::sweep(dir.path());
         assert!(!path.exists());

@@ -6,9 +6,9 @@ or the system loader's search for its file name. So every module in a process ca
 requests through the one library, and hand a ``Client`` between them as the ``VirtxClient*`` it
 is, with ``Client.as_raw``, ``Client.into_raw`` and ``Client.from_raw``.
 
-Requests take and answer the types of ``virtx.image``, ``virtx.volume``, ``virtx.sandbox`` and
-``virtx.files``, and plain values elsewhere: what the wire calls a map is a
-``dict``.
+Requests take and answer the types of ``virtx.image``, ``virtx.volume``, ``virtx.project``,
+``virtx.sandbox`` and ``virtx.files``, and plain values elsewhere: what the wire calls a map is
+a ``dict``.
 
 A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
 the request that started it. The method that starts one answers a ``StartedJob``, sent when first
@@ -23,6 +23,9 @@ on one is the handle, so it is all a caller hands on. The client lists, makes an
 known by its id or name is had with ``get_sandbox``, ``get_volume``, ``get_image_job`` or
 ``Sandbox.job``. The two with files read and write them as ``Files``:
 ``await volume.read_file("a.txt")``.
+
+A project is answered as a ``Project``, carrying its client the same way: its members, and its
+removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
 ``create_sandbox`` answered for it: an address on this machine's loopback.
@@ -52,6 +55,7 @@ from .image import (
 )
 from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
+from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
     Sandbox,
     SandboxJob,
@@ -105,8 +109,11 @@ __all__ = [
     "Output",
     "PortForwarder",
     "Progress",
+    "Project",
+    "ProjectMemberListOutputItem",
     "Recipe",
     "RegistryAuth",
+    "Role",
     "Sandbox",
     "SandboxJob",
     "SandboxJobEnd",

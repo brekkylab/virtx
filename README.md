@@ -149,12 +149,13 @@ Each [release](https://github.com/brekkylab/virtx/releases) carries the server a
 It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
 Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
 
-On the server machine, write a `server.json` and start the server:
+On the server machine, write a `server.json` naming your OpenID Connect provider, and start the server:
 
 ```json
 {
-  "listen": "127.0.0.1:8470",
-  "home": "/var/lib/virtx"
+  "listen": "0.0.0.0:8470",
+  "home": "/var/lib/virtx",
+  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
 }
 ```
 
@@ -165,53 +166,8 @@ virtx-server-tcp serve --config server.json
 On the client, connect to it in place of `Client.spawn()`.
 The rest is the same as the local example.
 
-<details open>
-<summary><b>Python</b></summary>
-
-```python
-from virtx import Client
-
-client = Client.connect("http://127.0.0.1:8470")
-```
-
-</details>
-
-<details>
-<summary><b>Node</b></summary>
-
-```js
-const client = Client.connect('http://127.0.0.1:8470')
-```
-
-</details>
-
-<details>
-<summary><b>Rust</b></summary>
-
-```rust
-let client = Client::connect(
-    "http://127.0.0.1:8470",
-    Auth::None,
-    [("virtx-project", "default")],
-)?;
-```
-
-</details>
-
-A server listening on the loopback takes no credentials.
-To serve other machines, name your OpenID Connect provider and who may reach each project:
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
-  "projects": { "demo": { "members": ["alice@example.com"] } }
-}
-```
-
 A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
-Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints and the project:
+Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints:
 
 ```sh
 virtx login https://virtx.example
@@ -226,7 +182,6 @@ from virtx import Client, CommandAuth
 client = Client.connect(
     "https://virtx.example",
     CommandAuth("virtx", ("token", "--json")),
-    {"virtx-project": "demo"},
 )
 ```
 
@@ -238,8 +193,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] },
-  { 'virtx-project': 'demo' }
+  { type: 'command', program: 'virtx', args: ['token', '--json'] }
 )
 ```
 
@@ -252,7 +206,8 @@ const client = Client.connect(
 let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    [("virtx-project", "demo")],
+    None,
+    [] as [(&str, &str); 0],
 )?;
 ```
 

@@ -1,6 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry, each answered from
-//! the [`Home`] of the project its request reaches, which [`access`](crate::access) puts in its
-//! extensions.
+//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
+//! ([`router`]), each answered from the [`Home`] of the project its request reaches, which
+//! [`access`](crate::access) puts in its extensions; and those of the projects themselves
+//! ([`projects`]), answered from the [`Access`] there.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -9,6 +10,7 @@ use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,10 +25,12 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
-    ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImagePruneOutput,
-    ImagePullArgs, ImagePushArgs, Log, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
+    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxPort, SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
     VolumeMountListOutputItem,
 };
 use virtx_uvm::{
@@ -35,6 +39,12 @@ use virtx_uvm::{
     MachineSpec, Network, Os, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
     VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
+
+use virtx_uvm::ProjectError;
+
+use crate::access::Access;
+use crate::access::Principal;
+use crate::project::Project;
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -63,6 +73,8 @@ pub struct Home {
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    /// Set once its project is to be removed: no sandbox or image job is added after.
+    closed: AtomicBool,
 }
 
 impl Home {
@@ -87,6 +99,7 @@ impl Home {
             ],
             sandboxes: Mutex::default(),
             image_jobs: Mutex::default(),
+            closed: AtomicBool::default(),
         })
     }
 
@@ -112,9 +125,25 @@ impl Home {
         })
     }
 
-    /// Close every sandbox here, as removing each does, side by side: blocks until each
-    /// machine has stopped and synced what it wrote.
+    /// Close it to every sandbox and image job from now on, for its project to be removed:
+    /// `false`, and left open, while a sandbox of this process or another lives here. Decided
+    /// under the sandboxes' lock, which a sandbox is added under once it holds its upper disk:
+    /// one made meanwhile is either seen here or sees it closed.
+    pub fn close(&self) -> bool {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        if Sandbox::lives_under(&self.root) {
+            return false;
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// Cancel every image job here, and close every sandbox, as removing each does, side by
+    /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
+        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
+            cancel(&job, &task);
+        }
         let closed: Vec<_> = self
             .sandboxes
             .lock()
@@ -260,7 +289,206 @@ pub fn router() -> Router {
         .fallback(async || not_found("no endpoint here"))
 }
 
+/// The projects, and their members, each request answered as its sender, from the [`Access`] in
+/// its extensions.
+pub fn projects() -> Router {
+    Router::new()
+        .route("/projects/", get(project_list).post(project_create))
+        .route(
+            "/projects/{project}",
+            get(project_get).delete(project_remove),
+        )
+        .route("/projects/{project}/members/", get(project_member_list))
+        .route(
+            "/projects/{project}/members/{user}",
+            put(project_member_set).delete(project_member_remove),
+        )
+}
+
 type Answer = Result<Response, Refused>;
+
+/// What a path segment keeps as it is: the unreserved characters of RFC 3986.
+const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Who sends a request with `headers`, the project `named` names to them, and their role in
+/// it: refused as [`Access::principal`] refuses, and `403` where they have none, or it does not
+/// exist.
+async fn role_in(
+    access: &Access,
+    headers: &HeaderMap,
+    named: &str,
+) -> Result<(Principal, Project, Role), Refused> {
+    let who = access.principal(headers).await.map_err(refusal)?;
+    let reached = match access.project(&who, Some(named)).await? {
+        Some((id, role)) => access.membership().project(&id).await?.map(|p| (p, role)),
+        None => None,
+    };
+    match reached {
+        Some((project, role)) => Ok((who, project, role)),
+        None => Err(forbidden(format!("project {named} is not one you reach"))),
+    }
+}
+
+/// `project` as the server answers it to one in `role` in it.
+fn answer(project: Project, role: Role) -> ProjectListOutputItem {
+    ProjectListOutputItem {
+        id: project.id.to_string(),
+        owner: project.owner.user().map(str::to_owned),
+        role,
+        name: project.name,
+    }
+}
+
+/// Every project the sender has a role in, their own among them, made if it is not there.
+async fn project_list(Extension(access): Extension<Arc<Access>>, headers: HeaderMap) -> Answer {
+    let who = access.principal(&headers).await.map_err(refusal)?;
+    access.project(&who, None).await?;
+    let listed: Vec<_> = access
+        .membership()
+        .projects(&who)
+        .await?
+        .into_iter()
+        .map(|(project, role)| answer(project, role))
+        .collect();
+    Ok(json(&listed))
+}
+
+/// Make a project of the sender's, them its owner: refused for [`DEFAULT_PROJECT`], which is
+/// each user's own.
+async fn project_create(
+    Extension(access): Extension<Arc<Access>>,
+    headers: HeaderMap,
+    request: Bytes,
+) -> Answer {
+    let who = access.principal(&headers).await.map_err(refusal)?;
+    let args: ProjectCreateArgs = body(&request)?;
+    if args.name == DEFAULT_PROJECT {
+        return Err(invalid(format!(
+            "{DEFAULT_PROJECT:?} is each user's own project, made for them"
+        )));
+    }
+    let made = access.membership().create(&who, &args.name).await?;
+    let made = answer(made, Role::Owner);
+    Ok(created(format!("/projects/{}", made.id), &made))
+}
+
+async fn project_get(
+    Extension(access): Extension<Arc<Access>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+) -> Answer {
+    let (_, project, role) = role_in(&access, &headers, &named).await?;
+    Ok(json(&answer(project, role)))
+}
+
+/// Remove a project and everything in it, its image jobs cancelled: an owner's to do, and
+/// refused while a sandbox lives in it.
+async fn project_remove(
+    Extension(access): Extension<Arc<Access>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+) -> Answer {
+    let (_, project, role) = role_in(&access, &headers, &named).await?;
+    if role != Role::Owner {
+        return Err(forbidden(format!("only an owner removes project {named}")));
+    }
+    let id = project.id;
+    if !access.close(&id) {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            "in_use",
+            format!("a sandbox lives in project {named}"),
+        ));
+    }
+    let removed = async {
+        access.membership().remove(&id).await?;
+        let store = access.store().clone();
+        tokio::task::spawn_blocking(move || store.remove(&id))
+            .await
+            .map_err(internal)??;
+        Ok::<_, Refused>(())
+    }
+    .await;
+    // Once removed, its id stays taken: no id is given again, and a request that read the
+    // record before it was forgotten makes no home for it.
+    if removed.is_err() {
+        access.release(&id);
+    }
+    removed?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn project_member_list(
+    Extension(access): Extension<Arc<Access>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+) -> Answer {
+    let (_, project, _) = role_in(&access, &headers, &named).await?;
+    let members: Vec<_> = project
+        .members
+        .into_iter()
+        .map(|(user, role)| ProjectMemberListOutputItem { user, role })
+        .collect();
+    Ok(json(&members))
+}
+
+/// Give `user` a role in a project, adding them if they are no member yet: an owner's to do.
+async fn project_member_set(
+    Extension(access): Extension<Arc<Access>>,
+    Segments((named, user)): Segments<(String, String)>,
+    headers: HeaderMap,
+    request: Bytes,
+) -> Answer {
+    let (_, project, role) = role_in(&access, &headers, &named).await?;
+    if role != Role::Owner {
+        return Err(forbidden(format!(
+            "only an owner changes the members of project {named}"
+        )));
+    }
+    let args: ProjectMemberSetArgs = body(&request)?;
+    let had = access
+        .membership()
+        .set_member(&project.id, &user, Some(args.role))
+        .await?;
+    let set = ProjectMemberListOutputItem {
+        user,
+        role: args.role,
+    };
+    if had.is_some() {
+        return Ok(json(&set));
+    }
+    let user = utf8_percent_encode(&set.user, SEGMENT);
+    Ok(created(
+        format!("/projects/{}/members/{user}", project.id),
+        &set,
+    ))
+}
+
+/// Take `user`'s role in a project away: an owner's to do, or the user's own, leaving it.
+async fn project_member_remove(
+    Extension(access): Extension<Arc<Access>>,
+    Segments((named, user)): Segments<(String, String)>,
+    headers: HeaderMap,
+) -> Answer {
+    let (sender, project, role) = role_in(&access, &headers, &named).await?;
+    if role != Role::Owner && sender.user != user {
+        return Err(forbidden(format!(
+            "only an owner removes another member of project {named}"
+        )));
+    }
+    let had = access
+        .membership()
+        .set_member(&project.id, &user, None)
+        .await?;
+    if had.is_none() {
+        return Err(not_found(format!("{user} is no member of project {named}")));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
 
 async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let jobs = home.image_jobs.lock().unwrap();
@@ -278,11 +506,15 @@ fn image_job<Fut>(
     kind: ImageJobKind,
     reference: String,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
-) -> Response
+) -> Answer
 where
     Fut: Future<Output = Result<Digest, Failure>> + Send + 'static,
 {
     let mut jobs = home.image_jobs.lock().unwrap();
+    // Under the jobs' lock, which closing the home cancels them under after.
+    if home.closed.load(Ordering::SeqCst) {
+        return Err(forbidden("this project is being removed"));
+    }
     let id = pick(|id| jobs.contains_key(id));
     let job = Job::new(
         ImageJob {
@@ -322,14 +554,17 @@ where
         ended.remove();
     });
     jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
-    created(format!("/images/jobs/{id}"), &*job.job.lock().unwrap())
+    Ok(created(
+        format!("/images/jobs/{id}"),
+        &*job.job.lock().unwrap(),
+    ))
 }
 
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
@@ -340,14 +575,14 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
-    ))
+    )
 }
 
 async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let images = home.images.clone();
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
@@ -355,7 +590,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
             let registry = RegistryClient::new(images, args.auth);
             Ok(registry.push(&reference, report).await?)
         },
-    ))
+    )
 }
 
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -366,7 +601,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let recipe = args.recipe;
-    Ok(image_job(
+    image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
@@ -400,7 +635,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             .await??;
             Ok(digest)
         },
-    ))
+    )
 }
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
@@ -452,6 +687,12 @@ async fn image_job_remove(
     let removed = home.image_jobs.lock().unwrap().remove(&id);
     let (job, task) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
+    cancel(&job, &task);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
+fn cancel(job: &ImageJobOf, task: &AbortHandle) {
     task.abort();
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
@@ -461,7 +702,6 @@ async fn image_job_remove(
         }),
     );
     job.remove();
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn image_job_events(
@@ -636,7 +876,18 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         sandbox: Arc::clone(&sandbox),
         capabilities,
     };
-    home.sandboxes.lock().unwrap().insert(id.clone(), held);
+    let closed = {
+        let mut sandboxes = home.sandboxes.lock().unwrap();
+        let closed = home.closed.load(Ordering::SeqCst);
+        if !closed {
+            sandboxes.insert(id.clone(), held);
+        }
+        closed
+    };
+    if closed {
+        tokio::task::spawn_blocking(move || sandbox.close()).await?;
+        return Err(forbidden("this project is being removed"));
+    }
     let answer = virtx_core::Sandbox {
         ports: opened,
         ..sandbox.answer()
@@ -859,6 +1110,20 @@ fn invalid(message: impl Display) -> Refused {
     refused(StatusCode::BAD_REQUEST, "invalid", message)
 }
 
+fn forbidden(message: impl Display) -> Refused {
+    refused(StatusCode::FORBIDDEN, "forbidden", message)
+}
+
+/// A request [`Access`] refused with `status`, as the endpoints refuse one.
+pub fn refusal(status: StatusCode) -> Refused {
+    match status {
+        StatusCode::UNAUTHORIZED => refused(status, "unauthorized", "no token this server knows"),
+        StatusCode::FORBIDDEN => forbidden("not a member of the project, or not from here"),
+        StatusCode::BAD_REQUEST => invalid("the virtx-project header is not a project's name"),
+        _ => internal("reaching the project failed"),
+    }
+}
+
 fn not_found(message: impl Display) -> Refused {
     refused(StatusCode::NOT_FOUND, "not_found", message)
 }
@@ -890,6 +1155,23 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
         std::io::ErrorKind::NotFound => not_found(said),
         std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", said),
         _ => internal(said),
+    }
+}
+
+impl From<ProjectError> for Refused {
+    fn from(e: ProjectError) -> Refused {
+        match &e {
+            ProjectError::InvalidName(_) => invalid(e),
+            ProjectError::Unknown(_) => forbidden(e),
+            ProjectError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            ProjectError::NoOwner(_) => refused(StatusCode::CONFLICT, "in_use", e),
+            ProjectError::Io { source, .. } => internal(io_failure(source, &e)),
+            // A server's own, such as its database's, which can name what it runs on.
+            ProjectError::Other(_) => {
+                let _ = writeln!(io::stderr(), "{e:#}");
+                internal("the server's projects failed")
+            }
+        }
     }
 }
 
@@ -989,8 +1271,13 @@ mod tests {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 2] = [
+            let internal: [Refused; 3] = [
                 ImageStoreError::Fstree(tree()).into(),
+                ProjectError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
                 SandboxError::Io {
                     context: CONTEXT.into(),
                     source: source(),
@@ -1026,5 +1313,11 @@ mod tests {
                 assert_eq!(message, format!("the server's files: {kind}"));
             }
         }
+        let other: Refused = ProjectError::Other(anyhow::anyhow!("postgres://db.internal")).into();
+        let body = axum::body::to_bytes(other.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "the server's projects failed");
     }
 }

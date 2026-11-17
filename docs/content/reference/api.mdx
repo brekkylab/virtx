@@ -19,11 +19,31 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
-| `Client.connect(url, auth, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request. A token is sent over plain `http` only to this machine's loopback. |
-| `set_auth(auth)`, `set_headers(headers)` | `None` | Replace what every later request sends. |
+| `Client.connect(url, auth, project, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. A token is sent over plain `http` only to this machine's loopback. |
+| `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. Without a project, a request is in its user's own, `default`. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
 | `ensure_virtx()` | `str`, its path | Fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it. Node.js calls it `ensureVirtx`. |
+
+## Projects
+
+Everything on a server belongs to a project, which a client names at `connect`, or with `set_project`: a project of the user's by its name, or any by its id.
+See [Projects](https://github.com/brekkylab/virtx/blob/main/virtx-core/PROTOCOL.md#projects).
+
+| Call | Returns | What it does |
+| --- | --- | --- |
+| `create_project(name)` | `Project` | Makes a project, its maker its owner. |
+| `list_project()`, `get_project(name)` | `list[Project]`, `Project` | The projects the client has a role in; `get_project` takes a name of the user's or an id. |
+
+A `Project` has its `id`, its `name`, its `owner` (none for one made over stdio) and the client's `role` in it, `owner` or `member`.
+Over stdio it has no members, and the calls on them are refused with `404`:
+
+| Call | Returns | What it does |
+| --- | --- | --- |
+| `members()` | `list[ProjectMemberListOutputItem]` | Its members, each a `user` and a `role`. |
+| `set_member(user, role)` | `ProjectMemberListOutputItem` | Gives `user` the role, adding them if they are no member: an owner's to do. |
+| `remove_member(user)` | `None` | Takes `user`'s role away: an owner's to do, or the user's own, leaving it. |
+| `remove()` | `None` | Deletes it and everything in it: an owner's to do, refused with `409` while a sandbox lives in it. |
 
 ## Images
 
@@ -176,5 +196,5 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_HOME` | `spawn`, CLI | Where virtx keeps what it fetches on this machine. |
 | `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
 | `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
-| `VIRTX_PROJECT` | CLI | The project the requests to the server reached over HTTP belong to, when `--project` is not given. |
+| `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
 | `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |

@@ -343,22 +343,6 @@ jobs:
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
 
-      # Tracing, for now: cargo's first rustc probe here took 26 seconds, in sccache's first
-      # hashing of the toolchain. Whether it is the toolchain's first read off a new volume:
-      # read it once, timed, and see what the probe takes after.
-      - name: The toolchain's first read, and cargo's rustc probe after it (traced)
-        run: |
-          sysroot=$(cygpath -u "$(rustc --print sysroot)")
-          du -sh "$sysroot/bin" "$sysroot/lib"
-          time cat "$sysroot"/bin/* > /dev/null
-          time cat "$sysroot"/bin/* > /dev/null
-          SECONDS=0
-          CARGO_LOG=debug cargo metadata --offline --format-version 1 2>&1 >/dev/null \
-            | awk '$1 ~ /^[0-9.]+s$/ { t = $1; sub(/s$/, "", t); t += 0
-                     if (t - prev >= 0.5) { printf "+%.1fs\n  before: %s\n  after:  %s\n", t - prev, substr(last, 1, 260), substr($0, 1, 260) }
-                     prev = t; last = $0 }'
-          echo "took ${SECONDS}s"
-
       - name: Add the guest's musl target
         run: cargo xtask init
 

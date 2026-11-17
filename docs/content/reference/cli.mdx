@@ -1,6 +1,6 @@
 ---
 title: "CLI"
-description: "Build and manage a server's images from a shell."
+description: "Build and manage a server's images, and sign in, from a shell."
 ---
 
 The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
@@ -37,3 +37,22 @@ virtx rmi jq:latest
 ## Which server
 
 Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. `--project NAME` (`$VIRTX_PROJECT`) names the project the requests belong to, a project of the user's by its name or any by its id, sent as the `virtx-project` header; without it, the requests are in the user's own, `default`. `--host` and `--server` together are refused; otherwise a flag wins over the environment and a host over a program, so `--server` starts its program with `$VIRTX_HOST` set, and `$VIRTX_HOST` is reached with `$VIRTX_STDIO` set. See [Hello world](/docs/hello-world/#run-it) for the two servers.
+
+## Signing in
+
+The `virtx` built from `virtx-cli/` also signs a person in to the OpenID Connect provider of a virtx server, for a client to send the session's token.
+
+| Command | What it does |
+| --- | --- |
+| `virtx login [URL]` | Signs in: it shows a code and a page to approve it at, and opens the page in a browser where there is one. |
+| `virtx token` | Prints a token of the session, refreshed as needed; `--json` prints `{"token", "expires_in"}`, as the SDKs read it. |
+| `virtx whoami` | Says who is signed in. |
+| `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
+
+### A server's provider
+
+`virtx login <the server's URL>` asks the server which provider to sign in to and as which client: the `issuer` and `client_id` of its `oidc`. `--issuer` (`$VIRTX_OIDC_ISSUER`) and `--client-id` (`$VIRTX_OIDC_CLIENT_ID`) name the two without asking a server, and `--client-secret` (`$VIRTX_OIDC_CLIENT_SECRET`) gives the secret of a provider that has one for its public clients. Without a URL or the two options, a command is of what was signed in to last.
+
+`virtx token` prints the ID token, which the server checks against the provider's keys. `virtx logout` asks the provider to end the session, where the provider takes that.
+
+The session is kept under `~/.config/virtx/`. The refresh token is in the OS's keychain, or in a file where the keychain cannot be used, and the ID token last issued is in a file. The files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of [Hello world](/docs/hello-world/#on-your-own-server-tcp)'s server. On Linux and macOS they are readable by their owner alone.

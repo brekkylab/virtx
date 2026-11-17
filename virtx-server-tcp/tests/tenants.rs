@@ -8,8 +8,9 @@ use futures_util::future::BoxFuture;
 use http::StatusCode;
 use virtx_core::{DEFAULT_PROJECT, Role};
 use virtx_server_tcp::access::{Access, Identity};
+use virtx_server_tcp::project::{Membership, Owner, Project};
 use virtx_server_tcp::serve;
-use virtx_uvm::{Membership, Owner, Project, ProjectError, ProjectId, ProjectStore};
+use virtx_uvm::{ProjectError, ProjectId, ProjectStore};
 
 /// Each token `<name>-key` is the user `<name>`'s.
 struct Keys;
@@ -92,8 +93,14 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
     let root = std::env::temp_dir().join(format!("virtx-tcp-tenants-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let store = ProjectStore::new(&root);
-    let access = Access::new(Vec::new(), Arc::new(Keys), Arc::new(Tenants), store.clone());
-    let access = Arc::new(access.unwrap());
+    let access = Access::new(
+        Vec::new(),
+        Arc::new(Keys),
+        Arc::new(Tenants),
+        store.clone(),
+        Arc::new(store.clone()),
+    );
+    let access = Arc::new(access);
     let counting = Arc::clone(&access);
     let own = axum::Router::new().route(
         "/node/homes",

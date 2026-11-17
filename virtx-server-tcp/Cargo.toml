@@ -40,6 +40,8 @@ virtx-core = { workspace = true, features = ["server"] }
 virtx-uvm = { workspace = true }
 
 [dev-dependencies]
+# Tokens signed as an issuer signs them.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 # A blob's digest, as a registry's client computes it.
 sha2 = "0.10"
 # A test's own root, removed when it is done.

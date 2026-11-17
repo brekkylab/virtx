@@ -55,8 +55,8 @@ pub fn become_machine_if_spawned() {
 /// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
 /// where a client signs in for its tokens, answered without any -- the provider and the client
 /// to sign in as.
-pub fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
-    let access = Arc::new(Access::configured(config)?);
+pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
+    let access = Arc::new(Access::configured(config).await?);
     let oidc = &config.oidc;
     let advertised = serde_json::json!({
         "oidc": { "issuer": oidc.issuer, "client_id": oidc.client_id },
@@ -311,10 +311,11 @@ mod tests {
 
     use futures_util::future::BoxFuture;
 
-    use virtx_uvm::{Membership as _, Owner, ProjectStore};
+    use virtx_uvm::ProjectStore;
 
-    use crate::access::{Access, Identity, TcpMembership, TokenIsUser};
+    use crate::access::{Access, Identity, TokenIsUser};
     use crate::config::Config;
+    use crate::project::{Membership as _, Owner, TcpMembership};
 
     /// Every request the tester's, whatever it carries.
     struct Tester;
@@ -347,13 +348,15 @@ mod tests {
                 for project in ["demo", "other"] {
                     projects.create(&tester, project, "tester").await.unwrap();
                 }
+                let store = ProjectStore::new(home);
                 let access = Access::new(
                     vec!["https://allowed.example".to_owned()],
                     Arc::new(Tester),
                     Arc::new(projects),
-                    ProjectStore::new(home),
+                    store.clone(),
+                    Arc::new(store),
                 );
-                super::router(Arc::new(access.unwrap()), axum::Router::new())
+                super::router(Arc::new(access), axum::Router::new())
             })
             .await
         }
@@ -470,6 +473,7 @@ mod tests {
         let served = Served::spawn_over("advertised", async |home| {
             let config = json!({ "listen": "127.0.0.1:0", "home": home, "oidc": oidc });
             super::configured(&Config::parse(config).unwrap())
+                .await
                 .unwrap()
                 .1
         })
@@ -488,13 +492,15 @@ mod tests {
     async fn members_make_read_and_remove_projects_as_their_roles_let_them() {
         let served = Served::spawn_over("projects", async |home| {
             let users = ["alice", "bob", "carol"].map(str::to_owned).into();
+            let store = ProjectStore::new(home);
             let access = Access::new(
                 Vec::new(),
                 Arc::new(TokenIsUser(users)),
                 Arc::new(TcpMembership::new(home)),
-                ProjectStore::new(home),
+                store.clone(),
+                Arc::new(store),
             );
-            super::router(Arc::new(access.unwrap()), axum::Router::new())
+            super::router(Arc::new(access), axum::Router::new())
         })
         .await;
         let send = async |method: &str, path: &str, token: &str, body: Value| {

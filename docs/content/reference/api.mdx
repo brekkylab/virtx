@@ -35,7 +35,8 @@ See [Projects](https://github.com/brekkylab/virtx/blob/main/virtx-core/PROTOCOL.
 | `create_project(name)` | `Project` | Makes a project, its maker its owner. |
 | `list_project()`, `get_project(name)` | `list[Project]`, `Project` | The projects the client has a role in; `get_project` takes a name of the user's or an id. |
 
-A `Project` has its `id`, its `name`, its `owner` (none over stdio) and the client's `role` in it, `owner` or `member`:
+A `Project` has its `id`, its `name`, its `owner` (none over stdio) and the client's `role` in it, `owner` or `member`.
+Over stdio it has no members, and the calls on them are refused with `404`:
 
 | Call | Returns | What it does |
 | --- | --- | --- |

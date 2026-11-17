@@ -1,32 +1,26 @@
 //! Projects: what everything a server keeps belongs to. Each project is a directory of its own,
 //! under an id given it once, which its images, snapshots, sandboxes and volumes are kept in.
-//! Each is named by its owner, and has members, each in a role, who alone reach it.
-//!
-//! * [`Store`]: the projects' directories under a server's root, by id, as snapshots and
-//!   volumes are kept by name.
-//! * [`Membership`]: which project an owner names so, and who is a member of each, in which
-//!   role. A server keeps it as it chooses -- in files in each project's directory, or in a
-//!   database -- and asks it of every request.
+//! [`Store`] keeps the directories, and in each the server's record of the project, its name and
+//! whatever else that server keeps of it, such as its members.
 //!
 //! # Layout
 //!
 //! ```text
 //! <root>/
-//!   project/<id>/       a project's own: images/, snapshot/, sandbox/, volume/, and what a
-//!                       membership keeps of it there
+//!   project/.lock             held while a record changes
+//!   project/<id>/             a project's own: images/, snapshot/, sandbox/, volume/
+//!   project/<id>/project.json its record: a project is there while this is
 //! ```
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use futures_util::future::BoxFuture;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use virtx_core::Role;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -52,7 +46,7 @@ pub enum Error {
         source: io::Error,
     },
 
-    /// A membership's own failure, such as its database's.
+    /// A server's own failure, such as its database's.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -108,27 +102,7 @@ impl FromStr for ProjectId {
     }
 }
 
-/// Whose a project is, whose names it is among: no two of one owner's share a name.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum Owner {
-    /// A user, as the server names them, who is an owner of each project of theirs.
-    User(String),
-}
-
-/// A project, as a [`Membership`] keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Project {
-    pub id: ProjectId,
-    pub owner: Owner,
-    pub name: String,
-    /// Each member's role, by user: they alone reach it.
-    pub members: BTreeMap<String, Role>,
-}
-
-/// The projects' directories under a server's root.
+/// The projects' directories under a server's root, and the record of each in it.
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
@@ -172,6 +146,63 @@ impl Store {
         Ok(ids)
     }
 
+    /// The lock held while a record changes, until it drops: servers over one root change them
+    /// one at a time.
+    pub fn lock(&self) -> Result<fs::File> {
+        let dir = self.dir();
+        fs::create_dir_all(&dir).map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
+        let path = dir.join(".lock");
+        let lock = fs::File::create(&path)
+            .map_err(|e| Error::io(format!("opening {}", path.display()), e))?;
+        lock.lock()
+            .map_err(|e| Error::io(format!("locking {}", path.display()), e))?;
+        Ok(lock)
+    }
+
+    /// Project `id`'s record: `None` where it has none.
+    pub fn read<T: DeserializeOwned>(&self, id: &ProjectId) -> Result<Option<T>> {
+        let path = self.path(id).join("project.json");
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| Error::io(format!("reading {}", path.display()), e.into())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::io(format!("reading {}", path.display()), e)),
+        }
+    }
+
+    /// Every project's record, by id: a directory with none, left by a create that did not
+    /// end, is no project.
+    pub fn records<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
+        let mut all = Vec::new();
+        for id in self.list()? {
+            all.extend(self.read(&id)?);
+        }
+        Ok(all)
+    }
+
+    /// Keep `record` as project `id`'s, whole: written beside, and renamed over, so that the
+    /// project is there once it is all written.
+    pub fn write<T: Serialize>(&self, id: &ProjectId, record: &T) -> Result<()> {
+        let dir = self.path(id);
+        fs::create_dir_all(&dir).map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
+        let (path, part) = (dir.join("project.json"), dir.join("project.json.part"));
+        let bytes = serde_json::to_vec_pretty(record).map_err(|e| Error::Other(e.into()))?;
+        fs::write(&part, bytes).map_err(|e| Error::io(format!("writing {}", part.display()), e))?;
+        fs::rename(&part, &path).map_err(|e| Error::io(format!("writing {}", path.display()), e))
+    }
+
+    /// Forget project `id`, its record removed, so that no request reaches it while its
+    /// directory is deleted: a directory left by a removal that did not end is no project's.
+    pub fn forget(&self, id: &ProjectId) -> Result<()> {
+        let path = self.path(id).join("project.json");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::Unknown(id.to_string())),
+            Err(e) => Err(Error::io(format!("removing {}", path.display()), e)),
+        }
+    }
+
     /// Delete project `id`'s directory and everything in it, if it has one. Whoever removes it
     /// closes what runs over it first: a sandbox's machine still running there keeps the files
     /// it has open.
@@ -183,48 +214,6 @@ impl Store {
             Err(e) => Err(Error::io(format!("removing {}", dir.display()), e)),
         }
     }
-}
-
-/// Which project an owner names so, and who is a member of each, in which role.
-///
-/// A project is forgotten ([`remove`](Membership::remove)) before its directory is deleted, so
-/// that no request reaches what is being deleted; a directory left by a removal that did not
-/// end is no project's, and reached by no request, since no id is given twice.
-pub trait Membership: Send + Sync {
-    /// The project `owner` names `name`, if any. A user's [`virtx_core::DEFAULT_PROJECT`] is
-    /// always there: made, the user its owner, as it is first resolved.
-    fn resolve<'a>(
-        &'a self,
-        owner: &'a Owner,
-        name: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ProjectId>>>;
-
-    /// Project `id`, with its members, if there is one.
-    fn project<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<Option<Project>>>;
-
-    /// Make project `name` of `owner`'s, under an id no project has had, with `creator` its one
-    /// member, an owner: refused where `owner` has a project of that name.
-    fn create<'a>(
-        &'a self,
-        owner: &'a Owner,
-        name: &'a str,
-        creator: &'a str,
-    ) -> BoxFuture<'a, Result<Project>>;
-
-    /// Every project `user` is a member of, by name.
-    fn projects<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Project>>>;
-
-    /// Give `user` `role` in project `id`, or with `None` take theirs away: refused where it
-    /// would take the project from its owner.
-    fn set_member<'a>(
-        &'a self,
-        id: &'a ProjectId,
-        user: &'a str,
-        role: Option<Role>,
-    ) -> BoxFuture<'a, Result<()>>;
-
-    /// Forget project `id`, its name its owner's to give again, so that no one reaches it.
-    fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<()>>;
 }
 
 #[cfg(test)]
@@ -277,5 +266,28 @@ mod tests {
         assert!(!store.path(&demo).exists());
         store.remove(&demo).unwrap();
         assert_eq!(store.list().unwrap(), [other]);
+    }
+
+    #[test]
+    fn a_project_is_there_while_its_record_is() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let (kept, left) = (ProjectId::new(), ProjectId::new());
+        store.write(&kept, &"demo").unwrap();
+        // A create that did not end leaves a directory with no record.
+        fs::create_dir_all(store.path(&left)).unwrap();
+        fs::write(store.path(&left).join("project.json.part"), "{").unwrap();
+
+        assert_eq!(
+            store.read::<String>(&kept).unwrap().as_deref(),
+            Some("demo")
+        );
+        assert_eq!(store.read::<String>(&left).unwrap(), None);
+        assert_eq!(store.records::<String>().unwrap(), ["demo"]);
+
+        store.forget(&kept).unwrap();
+        assert_eq!(store.records::<String>().unwrap(), Vec::<String>::new());
+        assert!(matches!(store.forget(&kept), Err(Error::Unknown(_))));
+        assert!(store.path(&kept).is_dir());
     }
 }

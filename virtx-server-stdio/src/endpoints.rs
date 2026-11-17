@@ -1,7 +1,7 @@
 //! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
 //! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
 //! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
-//! of stdio, so all of it is its, and a project has no members.
+//! of stdio, so all of it is its.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -33,13 +33,12 @@ use virtx_core::{
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Membership as _, Network, Os, Owner,
-    Project, ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
-    Snapshot, SnapshotError, SnapshotStore, VolumeError, VolumeStore, build_step, park_after,
-    signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, ProjectError, Reference,
+    RegistryClient, RegistryServer, Sandbox, SandboxError, Snapshot, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
-use crate::{CLIENT, Host};
+use crate::{Host, Project};
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -262,8 +261,7 @@ pub fn router() -> Router {
         .fallback(async || not_found("no endpoint here"))
 }
 
-/// The projects, each the client's to own, answered from the [`Host`] in each request's
-/// extensions.
+/// The projects, each the client's, answered from the [`Host`] in each request's extensions.
 pub fn projects() -> Router {
     Router::new()
         .route("/projects/", get(project_list).post(project_create))
@@ -271,19 +269,13 @@ pub fn projects() -> Router {
             "/projects/{project}",
             get(project_get).delete(project_remove),
         )
-        .route("/projects/{project}/members/", get(project_member_list))
-        .route(
-            "/projects/{project}/members/{user}",
-            put(project_member_change).delete(project_member_change),
-        )
 }
 
 type Answer = Result<Response, Refused>;
 
 /// The client's project `named` names: `403` for one not here.
 async fn here(host: &Host, named: &str) -> Result<Project, Refused> {
-    host.project(Some(named))
-        .await?
+    host.project(Some(named))?
         .ok_or_else(|| forbidden(format!("no project here is {named}")))
 }
 
@@ -299,8 +291,8 @@ fn answer(project: Project) -> ProjectListOutputItem {
 
 /// Every project, the client's own among them, made if it is not there.
 async fn project_list(Extension(host): Extension<Arc<Host>>) -> Answer {
-    host.project(None).await?;
-    let listed = host.membership().projects(CLIENT).await?;
+    host.project(None)?;
+    let listed = host.projects()?;
     Ok(json(&listed.into_iter().map(answer).collect::<Vec<_>>()))
 }
 
@@ -312,8 +304,7 @@ async fn project_create(Extension(host): Extension<Arc<Host>>, request: Bytes) -
             "{DEFAULT_PROJECT:?} is the client's own project, made for it"
         )));
     }
-    let owner = Owner::User(CLIENT.to_owned());
-    let made = answer(host.membership().create(&owner, &args.name, CLIENT).await?);
+    let made = answer(host.create(&args.name)?);
     Ok(created(format!("/projects/{}", made.id), &made))
 }
 
@@ -339,7 +330,7 @@ async fn project_remove(
         ));
     }
     let removed = async {
-        host.membership().remove(&id).await?;
+        host.store().forget(&id)?;
         let store = host.store().clone();
         tokio::task::spawn_blocking(move || store.remove(&id))
             .await
@@ -350,21 +341,6 @@ async fn project_remove(
     host.release(&id);
     removed?;
     Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-/// None: a project here has no members.
-async fn project_member_list(
-    Extension(host): Extension<Arc<Host>>,
-    Segments(named): Segments<String>,
-) -> Answer {
-    here(&host, &named).await?;
-    Ok(json(&Vec::<ProjectListOutputItem>::new()))
-}
-
-async fn project_member_change() -> Answer {
-    Err(forbidden(
-        "virtx-stdio has no members: its one client owns every project",
-    ))
 }
 
 async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {

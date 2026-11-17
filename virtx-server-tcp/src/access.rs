@@ -1,28 +1,26 @@
 //! Who may send a request, and which project's [`Home`] it reaches. [`Access`] lets a request
 //! in from where a browser may call, asks its [`Identity`] who the token is, asks its
 //! [`Membership`] which project the request names and what they are in it, and takes that
-//! project's home, made as it is first reached.
+//! project's home, made by its [`Homes`] as it is first reached.
 //!
-//! The server's own are [`Access::configured`]'s: the config's OpenID Connect provider
-//! ([`Oidc`]), and the projects kept beside their directories ([`TcpMembership`]). A server
-//! built on this one gives its own of either, such as a membership kept in a database.
+//! The server's own are [`Access::configured`]'s: the config's token issuer ([`Oidc`]), the
+//! projects kept beside their directories ([`TcpMembership`]), and each home in its directory
+//! ([`ProjectStore`]). A server built on this one gives its own of any, such as a membership
+//! kept in a database.
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
-use virtx_uvm::{
-    ImageStore, Membership, Owner, Project, ProjectError, ProjectId, ProjectStore, RegistryServer,
-};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER};
+use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer};
 
 use crate::config::Config;
 use crate::endpoints::Home;
 use crate::oidc::Oidc;
+use crate::project::{Membership, Owner, Project, TcpMembership};
 
 /// Where a home's images are served as a registry.
 pub const REGISTRY_PATH: &str = "/images/oci";
@@ -40,48 +38,77 @@ impl Identity for Oidc {
     }
 }
 
+/// What makes a project's home, as the project is first reached.
+pub trait Homes: Send + Sync {
+    /// Project `id`'s home: `None` where it is to have none, which no request then reaches.
+    fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>>;
+}
+
+/// Each home in the project's directory, its images its own.
+impl Homes for ProjectStore {
+    fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>> {
+        Box::pin(async move {
+            let dir = self.path(id);
+            let images = ImageStore::new(dir.join("images"))?;
+            let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+            Ok(Some(Home::new(images, registry, &dir)?))
+        })
+    }
+}
+
 pub struct Access {
     /// The `Origin`s a browser may call from.
     origins: Vec<String>,
     identity: Arc<dyn Identity>,
     membership: Arc<dyn Membership>,
+    /// Where the projects' directories are, each deleted as its project is removed.
     store: ProjectStore,
+    maker: Arc<dyn Homes>,
     /// Each project's home, by id, made as it is first reached.
     /// `None` for a project being removed, which no request reaches until it is gone.
     homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
+    /// Held while a home is made, so that each is made once.
+    making: tokio::sync::Mutex<()>,
 }
 
 impl Access {
     /// Requests from the `origins` a browser may call from, sent by whom `identity` says, to the
-    /// projects `membership` names, kept in `store`. The home of each project in `store` is made
-    /// now, so that its sandboxes left from before are swept as the server starts.
+    /// projects `membership` names, kept in `store`, the home of each made by `maker` as it is
+    /// first reached.
     pub fn new(
         origins: Vec<String>,
         identity: Arc<dyn Identity>,
         membership: Arc<dyn Membership>,
         store: ProjectStore,
-    ) -> anyhow::Result<Access> {
-        let access = Access {
+        maker: Arc<dyn Homes>,
+    ) -> Access {
+        Access {
             origins,
             identity,
             membership,
             store,
+            maker,
             homes: Mutex::default(),
-        };
-        for id in access.store.list()? {
-            access.home_of(&id)?;
+            making: tokio::sync::Mutex::default(),
         }
-        Ok(access)
     }
 
-    /// What `config` says: the users of its provider, the projects kept at its home.
-    pub fn configured(config: &Config) -> anyhow::Result<Access> {
-        Access::new(
+    /// What `config` says: the users of its issuer, the projects kept at its home, each home in
+    /// its directory. The home of each project there is made now, so that its sandboxes left
+    /// from before are swept as the server starts.
+    pub async fn configured(config: &Config) -> anyhow::Result<Access> {
+        let store = ProjectStore::new(config.home());
+        let access = Access::new(
             config.origins.clone(),
             Arc::new(Oidc::new(config.oidc.clone())),
             Arc::new(TcpMembership::new(config.home())),
-            ProjectStore::new(config.home()),
-        )
+            store.clone(),
+            Arc::new(store),
+        );
+        for id in access.store.list()? {
+            access.home_of(&id).await?;
+        }
+        Ok(access)
     }
 
     pub fn origins(&self) -> &[String] {
@@ -156,7 +183,7 @@ impl Access {
     /// Who a request with `headers` is sent by, and the home of the project it names, as
     /// [`project`](Access::project) reads it: as [`user`](Access::user) refuses, `400` for a
     /// project that is no string, and `403` for one its sender is no member of -- or that does
-    /// not exist, which is not told apart.
+    /// not exist, or has no home, which is not told apart.
     pub async fn home(&self, headers: &HeaderMap) -> Result<(String, Arc<Home>), StatusCode> {
         let user = self.user(headers).await?;
         let named = match headers.get(PROJECT_HEADER) {
@@ -171,25 +198,31 @@ impl Access {
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
             .ok_or(StatusCode::FORBIDDEN)?;
-        let home = self.home_of(&project.id).map_err(|e| {
+        let home = self.home_of(&project.id).await.map_err(|e| {
             eprintln!("making project {}'s home: {e:#}", project.id);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         Ok((user, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
-    /// Project `id`'s home, its images its own: `None` while it is being removed.
-    fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
-        let mut homes = self.homes.lock().unwrap();
-        if let Some(home) = homes.get(id) {
+    /// Project `id`'s home, made as it is first reached: `None` while it is being removed, or
+    /// where it is to have none.
+    async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+        if let Some(home) = self.homes.lock().unwrap().get(id) {
             return Ok(home.clone());
         }
-        let dir = self.store.path(id);
-        let images = ImageStore::new(dir.join("images"))?;
-        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-        let home = Arc::new(Home::new(images, registry, &dir)?);
-        homes.insert(*id, Some(Arc::clone(&home)));
-        Ok(Some(home))
+        let _making = self.making.lock().await;
+        if let Some(home) = self.homes.lock().unwrap().get(id) {
+            return Ok(home.clone());
+        }
+        let Some(made) = self.maker.make(id).await? else {
+            return Ok(None);
+        };
+        match self.homes.lock().unwrap().entry(*id) {
+            // Taken away for its removal while it was made.
+            Entry::Occupied(taken) => Ok(taken.get().clone()),
+            Entry::Vacant(vacant) => Ok(vacant.insert(Some(Arc::new(made))).clone()),
+        }
     }
 
     /// Take project `id`'s home away, its image jobs cancelled, for it to be removed: no
@@ -222,185 +255,6 @@ pub fn bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.strip_prefix("Bearer "))
 }
 
-/// The projects, each kept in its directory as `project.json`, the [`Project`] with its
-/// members: a project is there while that file is. Each change is made holding `project/.lock`,
-/// so that servers over one root change them one at a time.
-pub struct TcpMembership {
-    store: ProjectStore,
-}
-
-impl TcpMembership {
-    /// The projects kept under `root`.
-    pub fn new(root: impl Into<PathBuf>) -> TcpMembership {
-        TcpMembership {
-            store: ProjectStore::new(root),
-        }
-    }
-
-    /// Project `id`, as kept: `None` where it is not there.
-    fn read(&self, id: &ProjectId) -> Result<Option<Project>, ProjectError> {
-        let path = self.store.path(id).join("project.json");
-        match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| ProjectError::io(format!("reading {}", path.display()), e.into())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(ProjectError::io(format!("reading {}", path.display()), e)),
-        }
-    }
-
-    /// Keep `project` whole: written beside, and renamed over.
-    fn write(&self, project: &Project) -> Result<(), ProjectError> {
-        let dir = self.store.path(&project.id);
-        fs::create_dir_all(&dir)
-            .map_err(|e| ProjectError::io(format!("making {}", dir.display()), e))?;
-        let (path, part) = (dir.join("project.json"), dir.join("project.json.part"));
-        let bytes = serde_json::to_vec_pretty(project).expect("JSON of strings");
-        fs::write(&part, bytes)
-            .map_err(|e| ProjectError::io(format!("writing {}", part.display()), e))?;
-        fs::rename(&part, &path)
-            .map_err(|e| ProjectError::io(format!("writing {}", path.display()), e))
-    }
-
-    /// Every project here.
-    fn all(&self) -> Result<Vec<Project>, ProjectError> {
-        let mut all = Vec::new();
-        for id in self.store.list()? {
-            all.extend(self.read(&id)?);
-        }
-        Ok(all)
-    }
-
-    /// The project `owner` names `name`, if any, as kept.
-    fn find(&self, owner: &Owner, name: &str) -> Result<Option<Project>, ProjectError> {
-        let all = self.all()?;
-        Ok(all
-            .into_iter()
-            .find(|project| project.owner == *owner && project.name == name))
-    }
-
-    /// The lock held while the projects change, until it drops.
-    fn lock(&self) -> Result<fs::File, ProjectError> {
-        let dir = self.store.dir();
-        fs::create_dir_all(&dir)
-            .map_err(|e| ProjectError::io(format!("making {}", dir.display()), e))?;
-        let path = dir.join(".lock");
-        let lock = fs::File::create(&path)
-            .map_err(|e| ProjectError::io(format!("opening {}", path.display()), e))?;
-        lock.lock()
-            .map_err(|e| ProjectError::io(format!("locking {}", path.display()), e))?;
-        Ok(lock)
-    }
-
-    /// Make project `name` of `owner`'s, `creator` its owner, holding the lock.
-    fn make(&self, owner: &Owner, name: &str, creator: &str) -> Result<Project, ProjectError> {
-        let _lock = self.lock()?;
-        if self.find(owner, name)?.is_some() {
-            return Err(ProjectError::AlreadyExists(name.to_owned()));
-        }
-        let project = Project {
-            id: ProjectId::new(),
-            owner: owner.clone(),
-            name: name.to_owned(),
-            members: BTreeMap::from([(creator.to_owned(), Role::Owner)]),
-        };
-        self.write(&project)?;
-        Ok(project)
-    }
-}
-
-impl Membership for TcpMembership {
-    fn resolve<'a>(
-        &'a self,
-        owner: &'a Owner,
-        name: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ProjectId>, ProjectError>> {
-        Box::pin(async move {
-            if let Some(project) = self.find(owner, name)? {
-                return Ok(Some(project.id));
-            }
-            if name != DEFAULT_PROJECT {
-                return Ok(None);
-            }
-            let Owner::User(user) = owner else {
-                return Ok(None);
-            };
-            match self.make(owner, name, user) {
-                Ok(project) => Ok(Some(project.id)),
-                // Made by a request beside this one.
-                Err(ProjectError::AlreadyExists(_)) => Ok(self.find(owner, name)?.map(|p| p.id)),
-                Err(e) => Err(e),
-            }
-        })
-    }
-
-    fn project<'a>(
-        &'a self,
-        id: &'a ProjectId,
-    ) -> BoxFuture<'a, Result<Option<Project>, ProjectError>> {
-        Box::pin(async move { self.read(id) })
-    }
-
-    fn create<'a>(
-        &'a self,
-        owner: &'a Owner,
-        name: &'a str,
-        creator: &'a str,
-    ) -> BoxFuture<'a, Result<Project, ProjectError>> {
-        Box::pin(async move {
-            if !virtx_uvm::is_project_name(name) {
-                return Err(ProjectError::InvalidName(name.to_owned()));
-            }
-            self.make(owner, name, creator)
-        })
-    }
-
-    fn projects<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Project>, ProjectError>> {
-        Box::pin(async move {
-            let mut reached = self.all()?;
-            reached.retain(|project| project.members.contains_key(user));
-            reached.sort_by(|a, b| (&a.name, &a.owner).cmp(&(&b.name, &b.owner)));
-            Ok(reached)
-        })
-    }
-
-    fn set_member<'a>(
-        &'a self,
-        id: &'a ProjectId,
-        user: &'a str,
-        role: Option<Role>,
-    ) -> BoxFuture<'a, Result<(), ProjectError>> {
-        Box::pin(async move {
-            let _lock = self.lock()?;
-            let mut project = self
-                .read(id)?
-                .ok_or_else(|| ProjectError::Unknown(id.to_string()))?;
-            if project.owner == Owner::User(user.to_owned()) && role != Some(Role::Owner) {
-                return Err(ProjectError::NoOwner(id.to_string()));
-            }
-            match role {
-                Some(role) => project.members.insert(user.to_owned(), role),
-                None => project.members.remove(user),
-            };
-            self.write(&project)
-        })
-    }
-
-    fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<(), ProjectError>> {
-        Box::pin(async move {
-            let _lock = self.lock()?;
-            let path = self.store.path(id).join("project.json");
-            match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    Err(ProjectError::Unknown(id.to_string()))
-                }
-                Err(e) => Err(ProjectError::io(format!("removing {}", path.display()), e)),
-            }
-        })
-    }
-}
-
 /// The users a set of tokens names, each token the user it names: for a test's requests, as
 /// different users would send them.
 #[cfg(test)]
@@ -421,8 +275,7 @@ impl Identity for TokenIsUser {
 mod tests {
     use http::HeaderValue;
     use serde_json::json;
-    use virtx_core::{DEFAULT_PROJECT, Role};
-    use virtx_uvm::Owner;
+    use virtx_core::Role;
 
     use super::*;
 
@@ -467,13 +320,14 @@ mod tests {
             .await
             .unwrap()
             .id;
+        let store = ProjectStore::new(dir.path());
         let access = Access::new(
             Vec::new(),
             Arc::new(TokenIsUser(users)),
             projects,
-            ProjectStore::new(dir.path()),
-        )
-        .unwrap();
+            store.clone(),
+            Arc::new(store),
+        );
         let home = async |token, project| access.home(&headers(token, project, None)).await;
         let (alice, bob) = (Some("alice@example.com"), Some("bob@example.com"));
         let id = demo.to_string();
@@ -545,105 +399,47 @@ mod tests {
         assert!(!Arc::ptr_eq(&plus, &minus));
     }
 
-    #[tokio::test]
-    async fn an_owner_names_each_project_once_and_its_members_reach_it_in_their_roles() {
-        let root = tempfile::tempdir().unwrap();
-        let store = TcpMembership::new(root.path());
-        let (alice, bob) = (Owner::User("alice".into()), Owner::User("bob".into()));
+    /// Homes made only for the projects listed, none for any other.
+    struct Only(ProjectStore, Vec<ProjectId>);
 
-        assert_eq!(store.resolve(&alice, "demo").await.unwrap(), None);
-        let demo = store.create(&alice, "demo", "alice").await.unwrap();
-        assert!(
-            root.path()
-                .join("project")
-                .join(demo.id.to_string())
-                .join("project.json")
-                .is_file()
-        );
-        assert_eq!(store.resolve(&alice, "demo").await.unwrap(), Some(demo.id));
-        assert!(matches!(
-            store.create(&alice, "demo", "alice").await,
-            Err(ProjectError::AlreadyExists(_))
-        ));
-        assert!(matches!(
-            store.create(&alice, "Demo", "alice").await,
-            Err(ProjectError::InvalidName(_))
-        ));
-        // Another owner's of the same name is another project.
-        let theirs = store.create(&bob, "demo", "bob").await.unwrap();
-        assert_ne!(theirs.id, demo.id);
-        assert_eq!(store.resolve(&bob, "demo").await.unwrap(), Some(theirs.id));
-        assert_eq!(store.project(&demo.id).await.unwrap(), Some(demo.clone()));
-
-        store
-            .set_member(&demo.id, "bob", Some(Role::Member))
-            .await
-            .unwrap();
-        let listed: Vec<_> = store
-            .projects("bob")
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|project| (project.owner, project.members["bob"]))
-            .collect();
-        assert_eq!(listed, [(alice.clone(), Role::Member), (bob, Role::Owner)]);
-
-        // Its owner neither leaves nor steps down; another owner leaves.
-        for role in [None, Some(Role::Member)] {
-            assert!(matches!(
-                store.set_member(&demo.id, "alice", role).await,
-                Err(ProjectError::NoOwner(_))
-            ));
+    impl Homes for Only {
+        fn make<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, anyhow::Result<Option<Home>>> {
+            Box::pin(async move {
+                if !self.1.contains(id) {
+                    return Ok(None);
+                }
+                self.0.make(id).await
+            })
         }
-        store
-            .set_member(&demo.id, "bob", Some(Role::Owner))
-            .await
-            .unwrap();
-        store.set_member(&demo.id, "bob", None).await.unwrap();
-
-        // Kept on disk, for the next membership over the same root.
-        let again = TcpMembership::new(root.path());
-        let kept = again.project(&demo.id).await.unwrap().unwrap();
-        assert_eq!(
-            kept.members.into_iter().collect::<Vec<_>>(),
-            [("alice".to_owned(), Role::Owner)]
-        );
-
-        again.remove(&demo.id).await.unwrap();
-        assert_eq!(again.project(&demo.id).await.unwrap(), None);
-        assert_eq!(again.resolve(&alice, "demo").await.unwrap(), None);
-        assert!(matches!(
-            again.remove(&demo.id).await,
-            Err(ProjectError::Unknown(_))
-        ));
-        // Its name is its owner's to give again, to a project of another id.
-        let anew = again.create(&alice, "demo", "alice").await.unwrap();
-        assert_ne!(anew.id, demo.id);
     }
 
-    /// A create that failed writing leaves a directory with no `project.json`: no project, and
-    /// no name taken, so the user's own and a project of that name are made after it.
     #[tokio::test]
-    async fn a_create_that_did_not_end_takes_no_name() {
-        let root = tempfile::tempdir().unwrap();
-        let store = TcpMembership::new(root.path());
+    async fn a_project_its_homes_make_none_of_is_reached_by_no_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
         let alice = Owner::User("alice".into());
-        let left = ProjectId::new();
-        let dir = ProjectStore::new(root.path()).path(&left);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("project.json.part"), "{").unwrap();
+        let kept = projects.create(&alice, "kept", "alice").await.unwrap().id;
+        let gone = projects.create(&alice, "gone", "alice").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(Only(store.clone(), vec![kept])),
+        );
+        let home = async |project| {
+            access
+                .home(&headers(Some("alice"), Some(project), None))
+                .await
+        };
 
-        assert_eq!(store.project(&left).await.unwrap(), None);
-        assert_eq!(store.projects("alice").await.unwrap(), []);
-        let own = store
-            .resolve(&alice, DEFAULT_PROJECT)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(own, left);
-        let kept = store.project(&own).await.unwrap().unwrap();
-        assert_eq!(kept.members.get("alice"), Some(&Role::Owner));
-        let demo = store.create(&alice, "demo", "alice").await.unwrap();
-        assert_ne!(demo.id, left);
+        // Made as first reached, and no sooner.
+        assert!(access.homes().is_empty());
+        let (_, reached) = home("kept").await.unwrap();
+        assert!(Arc::ptr_eq(&home("kept").await.unwrap().1, &reached));
+        assert_eq!(access.homes().len(), 1);
+        assert_eq!(home("gone").await.err(), Some(StatusCode::FORBIDDEN));
+        assert!(!store.path(&gone).join("images").exists());
     }
 }

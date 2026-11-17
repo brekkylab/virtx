@@ -96,7 +96,7 @@ Each member of a project has a role:
 - `owner` does what a member does, and also adds, changes and removes members, and removes the project.
 
 A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), has no members: its one client owns every project.
-It answers a project with no `owner`, and its members as none, and refuses a change to them with `403`, `forbidden`.
+It answers a project with no `owner`, the client's `role` in it `owner`, and serves no `/projects/{project}/members/`.
 
 Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
 They name the project in their path, and take no `virtx-project`.

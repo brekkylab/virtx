@@ -39,9 +39,10 @@ use virtx_uvm::{
     VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
-use virtx_uvm::{Owner, Project, ProjectError};
+use virtx_uvm::ProjectError;
 
 use crate::access::Access;
+use crate::project::{Owner, Project};
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -342,12 +343,10 @@ async fn role_in(
 
 /// `project` as the server answers it to `user`, a member of it.
 fn answer(project: Project, user: &str) -> ProjectListOutputItem {
+    let Owner::User(owner) = project.owner;
     ProjectListOutputItem {
         id: project.id.to_string(),
-        owner: match project.owner {
-            Owner::User(owner) => Some(owner),
-            _ => None,
-        },
+        owner: Some(owner),
         role: project.members[user],
         name: project.name,
     }

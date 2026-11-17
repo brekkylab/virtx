@@ -133,8 +133,9 @@ jobs:
       - name: Wheels
         run: |
           # Wheels name the version as PEP 440 spells it: `0.2.0-rc.0` is `0.2.0rc0` there.
-          # `check` lets through no pre-release but these three.
-          version=$(printf '%s' "${TAG#v}" | sed -E 's/-alpha\.([0-9]+)$/a\1/; s/-beta\.([0-9]+)$/b\1/; s/-rc\.([0-9]+)$/rc\1/')
+          # Their METADATA may not. `check` lets through no pre-release but these three.
+          pep440() { sed -E 's/-alpha\.([0-9]+)$/a\1/; s/-beta\.([0-9]+)$/b\1/; s/-rc\.([0-9]+)$/rc\1/'; }
+          version=$(printf '%s' "${TAG#v}" | pep440)
           name=$(sed -n 's/^name = "\(.*\)"$/\1/p' virtx-py/pyproject.toml)
           ls dist/*.whl >/dev/null
           for whl in dist/*.whl; do
@@ -143,7 +144,7 @@ jobs:
               *) echo "::error::$whl is not a wheel of $name $version"; exit 1 ;;
             esac
             meta=$(unzip -p "$whl" '*.dist-info/METADATA')
-            got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta")"
+            got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta" | pep440)"
             [ "$got" = "$name $version" ] || { echo "::error::$whl's metadata says $got"; exit 1; }
           done
           pipx run twine check --strict dist/*.whl

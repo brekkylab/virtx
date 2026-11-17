@@ -38,7 +38,11 @@ describe('against virtx-stdio', () => {
     assert.ok(found instanceof virtx.Sandbox)
     assert.equal(found.id, made.id)
     assert.equal(await client.findSandbox(unique('nobody')), undefined)
-    await assert.rejects(client.createSandbox(ALPINE, { name }), { source: 'server', status: 409, code: 'exists' })
+    await assert.rejects(client.createSandbox(ALPINE, { name }), {
+      source: 'server',
+      status: 409,
+      code: 'exists',
+    })
 
     const stopped = await made.stop()
     assert.ok(stopped instanceof virtx.Sandbox)

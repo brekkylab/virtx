@@ -419,11 +419,18 @@ class StartedJob extends Promise {
         started.then(settle.resolve, settle.reject)
       }
     }
-    job._run = run && (() => (started ? null : ((started = true), run(settle))))
+    job._run =
+      run &&
+      (() => {
+        if (started) return null
+        started = true
+        return run(settle)
+      })
     queueMicrotask(job._start)
     return job
   }
 
+  // biome-ignore lint/suspicious/noThenProperty: a started job is awaited as the job it starts.
   then(resolved, rejected) {
     this._start?.()
     return super.then(resolved, rejected)

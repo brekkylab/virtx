@@ -136,12 +136,15 @@ export type ImageJobEnd = { digest: string }
 
 /** An entry of an image job's log, numbered by `id`; `end` is the last. */
 export type ImageJobEntry = { id: number } & (
-  { log: string } | { truncated: Record<string, never> } | { end: ImageJobEnd }
+  | { log: string }
+  | { truncated: Record<string, never> }
+  | { end: ImageJobEnd }
 )
 
 /** Credentials for a remote image registry. A `basic` password may be an access token the registry takes in its place. */
 export type RegistryAuth =
-  { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string }
+  | { type: 'basic'; username: string; password: string }
+  | { type: 'bearer'; token: string }
 
 /** The credentials a server wants with every request: a token, sent as `Authorization: Bearer <token>`. */
 export type Auth =
@@ -417,7 +420,8 @@ export interface SandboxPort {
 
 /** A port to open as a sandbox is made: a number for TCP that says nothing more, or one that says more. */
 export type PortSpec =
-  number | { port: number; label?: string; protocol?: PortProtocol; inbound?: InboundRule[] }
+  | number
+  | { port: number; label?: string; protocol?: PortProtocol; inbound?: InboundRule[] }
 
 /** What opening a port in a sandbox already made asks for; TCP if not said. */
 export interface SandboxPortOpenOptions {
@@ -454,14 +458,12 @@ export interface SandboxCreateOptions {
   autoStopMinutes?: number
   /** `'never'` keeps it until it is deleted. */
   autoDeleteDays?: number | 'never'
-  /** How much it may write over its image, in GiB. */
-  diskGib?: number
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */
   ports?: PortSpec[]
   vcpus?: number
   memoryMib?: number
-  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
+  /** How much it may write over its image, in GiB, at most 1024. */
   diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number

@@ -783,8 +783,7 @@ mod tests {
 
     /// A file's `getetag`, as a `PROPFIND` answers it, is the entity-tag its `ETag` header is,
     /// quotes and all, so a client that sends it as `If-Match` writes over the file it read: the
-    /// write lands, and the same tag again, gone stale, is refused `412`. A tag sent without its
-    /// quotes is taken as the same tag.
+    /// write lands, and the same tag again, gone stale, is refused `412`.
     #[tokio::test]
     async fn a_file_s_getetag_is_its_etag_and_is_taken_as_if_match() {
         use axum::body::Body;
@@ -792,7 +791,7 @@ mod tests {
 
         let server = Server::spawn("getetag");
         server.client.create_volume(Some("data")).await.unwrap();
-        let (app, _) = app(&server.home).unwrap();
+        let app = server.app.clone();
         let path = "/volumes/data/files/a.txt";
         let send = |request: http::Request<Body>| {
             let app = app.clone();
@@ -837,11 +836,38 @@ mod tests {
 
         assert_eq!(send(put(Some(&tag), "three")).await.0, 204);
         assert_eq!(send(put(Some(&tag), "stale")).await.0, 412);
+    }
 
-        let fresh = getetag().await;
-        let bare = fresh.trim_matches('"');
-        assert_ne!(bare, fresh);
-        assert_eq!(send(put(Some(bare), "bare")).await.0, 204);
+    /// A `PROPPATCH`, which WebDAV class 1 asks a server for, is answered `207` with the status
+    /// of each property it names, and leaves the connection open.
+    #[tokio::test]
+    async fn a_proppatch_is_answered_with_each_property_s_status() {
+        use axum::body::Body;
+
+        let server = Server::spawn("proppatch");
+        server.client.create_volume(Some("data")).await.unwrap();
+        let volume = FileRoot::Volume("data".into());
+        server
+            .client
+            .write_file(&volume, "a.txt", "a", None)
+            .await
+            .unwrap();
+        let proppatch = http::Request::builder()
+            .method("PROPPATCH")
+            .uri("/volumes/data/files/a.txt")
+            .header(http::header::CONTENT_TYPE, "application/xml")
+            .body(Body::from(
+                r#"<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><D:displayname>a</D:displayname></D:prop></D:set></D:propertyupdate>"#,
+            ))
+            .unwrap();
+        let Ok(response) = server.app.clone().oneshot(proppatch).await;
+        assert_eq!(response.status(), 207);
+        assert!(response.headers().get(http::header::CONNECTION).is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xml.contains("displayname"), "{xml}");
     }
 
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client

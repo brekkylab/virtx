@@ -259,7 +259,7 @@ impl DavFileSystem for Fs {
         })
     }
 
-    /// A link is not told from what it points at here, as `metadata` does not tell it.
+    /// The same as `metadata`: a link is nothing this root answers.
     fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         self.metadata(path)
     }

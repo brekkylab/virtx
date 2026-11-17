@@ -32,12 +32,12 @@ use virtx_core::{
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, ProjectError, Reference,
-    RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step,
-    park_after, signal_number,
+    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
+    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
+    build_step, park_after, signal_number,
 };
 
-use crate::{Host, Project};
+use crate::Host;
 
 /// An image job, with the entries its log carries.
 type ImageJobOf = Job<ImageJob, ImageJobEntry>;
@@ -254,12 +254,13 @@ async fn here(host: &Host, named: &str) -> Result<Project, Refused> {
         .ok_or_else(|| forbidden(format!("no project here is {named}")))
 }
 
-/// `project` as the server answers it: the client's, who owns it.
+/// `project` as the server answers it: the admin's to own, whoever's it is, and a user's of a
+/// server over the same cache named so.
 fn answer(project: Project) -> ProjectListOutputItem {
     ProjectListOutputItem {
         id: project.id.to_string(),
+        owner: project.owner.user().map(str::to_owned),
         name: project.name,
-        owner: None,
         role: Role::Owner,
     }
 }

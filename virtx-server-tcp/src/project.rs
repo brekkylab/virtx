@@ -8,31 +8,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use futures_util::future::BoxFuture;
-use serde::{Deserialize, Serialize};
 use virtx_core::{DEFAULT_PROJECT, Role};
+pub use virtx_uvm::{Project, ProjectOwner as Owner};
 use virtx_uvm::{ProjectError, ProjectId, ProjectStore};
 
 type Result<T> = std::result::Result<T, ProjectError>;
-
-/// Whose a project is, whose names it is among: no two of one owner's share a name.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum Owner {
-    /// A user, as the server names them, who is an owner of each project of theirs.
-    User(String),
-}
-
-/// A project, as a [`Membership`] keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Project {
-    pub id: ProjectId,
-    pub owner: Owner,
-    pub name: String,
-    /// Each member's role, by user: they alone reach it.
-    pub members: BTreeMap<String, Role>,
-}
 
 /// Which project an owner names so, and who is a member of each, in which role.
 ///
@@ -76,7 +56,8 @@ pub trait Membership: Send + Sync {
     fn remove<'a>(&'a self, id: &'a ProjectId) -> BoxFuture<'a, Result<()>>;
 }
 
-/// The projects, each kept as its [`ProjectStore`] record, the [`Project`] with its members.
+/// The projects, each kept as its [`ProjectStore`] record, beside those of a `virtx-stdio` over
+/// the same root, which are the admin's and no user's to reach.
 pub struct TcpMembership {
     store: ProjectStore,
 }
@@ -88,30 +69,6 @@ impl TcpMembership {
             store: ProjectStore::new(root),
         }
     }
-
-    /// The project `owner` names `name`, if any, as kept.
-    fn find(&self, owner: &Owner, name: &str) -> Result<Option<Project>> {
-        let all = self.store.records::<Project>()?;
-        Ok(all
-            .into_iter()
-            .find(|project| project.owner == *owner && project.name == name))
-    }
-
-    /// Make project `name` of `owner`'s, `creator` its owner, holding the lock.
-    fn make(&self, owner: &Owner, name: &str, creator: &str) -> Result<Project> {
-        let _lock = self.store.lock()?;
-        if self.find(owner, name)?.is_some() {
-            return Err(ProjectError::AlreadyExists(name.to_owned()));
-        }
-        let project = Project {
-            id: ProjectId::new(),
-            owner: owner.clone(),
-            name: name.to_owned(),
-            members: BTreeMap::from([(creator.to_owned(), Role::Owner)]),
-        };
-        self.store.write(&project.id, &project)?;
-        Ok(project)
-    }
 }
 
 impl Membership for TcpMembership {
@@ -121,17 +78,22 @@ impl Membership for TcpMembership {
         name: &'a str,
     ) -> BoxFuture<'a, Result<Option<ProjectId>>> {
         Box::pin(async move {
-            if let Some(project) = self.find(owner, name)? {
+            if let Some(project) = self.store.find(owner, name)? {
                 return Ok(Some(project.id));
             }
             if name != DEFAULT_PROJECT {
                 return Ok(None);
             }
-            let Owner::User(user) = owner;
-            match self.make(owner, name, user) {
+            let members = owner.user().map(|user| (user.to_owned(), Role::Owner));
+            match self
+                .store
+                .create(owner, name, members.into_iter().collect())
+            {
                 Ok(project) => Ok(Some(project.id)),
                 // Made by a request beside this one.
-                Err(ProjectError::AlreadyExists(_)) => Ok(self.find(owner, name)?.map(|p| p.id)),
+                Err(ProjectError::AlreadyExists(_)) => {
+                    Ok(self.store.find(owner, name)?.map(|p| p.id))
+                }
                 Err(e) => Err(e),
             }
         })
@@ -148,16 +110,14 @@ impl Membership for TcpMembership {
         creator: &'a str,
     ) -> BoxFuture<'a, Result<Project>> {
         Box::pin(async move {
-            if !virtx_uvm::is_project_name(name) {
-                return Err(ProjectError::InvalidName(name.to_owned()));
-            }
-            self.make(owner, name, creator)
+            let members = BTreeMap::from([(creator.to_owned(), Role::Owner)]);
+            self.store.create(owner, name, members)
         })
     }
 
     fn projects<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Vec<Project>>> {
         Box::pin(async move {
-            let mut reached = self.store.records::<Project>()?;
+            let mut reached = self.store.records()?;
             reached.retain(|project| project.members.contains_key(user));
             reached.sort_by(|a, b| (&a.name, &a.owner).cmp(&(&b.name, &b.owner)));
             Ok(reached)
@@ -172,7 +132,7 @@ impl Membership for TcpMembership {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let _lock = self.store.lock()?;
-            let mut project: Project = self
+            let mut project = self
                 .store
                 .read(id)?
                 .ok_or_else(|| ProjectError::Unknown(id.to_string()))?;
@@ -183,7 +143,7 @@ impl Membership for TcpMembership {
                 Some(role) => project.members.insert(user.to_owned(), role),
                 None => project.members.remove(user),
             };
-            self.store.write(id, &project)
+            self.store.write(&project)
         })
     }
 
@@ -301,5 +261,33 @@ mod tests {
         assert_eq!(kept.members.get("alice"), Some(&Role::Owner));
         let demo = store.create(&alice, "demo", "alice").await.unwrap();
         assert_ne!(demo.id, left);
+    }
+
+    /// A `virtx-stdio` over the same root keeps the admin's projects beside the users': read
+    /// as any other, and reached by no user, whose own is their own whatever the admin's is.
+    #[tokio::test]
+    async fn the_admin_s_projects_are_beside_the_users_and_no_user_s() {
+        let root = tempfile::tempdir().unwrap();
+        let admin_s = ProjectStore::new(root.path())
+            .create(&Owner::Admin, DEFAULT_PROJECT, BTreeMap::new())
+            .unwrap();
+        let store = TcpMembership::new(root.path());
+        let alice = Owner::User("alice".into());
+
+        let own = store
+            .resolve(&alice, DEFAULT_PROJECT)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(own, admin_s.id);
+        let listed: Vec<_> = store
+            .projects("alice")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|project| project.id)
+            .collect();
+        assert_eq!(listed, [own]);
+        assert_eq!(store.project(&admin_s.id).await.unwrap(), Some(admin_s));
     }
 }

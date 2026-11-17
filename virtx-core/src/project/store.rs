@@ -28,8 +28,8 @@ pub struct ProjectListOutputItem {
     pub id: String,
     /// What its owner names it, among their projects.
     pub name: String,
-    /// The user whose project it is, as the server names them: none on a server with no
-    /// users, such as over stdio.
+    /// The user whose project it is, as the server names them: none for one of no user's, such
+    /// as one made over stdio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     pub role: Role,

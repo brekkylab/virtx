@@ -175,7 +175,7 @@ export interface ProjectInfo {
   id: string
   /** What its owner names it, among their projects. */
   name: string
-  /** The user whose project it is: absent from a server with no users, such as over stdio. */
+  /** The user whose project it is: absent for one of no user's, such as one made over stdio. */
   owner?: string
   /** The client's role in it. */
   role: Role

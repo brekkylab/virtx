@@ -1,15 +1,16 @@
 //! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
 //! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
-//! answered on stdin and stdout to the client that spawned it, until it closes stdin. Everything
-//! this host keeps is that one client's, who owns every project here: its own, `default`, and
-//! each one made, each a directory of its own in the cache (see [`virtx_uvm::ProjectStore`]).
+//! answered on stdin and stdout to the client that spawned it, until it closes stdin. That client
+//! is the host's admin, who reaches every project here, each a directory of its own in the cache
+//! (see [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those
+//! a `virtx-server-tcp` over the same cache keeps for its users, by id.
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
 
 mod endpoints;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -22,10 +23,12 @@ use axum::middleware::Next;
 use axum::response::IntoResponse as _;
 use axum::routing::any;
 use http::HeaderMap;
-use serde::{Deserialize, Serialize};
 use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
-use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer};
+use virtx_uvm::{
+    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    RegistryServer,
+};
 
 use crate::endpoints::{Home, Refused, forbidden, invalid};
 
@@ -108,15 +111,8 @@ async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
     Ok((app, host))
 }
 
-/// A project here, as its record keeps it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Project {
-    pub id: ProjectId,
-    pub name: String,
-}
-
-/// The projects this host keeps, each the client's, the home of each made as it is first
-/// reached.
+/// The projects this host keeps, every one the client's to reach, the home of each made as it
+/// is first reached.
 pub struct Host {
     store: ProjectStore,
     /// Each project's home, by id.
@@ -146,14 +142,14 @@ impl Host {
     }
 
     /// The project `named` names, if any: the client's own, [`DEFAULT_PROJECT`], where it is
-    /// `None`, made if it is not there; the project of that id, where it is one; and otherwise
-    /// the project of that name.
+    /// `None`, made if it is not there; the project of that id, where it is one, whoever's it
+    /// is; and otherwise the admin's project of that name.
     pub fn project(&self, named: Option<&str>) -> Result<Option<Project>, ProjectError> {
         let named = named.unwrap_or(DEFAULT_PROJECT);
         if let Ok(id) = named.parse::<ProjectId>() {
             return self.store.read(&id);
         }
-        if let Some(project) = self.named(named)? {
+        if let Some(project) = self.store.find(&Owner::Admin, named)? {
             return Ok(Some(project));
         }
         if named != DEFAULT_PROJECT {
@@ -162,39 +158,21 @@ impl Host {
         match self.create(DEFAULT_PROJECT) {
             Ok(project) => Ok(Some(project)),
             // Made by a `virtx-stdio` beside this one.
-            Err(ProjectError::AlreadyExists(_)) => self.named(named),
+            Err(ProjectError::AlreadyExists(_)) => self.store.find(&Owner::Admin, named),
             Err(e) => Err(e),
         }
     }
 
-    /// The project named `name`, if any.
-    fn named(&self, name: &str) -> Result<Option<Project>, ProjectError> {
-        let all = self.store.records::<Project>()?;
-        Ok(all.into_iter().find(|project| project.name == name))
-    }
-
-    /// Every project here, by name.
+    /// Every project here, whoever's, by name.
     pub fn projects(&self) -> Result<Vec<Project>, ProjectError> {
-        let mut all = self.store.records::<Project>()?;
-        all.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut all = self.store.records()?;
+        all.sort_by(|a, b| (&a.name, &a.owner).cmp(&(&b.name, &b.owner)));
         Ok(all)
     }
 
-    /// Make project `name`, under an id no project has had: refused where one is named so.
+    /// Make the admin's project `name`: refused where the admin has one named so.
     pub fn create(&self, name: &str) -> Result<Project, ProjectError> {
-        if !virtx_uvm::is_project_name(name) {
-            return Err(ProjectError::InvalidName(name.to_owned()));
-        }
-        let _lock = self.store.lock()?;
-        if self.named(name)?.is_some() {
-            return Err(ProjectError::AlreadyExists(name.to_owned()));
-        }
-        let project = Project {
-            id: ProjectId::new(),
-            name: name.to_owned(),
-        };
-        self.store.write(&project.id, &project)?;
-        Ok(project)
+        self.store.create(&Owner::Admin, name, BTreeMap::new())
     }
 
     /// The home of the project `headers` name, or of the client's own where they name none:
@@ -937,6 +915,53 @@ mod tests {
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].0, "default");
         assert_ne!(again[0].1, own[0].1);
+    }
+
+    /// The projects a `virtx-server-tcp` over the same cache keeps for its users are here too:
+    /// listed with their owners, and reached by id, the client's names its own alone.
+    #[tokio::test]
+    async fn a_user_s_projects_over_the_same_cache_are_reached_by_id() {
+        let server = Server::spawn("users-projects").await;
+        let alice = virtx_uvm::ProjectOwner::User("alice".into());
+        let members = BTreeMap::from([("alice".to_owned(), virtx_core::Role::Owner)]);
+        let store = ProjectStore::new(&server.root);
+        let theirs = store
+            .create(&alice, DEFAULT_PROJECT, members.clone())
+            .unwrap();
+        let demo = store.create(&alice, "demo", members).unwrap();
+
+        let listed: Vec<_> = server
+            .client
+            .list_project()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|project| (project.name, project.owner, project.role))
+            .collect();
+        let alice_s = Some("alice".to_owned());
+        assert_eq!(
+            listed,
+            [
+                ("default".to_owned(), None, virtx_core::Role::Owner),
+                (
+                    "default".to_owned(),
+                    alice_s.clone(),
+                    virtx_core::Role::Owner
+                ),
+                ("demo".to_owned(), alice_s.clone(), virtx_core::Role::Owner),
+            ]
+        );
+        assert_ne!(
+            server.client.get_project("default").await.unwrap().id,
+            theirs.id.to_string()
+        );
+        assert_eq!(status(server.client.get_project("demo").await), 403);
+        let by_id = server
+            .client
+            .get_project(demo.id.to_string())
+            .await
+            .unwrap();
+        assert_eq!((by_id.name, by_id.owner), ("demo".to_owned(), alice_s));
     }
 
     #[test]

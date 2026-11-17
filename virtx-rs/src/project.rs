@@ -38,7 +38,7 @@ impl Project {
         &self.info.name
     }
 
-    /// The user whose project it is: none from a server with no users, such as over stdio.
+    /// The user whose project it is: none for one of no user's, such as one made over stdio.
     pub fn owner(&self) -> Option<&str> {
         self.info.owner.as_deref()
     }

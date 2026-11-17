@@ -1,7 +1,7 @@
 //! Projects: what everything a server keeps belongs to. Each project is a directory of its own,
 //! under an id given it once, which its images, sandboxes and volumes are kept in.
-//! [`Store`] keeps the directories, and in each the server's record of the project, its name and
-//! whatever else that server keeps of it, such as its members.
+//! [`Store`] keeps the directories, and in each the project's record, a [`Project`]: one record
+//! for every server, so that servers over one root keep their projects side by side.
 //!
 //! # Layout
 //!
@@ -12,15 +12,16 @@
 //!   project/<id>/project.json its record: a project is there while this is
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use virtx_core::Role;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -102,6 +103,38 @@ impl FromStr for ProjectId {
     }
 }
 
+/// Whose a project is, whose names it is among: no two of one owner's share a name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Owner {
+    /// The host's own: `virtx-stdio`'s client, who reaches every project under its root.
+    Admin,
+    /// A user, as the server names them, who is an owner of each project of theirs.
+    User(String),
+}
+
+impl Owner {
+    /// The user it is, if it is one.
+    pub fn user(&self) -> Option<&str> {
+        match self {
+            Owner::User(user) => Some(user),
+            Owner::Admin => None,
+        }
+    }
+}
+
+/// A project, as its record keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub id: ProjectId,
+    pub owner: Owner,
+    pub name: String,
+    /// Each member's role, by user: they alone reach it over a server with users.
+    pub members: BTreeMap<String, Role>,
+}
+
 /// The projects' directories under a server's root, and the record of each in it.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -160,7 +193,7 @@ impl Store {
     }
 
     /// Project `id`'s record: `None` where it has none.
-    pub fn read<T: DeserializeOwned>(&self, id: &ProjectId) -> Result<Option<T>> {
+    pub fn read(&self, id: &ProjectId) -> Result<Option<Project>> {
         let path = self.path(id).join("project.json");
         match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
@@ -173,7 +206,7 @@ impl Store {
 
     /// Every project's record, by id: a directory with none, left by a create that did not
     /// end, is no project.
-    pub fn records<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
+    pub fn records(&self) -> Result<Vec<Project>> {
         let mut all = Vec::new();
         for id in self.list()? {
             all.extend(self.read(&id)?);
@@ -181,13 +214,46 @@ impl Store {
         Ok(all)
     }
 
-    /// Keep `record` as project `id`'s, whole: written beside, and renamed over, so that the
+    /// The project `owner` names `name`, if any.
+    pub fn find(&self, owner: &Owner, name: &str) -> Result<Option<Project>> {
+        let all = self.records()?;
+        Ok(all
+            .into_iter()
+            .find(|project| project.owner == *owner && project.name == name))
+    }
+
+    /// Make project `name` of `owner`'s, with `members`, under an id no project has had:
+    /// refused where `owner` has a project of that name.
+    pub fn create(
+        &self,
+        owner: &Owner,
+        name: &str,
+        members: BTreeMap<String, Role>,
+    ) -> Result<Project> {
+        if !is_name(name) {
+            return Err(Error::InvalidName(name.to_owned()));
+        }
+        let _lock = self.lock()?;
+        if self.find(owner, name)?.is_some() {
+            return Err(Error::AlreadyExists(name.to_owned()));
+        }
+        let project = Project {
+            id: ProjectId::new(),
+            owner: owner.clone(),
+            name: name.to_owned(),
+            members,
+        };
+        self.write(&project)?;
+        Ok(project)
+    }
+
+    /// Keep `project` as its record, whole: written beside, and renamed over, so that the
     /// project is there once it is all written.
-    pub fn write<T: Serialize>(&self, id: &ProjectId, record: &T) -> Result<()> {
-        let dir = self.path(id);
+    pub fn write(&self, project: &Project) -> Result<()> {
+        let dir = self.path(&project.id);
         fs::create_dir_all(&dir).map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
         let (path, part) = (dir.join("project.json"), dir.join("project.json.part"));
-        let bytes = serde_json::to_vec_pretty(record).map_err(|e| Error::Other(e.into()))?;
+        let bytes = serde_json::to_vec_pretty(project).map_err(|e| Error::Other(e.into()))?;
         fs::write(&part, bytes).map_err(|e| Error::io(format!("writing {}", part.display()), e))?;
         fs::rename(&part, &path).map_err(|e| Error::io(format!("writing {}", path.display()), e))
     }
@@ -272,22 +338,47 @@ mod tests {
     fn a_project_is_there_while_its_record_is() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path());
-        let (kept, left) = (ProjectId::new(), ProjectId::new());
-        store.write(&kept, &"demo").unwrap();
+        let kept = store
+            .create(&Owner::Admin, "demo", BTreeMap::new())
+            .unwrap();
         // A create that did not end leaves a directory with no record.
+        let left = ProjectId::new();
         fs::create_dir_all(store.path(&left)).unwrap();
         fs::write(store.path(&left).join("project.json.part"), "{").unwrap();
 
-        assert_eq!(
-            store.read::<String>(&kept).unwrap().as_deref(),
-            Some("demo")
-        );
-        assert_eq!(store.read::<String>(&left).unwrap(), None);
-        assert_eq!(store.records::<String>().unwrap(), ["demo"]);
+        assert_eq!(store.read(&kept.id).unwrap(), Some(kept.clone()));
+        assert_eq!(store.read(&left).unwrap(), None);
+        assert_eq!(store.records().unwrap(), std::slice::from_ref(&kept));
 
-        store.forget(&kept).unwrap();
-        assert_eq!(store.records::<String>().unwrap(), Vec::<String>::new());
-        assert!(matches!(store.forget(&kept), Err(Error::Unknown(_))));
-        assert!(store.path(&kept).is_dir());
+        store.forget(&kept.id).unwrap();
+        assert_eq!(store.records().unwrap(), []);
+        assert!(matches!(store.forget(&kept.id), Err(Error::Unknown(_))));
+        assert!(store.path(&kept.id).is_dir());
+    }
+
+    /// Each owner names their own: the admin's and a user's of one name are two projects, and
+    /// neither is the other's.
+    #[test]
+    fn an_owner_names_each_of_their_projects_once() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path());
+        let alice = Owner::User("alice".into());
+        let members = BTreeMap::from([("alice".to_owned(), Role::Owner)]);
+
+        let admin_s = store
+            .create(&Owner::Admin, "demo", BTreeMap::new())
+            .unwrap();
+        let alice_s = store.create(&alice, "demo", members.clone()).unwrap();
+        assert_ne!(admin_s.id, alice_s.id);
+        assert_eq!(store.find(&Owner::Admin, "demo").unwrap(), Some(admin_s));
+        assert_eq!(store.find(&alice, "demo").unwrap(), Some(alice_s));
+        assert!(matches!(
+            store.create(&alice, "demo", members.clone()),
+            Err(Error::AlreadyExists(_))
+        ));
+        assert!(matches!(
+            store.create(&alice, "Demo", members),
+            Err(Error::InvalidName(_))
+        ));
     }
 }

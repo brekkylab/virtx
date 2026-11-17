@@ -44,7 +44,7 @@ class Project:
     """What its owner names it, among their projects."""
 
     owner: str | None
-    """The user whose project it is: ``None`` from a server with no users, such as over stdio."""
+    """The user whose project it is: ``None`` for one of no user's, such as one made over stdio."""
 
     role: Role
     """The client's role in it, as the server answered it."""

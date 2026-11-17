@@ -1185,7 +1185,7 @@ pub(crate) mod ffi {
 
     /// Answers with each project the client has a role in, as
     /// `[{"id": "...", "name": "...", "owner": "...", "role": "owner" or "member"}, ...]`, with no
-    /// `owner` from a server with no users, such as over stdio.
+    /// `owner` for one of no user's, such as one made over stdio.
     ///
     /// # Safety
     ///

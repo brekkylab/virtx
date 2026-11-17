@@ -319,10 +319,9 @@ async fn role_in(
 
 /// `project` as the server answers it to `user`, a member of it.
 fn answer(project: Project, user: &str) -> ProjectListOutputItem {
-    let Owner::User(owner) = project.owner;
     ProjectListOutputItem {
         id: project.id.to_string(),
-        owner: Some(owner),
+        owner: project.owner.user().map(str::to_owned),
         role: project.members[user],
         name: project.name,
     }

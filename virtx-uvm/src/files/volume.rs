@@ -224,7 +224,16 @@ impl DavFile for File {
     fn flush(&mut self) -> FsFuture<'_, ()> {
         Box::pin(async move {
             let at = self.saving.as_deref().unwrap_or(&self.path);
-            let read = self.volume.stat(at).await.ok().map(|s| described(&s));
+            let read = match self.volume.stat(at).await {
+                Ok(stat) => Some(described(&stat)),
+                Err(e) => {
+                    log::debug!(
+                        "{self:?}: the written file was not read, so the PUT answers no ETag or \
+                         Last-Modified: {e}"
+                    );
+                    None
+                }
+            };
             if let Some(saving) = &self.saving {
                 self.volume
                     .rename(saving, &self.path, true)

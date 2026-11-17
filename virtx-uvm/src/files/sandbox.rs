@@ -265,7 +265,16 @@ impl DavFile for File {
         Box::pin(async move {
             self.send(0).await?;
             let at = self.saving.clone().unwrap_or_else(|| self.path.clone());
-            let read = stat(&self.machine, &at).await.ok();
+            let read = match stat(&self.machine, &at).await {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    log::debug!(
+                        "{self:?}: the written file was not read, so the PUT answers no ETag or \
+                         Last-Modified: {e}"
+                    );
+                    None
+                }
+            };
             if let Some(saving) = self.saving.take() {
                 let request = IoReq::Rename {
                     from: saving.clone(),

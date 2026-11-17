@@ -795,9 +795,10 @@ const BODY_LIMIT: usize = 2 << 20;
 /// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
-/// it comes, before it is refused: answered with its body unread, the connection is closed with
-/// it unread, and Windows resets it, so a client still sending sees the reset and never the
-/// `413`. The files endpoints read the rest of a body for the same reason.
+/// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
+/// with a body unread is reset, and a client still sending never sees the `413`. This server's
+/// one connection is HTTP/2 over the process's pipes, where that does not happen; the body is
+/// read to its end here too, so the two servers answer it alike.
 struct Whole(Bytes);
 
 impl<S: Send + Sync> FromRequest<S> for Whole {

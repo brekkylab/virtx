@@ -833,8 +833,10 @@ const BODY_LIMIT: usize = 2 << 20;
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused: answered with its body unread, the connection is closed with
-/// it unread, and Windows resets it, so a client still sending sees the reset and never the
-/// `413`. The files endpoints read the rest of a body for the same reason.
+/// it unread and reset, on any system, so a client still sending sees the reset and never the
+/// `413`. The files endpoints read the rest of a body for the same reason. What is read has no
+/// bound: a client that sends a JSON body here has been let in already, and may write a file of
+/// any size.
 struct Whole(Bytes);
 
 impl<S: Send + Sync> FromRequest<S> for Whole {

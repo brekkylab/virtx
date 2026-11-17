@@ -343,13 +343,6 @@ jobs:
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
 
-      # Measuring, for now: `cargo xtask init` waited about 33 seconds on a new Windows runner
-      # before it did anything, and these are the two things it starts first.
-      - name: First start of rustc and sccache (timed)
-        run: |
-          time rustc -vV
-          [ -z "$RUSTC_WRAPPER" ] || time sccache --start-server
-
       - name: Add the guest's musl target
         run: cargo xtask init
 
@@ -848,13 +841,6 @@ jobs:
 
       - if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: ./.github/actions/cargo-deps
-
-      # Measuring, for now: `cargo xtask init` waited about 33 seconds on a new Windows runner
-      # before it did anything, and these are the two things it starts first.
-      - name: First start of rustc and sccache (timed)
-        run: |
-          time rustc -vV
-          [ -z "$RUSTC_WRAPPER" ] || time sccache --start-server
 
       - name: Add the guest's musl target
         run: cargo xtask init

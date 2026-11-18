@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-[직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라 내 머신에 `virtx-server-tcp`를 세팅합니다.
+[직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
 
 `virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
 나머지는 로컬 예제와 같습니다.

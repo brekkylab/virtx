@@ -44,7 +44,8 @@ let project = client.create_project("demo").await?;
 </Tabs>
 
 You become the project's owner.
-A project name uses lower-case letters, digits, `.`, `_` and `-`.
+A project name is at most 128 characters of lower-case letters, digits, `.`, `_` and `-`, not starting with `.` or `-`.
+It cannot be `default`, which is your own, or be spelled like a project `id`.
 
 To see your projects, use `list_project`, which includes those others have shared with you.
 To look one up, use `get_project`.
@@ -132,8 +133,9 @@ A member can also leave a project on their own with `remove_member`.
 
 A teammate's project is named by its owner, so your teammates reach a shared project by its `id` rather than its name: `project.id` is what to pass them.
 
-Members are for servers with users, such as virtx cloud or [your own server](/docs/guides/self-hosting/).
+Members are for servers with users, such as [your own server](/docs/guides/self-hosting/).
 A server on your own machine, started with `Client.spawn()`, has only you.
+On virtx cloud, you create projects and add members in the console instead.
 
 ## Remove a project
 
@@ -164,6 +166,7 @@ project.remove().await?;
 </TabItem>
 </Tabs>
 
-Removing your `default` project empties it instead: it is there again, with nothing in it, the next time you use it.
+Removing your `default` project removes it like any other, and you get a new, empty `default` the next time you use it.
+The new one has a new `id` and only you in it, so teammates you shared the old one with need to be added again.
 
 For every call and what each returns, see the [API reference](/docs/reference/api/#projects).

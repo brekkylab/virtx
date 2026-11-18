@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### リモート
 
-[自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、手元のマシンに`virtx-server-tcp`をセットアップします。
+[自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
 
 `virtx-cli/`からビルドした`virtx`で一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
 それ以外はローカルの例と同じです。

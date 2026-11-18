@@ -36,8 +36,9 @@ use virtx_core::{
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, Os, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
+    RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after,
+    signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -61,6 +62,8 @@ const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 pub struct Home {
     images: ImageStore,
     registry: Arc<RegistryServer>,
+    /// What its image jobs -- a pull, a push, a build's base -- connect to registries through.
+    registries: Arc<dyn RegistryProxy>,
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
@@ -79,7 +82,9 @@ pub struct Home {
 
 impl Home {
     /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' upper disks under `root`.
+    /// sandboxes' upper disks under `root`. Its image jobs connect to registries on public
+    /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
+    /// is made for says otherwise ([`Access::through`]).
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
@@ -90,6 +95,7 @@ impl Home {
         Ok(Home {
             images,
             registry,
+            registries: Arc::new(PublicRegistries::default()),
             files: Files::new(volumes.clone()),
             root: root.to_owned(),
             volumes,
@@ -101,6 +107,12 @@ impl Home {
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
+    }
+
+    /// This, its image jobs connecting to registries through `registries`.
+    pub(crate) fn through(mut self, registries: Arc<dyn RegistryProxy>) -> Home {
+        self.registries = registries;
+        self
     }
 
     pub fn images(&self) -> &ImageStore {
@@ -563,13 +575,14 @@ where
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let images = home.images.clone();
+    let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images.clone(), args.auth);
+            let registry =
+                RegistryClient::new(images.clone(), args.auth).through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -581,13 +594,13 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
 async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let images = home.images.clone();
+    let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
     image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = RegistryClient::new(images, args.auth);
+            let registry = RegistryClient::new(images, args.auth).through(Some(&*registries))?;
             Ok(registry.push(&reference, report).await?)
         },
     )
@@ -600,13 +613,15 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         self::reference(&args.recipe.base)?;
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
+    let registries = Arc::clone(&home.registries);
     let recipe = args.recipe;
     image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
         move |mut report| async move {
-            let (mut image, mut layers, _base) = base(&images, &recipe.base, &mut report).await?;
+            let (mut image, mut layers, _base) =
+                base(&images, &*registries, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -640,9 +655,11 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
+/// pulled into the store now, anonymously, through `registries`, and left untagged: a build
+/// tags only what it builds.
 async fn base(
     images: &ImageStore,
+    registries: &dyn RegistryProxy,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -656,6 +673,7 @@ async fn base(
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
             RegistryClient::new(images.clone(), None)
+                .through(Some(registries))?
                 .pull(&reference, report)
                 .await?
                 .1

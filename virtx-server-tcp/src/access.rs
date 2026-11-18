@@ -4,9 +4,9 @@
 //! project's home, made by its [`Homes`] as it is first reached.
 //!
 //! The server's own are [`Access::configured`]'s: the config's token issuer ([`Oidc`]), the
-//! projects kept beside their directories ([`TcpMembership`]), and each home in its directory
-//! ([`ProjectStore`]). A server built on this one gives its own of any, such as a membership
-//! kept in a database.
+//! projects kept beside their directories ([`TcpMembership`]), each home in its directory
+//! ([`ProjectStore`]), and the registries its image jobs reach ([`Config::registries`]). A
+//! server built on this one gives its own of any, such as a membership kept in a database.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
-use virtx_uvm::{ImageStore, ProjectError, ProjectId, ProjectStore, RegistryServer, Sandbox};
+use virtx_uvm::{
+    ImageStore, ProjectError, ProjectId, ProjectStore, PublicRegistries, RegistryProxy,
+    RegistryServer, Sandbox,
+};
 
 use crate::config::Config;
 use crate::endpoints::Home;
@@ -87,12 +90,15 @@ pub struct Access {
     homes: Mutex<HashMap<ProjectId, Option<Arc<Home>>>>,
     /// Held while a home is made, so that each is made once.
     making: tokio::sync::Mutex<()>,
+    /// What the image jobs of the homes it makes connect to registries through.
+    registries: Arc<dyn RegistryProxy>,
 }
 
 impl Access {
     /// Requests from the `origins` a browser may call from, sent by whom `identity` says, to the
     /// projects `membership` names, kept in `store`, the home of each made by `maker` as it is
-    /// first reached.
+    /// first reached. The homes' image jobs connect to registries on public addresses alone,
+    /// through [`PublicRegistries`] with none named, unless [`Access::through`] says otherwise.
     pub fn new(
         origins: Vec<String>,
         identity: Arc<dyn Identity>,
@@ -108,12 +114,20 @@ impl Access {
             maker,
             homes: Mutex::default(),
             making: tokio::sync::Mutex::default(),
+            registries: Arc::new(PublicRegistries::default()),
         }
     }
 
+    /// This, the image jobs of the homes it makes from here on -- a pull, a push, a build's
+    /// base -- connecting to registries through `registries`.
+    pub fn through(mut self, registries: Arc<dyn RegistryProxy>) -> Access {
+        self.registries = registries;
+        self
+    }
+
     /// What `config` says: the users of its issuer, the projects kept at its home, each home in
-    /// its directory. The home of each project there is made now, so that its sandboxes left
-    /// from before are swept as the server starts.
+    /// its directory, and the registries the homes' image jobs reach. The home of each project
+    /// there is made now, so that its sandboxes left from before are swept as the server starts.
     pub async fn configured(config: &Config) -> anyhow::Result<Access> {
         let store = ProjectStore::new(config.home());
         let access = Access::new(
@@ -122,7 +136,8 @@ impl Access {
             Arc::new(TcpMembership::new(config.home())),
             store.clone(),
             Arc::new(store),
-        );
+        )
+        .through(Arc::new(config.registries()?));
         for id in access.store.list()? {
             access.home_of(&id).await?;
         }
@@ -232,6 +247,7 @@ impl Access {
         let Some(made) = self.maker.make(id).await? else {
             return Ok(None);
         };
+        let made = made.through(Arc::clone(&self.registries));
         match self.homes.lock().unwrap().entry(*id) {
             // Taken away for its removal while it was made.
             Entry::Occupied(taken) => Ok(taken.get().clone()),
@@ -316,6 +332,39 @@ mod tests {
             .err()
             .unwrap();
         assert!(refused.to_string().contains("oidc"), "{refused}");
+    }
+
+    /// The registry proxy of the access a config makes lets a job through to a registry on this
+    /// host's loopback that its `private_registries` names, and refuses one beside it.
+    #[tokio::test]
+    async fn a_config_s_private_registries_are_let_through_its_registry_proxy() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let listeners = [(); 2].map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap());
+        let [named, other] = listeners
+            .each_ref()
+            .map(|listener| listener.local_addr().unwrap().to_string());
+        let config = Config::parse(json!({
+            "listen": "127.0.0.1:0",
+            "home": dir.path(),
+            "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+            "private_registries": [named],
+        }))
+        .unwrap();
+        let access = Access::configured(&config).await.unwrap();
+        let pass = access.registries.pass();
+        let answered = async |host: &str| {
+            let at = pass.url().strip_prefix("http://").unwrap();
+            let mut stream = tokio::net::TcpStream::connect(at).await.unwrap();
+            let request = format!("CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut status = [0; 12];
+            stream.read_exact(&mut status).await.unwrap();
+            String::from_utf8(status.to_vec()).unwrap()
+        };
+        assert_eq!(answered(&named).await, "HTTP/1.1 200");
+        assert_eq!(answered(&other).await, "HTTP/1.1 403");
     }
 
     #[tokio::test]

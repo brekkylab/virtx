@@ -1,21 +1,23 @@
 //! `virtx-uvm-guest` -- the agent inside each of virtx-uvm's machines.
 //!
-//! libkrun's init has already built the root -- the image under the machine's ext4, the shares
-//! mounted -- and execs this standing where the image said. What is left is to open the
-//! channel, say the guest is up, and run the commands the host sends side by side, each in a
-//! process group of its own, sending what they write a line at a time.
+//! libkrun's init execs this on the boot root. It opens the channel and reads the root to build
+//! ([`root`]) as its first message: the image under the machine's ext4, the shares mounted.
+//! Standing in it where the image said, it says the guest is up and runs the commands the host
+//! sends side by side, each in a process group of its own, sending what they write a line at a
+//! time.
 //!
 //! Beside them it does what the host asks of the guest's files on the I/O channel, one request
 //! at a time. What the host sees is the root as the guest's processes see it, volumes and all,
-//! but for the kernel's own filesystems and the agent's; and a link, a device or a pipe is not
+//! but for the kernel's own filesystems; and a link, a device or a pipe is not
 //! there as far as it is told: none is listed or followed at the end of a path, and none is
 //! removed.
 //!
 //! Each channel is a named virtio-console port, not stdin and stdout: those are the guest's
 //! console, where the kernel prints, and one kernel warning would corrupt a frame there.
 //!
-//! Before any of it, it adds to its own environment, which every command inherits, what
-//! `/alib` holds for this image ([`alib_env`]): only from in here is the image's root seen.
+//! Once in the root and before it says the guest is up, it adds to its own environment, which
+//! every command inherits, what `/alib` holds for this image ([`alib_env`]): only from in here
+//! is the image's root seen.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
@@ -44,8 +46,8 @@ type Out = Arc<Mutex<File>>;
 const LINE_LIMIT: u64 = 64 << 10;
 
 /// What the host does not see at the root: the kernel's filesystems, which are no files to
-/// read or write, and the agent's.
-const HIDDEN: [&str; 4] = ["proc", "sys", "dev", ".virtx"];
+/// read or write.
+const HIDDEN: [&str; 3] = ["proc", "sys", "dev"];
 
 /// Where the libraries built against each C library are, and venus's manifest in each.
 const ALIB_MUSL: &str = "/alib/musl";
@@ -53,8 +55,6 @@ const ALIB_GLIBC: &str = "/alib/glibc";
 const ALIB_ICD: &str = "virtio_icd.json";
 
 fn main() -> ExitCode {
-    // SAFETY: nothing else runs yet; the threads start in `serve`.
-    unsafe { alib_env() };
     match serve() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -63,6 +63,110 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where the two disks and the overlay of them are mounted on the boot root, and the
+/// directories on the upper disk the overlay writes to.
+const LOWER_AT: &str = "/lower";
+const UPPER_AT: &str = "/upper";
+const UPPER_DIR: &str = "/upper/upper";
+const WORK_DIR: &str = "/upper/work";
+const NEW_ROOT: &str = "/newroot";
+
+/// Build the root the commands run in and step into it: the upper disk overlaid on the lower,
+/// the kernel's filesystems, each share where it was asked, and the resolver named.
+///
+/// libkrun's init stays PID 1 on the boot root it started this from, which is where it tells
+/// the host how the machine ended.
+fn root(asked: &wire::MachineInfo) -> io::Result<()> {
+    // The boot root is shared by the time this runs, and a mount under a shared one cannot be
+    // moved.
+    mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+    mount(
+        Some(&asked.lower_device),
+        LOWER_AT,
+        Some(&asked.lower_fstype),
+        libc::MS_RDONLY,
+        None,
+    )?;
+    mount(
+        Some(&asked.upper_device),
+        UPPER_AT,
+        Some(&asked.upper_fstype),
+        0,
+        None,
+    )?;
+    fs::create_dir_all(UPPER_DIR)?;
+    fs::create_dir_all(WORK_DIR)?;
+    let layers = format!("lowerdir={LOWER_AT},upperdir={UPPER_DIR},workdir={WORK_DIR}");
+    mount(Some("overlay"), NEW_ROOT, Some("overlay"), 0, Some(&layers))?;
+
+    std::env::set_current_dir(NEW_ROOT)?;
+    mount(Some("."), "/", None, libc::MS_MOVE, None)?;
+    std::os::unix::fs::chroot(".")?;
+    std::env::set_current_dir("/")?;
+
+    let quiet = libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_RELATIME;
+    for (source, at, flags) in [
+        ("devtmpfs", "/dev", libc::MS_RELATIME),
+        ("proc", "/proc", libc::MS_NODEV | quiet),
+        ("sysfs", "/sys", libc::MS_NODEV | quiet),
+        ("cgroup2", "/sys/fs/cgroup", libc::MS_NODEV | quiet),
+        ("devpts", "/dev/pts", quiet),
+        ("tmpfs", "/dev/shm", quiet),
+    ] {
+        fs::create_dir_all(at)?;
+        mount(Some(source), at, Some(source), flags, None)?;
+    }
+    let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
+    mount(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
+
+    for (tag, at) in &asked.shares {
+        fs::create_dir_all(at)?;
+        mount(Some(tag), at, Some("virtiofs"), 0, None)?;
+    }
+    // An image whose `/etc/resolv.conf` cannot be written resolves no names and runs anyway.
+    if let Some(nameserver) = &asked.nameserver
+        && let Err(e) = fs::write("/etc/resolv.conf", format!("nameserver {nameserver}\n"))
+    {
+        eprintln!("{}: naming the resolver: {e}", env!("CARGO_BIN_NAME"));
+    }
+    std::env::set_current_dir(&asked.workdir)
+}
+
+/// `mount(2)`, its failure naming what was being mounted where.
+fn mount(
+    source: Option<&str>,
+    at: &str,
+    fstype: Option<&str>,
+    flags: libc::c_ulong,
+    data: Option<&str>,
+) -> io::Result<()> {
+    let c = |s: Option<&str>| {
+        s.map(|s| std::ffi::CString::new(s).map_err(io::Error::other))
+            .transpose()
+    };
+    let (source_c, at_c, fstype_c, data_c) =
+        (c(source)?, c(Some(at))?.unwrap(), c(fstype)?, c(data)?);
+    let ptr = |s: &Option<std::ffi::CString>| s.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    // SAFETY: each pointer is null or a string that lives until the call returns.
+    let mounted = unsafe {
+        libc::mount(
+            ptr(&source_c),
+            at_c.as_ptr(),
+            ptr(&fstype_c),
+            flags,
+            ptr(&data_c).cast(),
+        )
+    };
+    if mounted == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    Err(io::Error::new(
+        e.kind(),
+        format!("mounting {} at {at}: {e}", source.unwrap_or("-")),
+    ))
 }
 
 /// When the machine has a GPU, put `/alib`'s libraries for the image's C library on
@@ -116,6 +220,11 @@ fn serve() -> io::Result<()> {
         .write(true)
         .open(find(PORT_NAME)?)?;
     let out: Out = Arc::new(Mutex::new(input.try_clone()?));
+    let asked = wire::recv(&mut input)?
+        .ok_or_else(|| io::Error::other("the channel ended before it named a root"))?;
+    root(&asked)?;
+    // SAFETY: nothing else runs yet; the threads start below.
+    unsafe { alib_env() };
     let io = File::options()
         .read(true)
         .write(true)

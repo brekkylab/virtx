@@ -4,8 +4,9 @@
 //!
 //! The same frames go on between the process and the agent in the guest, over the
 //! virtio-console port [`PORT_NAME`]: the process passes the host's on to the agent and the
-//! agent's back, so the channel runs end to end. The agent, built apart, includes this file by
-//! path.
+//! agent's back, so the channel runs end to end. Before any of the host's, the process writes
+//! one frame of its own there: the [`MachineInfo`] the agent builds its root from. The agent,
+//! built apart, includes this file by path.
 //!
 //! The I/O channel is two more pipes, `ioin` and `ioout`, which the process wires straight to
 //! the virtio-console port [`IO_PORT_NAME`]: the host writes [`IoReq`]s into it and
@@ -33,6 +34,25 @@ pub const IO_PORT_NAME: &str = "virtx-io";
 /// The most of a file one [`Read`](IoReq::Read) or [`Write`](IoReq::Write)
 /// moves.
 pub const MAX_DATA: usize = 1 << 20;
+
+/// What the machine's process tells the agent first, before anything of the host's: the root to
+/// build. The overlay of the two disks, the shares mounted over it in this order, and where the
+/// guest stands in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    /// The read-only disk under the overlay, and the filesystem on it.
+    pub lower_device: String,
+    pub lower_fstype: String,
+    /// The writable disk over it, and the filesystem on it.
+    pub upper_device: String,
+    pub upper_fstype: String,
+    /// Each virtio-fs share, by the tag it is attached under, and where it is mounted.
+    pub shares: Vec<(String, String)>,
+    /// The resolver `/etc/resolv.conf` names; `None` leaves the image's file as it is.
+    pub nameserver: Option<String>,
+    /// Where the agent, and so every command, stands.
+    pub workdir: String,
+}
 
 /// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

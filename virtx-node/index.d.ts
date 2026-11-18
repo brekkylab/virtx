@@ -69,6 +69,11 @@ export class Recipe {
   /** Where later steps run, and the built image's working directory. */
   workdir(directory: string): this
   toJSON(): { v: 1; base: string; steps: Step[] }
+  /**
+   * The recipe a Dockerfile's text says: one stage, with only `FROM`, `RUN`, `ENV` and `WORKDIR`.
+   * Anything else throws a `VirtxError` naming its line.
+   */
+  static fromDockerfile(content: string): Recipe
 }
 
 /** A notification about a request: how far it has got, what that will reach when known, and its `content`, if it sent one, such as a line of its log. */

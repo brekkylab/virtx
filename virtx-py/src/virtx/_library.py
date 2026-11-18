@@ -213,6 +213,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         ctypes.c_int,
     ),
     "virtx_port_forwarder_free": ([_HANDLE], None),
+    "virtx_recipe_from_dockerfile": ([ctypes.c_char_p, ctypes.c_size_t, _OUT], ctypes.c_int),
     "virtx_bytes_free": ([_Bytes], None),
     "virtx_future_poll": ([_HANDLE, _Waker, _OUT], ctypes.c_int),
     "virtx_future_wait": ([_HANDLE, _OUT], ctypes.c_int),

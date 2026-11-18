@@ -314,6 +314,101 @@ impl fmt::Display for Step {
     }
 }
 
+#[cfg(feature = "ffi")]
+pub(crate) mod ffi {
+    //! [`Recipe::from_dockerfile`] behind the C ABI, for the packages that cannot call it in Rust.
+
+    use std::{ffi::c_int, slice};
+
+    use super::Recipe;
+    use crate::{
+        Error,
+        ffi::{VirtxBytes, encode, write},
+    };
+
+    /// Read the `content_len` bytes of `content`, a Dockerfile's UTF-8 text, into a recipe, and
+    /// write it to `out` as the JSON `build_image` takes. Answers `VIRTX_OK`, or `VIRTX_ERROR`
+    /// with why it is refused, at its line, written to `out` instead.
+    ///
+    /// # Safety
+    ///
+    /// `content` is `content_len` readable bytes, or null when `content_len` is 0. `out` is null
+    /// or writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_recipe_from_dockerfile(
+        content: *const u8,
+        content_len: usize,
+        out: *mut VirtxBytes,
+    ) -> c_int {
+        let read = if content_len == 0 {
+            Ok("")
+        } else if content.is_null() {
+            Err(Error::Client("the Dockerfile is null".into()))
+        } else {
+            std::str::from_utf8(unsafe { slice::from_raw_parts(content, content_len) })
+                .map_err(|e| Error::Client(format!("the Dockerfile is not UTF-8: {e}")))
+        }
+        .and_then(|text| Recipe::from_dockerfile(text).map_err(|e| Error::Client(e.to_string())));
+        let (status, bytes) = encode(read);
+        unsafe { write(out, bytes) };
+        status
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::ptr;
+
+        use serde_json::Value;
+
+        use super::*;
+        use crate::{
+            Step,
+            ffi::{VIRTX_ERROR, VIRTX_OK, virtx_bytes_free},
+        };
+
+        /// The status and the JSON `virtx_recipe_from_dockerfile` answers for `content`.
+        fn read(content: &[u8]) -> (c_int, Value) {
+            let mut out = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            let status =
+                unsafe { virtx_recipe_from_dockerfile(content.as_ptr(), content.len(), &mut out) };
+            let json = serde_json::from_slice(unsafe { slice::from_raw_parts(out.data, out.len) })
+                .unwrap();
+            unsafe { virtx_bytes_free(out) };
+            (status, json)
+        }
+
+        #[test]
+        fn a_dockerfile_is_answered_as_the_recipe_build_image_takes() {
+            let (status, json) = read(b"FROM alpine:3.20\nRUN apk add jq\nENV TZ=UTC\n");
+            assert_eq!(status, VIRTX_OK);
+            let recipe: Recipe = serde_json::from_value(json).unwrap();
+            let declared = Recipe::new("alpine:3.20")
+                .step("apk add jq")
+                .step(Step::env("TZ", "UTC"));
+            assert_eq!(recipe, declared);
+        }
+
+        #[test]
+        fn a_refused_dockerfile_is_answered_as_a_client_error_at_its_line() {
+            let (status, json) = read(b"FROM alpine:3.20\nCMD [\"sh\"]\n");
+            assert_eq!(status, VIRTX_ERROR);
+            assert_eq!(json["source"], "client");
+            let message = json["message"].as_str().unwrap();
+            assert!(message.starts_with("Dockerfile:2: CMD"), "{message}");
+        }
+
+        #[test]
+        fn text_that_is_not_utf8_is_refused() {
+            let (status, json) = read(b"FROM alpine\nRUN \xff\n");
+            assert_eq!(status, VIRTX_ERROR);
+            assert!(json["message"].as_str().unwrap().contains("not UTF-8"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

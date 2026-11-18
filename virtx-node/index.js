@@ -147,6 +147,7 @@ const SIGNATURES = {
     ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
+  virtx_recipe_from_dockerfile: ['int', ['uint8_t *', 'size_t', Out]],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_future_wait: ['int', ['uintptr_t', Out]],
@@ -354,6 +355,16 @@ class Recipe {
   workdir(directory) {
     this.steps.push({ workdir: directory })
     return this
+  }
+
+  // The recipe a Dockerfile's text says: one stage, with only `FROM`, `RUN`, `ENV` and `WORKDIR`.
+  // Anything else throws a `VirtxError` naming its line.
+  static fromDockerfile(content) {
+    const lib = library()
+    const bytes = Buffer.from(content, 'utf8')
+    const out = {}
+    const read = lib.take(lib.virtx_recipe_from_dockerfile(bytes, bytes.length, out), out)
+    return new Recipe(read.base, read.steps)
   }
 
   toJSON() {

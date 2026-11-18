@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import builtins
+import ctypes
 import re
 import sys
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ._library import VirtxError, args
+from ._library import VirtxError, _Bytes, args, library
 from .job import LogEntry, Truncated
 
 if TYPE_CHECKING:
@@ -84,6 +85,17 @@ class Recipe:
         """Where later steps run, and the built image's working directory."""
         self.steps.append({"workdir": directory})
         return self
+
+    @classmethod
+    def from_dockerfile(cls, content: str) -> Recipe:
+        """The recipe a Dockerfile's text says: one stage, with only ``FROM``, ``RUN``, ``ENV``
+        and ``WORKDIR``. Anything else raises a ``VirtxError`` naming its line."""
+        lib = library()
+        data = content.encode()
+        out = _Bytes()
+        status = lib.virtx_recipe_from_dockerfile(data, len(data), ctypes.byref(out))
+        read = lib.take(status, out)
+        return cls(read["base"], read["steps"])
 
     def to_dict(self) -> dict[str, Any]:
         """As the wire has it."""

@@ -20,6 +20,21 @@ test('an image is named by its spelling', () => {
   assert.deepEqual(virtx.imageName('sha256:0'), { type: 'tag', tag: 'sha256:0' })
 })
 
+test('a Dockerfile reads into a recipe', () => {
+  const recipe = virtx.Recipe.fromDockerfile('FROM alpine:3.20\nRUN apk add jq\nENV TZ=UTC\n')
+  assert.ok(recipe instanceof virtx.Recipe)
+  const declared = new virtx.Recipe('alpine:3.20').run('apk add jq').env('TZ', 'UTC')
+  assert.deepEqual(recipe.toJSON(), declared.toJSON())
+})
+
+test('a Dockerfile refused throws at its line', () => {
+  assert.throws(() => virtx.Recipe.fromDockerfile('FROM alpine:3.20\nCMD ["sh"]\n'), {
+    name: 'VirtxError',
+    source: 'client',
+    message: /^Dockerfile:2: CMD/,
+  })
+})
+
 test('a client over HTTP sends its token and project', async () => {
   const { url, token, project } = fixture()
   const client = Client.connect(url, { type: 'bearer', token }, project)

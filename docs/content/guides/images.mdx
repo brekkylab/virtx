@@ -65,17 +65,39 @@ ENV LANG=C.UTF-8
 WORKDIR /work
 ```
 
-The `virtx` command, which the Python and Node.js packages install, builds the Dockerfile in a directory, or the one `-f` names; see [CLI](/docs/reference/cli/):
+`from_dockerfile` reads a Dockerfile's text into a recipe for `build_image`:
 
-```sh
-virtx build -t jq:latest .
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+recipe = Recipe.from_dockerfile(Path("Dockerfile").read_text())
+digest = await client.build_image(recipe, "jq:latest").complete(print=True)
 ```
 
-In Rust, `Recipe::from_dockerfile` reads a Dockerfile's text into a recipe for `build_image`:
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const recipe = Recipe.fromDockerfile(fs.readFileSync('Dockerfile', 'utf8'))
+const digest = await client.buildImage(recipe, 'jq:latest').complete({ print: true })
+```
+
+</TabItem>
+<TabItem label="Rust">
 
 ```rust
 let recipe = Recipe::from_dockerfile(std::fs::read_to_string("Dockerfile")?)?;
 let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
+```
+
+</TabItem>
+</Tabs>
+
+The `virtx` command, which the Python and Node.js packages install, builds the Dockerfile in a directory, or the one `-f` names; see [CLI](/docs/reference/cli/):
+
+```sh
+virtx build -t jq:latest .
 ```
 
 ### After a build

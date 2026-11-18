@@ -18,6 +18,20 @@ def test_an_image_is_named_by_its_spelling() -> None:
     assert virtx.image_name("sha256:0") == virtx.ImageTag("sha256:0")
 
 
+def test_a_dockerfile_reads_into_a_recipe() -> None:
+    recipe = virtx.Recipe.from_dockerfile("FROM alpine:3.20\nRUN apk add jq\nENV TZ=UTC\n")
+    assert isinstance(recipe, virtx.Recipe)
+    assert (
+        recipe.to_dict() == virtx.Recipe("alpine:3.20").run("apk add jq").env("TZ", "UTC").to_dict()
+    )
+
+
+def test_a_dockerfile_refused_raises_at_its_line() -> None:
+    with pytest.raises(VirtxError, match="^Dockerfile:2: CMD") as refused:
+        virtx.Recipe.from_dockerfile('FROM alpine:3.20\nCMD ["sh"]\n')
+    assert refused.value.source == "client"
+
+
 def test_a_mount_source_keeps_its_credentials_out_of_its_repr() -> None:
     source = virtx.GdriveSource("id", "secret", "token")
     assert source.to_dict() == {

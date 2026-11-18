@@ -812,6 +812,18 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
 
+// Read the `content_len` bytes of `content`, a Dockerfile's UTF-8 text, into a recipe, and
+// write it to `out` as the JSON `build_image` takes. Answers `VIRTX_OK`, or `VIRTX_ERROR`
+// with why it is refused, at its line, written to `out` instead.
+//
+// # Safety
+//
+// `content` is `content_len` readable bytes, or null when `content_len` is 0. `out` is null
+// or writable.
+int virtx_recipe_from_dockerfile(const uint8_t *content,
+                                 size_t content_len,
+                                 struct VirtxBytes *out);
+
 // Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
 // `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
 // `{"address": "127.0.0.1:n"}`, or the error's message.

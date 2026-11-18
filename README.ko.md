@@ -149,29 +149,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-각 [릴리스](https://github.com/brekkylab/virtx/releases)에는 서버가 `virtx-server-tcp-<os>-<arch>.tar.gz`로 들어 있습니다(`macos-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`).
-안에는 `virtx-server-tcp`, 게스트 커널, `abin/`, `alib/`이 있습니다.
-별도 디렉터리에 풀면 `virtx-server-tcp`가 옆에 있는 게스트 커널을 찾으므로, `PATH`나 라이브러리 경로를 설정하지 않고 그 자리에서 실행할 수 있습니다.
+[직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
 
-서버 머신에서 OpenID Connect 제공자를 지정한 `server.json`을 작성하고 서버를 시작합니다.
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-클라이언트에서는 `Client.spawn()` 대신 서버에 접속합니다.
+`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
 나머지는 로컬 예제와 같습니다.
-
-사용자는 제공자가 `client_id`의 클라이언트에 발급한 ID 토큰의 `email`입니다. 이 클라이언트는 device flow를 쓰는 공개 클라이언트여야 합니다.
-`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, 그것이 출력하는 토큰으로 접속합니다.
 
 ```sh
 virtx login https://virtx.example
@@ -216,10 +197,6 @@ let client = Client::connect(
 ```
 
 </details>
-
-`virtx token`은 마지막으로 로그인한 provider의 토큰을 줍니다. 여러 곳에 로그인해 두었다면 인자로 서버의 provider를 지정하세요: `token --json --issuer https://idp.example --client-id virtx`.
-
-클라이언트는 평문 `http`로는 자기 머신의 루프백 주소에만 토큰을 보내므로, 서버를 다른 머신에서 돌린다면 앞단에 HTTPS를 두세요.
 
 ## 주요 기능
 

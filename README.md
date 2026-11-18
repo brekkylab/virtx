@@ -148,29 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Remote
 
-Each [release](https://github.com/brekkylab/virtx/releases) carries the server as `virtx-server-tcp-<os>-<arch>.tar.gz`, for `macos-aarch64`, `linux-x86_64`, `linux-aarch64` and `windows-x86_64`.
-It holds `virtx-server-tcp`, the guest kernel, `abin/` and `alib/`.
-Unpack it into a directory of its own: `virtx-server-tcp` finds the guest kernel beside it, so it runs from there with no `PATH` or library path to set.
+Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](https://virtx.sh/docs/guides/self-hosting/) shows.
 
-On the server machine, write a `server.json` naming your OpenID Connect provider, and start the server:
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-On the client, connect to it in place of `Client.spawn()`.
+Sign in to it once with `virtx`, built from `virtx-cli/`, and connect with the token it prints in place of `Client.spawn()`.
 The rest is the same as the local example.
-
-A user is the `email` of the ID token the provider issues the client `client_id` names, a public client with the device flow.
-Sign in once with `virtx`, built from `virtx-cli/`, and connect with the token it prints:
 
 ```sh
 virtx login https://virtx.example
@@ -215,10 +196,6 @@ let client = Client::connect(
 ```
 
 </details>
-
-`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`.
-
-A client sends a token over plain `http` only to this machine's loopback, so put a server on another machine behind HTTPS.
 
 ## Features
 

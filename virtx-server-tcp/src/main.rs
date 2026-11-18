@@ -31,9 +31,6 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn run(config: Config) -> anyhow::Result<()> {
-    if let Some(secs) = config.minute_secs {
-        endpoints::set_minute(std::time::Duration::from_secs(secs.max(1)));
-    }
     if let Some(mirror) = config
         .registry_mirror
         .as_deref()
@@ -45,7 +42,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     serve::spawn_loops(&access);
     let listener = serve::bind(config.listen).await?;
     let served = serve::serve(listener, router).await;
-    // Every sandbox stops with this server, what it wrote on its disk, kept for the next.
+    // Every sandbox is parked with this server, what it wrote on its disk, kept for the next.
     tokio::task::spawn_blocking(move || {
         for home in access.homes() {
             home.close_all_blocking();

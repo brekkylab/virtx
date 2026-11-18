@@ -5,8 +5,8 @@
 //!
 //! A sandbox's disk is a snapshot of the store's, named by its id, and what lasts past its
 //! machine is kept on disk beside it ([`Sandboxes`]): a server spawned again knows each,
-//! stopped. Its ports are on this host's loopback, each at an address this server picks once
-//! it first starts or opens it ([`Loopback`]).
+//! parked. Its ports are on this host's loopback, each at an address this server picks once
+//! its machine first boots ([`Loopback`]).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -97,6 +97,7 @@ impl Home {
             root,
             vm.clone(),
             Arc::new(Loopback),
+            virtx_uvm::park_after(),
         )?;
         Ok(Home {
             images,
@@ -117,8 +118,8 @@ impl Home {
     }
 
     /// Close it to every sandbox and image job from now on, for its project to be removed:
-    /// `false`, and left open, while a sandbox lives here -- running or stopped, of this process
-    /// or another.
+    /// `false`, and left open, while a sandbox lives here -- its machine up or not, of this
+    /// process or another.
     pub fn close(&self) -> bool {
         if !self.sandboxes.list(None).is_empty() || Sandbox::lives_under(&self.root) {
             return false;
@@ -127,23 +128,22 @@ impl Home {
         true
     }
 
-    /// Its sandboxes, stopped once unused for their `auto_stop_minutes` and deleted once kept
-    /// past their `auto_delete_days`, from now on.
-    pub fn tend(&self) {
-        self.sandboxes.spawn_tending();
+    /// Its sandboxes reclaimed once unused for [`reclaim_after`](virtx_uvm::reclaim_after),
+    /// from now on.
+    pub fn reclaim(&self) {
+        self.sandboxes.spawn_reclaiming();
     }
 
-    /// Stop every sandbox here, side by side: blocks until each machine has stopped and synced
-    /// what it wrote. Each is kept, stopped, for the next server over this home -- an ephemeral
-    /// one, deleted.
+    /// Park every sandbox here, side by side: blocks until each machine has stopped and synced
+    /// what it wrote. Each is kept, parked, for the next server over this home.
     pub fn close_all(&self) {
         self.sandboxes.close_all_blocking();
     }
 }
 
 /// What answers a sandbox's ports on this host: each on its loopback, which only this machine
-/// reaches, at an address picked as the port is first started or opened, and taken to the
-/// sandbox's machine while it runs.
+/// reaches, at an address picked as its machine first boots, and taken to the sandbox's machine
+/// while it is up.
 struct Loopback;
 
 impl Hooks for Loopback {
@@ -168,14 +168,14 @@ impl Hooks for Loopback {
                     };
                     let activity = sandbox.activity();
                     tokio::spawn(async move {
-                        // Closed at once when no machine runs, as a port nothing listens on is --
-                        // and then not a use of it.
+                        // Closed at once while its machine is not up, as a port nothing listens
+                        // on is -- and then not a use of it.
                         match activity.sandbox().connect(port).await {
                             Ok(mut reached) => {
                                 let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached)
                                     .await;
                             }
-                            Err(_) if !activity.sandbox().is_running() => activity.unused(),
+                            Err(_) if !activity.sandbox().up() => activity.unused(),
                             Err(_) => {}
                         }
                     });
@@ -279,8 +279,6 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
-        .route("/sandboxes/{id}/start", post(sandbox_start))
-        .route("/sandboxes/{id}/stop", post(sandbox_stop))
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -720,8 +718,8 @@ async fn volume_files(
     home.files.volume(&segments["name"], request).await
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine while it runs: one
-/// that is stopped answers `409`, `stopped`, and is not started for it.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine: booted first if it
+/// is parked. One whose machine has exited answers `409`, `ended`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
@@ -729,13 +727,20 @@ async fn sandbox_files(
 ) -> Answer {
     let id = &segments["id"];
     let sandbox = home.sandboxes.get(id)?;
-    // In use from here until the answer has been sent.
+    // In use from here until the answer has been sent -- taken first, so that it is not parked
+    // unused in between. Refused, it is not used.
     let activity = sandbox.activity();
-    let machine = sandbox.running_machine()?;
+    let machine = match sandbox.machine().await {
+        Ok(machine) => machine,
+        Err(e) => {
+            activity.unused();
+            return Err(e.into());
+        }
+    };
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-/// Every sandbox, running or stopped; `?name=` those named so, one at most.
+/// Every sandbox; `?name=` those named so, one at most.
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
     let name = query.as_deref().and_then(|query| {
         query.split('&').find_map(|pair| {
@@ -782,21 +787,6 @@ async fn sandbox_get(
     Segments(id): Segments<String>,
 ) -> Answer {
     Ok(json(&home.sandboxes.get(&id)?.answer(false)))
-}
-
-/// Started if it is stopped; answered with where its ports are.
-async fn sandbox_start(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-) -> Answer {
-    Ok(json(&home.sandboxes.get(&id)?.start().await?))
-}
-
-async fn sandbox_stop(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-) -> Answer {
-    Ok(json(&home.sandboxes.stop(&id).await?))
 }
 
 async fn sandbox_remove(
@@ -1149,8 +1139,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
-            SandboxError::Stopped(_) => refused(StatusCode::CONFLICT, "stopped", e),
-            SandboxError::Running(_) => refused(StatusCode::CONFLICT, "running", e),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
             SandboxError::Refused {
                 status,
                 code,

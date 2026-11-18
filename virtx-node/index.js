@@ -51,7 +51,7 @@ class VirtxError extends Error {
     this.source = source
     // The HTTP status the server refused the request with, if it did.
     this.status = status
-    // The protocol's code it refused with, where it answered one: `not_found`, `stopped`,
+    // The protocol's code it refused with, where it answered one: `not_found`, `ended`,
     // `in_use` and the like -- what to branch on, not the message.
     this.code = code
     // The server's response body, where it was not a JSON error.
@@ -143,8 +143,6 @@ const SIGNATURES = {
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
   virtx_client_find_sandbox: WITH_ARGS,
-  virtx_client_start_sandbox: WITH_ARGS,
-  virtx_client_stop_sandbox: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -327,17 +325,13 @@ function library() {
   return opened
 }
 
-// What is sent as `null`, where leaving a member out would mean something else.
-const NULL = Symbol('null')
-
 // camelCase keys to the wire's snake_case, and back, through plain objects and arrays.
 function rekey(value, key) {
   if (Array.isArray(value)) return value.map((item) => rekey(item, key))
   if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return value
   const rekeyed = {}
   for (const [name, item] of Object.entries(value)) {
-    if (item === NULL) rekeyed[key(name)] = null
-    else if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
+    if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
   }
   return rekeyed
 }
@@ -749,14 +743,12 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
-  // Each of `volumes`' `volume` is a handle or its name. `autoDeleteDays: 'never'` keeps it until
-  // it is deleted.
+  // Each of `volumes`' `volume` is a handle or its name.
   async createSandbox(image, options = {}) {
-    const { autoDeleteDays, volumes } = options
+    const { volumes } = options
     const info = await this._call('virtx_client_create_sandbox', {
       ...options,
       image: imageName(image),
-      autoDeleteDays: autoDeleteDays === 'never' ? NULL : autoDeleteDays,
       volumes: volumes?.map((v) =>
         v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
       ),
@@ -772,16 +764,6 @@ class Client {
   async findSandbox(name) {
     const info = await this._call('virtx_client_find_sandbox', { name })
     return info ? new Sandbox(this, info) : undefined
-  }
-
-  // Starts it if it is stopped; answered once it runs, with where its ports are now.
-  async startSandbox(id) {
-    return new Sandbox(this, await this._call('virtx_client_start_sandbox', { id }))
-  }
-
-  // Stops it if it runs, its disk kept -- or, for an ephemeral one, deleted with it.
-  async stopSandbox(id) {
-    return new Sandbox(this, await this._call('virtx_client_stop_sandbox', { id }))
   }
 }
 
@@ -1052,11 +1034,10 @@ class Project {
 }
 
 // A sandbox the server holds, as making it or asking for it answered (`id`, `name`, `image`,
-// `state`, `ephemeral`, `autoStopMinutes`, `autoDeleteDays`, `usedAt`, `ports`), and the client
-// that reaches it, to run processes in it and read and write its files, its root as its
-// processes see it. Its disk -- what it writes over its image -- outlives its VM: it stops when
-// unused or told to, and starts again as it was left, under the same id, until it is deleted.
-// Dropping it leaves the sandbox; `remove` removes it.
+// `running`, `ports`), and the client that reaches it, to run processes in it and read and write
+// its files, its root as its processes see it. Its disk -- what it writes over its image -- lasts
+// until it is deleted: the server may stop its VM while nothing uses it, and boots it again for
+// the next job or request to its files. Dropping it leaves the sandbox; `remove` removes it.
 class Sandbox extends Files {
   constructor(client, info) {
     super()
@@ -1112,17 +1093,7 @@ class Sandbox extends Files {
     return new SandboxJob(this.client, this.id, info)
   }
 
-  // Starts it if it is stopped; answered once it runs, with where its ports are now.
-  start() {
-    return this.client.startSandbox(this.id)
-  }
-
-  // Stops it if it runs, its disk kept -- or, for an ephemeral one, deleted with it.
-  stop() {
-    return this.client.stopSandbox(this.id)
-  }
-
-  // Deletes it: stopped first if it runs, and its disk removed. Its volumes stay.
+  // Deletes it: its VM stopped if it is up, and its disk removed. Its volumes stay.
   async remove() {
     await this.client._call('virtx_client_remove_sandbox', { id: this.id })
   }

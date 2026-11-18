@@ -1,5 +1,5 @@
 //! What lasts of a sandbox past its machine, and how it is kept on disk: `<id>.json` in the
-//! directory its server keeps records in, for a server started again to know each, stopped.
+//! directory its server keeps records in, for a server started again to know each, parked.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use virtx_core::{SandboxCreateArgs, SandboxPort, SandboxState};
+use virtx_core::{SandboxCreateArgs, SandboxPort};
 
 use crate::{Digest, ImageHold, ImageStore, Snapshot};
 
@@ -19,9 +19,6 @@ pub(super) struct Record {
     /// every time it starts.
     pub(super) image: Digest,
     pub(super) _held: ImageHold,
-    pub(super) ephemeral: bool,
-    pub(super) auto_stop_minutes: u32,
-    pub(super) auto_delete_days: Option<u32>,
     /// What it boots with each time: its machine's size and network, and its volumes. Its
     /// `image` is the digest it stands on, and its `ports` are not read: those it has are
     /// `opened`'s.
@@ -32,13 +29,15 @@ pub(super) struct Record {
     /// capability): by key. Empty on a server that names its ports by nothing.
     pub(super) keys: Mutex<HashMap<String, u16>>,
     /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files.
+    /// its ports, a request to its files, a terminal typed in.
     pub(super) used: Mutex<SystemTime>,
+    /// Whether its machine ended on its own: nothing boots it again.
+    pub(super) exited: Mutex<bool>,
     /// How large its disk is to be, in GiB, as grown since it was made: grown so as it next
     /// boots ([`Snapshot::grow`]). None for one never grown, whose `args` say it.
     pub(super) disk_gib: Mutex<Option<u32>>,
-    /// Its machine as resized while it was stopped: booted so from then on. None for what was
-    /// never resized, whose `args` say it.
+    /// Its machine as resized: booted so from its next boot on. None for what was never
+    /// resized, whose `args` say it.
     pub(super) resized: Mutex<Resized>,
 }
 
@@ -59,9 +58,6 @@ pub(super) struct Kept {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) name: Option<String>,
     pub(super) image: String,
-    pub(super) ephemeral: bool,
-    pub(super) auto_stop_minutes: u32,
-    pub(super) auto_delete_days: Option<u32>,
     pub(super) args: SandboxCreateArgs,
     #[serde(default)]
     pub(super) opened: Vec<SandboxPort>,
@@ -70,6 +66,9 @@ pub(super) struct Kept {
     pub(super) capabilities: HashMap<String, u16>,
     /// Seconds since the epoch.
     pub(super) used: u64,
+    /// [`Record::exited`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) exited: bool,
     /// [`Record::disk_gib`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) disk_gib: Option<u32>,
@@ -88,13 +87,11 @@ impl Record {
             name: kept.name,
             image,
             _held: held,
-            ephemeral: kept.ephemeral,
-            auto_stop_minutes: kept.auto_stop_minutes,
-            auto_delete_days: kept.auto_delete_days,
             args: kept.args,
             opened: Mutex::new(kept.opened),
             keys: Mutex::new(kept.capabilities),
             used: Mutex::new(UNIX_EPOCH + Duration::from_secs(kept.used)),
+            exited: Mutex::new(kept.exited),
             disk_gib: Mutex::new(kept.disk_gib),
             resized: Mutex::new(kept.resized),
         })
@@ -148,9 +145,6 @@ impl Record {
             id: self.id.clone(),
             name: self.name.clone(),
             image: self.image.to_string(),
-            ephemeral: self.ephemeral,
-            auto_stop_minutes: self.auto_stop_minutes,
-            auto_delete_days: self.auto_delete_days,
             args: self.args.clone(),
             opened: self.opened.lock().unwrap().clone(),
             capabilities: self.keys.lock().unwrap().clone(),
@@ -160,25 +154,20 @@ impl Record {
                 .unwrap()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            exited: *self.exited.lock().unwrap(),
             disk_gib: *self.disk_gib.lock().unwrap(),
             resized: *self.resized.lock().unwrap(),
         }
     }
 
-    /// It, as the protocol answers a sandbox: running or not, and with its ports or not.
-    pub(super) fn answer(&self, running: bool, ports: bool) -> virtx_core::Sandbox {
+    /// It, as the protocol answers a sandbox, with its ports or not: running unless its
+    /// machine ended on its own.
+    pub(super) fn answer(&self, ports: bool) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
             name: self.name.clone(),
             image: self.image.to_string(),
-            state: match running {
-                true => SandboxState::Running,
-                false => SandboxState::Stopped,
-            },
-            ephemeral: self.ephemeral,
-            auto_stop_minutes: self.auto_stop_minutes,
-            auto_delete_days: self.auto_delete_days,
-            used_at: rfc3339(*self.used.lock().unwrap()),
+            running: !*self.exited.lock().unwrap(),
             ports: match ports {
                 true => self.opened.lock().unwrap().clone(),
                 false => Vec::new(),
@@ -186,28 +175,6 @@ impl Record {
             abins: self.args.abins.clone(),
         }
     }
-}
-
-/// `at`, as RFC 3339 in UTC, to the second.
-pub(super) fn rfc3339(at: SystemTime) -> String {
-    let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    // Days since 1970-01-01 to a civil date (Howard Hinnant's).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
 }
 
 #[cfg(test)]
@@ -219,9 +186,6 @@ mod tests {
   "id": "sbx_4f2a9c",
   "name": "dev",
   "image": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "ephemeral": false,
-  "auto_stop_minutes": 15,
-  "auto_delete_days": 30,
   "args": {
     "image": {
       "type": "digest",
@@ -261,27 +225,26 @@ mod tests {
   }
 }"#;
 
-    /// A record as virtx cloud's stdio server kept one: no ports apart from its args.
+    /// A record as a stdio server keeps one of a sandbox whose machine exited: no ports apart
+    /// from its args.
     const STDIO: &str = r#"{
   "id": "1a2b3c4d",
   "image": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "ephemeral": true,
-  "auto_stop_minutes": 15,
-  "auto_delete_days": null,
   "args": {
     "image": {
       "type": "digest",
       "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    },
-    "ephemeral": true
+    }
   },
-  "used": 1762300000
+  "used": 1762300000,
+  "exited": true
 }"#;
 
     #[test]
     fn a_record_kept_by_a_node_reads_and_is_written_as_it_was() {
         let kept: Kept = serde_json::from_str(NODE).unwrap();
         assert_eq!(kept.capabilities["bbbb"], 5173);
+        assert!(!kept.exited, "left out, it has not exited");
         assert_eq!(kept.opened[1].label.as_deref(), Some("web"));
         assert_eq!(kept.disk_gib, Some(4));
         assert_eq!(kept.resized.memory_mib, Some(2048));
@@ -295,20 +258,10 @@ mod tests {
     #[test]
     fn a_record_kept_without_ports_reads_with_none() {
         let kept: Kept = serde_json::from_str(STDIO).unwrap();
-        assert!(kept.ephemeral);
-        assert_eq!(kept.auto_delete_days, None);
+        assert!(kept.exited);
         assert!(kept.opened.is_empty() && kept.capabilities.is_empty());
         assert_eq!(kept.resized, Resized::default());
         let again: Kept = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
         assert_eq!(again, kept);
-    }
-
-    #[test]
-    fn a_time_is_written_as_rfc_3339() {
-        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
-        let at = UNIX_EPOCH + Duration::from_secs(1_762_300_000);
-        assert_eq!(rfc3339(at), "2025-11-04T23:46:40Z");
-        let leap = UNIX_EPOCH + Duration::from_secs(951_782_400);
-        assert_eq!(rfc3339(leap), "2000-02-29T00:00:00Z");
     }
 }

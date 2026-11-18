@@ -64,7 +64,7 @@ async fn serve() -> anyhow::Result<()> {
         }
     };
     let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
-    // The client is gone: every sandbox stops, kept for the next client.
+    // The client is gone: every sandbox is parked, kept for the next client.
     tokio::task::spawn_blocking(move || host.close_all()).await?;
     Ok(served?)
 }
@@ -206,7 +206,7 @@ impl Host {
         let images = ImageStore::new(dir.join("images"))?;
         let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
         let home = Arc::new(Home::new(images, registry, &dir)?);
-        home.tend();
+        home.reclaim();
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
     }

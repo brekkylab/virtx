@@ -19,7 +19,7 @@ use std::{
 use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
-use virtx_uvm::sandbox::{NoHooks, Sandboxes, set_minute};
+use virtx_uvm::sandbox::{NoHooks, Sandboxes};
 use virtx_uvm::{
     FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
     VolumeStore,
@@ -34,9 +34,9 @@ const MACHINE: &str = "vm";
 const ALPINE: &str = "alpine:3.20";
 const ALPINE_FROM: &str = "mirror.gcr.io/library/alpine:3.20";
 
-/// A minute, as a sandbox's `auto_stop_minutes` counts it here: what stops one unused is
-/// tried in moments, not minutes.
-const MINUTE: Duration = Duration::from_millis(100);
+/// How long a sandbox is unused before it is parked, in a test that parks one so: moments, not
+/// a minute.
+const PARK_AFTER: Duration = Duration::from_millis(500);
 
 /// How long a test looks for what it waits on before it fails: a guard against a hang, not a
 /// measure of how soon.
@@ -56,10 +56,16 @@ impl Home {
         std::fs::create_dir_all(&root).unwrap();
         let volumes = VolumeStore::new(&root).unwrap();
         Home {
-            sandboxes: sandboxes(images, &root),
+            sandboxes: sandboxes(images, &root, None),
             volumes,
             root,
         }
+    }
+
+    /// It, its sandboxes parked once unused for [`PARK_AFTER`]: before any is made.
+    fn parking(mut self) -> Home {
+        self.sandboxes = sandboxes(self.sandboxes.images(), &self.root, Some(PARK_AFTER));
+        self
     }
 
     /// A sandbox as `args` asks, booted.
@@ -96,8 +102,9 @@ impl Drop for Home {
     }
 }
 
-/// The sandboxes kept under `root`, as a server over it has them.
-fn sandboxes(images: &ImageStore, root: &Path) -> Sandboxes {
+/// The sandboxes kept under `root`, as a server over it has them, each parked once unused for
+/// `park_after`.
+fn sandboxes(images: &ImageStore, root: &Path, park_after: Option<Duration>) -> Sandboxes {
     let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
     Sandboxes::new(
         images.clone(),
@@ -106,6 +113,7 @@ fn sandboxes(images: &ImageStore, root: &Path) -> Sandboxes {
         root,
         vm,
         Arc::new(NoHooks),
+        park_after,
     )
     .unwrap()
 }
@@ -190,11 +198,10 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
-async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote(home: Home) {
-    home.sandboxes.spawn_tending();
-    let args = SandboxCreateArgs::new(ALPINE).auto_stop_minutes(5);
-    let sandbox = home.sandbox(&args).await;
-    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
+async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: Home) {
+    let home = home.parking();
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE)).await;
+    // What runs past its job ends with the machine, so seeing it gone is seeing it parked.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
     let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
 
@@ -202,21 +209,62 @@ async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote(home: Home)
         .await
         .unwrap();
     run(&sandbox, &behind, None).await.unwrap();
-    // A job that runs keeps it up, past its auto-stop many times over.
+    // A job that runs keeps it up, past its park many times over.
     let held = ["sh", "-c", "sleep 3; ps | grep -c '[s]leep 1000'"];
     assert_eq!(
         run(&sandbox, &held, None).await.unwrap(),
         (vec!["1".into()], 0)
     );
 
-    // Unused, it stops; a job starts it again, over what it wrote.
-    assert!(until(async || !sandbox.is_running()).await, "not stopped");
+    // Unused, it is parked, and running still; a job boots it again, over what it wrote.
+    assert!(until(async || !sandbox.up()).await, "not parked");
+    assert!(sandbox.answer(false).running);
     let (lines, _) = run(&sandbox, &still, None).await.unwrap();
     assert_eq!(lines, ["kept", "0"]);
+
+    // Parked again, a request to its files boots it too.
+    assert!(until(async || !sandbox.up()).await, "not parked");
+    let _asking = sandbox.activity();
+    sandbox.machine().await.unwrap();
+    assert!(sandbox.up());
+    drop(_asking);
+
+    // In use, it is not parked when asked to; parking every sandbox parks it all the same,
+    // and ends its job.
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    let refused = sandbox.park().await;
+    assert!(
+        matches!(refused, Err(SandboxError::InUse(_))),
+        "{refused:?}"
+    );
+    assert!(sandbox.up());
+    home.sandboxes.park_all().await;
+    assert!(!sandbox.up());
+    assert_eq!(job.get().code, Some(137));
 
     // Deleted, its disk goes with it.
     home.sandboxes.delete(sandbox.id()).await.unwrap();
     assert_eq!(home.kept(), 0);
+}
+
+async fn a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good(home: Home) {
+    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE)).await;
+    let (_, code) = run(&sandbox, &["sh", "-c", "sync; poweroff -f"], None)
+        .await
+        .unwrap();
+    assert_eq!(code, 137, "ended with its machine");
+    assert!(until(async || !sandbox.answer(false).running).await);
+    let refused = run(&sandbox, &["true"], None).await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+
+    // A server started again over the same home knows it exited.
+    let other = sandboxes(home.sandboxes.images(), &home.root, None);
+    let there = other.get(sandbox.id()).unwrap();
+    assert!(!there.answer(false).running);
+    let refused = there.start().await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
 async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
@@ -225,11 +273,11 @@ async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
         .await
         .unwrap();
 
-    // Another server over the same home knows it, stopped, and cannot start it while its disk
+    // Another server over the same home knows it, parked, and cannot boot it while its disk
     // is this machine's.
-    let other = sandboxes(home.sandboxes.images(), &home.root);
+    let other = sandboxes(home.sandboxes.images(), &home.root, None);
     let there = other.get(sandbox.id()).unwrap();
-    assert!(!there.is_running());
+    assert!(!there.up());
     let refused = there.start().await;
     assert!(
         matches!(refused, Err(SandboxError::Snapshot(_))),
@@ -238,42 +286,41 @@ async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
     let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
 
-    // Stopped here, it is the other's to start, as it was left.
-    home.sandboxes.stop(sandbox.id()).await.unwrap();
+    // Parked here, it is the other's to boot, as it was left.
+    sandbox.park().await.unwrap();
     let (lines, _) = run(&there, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
     other.delete(sandbox.id()).await.unwrap();
 }
 
-async fn a_sandbox_stopped_while_it_stops_unused_has_synced(home: Home) {
-    home.sandboxes.spawn_tending();
-    // It stops about 500 ms after its last job ends, and syncs for a hundred or so: one stop
-    // asked for at each delay across that, each a sandbox of its own.
+async fn a_sandbox_parked_as_it_is_parked_unused_has_synced(home: Home) {
+    let home = home.parking();
+    // It is parked about 500 ms after its last job ends, and syncs for a hundred or so: one
+    // park asked for at each delay across that, each a sandbox of its own.
     for delay in (450..=700).step_by(50) {
-        let args = SandboxCreateArgs::new(ALPINE).auto_stop_minutes(5);
-        let sandbox = home.sandbox(&args).await;
+        let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE)).await;
         // Left in the guest's page cache, so stopping the machine takes the while it syncs.
         let big = ["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=256"];
         run(&sandbox, &big, None).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        home.sandboxes.stop(sandbox.id()).await.unwrap();
-        // Started again, it has all it wrote.
+        sandbox.park().await.unwrap();
+        // Booted again, it has all it wrote.
         let (lines, _) = run(&sandbox, &["stat", "-c", "%s", "/root/big"], None)
             .await
             .unwrap();
-        assert_eq!(lines, [(256 << 20).to_string()], "stopped after {delay} ms");
+        assert_eq!(lines, [(256 << 20).to_string()], "parked after {delay} ms");
         home.sandboxes.delete(sandbox.id()).await.unwrap();
     }
 }
 
-async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed(home: Home) {
+async fn a_disk_a_parked_machine_left_reads_as_its_kernel_committed(home: Home) {
     let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE)).await;
     let write = "mkdir /root/kept && for i in $(seq 100); do echo $i > /root/kept/$i; done \
                  && sync && echo synced";
     let (lines, _) = run(&sandbox, &["sh", "-c", write], None).await.unwrap();
     assert_eq!(lines, ["synced"]);
-    home.sandboxes.stop(sandbox.id()).await.unwrap();
+    sandbox.park().await.unwrap();
 
     let path = home.disk(&sandbox);
     let image = std::fs::read(&path).unwrap();
@@ -341,7 +388,7 @@ async fn a_sandbox_deleted_twice_at_once_ends_once(home: Home) {
             "{deleted:?}"
         );
     }
-    assert!(!sandbox.is_running());
+    assert!(!sandbox.up());
     assert!(!job.get().running);
     assert!(sandbox.jobs().is_empty());
     let after = run(&sandbox, &["true"], None).await;
@@ -406,8 +453,6 @@ fn main() -> ExitCode {
         let Err(_) = virtx_uvm::enter_machine();
         std::process::exit(1);
     }
-    set_minute(MINUTE);
-
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -435,10 +480,11 @@ fn main() -> ExitCode {
     let tests = tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
-        an_unused_sandbox_stops_and_starts_again_with_what_it_wrote,
+        an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,
+        a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
         a_running_sandbox_s_disk_is_held_against_another_server,
-        a_sandbox_stopped_while_it_stops_unused_has_synced,
-        a_disk_a_stopped_machine_left_reads_as_its_kernel_committed,
+        a_sandbox_parked_as_it_is_parked_unused_has_synced,
+        a_disk_a_parked_machine_left_reads_as_its_kernel_committed,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

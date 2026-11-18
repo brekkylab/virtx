@@ -5,8 +5,8 @@
 //!
 //! Beside the protocol, what virtx cloud's node needs of a home ([`Home`]'s `pub` methods): its
 //! storage kept past this server ([`Keeping`]), room for its machines ([`Admission`]), its
-//! sandboxes themselves -- to count, stop, move to another node or copy the disk of
-//! ([`Home::sandboxes`]) -- a sandbox resized or its disk grown as it next starts
+//! sandboxes themselves -- to count, park, move to another node or copy the disk of
+//! ([`Home::sandboxes`]) -- a sandbox resized or its disk grown as it next boots
 //! (`PUT /sandboxes/{id}/resources`, `/disk`), and the volumes listed a page at a time,
 //! `?limit=&after=` -- the cloud's extension, which a client that sends neither does not see.
 //!
@@ -61,7 +61,7 @@ use crate::access::{Access, Principal};
 use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
 use crate::project::Project;
 
-pub use virtx_uvm::sandbox::{AUTO_DELETE_DAYS, AUTO_STOP_MINUTES, Terminal, cloned};
+pub use virtx_uvm::sandbox::{Terminal, cloned};
 
 /// What decides whether a machine may boot now, every project's together, as an embedder sets
 /// it ([`set_admission`]): virtx cloud's nodes hold their machines to the room their host has.
@@ -112,16 +112,6 @@ fn registry(
         .through(Some(registries))
 }
 
-/// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;
-/// before any sandbox is tended. See [`virtx_uvm::sandbox::set_minute`].
-pub fn set_minute(minute: Duration) {
-    virtx_uvm::sandbox::set_minute(minute);
-}
-
-pub(crate) fn minute() -> Duration {
-    virtx_uvm::sandbox::minute()
-}
-
 /// How old what nothing needs has to be before a prune takes it: a pull, push or build in
 /// flight has put it there and not yet pointed a reference at it.
 pub const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
@@ -165,7 +155,7 @@ pub struct HomeInner {
     writing: Arc<Mutex<HashMap<(Kind, String), usize>>>,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
-    /// Every sandbox, running or stopped, until it is deleted.
+    /// Every sandbox, its machine up or not, until it is deleted.
     sandboxes: Sandboxes,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
@@ -213,6 +203,7 @@ impl Home {
             root,
             vm.clone(),
             Arc::clone(&hooks) as Arc<dyn Hooks>,
+            virtx_uvm::park_after(),
         )?;
         let home = Home(Arc::new(HomeInner {
             registry: Arc::new(registry),
@@ -234,15 +225,14 @@ impl Home {
         Ok(home)
     }
 
-    /// Stop every sandbox, its machine with it, in a thread of its own: what they wrote is on
-    /// their disks once each has ended, and each is kept, stopped, for a server started again --
-    /// but an ephemeral one, deleted.
+    /// Park every sandbox, in a thread of its own: what they wrote is on their disks once each
+    /// machine has ended, and each is kept, parked, for a server started again.
     pub fn close_all(&self) {
         self.sandboxes.close_all();
     }
 
-    /// As [`close_all`](Self::close_all), blocking until each has stopped: not on an async
-    /// runtime's thread.
+    /// As [`close_all`](Self::close_all), blocking until each machine has stopped: not on an
+    /// async runtime's thread.
     pub fn close_all_blocking(&self) {
         self.sandboxes.close_all_blocking();
     }
@@ -495,22 +485,23 @@ impl Home {
         response
     }
 
-    /// Stop each sandbox that has run nothing, and been reached through nothing, for its
-    /// `auto_stop_minutes`; and delete each kept stopped and unused for its `auto_delete_days`
-    /// ([`Sandboxes::tend`]).
-    pub fn tend(&self) {
-        self.sandboxes.tend();
+    /// Delete each sandbox unused for [`reclaim_after`](virtx_uvm::reclaim_after), if that is
+    /// ever ([`Sandboxes::reclaim`]).
+    pub fn reclaim(&self) {
+        if let Some(after) = virtx_uvm::reclaim_after() {
+            self.sandboxes.reclaim(after);
+        }
     }
 
-    /// Its sandboxes, running or stopped: for an embedder to count, stop, move to another
+    /// Its sandboxes, their machines up or not: for an embedder to count, park, move to another
     /// server, or copy the disk of, beside what this home's routes do with them.
     pub fn sandboxes(&self) -> &Sandboxes {
         &self.sandboxes
     }
 
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
-    /// one of. None while it is stopped: a connection to a stopped sandbox's port does not
-    /// start it.
+    /// one of, its machine up or not: a connection through it to a parked sandbox's port is
+    /// refused, and does not boot it.
     pub fn tunnel(&self, capability: &str) -> Option<Tunnel> {
         let (sandbox, port) = self.sandboxes.find_port(capability)?;
         Some(Tunnel {
@@ -520,8 +511,8 @@ impl Home {
     }
 
     /// Close it to every sandbox and image job from now on, for its project to be removed:
-    /// `false`, and left open, while a sandbox lives here -- running or stopped, of this process
-    /// or another.
+    /// `false`, and left open, while a sandbox lives here -- its machine up or not, of this
+    /// process or another.
     pub fn close(&self) -> bool {
         if !self.sandboxes.list(None).is_empty() || virtx_uvm::Sandbox::lives_under(&self.root) {
             return false;
@@ -530,12 +521,12 @@ impl Home {
         true
     }
 
-    /// Whether a sandbox running here has the disk `name`, and so holds it.
+    /// Whether a sandbox whose machine is up here has the disk `name`, and so holds it.
     pub fn holds(&self, name: &str) -> bool {
         self.sandboxes.running_on(name).is_some()
     }
 
-    /// The sandbox `id`, running or stopped.
+    /// The sandbox `id`, its machine up or not.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         Ok(self.sandboxes.get(id)?)
     }
@@ -549,15 +540,15 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// The port, in the sandbox's machine while it runs.
+    /// The port, in the sandbox's machine while it is up.
     pub async fn connect(&self) -> io::Result<TcpStream> {
         self.activity.sandbox().connect(self.port).await
     }
 
-    /// Ended as nothing done, where its sandbox is stopped: not a use of it
+    /// Ended as nothing done, where its sandbox's machine is not up: not a use of it
     /// ([`Activity::unused`]).
     pub fn refused(self) {
-        if !self.activity.sandbox().is_running() {
+        if !self.activity.sandbox().up() {
             self.activity.unused();
         }
     }
@@ -842,8 +833,6 @@ pub fn router() -> Router {
         .route("/volumes/{name}/files/{*path}", any(volume_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
-        .route("/sandboxes/{id}/start", post(sandbox_start))
-        .route("/sandboxes/{id}/stop", post(sandbox_stop))
         .route("/sandboxes/{id}/disk", put(sandbox_disk))
         .route("/sandboxes/{id}/resources", put(sandbox_resources))
         .route("/sandboxes/{id}/files", any(sandbox_files))
@@ -1480,19 +1469,19 @@ struct DiskArgs {
 }
 
 /// `PUT /sandboxes/{id}/disk`, `{"disk_gib": n}`: its disk grown to `n` GiB -- never shrunk:
-/// smaller than it is, refused `400`. Grown as it next starts, what is on it kept
-/// ([`virtx_uvm::Snapshot::grow`]). Answered `{disk_gib, running}`: `running`, it is grown once
-/// it starts again.
+/// smaller than it is, refused `400`. Grown as it next boots, what is on it kept
+/// ([`virtx_uvm::Snapshot::grow`]). Answered `{disk_gib, up}`: `up`, its machine is up now, and
+/// its disk is grown once it boots again.
 async fn sandbox_disk(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
     request: Bytes,
 ) -> Answer {
     let args: DiskArgs = body(&request)?;
-    let running = home.sandbox(&id)?.grow_disk(args.disk_gib)?;
+    let up = home.sandbox(&id)?.grow_disk(args.disk_gib)?;
     Ok(json(&serde_json::json!({
         "disk_gib": args.disk_gib,
-        "running": running,
+        "up": up,
     })))
 }
 
@@ -1508,10 +1497,10 @@ struct ResourcesArgs {
 }
 
 /// `PUT /sandboxes/{id}/resources`, `{"vcpus", "memory_mib", "disk_gib"}`, each optional: its
-/// machine resized, and its disk grown -- as it next starts. Its vCPUs and memory only while it
-/// is stopped, refused `409`, `running`, else: a machine is the size it booted as. Its disk
-/// never shrunk, refused `400`. Answered `{vcpus, memory_mib, disk_gib, running}`, as it is to
-/// be.
+/// machine resized, and its disk grown -- as it next boots. A machine is the size it booted as:
+/// one up whose vCPUs or memory change is parked now if nothing uses it, and refused `409`,
+/// `in_use`, if something does. Its disk never shrunk, refused `400`. Answered
+/// `{vcpus, memory_mib, disk_gib, up}`, as it is to be, `up` whether its machine is up now.
 async fn sandbox_resources(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -1525,8 +1514,8 @@ async fn sandbox_resources(
     Ok(json(&resized))
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine while it runs: one
-/// that is stopped answers `409`, `stopped`, and is not started for it.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine: booted first if it
+/// is parked. One whose machine has exited answers `409`, `ended`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
@@ -1534,10 +1523,10 @@ async fn sandbox_files(
 ) -> Answer {
     let id = &segments["id"];
     let sandbox = home.sandbox(id)?;
-    // In use from here until the answer has been sent -- taken first, so that it is not stopped
-    // unused in between. Refused, it is not used: a stopped sandbox is not kept longer for it.
+    // In use from here until the answer has been sent -- taken first, so that it is not parked
+    // unused in between. Refused, it is not used: an exited sandbox is not kept longer for it.
     let activity = sandbox.activity();
-    let machine = match sandbox.running_machine() {
+    let machine = match sandbox.machine().await {
         Ok(machine) => machine,
         Err(e) => {
             activity.unused();
@@ -1552,7 +1541,7 @@ struct Named {
     name: Option<String>,
 }
 
-/// Every sandbox, running or stopped; `?name=` those named so, one at most.
+/// Every sandbox; `?name=` those named so, one at most.
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>, named: Query<Named>) -> Answer {
     Ok(json(&home.sandboxes.list(named.name.as_deref())))
 }
@@ -1571,21 +1560,6 @@ async fn sandbox_get(
     Segments(id): Segments<String>,
 ) -> Answer {
     Ok(json(&home.sandbox(&id)?.answer(false)))
-}
-
-/// Started if it is stopped; answered with where its ports are.
-async fn sandbox_start(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-) -> Answer {
-    Ok(json(&home.sandbox(&id)?.start().await?))
-}
-
-async fn sandbox_stop(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-) -> Answer {
-    Ok(json(&home.sandboxes.stop(&id).await?))
 }
 
 async fn sandbox_remove(
@@ -1621,7 +1595,7 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    // A job started in a stopped sandbox starts it first.
+    // A job started in a parked sandbox boots it first.
     let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
@@ -2097,8 +2071,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
-            SandboxError::Stopped(_) => refused(StatusCode::CONFLICT, "stopped", e),
-            SandboxError::Running(_) => refused(StatusCode::CONFLICT, "running", e),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
             SandboxError::Refused {
                 status,
                 code,

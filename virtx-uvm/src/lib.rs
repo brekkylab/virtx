@@ -38,7 +38,7 @@ pub use project::{
 };
 pub use sandbox::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
-    LOG_LIMIT, Sandbox, Sandboxes, signal_number,
+    LOG_LIMIT, Sandbox, Sandboxes, park_after, reclaim_after, signal_number,
 };
 pub use snapshot::{
     Error as SnapshotError, Lock as SnapshotLock, Snapshot, Store as SnapshotStore,

@@ -17,7 +17,7 @@ export class VirtxError extends Error {
    */
   status: number | null
   /**
-   * The protocol's code it refused with, where it answered one: `not_found`, `stopped`,
+   * The protocol's code it refused with, where it answered one: `not_found`, `ended`,
    * `in_use` and the like -- what to branch on, not the message.
    */
   code: string | null
@@ -337,19 +337,11 @@ export interface SandboxInfo {
   id: string
   /** The name it was given, which `findSandbox` finds it by. */
   name?: string
-  /** The digest of the image it stands on: what it boots every time it starts. */
+  /** The digest of the image it stands on: what its VM boots every time. */
   image: string
-  /** `'stopped'`: its VM down and its disk kept; a job started in it, or `startSandbox`, starts it. */
-  state: 'running' | 'stopped'
-  /** Whether it is deleted when it stops, rather than kept. */
-  ephemeral: boolean
-  /** How long it runs unused before it stops. */
-  autoStopMinutes: number
-  /** How long it is kept stopped and unused before it is deleted; absent, until it is deleted. */
-  autoDeleteDays?: number
-  /** When it was last used, as RFC 3339. */
-  usedAt: string
-  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
+  /** Whether it takes processes: `false` once its VM has exited on its own. One whose VM the server stopped for want of use is booted again by the next job, and is `true`. */
+  running: boolean
+  /** Only as `createSandbox` answers it, if it has some. */
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
@@ -358,20 +350,16 @@ export interface SandboxInfo {
 /**
  * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
  * it, to run processes in it and read and write its files, its root as its processes see it, as
- * `etc/hostname`. Its disk -- what it writes over its image -- outlives its VM: it stops when
- * unused or told to, and starts again as it was left, under the same id, until it is deleted.
- * Dropping it leaves the sandbox; `remove` removes it.
+ * `etc/hostname`. Its disk -- what it writes over its image -- lasts until it is deleted: the
+ * server may stop its VM while nothing uses it, and boots it again, over that disk, for the next
+ * job or request to its files. Dropping it leaves the sandbox; `remove` removes it.
  */
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
   name?: string
   image: string
-  state: 'running' | 'stopped'
-  ephemeral: boolean
-  autoStopMinutes: number
-  autoDeleteDays?: number
-  usedAt: string
+  running: boolean
   ports?: SandboxPort[]
   abins?: string[]
   /**
@@ -383,11 +371,7 @@ export class Sandbox extends Files implements SandboxInfo {
   jobs(): Promise<SandboxJob[]>
   /** The job `id` in it. */
   job(id: string): Promise<SandboxJob>
-  /** Start it if it is stopped; answered once it runs, with where its ports are now. A job started in it while stopped starts it too. */
-  start(): Promise<Sandbox>
-  /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
-  stop(): Promise<Sandbox>
-  /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
+  /** Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
   /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */
   [Symbol.asyncDispose](): Promise<void>
@@ -425,11 +409,6 @@ export interface InboundRule {
 export interface SandboxCreateOptions {
   /** A name to find it again by, with `findSandbox`. */
   name?: string
-  /** Delete it when it stops, rather than keep it. */
-  ephemeral?: boolean
-  autoStopMinutes?: number
-  /** `'never'` keeps it until it is deleted. */
-  autoDeleteDays?: number | 'never'
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */
   ports?: PortSpec[]
@@ -637,10 +616,6 @@ export class Client {
   getSandbox(id: string): Promise<Sandbox>
   /** The sandbox named `name`, if one is. */
   findSandbox(name: string): Promise<Sandbox | undefined>
-  /** Start it if it is stopped; answered once it runs, with where its ports are now. A job started in a stopped sandbox starts it too. */
-  startSandbox(id: string): Promise<Sandbox>
-  /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
-  stopSandbox(id: string): Promise<Sandbox>
 }
 
 /**

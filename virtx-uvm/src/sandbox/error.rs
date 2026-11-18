@@ -31,13 +31,10 @@ pub enum Error {
     #[error("{0}")]
     JobEnded(&'static str),
 
-    /// What is asked of a sandbox while it runs, and it is stopped.
+    /// What is asked of a sandbox while nothing uses it, and something does: a job runs in
+    /// it, or it is reached through its files, its ports or a terminal.
     #[error("{0}")]
-    Stopped(String),
-
-    /// What is asked of a sandbox while it is stopped, and it runs.
-    #[error("{0}")]
-    Running(String),
+    InUse(String),
 
     /// Refused by the server's [`Hooks`](super::Hooks), as it says: an HTTP status, and the
     /// `code` and `message` of its body.

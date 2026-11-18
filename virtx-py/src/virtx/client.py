@@ -9,7 +9,7 @@ import os
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, Self, TypeVar
+from typing import Any, Generic, Self, TypeVar
 
 from ._library import OK, Library, VirtxError, _Bytes, library
 from ._library import args as _args
@@ -484,9 +484,6 @@ class Client:
         image: str | ImageName,
         *,
         name: str | None = None,
-        ephemeral: bool = False,
-        auto_stop_minutes: int | None = None,
-        auto_delete_days: int | Literal["never"] | None = None,
         network: bool = True,
         ports: Iterable[int | PortSpec | Mapping[str, Any]] = (),
         vcpus: int | None = None,
@@ -498,62 +495,40 @@ class Client:
         abins: Iterable[str] = (),
     ) -> Sandbox:
         """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
-        ``SandboxVolume``. It is kept when it stops -- after ``auto_stop_minutes`` unused, or at
-        ``Sandbox.stop`` -- and starts again as it was left, until it is deleted: at
-        ``Sandbox.remove``, when it stops if ``ephemeral``, or after ``auto_delete_days`` stopped
-        and unused, ``"never"`` keeping it until then. ``name`` finds it again with
-        ``find_sandbox``. ``ports`` are ports in it to open -- a number for TCP, or a
-        ``PortSpec`` (or its ``{port, label?, protocol?, inbound?}``) to say what it is for,
-        whether it is HTTP and whom it lets in -- each answered here and by ``Sandbox.start``
-        with the ``url`` it is reached by. ``abins`` names virtx's programs it gets at ``/abin``,
-        each with its ``SKILL.md`` at ``/abin/skills/{name}/``.
-        Whatever is left out the server picks.
+        ``SandboxVolume``. It is kept, with what it wrote, until ``Sandbox.remove``: the server
+        may stop its VM while nothing uses it, and boots it again for the next job or request to
+        its files. ``name`` finds it again with ``find_sandbox``. ``ports`` are ports in it to
+        open -- a number for TCP, or a ``PortSpec`` (or its ``{port, label?, protocol?,
+        inbound?}``) to say what it is for, whether it is HTTP and whom it lets in -- each
+        answered here only with the ``url`` it is reached by. ``abins`` names virtx's programs it
+        gets at ``/abin``, each with its ``SKILL.md`` at ``/abin/skills/{name}/``. Whatever is
+        left out the server picks.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
-        args = json.loads(
-            _args(
-                image=image_name(image).to_dict(),
-                name=name,
-                ephemeral=ephemeral or None,
-                auto_stop_minutes=auto_stop_minutes,
-                auto_delete_days=None if auto_delete_days == "never" else auto_delete_days,
-                disk_gib=disk_gib,
-                network=network,
-                ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
-                vcpus=vcpus,
-                memory_mib=memory_mib,
-                gpu=gpu,
-                gpu_memory_mib=gpu_memory_mib,
-                volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
-                abins=list(abins) or None,
-            )
+        args = _args(
+            image=image_name(image).to_dict(),
+            name=name,
+            disk_gib=disk_gib,
+            network=network,
+            ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
+            vcpus=vcpus,
+            memory_mib=memory_mib,
+            gpu=gpu,
+            gpu_memory_mib=gpu_memory_mib,
+            volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
+            abins=list(abins) or None,
         )
-        if auto_delete_days == "never":
-            args["auto_delete_days"] = None
-        return Sandbox.from_dict(
-            self, await self._call("virtx_client_create_sandbox", json.dumps(args).encode())
-        )
+        return Sandbox.from_dict(self, await self._call("virtx_client_create_sandbox", args))
 
     async def get_sandbox(self, id: str) -> Sandbox:
-        """The sandbox ``id``, running or stopped, without its ports."""
+        """The sandbox ``id``, without its ports."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
 
     async def find_sandbox(self, name: str) -> Sandbox | None:
         """The sandbox named ``name``, without its ports, if one is."""
         found = await self._call("virtx_client_find_sandbox", _args(name=name))
         return None if found is None else Sandbox.from_dict(self, found)
-
-    async def start_sandbox(self, id: str) -> Sandbox:
-        """Start the sandbox ``id`` if it is stopped -- its VM booted over its disk as it was
-        left -- and answer it once it runs, with where its ports are now. A job started in a
-        stopped sandbox starts it too."""
-        return Sandbox.from_dict(self, await self._call("virtx_client_start_sandbox", _args(id=id)))
-
-    async def stop_sandbox(self, id: str) -> Sandbox:
-        """Stop the sandbox ``id`` if it runs: its jobs end, and its disk is kept -- or, for an
-        ephemeral one, deleted with it. Answered once it has stopped."""
-        return Sandbox.from_dict(self, await self._call("virtx_client_stop_sandbox", _args(id=id)))
 
 
 DOMAIN = "virtx.sh"

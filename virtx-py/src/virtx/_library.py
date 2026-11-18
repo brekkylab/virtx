@@ -62,7 +62,7 @@ class VirtxError(Exception):
 
     code: str | None
     """The protocol's code the server refused the request with, where it answered one:
-    ``not_found``, ``stopped``, ``in_use`` and the like -- what to branch on, not the message."""
+    ``not_found``, ``ended``, ``in_use`` and the like -- what to branch on, not the message."""
 
     body: str | None
     """The server's response body, where it was not a JSON error."""
@@ -222,8 +222,6 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_create_sandbox": _WITH_ARGS,
     "virtx_client_get_sandbox": _WITH_ARGS,
     "virtx_client_find_sandbox": _WITH_ARGS,
-    "virtx_client_start_sandbox": _WITH_ARGS,
-    "virtx_client_stop_sandbox": _WITH_ARGS,
     "virtx_client_remove_sandbox": _WITH_ARGS,
     "virtx_client_list_sandbox_job": _WITH_ARGS,
     "virtx_client_exec_sandbox": _WITH_ARGS,

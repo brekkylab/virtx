@@ -12,9 +12,7 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
-use virtx_core::{
-    Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, SandboxState, Step,
-};
+use virtx_core::{Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, Step};
 use virtx_uvm::{ImageStore, RegistryClient};
 
 type Socket =
@@ -30,6 +28,9 @@ struct Served {
     issuer: tokio::task::JoinHandle<()>,
     /// The directory of the project `demo`, the tests' own.
     demo: PathBuf,
+    /// What its environment has besides this process's, as each server over its home is
+    /// started.
+    env: Vec<(&'static str, &'static str)>,
 }
 
 /// The issuer the server's config names, and a P-256 key of its, with its public half as a
@@ -89,11 +90,12 @@ fn mirrored(reference: &str) -> String {
 
 impl Served {
     async fn spawn(name: &str) -> Served {
-        Served::spawn_with(name, json!({})).await
+        Served::spawn_with(name, json!({}), &[]).await
     }
 
-    /// As [`Served::spawn`], its config with `more` in it besides.
-    async fn spawn_with(name: &str, more: Value) -> Served {
+    /// As [`Served::spawn`], its config with `more` in it besides, and its environment with
+    /// `env`.
+    async fn spawn_with(name: &str, more: Value, env: &[(&'static str, &'static str)]) -> Served {
         let home = std::env::temp_dir().join(format!("virtx-http-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -113,11 +115,11 @@ impl Served {
             config[key] = value.clone();
         }
         std::fs::write(home.join("config.json"), config.to_string()).unwrap();
-        Served::start(home).await
+        Served::start(home, env.to_vec()).await
     }
 
-    /// A server over `home`, as its `config.json` says.
-    async fn start(home: PathBuf) -> Served {
+    /// A server over `home`, as its `config.json` says, with `env` in its environment.
+    async fn start(home: PathBuf, env: Vec<(&'static str, &'static str)>) -> Served {
         let path = home.join("config.json");
         // The issuer's keys served anew, at the address the config now names.
         let (keys, issuer) = issuer().await;
@@ -129,6 +131,7 @@ impl Served {
             .arg("serve")
             .arg("--config")
             .arg(&path)
+            .envs(env.iter().copied())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         // A process group of its own, which ctrl-break can be sent to alone (`again`).
@@ -183,6 +186,7 @@ impl Served {
             home,
             issuer,
             demo,
+            env,
         }
     }
 
@@ -205,7 +209,39 @@ impl Served {
         self.process.wait().await.unwrap();
         // Not removed: the next is over it.
         let home = std::mem::take(&mut self.home);
-        Served::start(home).await
+        Served::start(home, std::mem::take(&mut self.env)).await
+    }
+
+    /// Sandbox `id`'s machine as `PUT /sandboxes/{id}/resources` answers it, asking no change:
+    /// whether it is up.
+    async fn up(&self, id: &str) -> bool {
+        let answer: Value = reqwest::Client::new()
+            .put(format!(
+                "{}/sandboxes/{id}/resources",
+                self.url.trim_end_matches('/')
+            ))
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        answer["up"].as_bool().unwrap_or_else(|| panic!("{answer}"))
+    }
+
+    /// Until sandbox `id`'s machine is parked: a guard against a hang, not a measure of how
+    /// soon.
+    async fn parked(&self, id: &str) {
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while self.up(id).await {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+        .await;
+        assert!(parked.is_ok(), "sandbox {id} never parked");
     }
 
     /// A client of `user`'s, in `demo`.
@@ -465,11 +501,12 @@ async fn a_built_image_keeps_its_recipe_and_its_steps_in_its_history() {
     );
 }
 
-/// Boots VMs, as the one above does. A stopped sandbox resized: its machine booted with the
-/// vCPUs and memory it was given, from its next start on; a running one's refused.
+/// Boots VMs, as the one above does. A sandbox resized: its machine parked, if nothing uses
+/// it, and booted with the vCPUs and memory it was given from its next boot on; one in use
+/// refused.
 #[tokio::test]
 #[ignore]
-async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
+async fn an_unused_sandbox_is_resized_as_it_next_boots() {
     let served = Served::spawn("resize").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
@@ -510,19 +547,29 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
     };
     assert_eq!(said("nproc").await.trim(), "2");
 
-    // Running: its machine is the size it booted as.
+    // In use: its machine is the size it booted as.
+    let sleeping = client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["sleep", "600"]))
+        .await
+        .unwrap();
     let (status, refused) = resize(json!({ "vcpus": 3 })).await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-    assert_eq!(refused["error"]["code"], "running");
+    assert_eq!(refused["error"]["code"], "in_use");
+    assert!(served.up(&id).await);
 
-    // Stopped: resized, and booted so.
-    client.stop_sandbox(&id).await.unwrap();
+    // Unused: parked, resized, and booted so.
+    client.remove_sandbox_job(&id, &sleeping.id).await.unwrap();
     let (status, answer) = resize(json!({ "vcpus": 3, "memory_mib": 1536 })).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(
-        (answer["vcpus"].as_u64(), answer["memory_mib"].as_u64()),
-        (Some(3), Some(1536))
+        (
+            answer["vcpus"].as_u64(),
+            answer["memory_mib"].as_u64(),
+            answer["up"].as_bool()
+        ),
+        (Some(3), Some(1536), Some(false))
     );
+    assert!(client.get_sandbox(&id).await.unwrap().running);
     assert_eq!(said("nproc").await.trim(), "3");
     let kib: u64 = said("awk '/MemTotal/ {print $2}' /proc/meminfo")
         .await
@@ -534,10 +581,10 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
 }
 
 /// Boots VMs, as the one above does. A sandbox's disk grown: its filesystem as large as it
-/// once it starts again, what was on it kept; never shrunk.
+/// once its machine boots again, what was on it kept; never shrunk.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
+async fn a_sandbox_s_disk_is_grown_as_it_next_boots() {
     let served = Served::spawn("disk").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
@@ -586,14 +633,25 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
             .json(&json!({ "disk_gib": n }))
             .send()
     };
-    // Running: grown once it starts again.
+    // Up: grown once it boots again -- here, once a resize has parked it.
     let r = grow(3).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let answer: Value = r.json().await.unwrap();
-    assert_eq!(answer, json!({ "disk_gib": 3, "running": true }));
+    assert_eq!(answer, json!({ "disk_gib": 3, "up": true }));
     assert_eq!(gib().await, 1);
-    client.stop_sandbox(&id).await.unwrap();
-    client.start_sandbox(&id).await.unwrap();
+    let parked = reqwest::Client::new()
+        .put(format!(
+            "{}/sandboxes/{id}/resources",
+            served.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .json(&json!({ "vcpus": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parked.status(), StatusCode::OK);
+    assert!(!served.up(&id).await);
     assert_eq!(gib().await, 3);
     assert_eq!(said("cat /root/kept").await, "kept");
     assert_eq!(said("stat -c %a /root/kept").await, "700");
@@ -606,13 +664,13 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
     client.remove_sandbox(&id).await.unwrap();
 }
 
-/// Boots a VM, as the one above does. A running sandbox's files, read over WebDAV through its
-/// agent: its image's and what it wrote alike, a directory listed, a file read whole and in
-/// part. Nothing written; a stopped one's not read.
+/// Boots a VM, as the one above does. A sandbox's files, read over WebDAV through its agent:
+/// its image's and what it wrote alike, a directory listed, a file read whole and in part, and
+/// written; its machine booted for them once it is parked.
 #[tokio::test]
 #[ignore]
-async fn a_running_sandbox_s_files_are_read_and_written() {
-    let served = Served::spawn("files").await;
+async fn a_sandbox_s_files_are_read_and_written_its_machine_booted_for_them() {
+    let served = Served::spawn_with("files", json!({}), &[("VIRTX_PARK_AFTER_MS", "1000")]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
@@ -691,19 +749,12 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("put".into()));
 
-    // Stopped: neither read nor started for it -- nor used by it, so a stopped sandbox is not
-    // kept from its deletion by requests it refuses.
-    client.stop_sandbox(&id).await.unwrap();
-    let used = client.get_sandbox(&id).await.unwrap().used_at;
-    // A later time than its stop's, were it used now.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    let r = asked("GET", "/root/d/a.txt").send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::CONFLICT);
-    let said: Value = r.json().await.unwrap();
-    assert_eq!(said["error"]["code"], "stopped");
-    let now = client.get_sandbox(&id).await.unwrap();
-    assert_eq!(now.state, SandboxState::Stopped);
-    assert_eq!(now.used_at, used, "not used by a request it refused");
+    // Parked: booted for a request to its files, which finds them as they were.
+    served.parked(&id).await;
+    let r = asked("GET", "/root/d/b.txt").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.text().await.unwrap(), "put\n");
+    assert!(served.up(&id).await);
     client.remove_sandbox(&id).await.unwrap();
 }
 
@@ -728,26 +779,24 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     client.remove_sandbox_job(&id, &job.id).await.unwrap();
     assert_eq!(status(client.get_sandbox_job(&id, &job.id).await), 404);
     assert_eq!(client.list_sandbox_job(&id).await.unwrap(), []);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Running
-    );
+    assert!(client.get_sandbox(&id).await.unwrap().running);
 }
 
-/// Boots VMs, as the one above does.
+/// Boots VMs, as the one above does. A sandbox's machine parked once nothing uses it, and
+/// booted again over its disk as it was left for the next job; its ports' connections boot it
+/// not.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
-    let served = Served::spawn("lifecycle").await;
+async fn an_unused_sandbox_is_parked_and_booted_again_as_it_was_left() {
+    let served =
+        Served::spawn_with("lifecycle", json!({}), &[("VIRTX_PARK_AFTER_MS", "1000")]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let mut args = small("alpine:3.20");
     args.name = Some("work".into());
     args.ports = vec![8000.into()];
     let made = client.create_sandbox(&args).await.unwrap();
-    assert_eq!(made.state, SandboxState::Running);
-    assert_eq!(made.auto_stop_minutes, 15);
-    assert_eq!(made.auto_delete_days, Some(30));
+    assert!(made.running);
     assert!(made.image.starts_with("sha256:"));
     let id = made.id.clone();
     assert_eq!(client.find_sandbox("work").await.unwrap().unwrap().id, id);
@@ -768,47 +817,39 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
             })
             .collect::<Vec<_>>()
     };
-    ran(&id, "echo kept > /root/note && sync").await;
+    ran(&id, "echo kept > /root/note; sleep 1000 >/dev/null 2>&1 &").await;
 
-    // Stopped: its machine down, its jobs ended and kept, its disk kept.
+    // A job that runs keeps it up, past its park many times over.
     let sleeping = client
         .exec_sandbox(&id, &SandboxExecArgs::new(["sleep", "600"]))
         .await
         .unwrap();
-    let stopped = client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(stopped.state, SandboxState::Stopped);
-    let ended = client.get_sandbox_job(&id, &sleeping.id).await.unwrap();
-    assert!(!ended.running);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Stopped
-    );
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(served.up(&id).await);
+    client.remove_sandbox_job(&id, &sleeping.id).await.unwrap();
 
-    // Started again: its files as they were, its port at the same URL.
-    let started = client.start_sandbox(&id).await.unwrap();
-    assert_eq!(started.state, SandboxState::Running);
-    assert_eq!(started.ports, made.ports);
-    assert_eq!(ran(&id, "cat /root/note").await, ["kept"]);
-
-    // A job started in a stopped one starts it.
-    client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(ran(&id, "cat /root/note").await, ["kept"]);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Running
+    // Unused: parked, running still; a connection to its port refused, and booting nothing.
+    served.parked(&id).await;
+    assert!(client.get_sandbox(&id).await.unwrap().running);
+    let url = served.port_url(&made.ports[0].url);
+    let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
+    assert!(
+        !matches!(socket.next().await, Some(Ok(Message::Binary(_)))),
+        "closed, as a port nothing listens on is"
     );
+    assert!(!served.up(&id).await);
+
+    // A job boots it: its files as they were, what ran in it gone.
+    assert_eq!(
+        ran(&id, "cat /root/note; ps | grep -c '[s]leep 1000'").await,
+        ["kept", "0"]
+    );
+    assert!(served.up(&id).await);
 
     // Deleted: gone, its disk with it.
     client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.get_sandbox(&id).await), 404);
     assert!(!served.demo.join(format!("sandbox/{id}.ext4")).exists());
-
-    // Ephemeral: deleted when it stops.
-    let mut args = small("alpine:3.20");
-    args.ephemeral = true;
-    let gone = client.create_sandbox(&args).await.unwrap();
-    client.stop_sandbox(&gone.id).await.unwrap();
-    assert_eq!(status(client.get_sandbox(&gone.id).await), 404);
 }
 
 /// Boots VMs, as the one above does.
@@ -834,26 +875,15 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .try_collect()
         .await
         .unwrap();
-    let ephemeral = client
-        .create_sandbox(&small("alpine:3.20").ephemeral(true))
-        .await
-        .unwrap()
-        .id;
 
-    // Stopped with its server, and known stopped to the next, its job with it -- but an
-    // ephemeral one, deleted.
+    // Parked with its server, and known to the next, parked and running still.
     let served = served.again().await;
     let client = served.connect("tester");
     let found = client.find_sandbox("kept").await.unwrap().unwrap();
-    assert_eq!(
-        (found.id.as_str(), found.state),
-        (made.id.as_str(), SandboxState::Stopped)
-    );
-    assert_eq!(status(client.get_sandbox(&ephemeral).await), 404);
+    assert_eq!((found.id.as_str(), found.running), (made.id.as_str(), true));
+    assert!(!served.up(&made.id).await);
 
-    // Started, as it was left, its port behind the capability it had.
-    let started = client.start_sandbox(&made.id).await.unwrap();
-    assert_eq!(started.ports, made.ports);
+    // Booted by a job, as it was left, its port behind the capability it had.
     let job = client
         .exec_sandbox(&made.id, &SandboxExecArgs::new(["cat", "/root/kept"]))
         .await
@@ -864,11 +894,14 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .await
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("kept".into()));
+    let url = served.port_url(&made.ports[0].url);
+    assert!(Served::open(&url, Some("virtx.tcp")).await.is_ok());
     client.remove_sandbox(&made.id).await.unwrap();
+    assert_eq!(Served::open(&url, Some("virtx.tcp")).await.err(), Some(404));
 }
 
 /// Boots VMs, as the one above does. A terminal's bash writes each command to its history
-/// as it runs -- on the sandbox's disk, before the shell exits, so a stop does not lose it.
+/// as it runs -- on the sandbox's disk, before the shell exits, so a park does not lose it.
 #[tokio::test]
 #[ignore]
 async fn a_terminal_s_history_is_written_as_each_command_runs() {
@@ -1076,17 +1109,21 @@ async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
     assert_eq!(hello["attached"], false);
 }
 
-/// Boots VMs, as the one above does, and waits for them to stop by themselves: a minute is a
-/// second here. A terminal at its prompt does not keep its sandbox from stopping unused; one
+/// Boots VMs, as the one above does, and waits for them to be parked by themselves, a second
+/// unused here. A terminal at its prompt does not keep its sandbox from being parked; one
 /// running a command does, as the guest says when asked.
 #[tokio::test]
 #[ignore]
 async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
-    let served = Served::spawn_with("terminal-idle", json!({ "minute_secs": 1 })).await;
+    let served = Served::spawn_with(
+        "terminal-idle",
+        json!({}),
+        &[("VIRTX_PARK_AFTER_MS", "1000")],
+    )
+    .await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = small("alpine:3.20");
-    args.auto_stop_minutes = Some(1);
+    let args = small("alpine:3.20");
     let idle = client.create_sandbox(&args).await.unwrap();
     let busy = client.create_sandbox(&args).await.unwrap();
     // A terminal in each, left open: `busy`'s running a command, `idle`'s at its prompt.
@@ -1121,17 +1158,13 @@ async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
     let _idle = open(&idle.id, b"").await;
     let _busy = open(&busy.id, b"sleep 600\n").await;
 
-    let state = async |id: &str| client.get_sandbox(id).await.unwrap().state;
-    let stopped = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while state(&idle.id).await == SandboxState::Running {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    })
-    .await;
-    assert!(stopped.is_ok(), "a terminal at its prompt kept its sandbox");
-    // Asked about many times since, a minute at a time: running still.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    assert_eq!(state(&busy.id).await, SandboxState::Running);
+    served.parked(&idle.id).await;
+    // Asked about many times since, a second at a time: up still.
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    assert!(
+        served.up(&busy.id).await,
+        "a terminal running a command was parked"
+    );
 }
 
 /// Boots VMs, as the one above does.
@@ -1498,5 +1531,5 @@ async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
     assert_eq!(answered[0], "alive", "{answered:?}");
     let processes: u32 = answered[1].parse().unwrap_or(0);
     assert!(processes > 100, "the bomb went on beside it: {answered:?}");
-    client.stop_sandbox(&id).await.unwrap();
+    client.remove_sandbox(&id).await.unwrap();
 }

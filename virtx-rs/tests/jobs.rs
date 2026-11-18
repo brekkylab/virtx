@@ -5,8 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry,
-    SandboxState, Source, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry, Source,
+    Step,
 };
 
 mod common;
@@ -408,14 +408,14 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
 }
 
 #[test]
-fn a_sandbox_stops_and_starts_again() {
+fn a_sandbox_is_found_by_its_name_and_runs_until_it_is_removed() {
     let client = common::client();
     common::alpine(&client);
     let name = common::unique("lifecycle");
     let mut args = SandboxCreateArgs::new(ALPINE);
     args.name = Some(name.clone());
     let made = client.create_sandbox(&args).wait().unwrap();
-    assert_eq!(made.info().state, SandboxState::Running);
+    assert!(made.info().running);
     assert_eq!(made.name(), Some(name.as_str()));
     let found = client.find_sandbox(&name).wait().unwrap().unwrap();
     assert_eq!(found.id(), made.id());
@@ -427,20 +427,10 @@ fn a_sandbox_stops_and_starts_again() {
             .is_none()
     );
 
-    // By its handle and by its id alike.
-    let stopped = found.stop().wait().unwrap();
-    assert_eq!(stopped.info().state, SandboxState::Stopped);
-    let started = stopped.start().wait().unwrap();
-    assert_eq!(started.info().state, SandboxState::Running);
-    let stopped = client.stop_sandbox(made.id()).wait().unwrap();
-    assert_eq!(stopped.info().state, SandboxState::Stopped);
-    // A job started in a stopped one starts it.
-    let (said, code) = common::run(&made, &["echo", "up"]);
+    let (said, code) = common::run(&found, &["echo", "up"]);
     assert_eq!((said, code), (vec!["up".to_owned()], 0));
     let got = client.get_sandbox(made.id()).wait().unwrap();
-    assert_eq!(got.info().state, SandboxState::Running);
-    let started = client.start_sandbox(made.id()).wait().unwrap();
-    assert_eq!(started.info().state, SandboxState::Running);
+    assert!(got.info().running);
 
     made.remove().wait().unwrap();
     let gone = client.get_sandbox(made.id()).wait().unwrap_err();

@@ -23,45 +23,28 @@ describe('against virtx-stdio', () => {
   })
   afterEach(() => client.close())
 
-  test('a sandbox stops, starts again and is found by its name', async () => {
+  test('a sandbox runs until it is removed, and is found by its name', async () => {
     await alpine(client)
     const name = unique('work')
     const made = await client.createSandbox(ALPINE, { name, ports: [8000] })
     assert.ok(made instanceof virtx.Sandbox)
     assert.equal(made.client, client)
-    assert.equal(made.state, 'running')
+    assert.equal(made.running, true)
     assert.equal(made.name, name)
-    assert.equal(made.ephemeral, false)
-    assert.equal(made.autoStopMinutes, 15)
-    assert.equal(made.autoDeleteDays, 30)
+    assert.deepEqual(
+      made.ports.map(({ port }) => port),
+      [8000],
+    )
     const found = await client.findSandbox(name)
     assert.ok(found instanceof virtx.Sandbox)
     assert.equal(found.id, made.id)
+    assert.equal(found.running, true)
     assert.equal(await client.findSandbox(unique('nobody')), undefined)
     await assert.rejects(client.createSandbox(ALPINE, { name }), {
       source: 'server',
       status: 409,
       code: 'exists',
     })
-
-    const stopped = await made.stop()
-    assert.ok(stopped instanceof virtx.Sandbox)
-    assert.equal(stopped.state, 'stopped')
-    const started = await stopped.start()
-    assert.equal(started.state, 'running')
-    assert.deepEqual(
-      started.ports.map(({ port }) => port),
-      [8000],
-    )
-    assert.equal((await client.stopSandbox(made.id)).state, 'stopped')
-    assert.equal((await client.startSandbox(made.id)).state, 'running')
-
-    const kept = await client.createSandbox(ALPINE, { autoDeleteDays: 'never' })
-    assert.equal(kept.autoDeleteDays, undefined)
-    await kept.remove()
-    const gone = await client.createSandbox(ALPINE, { ephemeral: true })
-    await gone.stop()
-    await assert.rejects(client.getSandbox(gone.id), { status: 404 })
 
     await made.remove()
     await assert.rejects(client.getSandbox(made.id), { status: 404 })
@@ -98,7 +81,7 @@ describe('against virtx-stdio', () => {
   test('a sandbox is deleted when disposed', { skip: !Symbol.asyncDispose }, async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
-    assert.equal((await client.getSandbox(sandbox.id)).state, 'running')
+    assert.equal((await client.getSandbox(sandbox.id)).running, true)
     await sandbox[Symbol.asyncDispose]()
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
 
@@ -118,7 +101,7 @@ describe('against virtx-stdio', () => {
   test('a command in a sandbox is a job whose log ends with its code', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { diskGib: 4, abins: ['index'] })
-    assert.equal(sandbox.state, 'running')
+    assert.equal(sandbox.running, true)
     assert.deepEqual(sandbox.abins, ['index'])
     assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)

@@ -1,7 +1,7 @@
 //! The server's routes and loops, for an [`Access`]: the endpoints of `virtx-core`'s
 //! `PROTOCOL.md` ([`crate::endpoints`]), each answered from the home its request reaches, the
-//! images as an OCI registry, and each sandbox's ports; and sandboxes stopped once unused and
-//! deleted once kept past their days, images pruned. A server built on this one -- virtx
+//! images as an OCI registry, and each sandbox's ports; and sandboxes reclaimed once unused
+//! for long, images pruned. A server built on this one -- virtx
 //! cloud's node -- gives [`router`] an access of its own, and routes of its own beside these;
 //! the server a config alone makes is [`configured`], which does both.
 //!
@@ -44,8 +44,8 @@ const TERMINAL_SUBPROTOCOL: &str = "virtx.terminal";
 
 /// The shell a terminal runs: bash where the image has it, sh otherwise, as a login shell.
 /// Bash writes each command to its history as it is run, not as it exits -- a sandbox
-/// stopped ends its shells without their exiting -- so that its history is on its disk, and
-/// there as it starts again.
+/// parked ends its shells without their exiting -- so that its history is on its disk, and
+/// there as it boots again.
 const SHELL: &str = "export TERM=xterm-256color; cd ~ 2>/dev/null; \
     if command -v bash >/dev/null 2>&1; then \
     export BASHOPTS=histappend PROMPT_COMMAND='history -a' HISTSIZE=10000 HISTFILESIZE=10000; \
@@ -59,6 +59,9 @@ const CHUNK: usize = 64 << 10;
 
 /// How often each project's images are pruned, as `POST /images/prune` does.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// How often each home's sandboxes are looked at to be reclaimed, at most.
+const RECLAIM_EVERY: Duration = Duration::from_secs(60);
 
 /// This process become a machine, never to come back, if it was spawned to be one: called
 /// before any runtime is made.
@@ -204,18 +207,20 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         .layer(cors(&origins))
 }
 
-/// The loops every server runs: each home's sandboxes tended -- stopped once unused, deleted once
-/// kept stopped past their days -- and the images pruned.
+/// The loops every server runs: each home's sandboxes reclaimed once unused for
+/// [`reclaim_after`](virtx_uvm::reclaim_after), and the images pruned. (A sandbox's machine is
+/// parked by the sandbox itself.)
 pub fn spawn_loops(access: &Arc<Access>) {
     let reaping = Arc::clone(access);
     tokio::spawn(async move {
-        // Once a minute, or as often as a minute made shorter lasts.
-        let every = endpoints::minute().min(Duration::from_secs(60));
+        // Once a minute, or as often as reclaiming waits, if that is shorter.
+        let every =
+            virtx_uvm::reclaim_after().map_or(RECLAIM_EVERY, |after| after.min(RECLAIM_EVERY));
         let mut every = tokio::time::interval(every);
         loop {
             every.tick().await;
             for home in &reaping.homes() {
-                home.tend();
+                home.reclaim();
             }
         }
     });

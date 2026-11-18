@@ -8,11 +8,11 @@ use virtx_core::{
 use crate::{Call, Client, Error, Events, JobEnd, StartedJob, files, job::sealed::Ends};
 
 /// A sandbox the server holds, as making, finding or asking for it answered, and the client
-/// that reaches it: what is needed to start and stop it, run processes in it, and reach its
-/// files, through [`Files`](crate::Files).
+/// that reaches it: what is needed to run processes in it, and reach its files, through
+/// [`Files`](crate::Files).
 ///
-/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is, running
-/// or stopped; it is kept until [`remove`](Self::remove).
+/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it is kept
+/// until [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Sandbox {
     client: Client,
@@ -38,23 +38,10 @@ impl Sandbox {
         self.info.name.as_deref()
     }
 
-    /// What the server answered about it, as it was then: its image, whether it runs, when it
-    /// stops and is deleted unused, and its ports, which only making and starting it answer.
+    /// What the server answered about it, as it was then: its image, whether it takes
+    /// processes, and its ports, which only making it answers.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
-    }
-
-    /// Start it if it is stopped -- its VM booted over its disk as it was left -- and answer it
-    /// once it runs, with where its ports are now. A job started in a stopped sandbox starts
-    /// it too.
-    pub fn start(&self) -> Call<Sandbox> {
-        self.client.start_sandbox(&self.info.id)
-    }
-
-    /// Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one,
-    /// deleted with it.
-    pub fn stop(&self) -> Call<Sandbox> {
-        self.client.stop_sandbox(&self.info.id)
     }
 
     /// Start a process in it as `args` says; see [`SandboxExecArgs::new`]. Its output and how
@@ -86,7 +73,7 @@ impl Sandbox {
         SandboxJob::new(self.client.clone(), self.info.id.clone(), info)
     }
 
-    /// Delete it: stopped first if it runs, and its disk removed. Its volumes stay.
+    /// Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox(&self.info.id)
     }

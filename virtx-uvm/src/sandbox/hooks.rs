@@ -2,8 +2,8 @@
 //! names, and may refuse it. Every one has a default that does nothing, which a server on its
 //! own -- its sandboxes' disks here and nowhere else -- leaves as it is.
 //!
-//! A hook runs while its sandbox starts, stops or is deleted, one of those at a time: it must
-//! not start, stop or delete a sandbox itself, which would wait on it.
+//! A hook runs while its sandbox's machine boots or is parked, or it is deleted, one of those
+//! at a time: it must not boot, park or delete a sandbox itself, which would wait on it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ pub trait Hooks: Send + Sync + 'static {
     }
 
     /// Where `port` of `sandbox` is answered from now on, and what answers it there, until it
-    /// drops: as the sandbox first starts. `None`, and it is answered at its URL as it is.
+    /// drops: as the sandbox's machine first boots. `None`, and it is answered at its URL as it is.
     fn listen<'a>(
         &'a self,
         sandbox: &'a Arc<Sandbox>,
@@ -79,7 +79,7 @@ pub trait Hooks: Send + Sync + 'static {
     }
 
     /// Sandbox `id` made again here, its disk [adopted](Hooks::adopted) and not booted: ready
-    /// for it to start at once when it is next asked to.
+    /// for its machine to boot at once when it is next used.
     fn readied(&self, id: &str) {
         let _ = id;
     }

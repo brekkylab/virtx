@@ -197,4 +197,5 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
 | `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
 | `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
-| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |
+| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. A minute by default. |
+| `VIRTX_RECLAIM_AFTER_MS` | Server | How long a sandbox is unused before it is deleted, in milliseconds; `0` for never. 30 days by default. |

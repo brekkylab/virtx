@@ -163,7 +163,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
 }
 
 #[test]
-fn a_port_says_what_it_is_for_and_is_kept_across_a_stop() {
+fn a_port_says_what_it_is_for() {
     let client = common::client();
     common::alpine(&client);
     let mut args = SandboxCreateArgs::new(ALPINE);
@@ -190,11 +190,6 @@ fn a_port_says_what_it_is_for_and_is_kept_across_a_stop() {
         (5173, Some("dev server".to_owned()), PortProtocol::Http),
     ];
     assert_eq!(described(&made), told);
-
-    // Kept, as it was made with them, across a stop.
-    made.stop().wait().unwrap();
-    let started = made.start().wait().unwrap();
-    assert_eq!(described(&started), told);
     made.remove().wait().unwrap();
 }
 

@@ -1,9 +1,10 @@
 //! What signing in keeps between runs, under `~/.config/virtx/`: which provider was signed in
 //! to (`oidc.json`), and for each client of a provider signed in as, the session's refresh
 //! token -- in the OS's keychain, or where the OS has none in `<client_id>@<issuer>.token` --
-//! and the ID token last issued (`<client_id>@<issuer>.id`). The directory and each file in it
-//! are their owner's alone: another user who could write the directory could put a file of
-//! their own in place of one kept there, and `virtx token` would then act with their session.
+//! and the ID token last issued (`<client_id>@<issuer>.id`). The directory is its owner's
+//! alone, and each of those files is written readable by its owner alone: another user who
+//! could write the directory could put a file of their own in place of one kept there, and
+//! `virtx token` would then act with that user's session.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -154,7 +155,7 @@ fn remove(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Make `dir`, with any parent it lacks, `0700`, and set it `0700` where it was left with any
-/// mode for the group or others.
+/// mode for the group or others. On Windows, make it and read or set no mode.
 fn make_private(dir: &Path) -> anyhow::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);

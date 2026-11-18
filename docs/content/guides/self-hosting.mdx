@@ -116,6 +116,9 @@ virtx-server-tcp serve --config server.json
 
 `listen` and `oidc` are required, and the server does not start with a field it does not know.
 
+Under `home`, each project's images, sandboxes and volumes are in `project/<id>/`.
+A sandbox reaches its volumes as virtio-fs shares, which libkrun does not claim keep a guest from other directories on the same host filesystem, so give `home` a filesystem with nothing else on it.
+
 ### Share public images
 
 Each project keeps its own images, so two projects pulling the same public image each download it. With `"share_public_images": true`, a pull without credentials, a build's base included, first looks in the server's other projects for that image as the registry serves it now: one another project pulled without credentials is filed from there, its layers sharing the same files on disk, and nothing is downloaded. A pull with credentials is never shared, and neither is what a project built or pushed.

@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <b>English</b> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hans.md">简体中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hant.md">繁體中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ja.md">日本語</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -36,7 +36,7 @@ Whatever a VM installs or changes is gone when you remove it, unless it wrote it
 ## Quickstart
 
 > [!TIP]
-> Using a coding agent? Install the [virtx skill](skills/virtx/SKILL.md) and let it write this for you:
+> Using a coding agent? Install the [virtx skill](https://github.com/brekkylab/virtx/blob/main/skills/virtx/SKILL.md) and let it write this for you:
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
@@ -250,7 +250,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](docs/content/guides/using-gpus.mdx).
+Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](https://virtx.sh/docs/guides/using-gpus/).
 
 ## How it works
 
@@ -260,7 +260,7 @@ virtx follows a client-server model.
 Your code, the client, tells a virtx server what to run, and the server runs it in a VM and sends the results back.
 
 <p align="center">
-  <img alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." src="docs/images/client-server.svg" width="640">
+  <img alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/client-server.svg" width="640">
 </p>
 
 The server can be one you run yourself, on the same machine as your code or on another one, or virtx cloud, hosted for you.
@@ -282,7 +282,7 @@ Code in it is separated from your machine by a hypervisor, not just by namespace
 The main resource is the **sandbox**: a VM you run commands in.
 
 <p align="center">
-  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable layer over a read-only image, and a volume is mounted into it." src="docs/images/core-concepts.svg" width="640">
+  <img alt="A user sends commands to a sandbox and reads its output; the sandbox is made from a writable layer over a read-only image, and a volume is mounted into it." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/core-concepts.svg" width="640">
 </p>
 
 A sandbox's root filesystem is an overlay of two layers: an **image** below, read-only, and a **writable layer** above, where its writes go.
@@ -301,19 +301,19 @@ Remote stores such as Notion, Google Drive and OneDrive can be mounted inside a 
 ## Documentation
 
 See the [documentation](https://virtx.sh/docs) for guides and the API reference.
-Each package documents the rest of its API: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
+Rust's API is on [docs.rs](https://docs.rs/virtx) too.
 
 ## Building from source
 
-See [Building from source](AGENTS.md#building-from-source) in AGENTS.md.
+See [Building from source](https://github.com/brekkylab/virtx/blob/main/AGENTS.md#building-from-source) in AGENTS.md.
 
 ## Contributing
 
 Bug reports, ideas and pull requests are welcome.
-[CONTRIBUTING.md](CONTRIBUTING.md) covers how to open a PR.
-For a suspected vulnerability, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+[CONTRIBUTING.md](https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md) covers how to open a PR.
+For a suspected vulnerability, please follow [SECURITY.md](https://github.com/brekkylab/virtx/blob/main/SECURITY.md) instead of opening a public issue.
 Questions and show-and-tell go on [Discord](https://discord.gg/27rx3EJy3P).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/brekkylab/virtx/blob/main/LICENSE).

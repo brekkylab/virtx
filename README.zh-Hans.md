@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <b>简体中文</b> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <a href="https://github.com/brekkylab/virtx/blob/main/README.md">English</a> · <b>简体中文</b> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hant.md">繁體中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ja.md">日本語</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -35,7 +35,7 @@
 ## 快速上手
 
 > [!TIP]
-> 在用编程智能体？装上 [virtx skill](skills/virtx/SKILL.md)，后面的示例代码就可以交给它来写。安装命令如下：
+> 在用编程智能体？装上 [virtx skill](https://github.com/brekkylab/virtx/blob/main/skills/virtx/SKILL.md)，后面的示例代码就可以交给它来写。安装命令如下：
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
@@ -244,7 +244,7 @@ let client = Client::connect(
 
 #### GPU（可选）
 
-只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](docs/content/guides/using-gpus.mdx)。
+只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](https://virtx.sh/docs/guides/using-gpus/)。
 
 ## 工作原理
 
@@ -253,7 +253,7 @@ let client = Client::connect(
 virtx 采用客户端-服务器模型。你的代码作为客户端，告诉 virtx 服务器要运行什么；服务器在虚拟机里把它跑起来，再把结果传回来。
 
 <p align="center">
-  <img alt="virtx 客户端可以连接三种服务器：客户端所在机器上的本地服务器、另一台机器上的远程服务器，或由 virtx 托管的云端。" src="docs/images/client-server.svg" width="640">
+  <img alt="virtx 客户端可以连接三种服务器：客户端所在机器上的本地服务器、另一台机器上的远程服务器，或由 virtx 托管的云端。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/client-server.svg" width="640">
 </p>
 
 服务器可以由你自己运行，和代码放在同一台机器上，或者放在另一台机器上；也可以直接用我们托管的 virtx cloud。无论采用哪种方式，客户端和服务器都使用同一套 HTTP 协议通信，区别只在传输方式。
@@ -273,7 +273,7 @@ virtx 采用客户端-服务器模型。你的代码作为客户端，告诉 vir
 最核心的资源是**沙箱**，也就是用来执行命令的虚拟机。
 
 <p align="center">
-  <img alt="用户向沙箱发送命令并读取输出；沙箱由只读镜像加上一层可写层组成，并挂载了一个卷。" src="docs/images/core-concepts.svg" width="640">
+  <img alt="用户向沙箱发送命令并读取输出；沙箱由只读镜像加上一层可写层组成，并挂载了一个卷。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/core-concepts.svg" width="640">
 </p>
 
 沙箱的根文件系统由两层叠加而成。下层是只读的**镜像**，上层是接收写入的**可写层**。
@@ -286,16 +286,16 @@ virtx 采用客户端-服务器模型。你的代码作为客户端，告诉 vir
 
 ## 文档
 
-指南和 API 参考请查看[文档](https://virtx.sh/docs)。其余 API 分别写在各个包的文档里：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
+指南和 API 参考请查看[文档](https://virtx.sh/docs)。Rust 的 API 也可以在 [docs.rs](https://docs.rs/virtx) 查看。
 
 ## 从源码构建
 
-参见 AGENTS.md 中的 [Building from source](AGENTS.md#building-from-source)。
+参见 AGENTS.md 中的 [Building from source](https://github.com/brekkylab/virtx/blob/main/AGENTS.md#building-from-source)。
 
 ## 参与贡献
 
-欢迎提交 bug 报告、分享想法或发起 Pull Request。如何提交 PR，请看 [CONTRIBUTING.md](CONTRIBUTING.md)。如果发现疑似安全漏洞，请按 [SECURITY.md](SECURITY.md) 的流程报告，不要公开提 issue。有问题想问，或者想展示你做的东西，欢迎来 [Discord](https://discord.gg/27rx3EJy3P)。
+欢迎提交 bug 报告、分享想法或发起 Pull Request。如何提交 PR，请看 [CONTRIBUTING.md](https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md)。如果发现疑似安全漏洞，请按 [SECURITY.md](https://github.com/brekkylab/virtx/blob/main/SECURITY.md) 的流程报告，不要公开提 issue。有问题想问，或者想展示你做的东西，欢迎来 [Discord](https://discord.gg/27rx3EJy3P)。
 
 ## 许可证
 
-Apache-2.0，详见 [LICENSE](LICENSE)。
+Apache-2.0，详见 [LICENSE](https://github.com/brekkylab/virtx/blob/main/LICENSE)。

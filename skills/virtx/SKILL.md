@@ -76,5 +76,4 @@ Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`
 
 - [`README.md`](../../README.md): the Quickstart, for a local server and a remote one.
 - [`docs/content/`](../../docs/content/): the guides and the API reference.
-- [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
 - [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.

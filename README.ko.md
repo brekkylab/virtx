@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <b>한국어</b>
+  <a href="https://github.com/brekkylab/virtx/blob/main/README.md">English</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hans.md">简体中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hant.md">繁體中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ja.md">日本語</a> · <b>한국어</b>
 </p>
 
 <br>
@@ -37,7 +37,7 @@ VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 
 ## 빠르게 시작하기
 
 > [!TIP]
-> 코딩 에이전트를 쓰고 있다면 아래 명령으로 [virtx 스킬](skills/virtx/SKILL.md)을 설치하고, 이어지는 예제 코드는 에이전트에게 맡겨 보세요.
+> 코딩 에이전트를 쓰고 있다면 아래 명령으로 [virtx 스킬](https://github.com/brekkylab/virtx/blob/main/skills/virtx/SKILL.md)을 설치하고, 이어지는 예제 코드는 에이전트에게 맡겨 보세요.
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
@@ -254,7 +254,7 @@ virtx 서버를 실행하는 머신에 필요한 조건입니다.
 GPU를 쓰는 샌드박스에만 필요합니다.
 호스트에 Vulkan 로더가 있어야 합니다.
 게스트 쪽 Vulkan은 모든 샌드박스에 함께 들어 있어서 이미지에는 필요 없습니다.
-자세한 내용은 [GPU 사용하기](docs/content/guides/using-gpus.mdx)를 참고하세요.
+자세한 내용은 [GPU 사용하기](https://virtx.sh/docs/guides/using-gpus/)를 참고하세요.
 
 ## 동작 방식
 
@@ -264,7 +264,7 @@ virtx는 클라이언트-서버 구조로 동작합니다.
 클라이언트인 내 코드가 virtx 서버에 무엇을 실행할지 알려 주면, 서버가 그것을 VM에서 실행하고 결과를 돌려줍니다.
 
 <p align="center">
-  <img alt="virtx 클라이언트는 같은 머신의 로컬 서버, 다른 머신의 원격 서버, virtx가 호스팅하는 클라우드 서버 중 어디에나 접속합니다." src="docs/images/client-server.svg" width="640">
+  <img alt="virtx 클라이언트는 같은 머신의 로컬 서버, 다른 머신의 원격 서버, virtx가 호스팅하는 클라우드 서버 중 어디에나 접속합니다." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/client-server.svg" width="640">
 </p>
 
 서버는 내 코드와 같은 머신이나 다른 머신에서 직접 운영할 수도 있고, 대신 호스팅해 주는 virtx cloud를 쓸 수도 있습니다.
@@ -287,7 +287,7 @@ virtx는 클라이언트-서버 구조로 동작합니다.
 가장 중심이 되는 리소스는 명령을 실행하는 VM인 **샌드박스**입니다.
 
 <p align="center">
-  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 쓰기 가능한 레이어를 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="docs/images/core-concepts.svg" width="640">
+  <img alt="사용자가 샌드박스에 명령을 보내고 출력을 받습니다. 샌드박스는 읽기 전용 이미지 위에 쓰기 가능한 레이어를 겹쳐 만들어지며, 볼륨이 마운트됩니다." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/core-concepts.svg" width="640">
 </p>
 
 샌드박스의 루트 파일시스템은 두 층을 겹친 오버레이입니다.
@@ -307,19 +307,19 @@ Notion, Google Drive, OneDrive 같은 원격 저장소도 볼륨 안에 읽기 �
 ## 문서
 
 가이드와 API 레퍼런스는 [문서](https://virtx.sh/docs)에서 볼 수 있습니다.
-그 밖의 API는 패키지별 문서에 정리되어 있습니다: [Python](virtx-py/README.md), [Node](virtx-node/README.md), [Rust](https://docs.rs/virtx).
+Rust API는 [docs.rs](https://docs.rs/virtx)에서도 볼 수 있습니다.
 
 ## 소스에서 빌드하기
 
-AGENTS.md의 [Building from source](AGENTS.md#building-from-source)를 참고하세요.
+AGENTS.md의 [Building from source](https://github.com/brekkylab/virtx/blob/main/AGENTS.md#building-from-source)를 참고하세요.
 
 ## 기여하기
 
 버그 제보, 아이디어, 풀 리퀘스트 모두 환영합니다.
-PR을 올리는 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)에 정리되어 있습니다.
-보안 취약점으로 보이는 것을 발견했다면 공개 이슈를 열지 말고 [SECURITY.md](SECURITY.md)의 절차를 따라 주세요.
+PR을 올리는 방법은 [CONTRIBUTING.md](https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md)에 정리되어 있습니다.
+보안 취약점으로 보이는 것을 발견했다면 공개 이슈를 열지 말고 [SECURITY.md](https://github.com/brekkylab/virtx/blob/main/SECURITY.md)의 절차를 따라 주세요.
 질문이나 만든 것 자랑은 [Discord](https://discord.gg/27rx3EJy3P)에서 나눠 주세요.
 
 ## 라이선스
 
-Apache-2.0 라이선스를 따릅니다. 자세한 내용은 [LICENSE](LICENSE)를 참고하세요.
+Apache-2.0 라이선스를 따릅니다. 자세한 내용은 [LICENSE](https://github.com/brekkylab/virtx/blob/main/LICENSE)를 참고하세요.

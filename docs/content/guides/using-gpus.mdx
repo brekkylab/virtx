@@ -68,4 +68,10 @@ A sandbox without a GPU gets neither, and runs the image's own Vulkan, if it has
 - **An image's own Vulkan driver is passed over in a GPU sandbox.** Set `VK_DRIVER_FILES` in the image to choose another.
 - **In a GPU sandbox, a program that links the Vulkan loader finds the one in `/alib` before the image's,** and one that opens `libvulkan.so.1` by name does too.
 
+## What the device offers
+
+The device reports Vulkan 1.4.
+On a Mac with an Apple7 GPU or later (M1 and later), it also offers bfloat16 (`VK_KHR_shader_bfloat16`) and cooperative matrices (`VK_KHR_cooperative_matrix`), in 8x8 and 16x16 shapes.
+An image that brings its own venus driver through `VK_DRIVER_FILES` needs Mesa 26.0 or later for those two: earlier venus does not pass them through.
+
 See [Working with images](/docs/guides/images/) for building the guest image, and [Running commands](/docs/guides/running-commands/) for reading command output.

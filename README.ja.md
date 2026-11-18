@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-Hans.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <b>日本語</b> · <a href="README.ko.md">한국어</a>
+  <a href="https://github.com/brekkylab/virtx/blob/main/README.md">English</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hans.md">简体中文</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hant.md">繁體中文</a> · <b>日本語</b> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -35,7 +35,7 @@ virtxを使うと、自分のコードから使い捨てのLinux VMを立ち上�
 ## クイックスタート
 
 > [!TIP]
-> コーディングエージェントを使っているなら、次のコマンドで[virtxスキル](skills/virtx/SKILL.md)をインストールすれば、この後のサンプルコードはエージェントが書いてくれます。
+> コーディングエージェントを使っているなら、次のコマンドで[virtxスキル](https://github.com/brekkylab/virtx/blob/main/skills/virtx/SKILL.md)をインストールすれば、この後のサンプルコードはエージェントが書いてくれます。
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
@@ -244,7 +244,7 @@ let client = Client::connect(
 
 #### GPU（任意）
 
-GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](docs/content/guides/using-gpus.mdx)を参照してください。
+GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](https://virtx.sh/docs/guides/using-gpus/)を参照してください。
 
 ## 仕組み
 
@@ -253,7 +253,7 @@ GPUを使うサンドボックスの場合だけ必要です。ホストにVulka
 virtxはクライアント・サーバーモデルを採用しています。クライアント側のコードがvirtxサーバーに何を実行するかを伝え、サーバーがそれをVMで実行して結果を返します。
 
 <p align="center">
-  <img alt="virtxクライアントは、同じマシン上のローカルサーバー、別のマシン上のリモートサーバー、virtxがホストするクラウドのいずれにも接続できます。" src="docs/images/client-server.svg" width="640">
+  <img alt="virtxクライアントは、同じマシン上のローカルサーバー、別のマシン上のリモートサーバー、virtxがホストするクラウドのいずれにも接続できます。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/client-server.svg" width="640">
 </p>
 
 サーバーは、コードと同じマシンや別のマシンで自分で動かすこともできますし、マネージドサービスのvirtx cloudを使うこともできます。どちらの場合もクライアントとサーバーは同じ標準的なHTTPプロトコルで通信し、違うのは通信路だけです。
@@ -273,7 +273,7 @@ virtxはクライアント・サーバーモデルを採用しています。ク
 中心となるリソースは、コマンドを実行するVMである**サンドボックス**です。
 
 <p align="center">
-  <img alt="ユーザーはサンドボックスにコマンドを送り、その出力を受け取ります。サンドボックスは読み取り専用のイメージに書き込み可能なレイヤーを重ねて作られ、ボリュームがマウントされます。" src="docs/images/core-concepts.svg" width="640">
+  <img alt="ユーザーはサンドボックスにコマンドを送り、その出力を受け取ります。サンドボックスは読み取り専用のイメージに書き込み可能なレイヤーを重ねて作られ、ボリュームがマウントされます。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/core-concepts.svg" width="640">
 </p>
 
 サンドボックスのルートファイルシステムは、2つのレイヤーを重ねたオーバーレイです。下が読み取り専用の**イメージ**、上が書き込み先となる**書き込みレイヤー**です。
@@ -286,16 +286,16 @@ virtxはクライアント・サーバーモデルを採用しています。ク
 
 ## ドキュメント
 
-ガイドとAPIリファレンスは[ドキュメント](https://virtx.sh/docs)にあります。それ以外のAPIは、各パッケージのドキュメント（[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)）にまとめています。
+ガイドとAPIリファレンスは[ドキュメント](https://virtx.sh/docs)にあります。RustのAPIは[docs.rs](https://docs.rs/virtx)にもあります。
 
 ## ソースからビルドする
 
-AGENTS.mdの[Building from source](AGENTS.md#building-from-source)を参照してください。
+AGENTS.mdの[Building from source](https://github.com/brekkylab/virtx/blob/main/AGENTS.md#building-from-source)を参照してください。
 
 ## コントリビューション
 
-バグ報告、アイデア、プルリクエストを歓迎します。PRの出し方は[CONTRIBUTING.md](CONTRIBUTING.md)にまとめています。脆弱性の疑いがあるものを見つけた場合は、公開のissueを立てずに[SECURITY.md](SECURITY.md)の手順に従ってください。質問や作ったものの紹介は[Discord](https://discord.gg/27rx3EJy3P)でどうぞ。
+バグ報告、アイデア、プルリクエストを歓迎します。PRの出し方は[CONTRIBUTING.md](https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md)にまとめています。脆弱性の疑いがあるものを見つけた場合は、公開のissueを立てずに[SECURITY.md](https://github.com/brekkylab/virtx/blob/main/SECURITY.md)の手順に従ってください。質問や作ったものの紹介は[Discord](https://discord.gg/27rx3EJy3P)でどうぞ。
 
 ## ライセンス
 
-Apache-2.0ライセンスです。詳しくは[LICENSE](LICENSE)を参照してください。
+Apache-2.0ライセンスです。詳しくは[LICENSE](https://github.com/brekkylab/virtx/blob/main/LICENSE)を参照してください。

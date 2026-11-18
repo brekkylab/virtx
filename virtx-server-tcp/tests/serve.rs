@@ -279,6 +279,15 @@ fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
     }
 }
 
+/// A sandbox of `image` with 1 GiB of memory: enough for what these tests run in it, and little
+/// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
+/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+fn small(image: impl Into<virtx_core::ImageName>) -> SandboxCreateArgs {
+    let mut args = SandboxCreateArgs::new(image);
+    args.memory_mib = Some(1024);
+    args
+}
+
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
 /// guest kernel where libkrun finds it.
 #[tokio::test]
@@ -287,7 +296,7 @@ async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() 
     let served = Served::spawn("port-reached").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = client.create_sandbox(&args).await.unwrap();
     assert_eq!(created.ports[0].port, 8000);
@@ -335,7 +344,7 @@ async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
     let served = Served::spawn("port-listened-twice").await;
     served.pull_image("nginx:1.27-alpine").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("nginx:1.27-alpine");
+    let mut args = small("nginx:1.27-alpine");
     args.ports = vec![80.into()];
     let created = client.create_sandbox(&args).await.unwrap();
     let url = served.port_url(&created.ports[0].url);
@@ -464,7 +473,7 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
     let served = Served::spawn("resize").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.vcpus = Some(2);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let said = async |cmd: &'static str| -> String {
@@ -508,11 +517,11 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
 
     // Stopped: resized, and booted so.
     client.stop_sandbox(&id).await.unwrap();
-    let (status, answer) = resize(json!({ "vcpus": 3, "memory_mib": 1024 })).await;
+    let (status, answer) = resize(json!({ "vcpus": 3, "memory_mib": 1536 })).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(
         (answer["vcpus"].as_u64(), answer["memory_mib"].as_u64()),
-        (Some(3), Some(1024))
+        (Some(3), Some(1536))
     );
     assert_eq!(said("nproc").await.trim(), "3");
     let kib: u64 = said("awk '/MemTotal/ {print $2}' /proc/meminfo")
@@ -520,7 +529,7 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
         .trim()
         .parse()
         .unwrap();
-    assert!((800 << 10..=1024 << 10).contains(&kib), "{kib} KiB");
+    assert!((1300 << 10..=1536 << 10).contains(&kib), "{kib} KiB");
     client.remove_sandbox(&id).await.unwrap();
 }
 
@@ -532,7 +541,7 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
     let served = Served::spawn("disk").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.disk_gib = Some(1);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let said = async |cmd: &'static str| -> String {
@@ -607,7 +616,7 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -706,7 +715,7 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -732,7 +741,7 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
     let served = Served::spawn("lifecycle").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("work".into());
     args.ports = vec![8000.into()];
     let made = client.create_sandbox(&args).await.unwrap();
@@ -795,7 +804,7 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
     assert!(!served.demo.join(format!("sandbox/{id}.ext4")).exists());
 
     // Ephemeral: deleted when it stops.
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.ephemeral = true;
     let gone = client.create_sandbox(&args).await.unwrap();
     client.stop_sandbox(&gone.id).await.unwrap();
@@ -809,7 +818,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
     let served = Served::spawn("kept").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("kept".into());
     args.ports = vec![8000.into()];
     let made = client.create_sandbox(&args).await.unwrap();
@@ -826,7 +835,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .await
         .unwrap();
     let ephemeral = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").ephemeral(true))
+        .create_sandbox(&small("alpine:3.20").ephemeral(true))
         .await
         .unwrap()
         .id;
@@ -867,7 +876,7 @@ async fn a_terminal_s_history_is_written_as_each_command_runs() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -948,7 +957,7 @@ async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap();
     // A connection to the terminal, attaching to `session` if given: it and what it is told
@@ -1076,7 +1085,7 @@ async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
     let served = Served::spawn_with("terminal-idle", json!({ "minute_secs": 1 })).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.auto_stop_minutes = Some(1);
     let idle = client.create_sandbox(&args).await.unwrap();
     let busy = client.create_sandbox(&args).await.unwrap();
@@ -1133,7 +1142,7 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap();
     let answer = reqwest::Client::new()
@@ -1183,7 +1192,7 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap();
     let exec = async |cmd: &str| {
@@ -1255,7 +1264,7 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -1329,7 +1338,7 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -1450,7 +1459,7 @@ async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
     let served = Served::spawn(name).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.memory_mib = Some(memory_mib);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let ran = async |cmd: &str| {

@@ -250,9 +250,9 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
 
 async fn a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good(home: Home) {
     let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE)).await;
-    let (_, code) = run(&sandbox, &["sh", "-c", "sync; poweroff -f"], None)
-        .await
-        .unwrap();
+    // Reset, which ends a machine on every arch: x86's has no power-off a guest reaches.
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &["sh", "-c", "sync; reboot -f"], None));
+    let (_, code) = ended.await.expect("its machine ended").unwrap();
     assert_eq!(code, 137, "ended with its machine");
     assert!(until(async || !sandbox.answer(false).running).await);
     let refused = run(&sandbox, &["true"], None).await;

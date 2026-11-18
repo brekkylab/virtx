@@ -25,9 +25,9 @@ from virtx import (
     Recipe,
     SandboxJob,
     SandboxJobEnd,
+    SandboxJobEndReason,
     SandboxJobKind,
     SandboxPort,
-    SandboxState,
     SandboxVolume,
     StartedJob,
     Stderr,
@@ -37,15 +37,15 @@ from virtx import (
 )
 
 
-async def test_a_sandbox_stops_starts_again_and_is_found_by_its_name(client: Client) -> None:
+async def test_a_sandbox_runs_until_it_is_removed_and_is_found_by_its_name(client: Client) -> None:
     await alpine(client)
     name = unique("work")
     made = await client.create_sandbox(ALPINE, name=name, ports=[8000])
-    assert made.state == SandboxState.RUNNING and made.running
-    assert made.name == name and not made.ephemeral
-    assert made.auto_stop_minutes == 15 and made.auto_delete_days == 30
+    assert made.running and made.name == name
+    assert [p.port for p in made.ports] == [8000]
     found = await client.find_sandbox(name)
     assert found is not None and found.id == made.id and found.client is client
+    assert found.running and found.ports == []
     assert await client.find_sandbox(unique("nobody")) is None
     with pytest.raises(VirtxError) as refused:
         await client.create_sandbox(ALPINE, name=name)
@@ -54,22 +54,6 @@ async def test_a_sandbox_stops_starts_again_and_is_found_by_its_name(client: Cli
         409,
         "exists",
     )
-
-    stopped = await made.stop()
-    assert stopped.state == SandboxState.STOPPED and stopped.client is client
-    started = await stopped.start()
-    assert started.running and [p.port for p in started.ports] == [8000]
-    assert (await client.stop_sandbox(made.id)).state == SandboxState.STOPPED
-    assert (await client.start_sandbox(made.id)).running
-
-    kept = await client.create_sandbox(ALPINE, auto_delete_days="never")
-    assert kept.auto_delete_days is None
-    await kept.remove()
-    gone = await client.create_sandbox(ALPINE, ephemeral=True)
-    await gone.stop()
-    with pytest.raises(VirtxError) as refused:
-        await client.get_sandbox(gone.id)
-    assert refused.value.status == 404
 
     await made.remove()
     with pytest.raises(VirtxError) as refused:
@@ -298,7 +282,19 @@ async def test_a_signal_ends_a_process(client: Client) -> None:
     assert log[-1] == SandboxJobEnd(128 + 15)
     assert await sleep.complete() == 128 + 15
     got = await client.get_sandbox(sandbox.id)
-    assert not (await got.job(sleep.id)).running
+    ended = await got.job(sleep.id)
+    assert not ended.running and ended.reason is None
+    await sandbox.remove()
+
+
+async def test_a_process_past_its_timeout_ends_with_the_reason(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    sleep = await sandbox.exec(["sleep", "60"], timeout_ms=200)
+    log = [entry.entry async for entry in sleep.log()]
+    assert log[-1] == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
+    ended = await sleep.get()
+    assert (ended.code, ended.reason) == (137, SandboxJobEndReason.TIMEOUT)
     await sandbox.remove()
 
 

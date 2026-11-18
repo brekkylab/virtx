@@ -64,7 +64,7 @@ How the forwarding works depends on where the server runs:
   The forwarder listens on a local port, and opens a WebSocket to the port's `url` for each connection made to it.
   The server passes the bytes between that WebSocket and the port in the sandbox.
 
-<img src={portForwarding.src} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/ports/<capability> on the virtx server, which connects to port 8000 in the sandbox it runs." />
+<img src={portForwarding.src} width={portForwarding.width} height={portForwarding.height} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/ports/<capability> on the virtx server, which connects to port 8000 in the sandbox it runs." />
 
 Because everything goes through the server's own HTTP address, the server's machine needs no other port open.
 The `url` holds the credentials for its port, so keep it secret.
@@ -174,5 +174,5 @@ let sandbox = client
 </TabItem>
 </Tabs>
 
-A source that is not an address or a CIDR is refused with `400`, `invalid`, and the desktop's port 5900 refuses rules with `409`, `not_public`.
+A source that is not an address or a CIDR is refused with `400`, `invalid`.
 Inbound rules are virtx cloud's alone: a self-hosted server, `virtx-stdio` or `virtx-server-tcp`, keeps none and refuses a port opened with `inbound`.

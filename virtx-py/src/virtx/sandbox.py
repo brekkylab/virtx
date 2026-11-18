@@ -132,19 +132,10 @@ class SandboxVolume:
         return {"volume": volume, "path": self.path, "readonly": self.readonly}
 
 
-class SandboxState(str, Enum):
-    """Whether a sandbox's VM is up."""
-
-    RUNNING = "running"
-    STOPPED = "stopped"
-    """Its VM is down and its disk kept: a job started in it, or ``Sandbox.start``, starts
-    it."""
-
-
 @dataclass(frozen=True)
 class Sandbox(Files):
-    """One sandbox the server holds, running or stopped, and the client that reaches it: what
-    starts and stops it, runs processes in it and reads and writes its files while it runs.
+    """One sandbox the server holds, and the client that reaches it: what runs processes in it
+    and reads and writes its files.
     Dropping it leaves the sandbox; ``remove`` deletes it, as leaving ``async with`` does:
     ``async with await client.create_sandbox(...) as sandbox:`` makes one for a block."""
 
@@ -157,31 +148,15 @@ class Sandbox(Files):
     """The name it was given, which ``find_sandbox`` finds it by."""
 
     image: str
-    """The digest of the image it stands on, as ``algorithm:hex``: what it boots every time it
-    starts, whatever its tag points at by then."""
+    """The digest of the image it stands on, as ``algorithm:hex``: what its VM boots every
+    time, whatever its tag points at by then."""
 
-    state: SandboxState
-
-    ephemeral: bool
-    """Whether it is deleted when it stops, rather than kept."""
-
-    auto_stop_minutes: int
-    """How long it runs unused before it stops."""
-
-    auto_delete_days: int | None
-    """How long it is kept stopped and unused before it is deleted; ``None`` keeps it until it
-    is deleted."""
-
-    used_at: str
-    """When it was last used, as RFC 3339."""
+    running: bool
+    """Whether it takes processes: ``False`` once its VM has exited on its own. One whose VM the
+    server stopped for want of use is booted again by the next job, and is ``True``."""
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` and ``start`` only."""
-
-    @property
-    def running(self) -> bool:
-        """Whether its VM is up."""
-        return self.state == SandboxState.RUNNING
+    """Its opened ports: answered by ``create_sandbox`` only."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""
@@ -193,11 +168,7 @@ class Sandbox(Files):
             value["id"],
             value.get("name"),
             value["image"],
-            SandboxState(value["state"]),
-            value["ephemeral"],
-            value["auto_stop_minutes"],
-            value.get("auto_delete_days"),
-            value["used_at"],
+            value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
             list(value.get("abins", ())),
         )
@@ -205,17 +176,6 @@ class Sandbox(Files):
     @property
     def _root(self) -> dict[str, str]:
         return {"sandbox": self.id}
-
-    async def start(self) -> Sandbox:
-        """Start it if it is stopped -- its VM booted over its disk as it was left -- and answer
-        it once it runs, with where its ports are now. A job started in it while it is stopped
-        starts it too."""
-        return await self.client.start_sandbox(self.id)
-
-    async def stop(self) -> Sandbox:
-        """Stop it if it runs: its jobs end, and its disk is kept -- or, if it is ephemeral,
-        deleted with it. Answered once it has stopped."""
-        return await self.client.stop_sandbox(self.id)
 
     def exec(
         self, cmd: Iterable[str], *, stdin: bool = False, timeout_ms: int | None = None
@@ -252,7 +212,7 @@ class Sandbox(Files):
         return SandboxJob.from_dict(self.client, self.id, output)
 
     async def remove(self) -> None:
-        """Delete it: stopped first if it runs, and its disk removed. Its volumes stay."""
+        """Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay."""
         await self.client._call("virtx_client_remove_sandbox", args(id=self.id))
 
     async def __aenter__(self) -> Self:
@@ -271,6 +231,20 @@ class SandboxJobKind(str, Enum):
     """What a sandbox job does."""
 
     EXEC = "exec"
+
+
+class SandboxJobEndReason(str, Enum):
+    """Why a process did not end by itself: the server killed it, as ``SIGKILL`` does, its code
+    ``137``."""
+
+    TIMEOUT = "timeout"
+    """Its ``timeout_ms`` ran out."""
+
+    CANCELLED = "cancelled"
+    """Its job was removed while it ran, or its sandbox parked or removed under it."""
+
+    VM_EXITED = "vm_exited"
+    """Its sandbox's VM exited on its own under it."""
 
 
 @dataclass(frozen=True)
@@ -301,6 +275,9 @@ class SandboxJob:
     code: int | None = None
     """Once it has ended, its exit code."""
 
+    reason: SandboxJobEndReason | None = None
+    """Once it has ended, why, if it did not end by itself."""
+
     @classmethod
     def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
         return cls(
@@ -312,6 +289,7 @@ class SandboxJob:
             list(value["cmd"]),
             value["running"],
             value.get("code"),
+            _reason(value),
         )
 
     def _args(self, **fields: Any) -> bytes:
@@ -386,6 +364,15 @@ class SandboxJobEnd:
 
     code: int
 
+    reason: SandboxJobEndReason | None = None
+    """Why, if it did not end by itself."""
+
+
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | None:
+    """A job's, or its end's, ``reason``, if it has one."""
+    reason = value.get("reason")
+    return None if reason is None else SandboxJobEndReason(reason)
+
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 """An entry of a sandbox job's log."""
@@ -402,5 +389,5 @@ def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
     elif "truncated" in item:
         entry = Truncated()
     else:
-        entry = SandboxJobEnd(item["end"]["code"])
+        entry = SandboxJobEnd(item["end"]["code"], _reason(item["end"]))
     return LogEntry(item["id"], entry)

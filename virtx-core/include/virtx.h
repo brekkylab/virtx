@@ -632,10 +632,8 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "name": "...", "image": "algorithm:hex", "state": "running",
-// "ephemeral": bool, "auto_stop_minutes": n, "auto_delete_days": n, "used_at": "..."}, ...]`,
-// `name` only for one that has one, `state` `"running"` or `"stopped"`, and
-// `auto_delete_days` `null` for one kept until it is deleted.
+// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool}, ...]`, `name`
+// only for one that has one, and `running` `false` once its VM has exited on its own.
 //
 // # Safety
 //
@@ -643,11 +641,10 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "name": "...", "ephemeral": bool, "auto_stop_minutes": n,
-// "auto_delete_days": n, "disk_gib": n, "network": bool, "ports": [n],
+// `{"image": {...}, "name": "...", "disk_gib": n, "network": bool, "ports": [n],
 // "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
-// `auto_delete_days` `null` to keep it until it is deleted, the image as
+// the image as
 // `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
 // sandbox as `virtx_client_list_sandbox` answers each, and
@@ -680,29 +677,8 @@ struct VirtxFuture *virtx_client_find_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// Starts the sandbox `id` if it is stopped, given `{"id": "..."}`. Answers once it runs,
-// as `virtx_client_create_sandbox` does, with where its ports are now.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_start_sandbox(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
-
-// Stops the sandbox `id` if it runs, given `{"id": "..."}`: its jobs end, and its disk is
-// kept -- or, for an ephemeral one, deleted with it. Answers once it has stopped, as
-// `virtx_client_list_sandbox` answers each.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_stop_sandbox(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
-
-// Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
-// removed. Answers with `null`.
+// Deletes the sandbox `id`, given `{"id": "..."}`: its VM stopped if it is up, and its
+// disk removed. Answers with `null`.
 //
 // # Safety
 //

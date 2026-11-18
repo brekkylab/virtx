@@ -22,4 +22,3 @@ pub mod keeping;
 pub mod oidc;
 pub mod project;
 pub mod serve;
-pub mod terminals;

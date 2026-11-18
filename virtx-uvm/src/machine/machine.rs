@@ -234,48 +234,15 @@ impl Machine {
         .map_err(|e| Error::io("sending the command", e))
     }
 
-    /// Start `cmd` in the guest on a terminal of its own, `cols` by `rows`: answered as
-    /// [`exec`](Machine::exec) is, in the same turn, and what it writes comes back as
-    /// [`Output`](CtrlResp::Output).
-    pub fn exec_tty(&self, cmd: Vec<String>, cols: u16, rows: u16) -> Result<()> {
-        if cmd.is_empty() {
-            return Err(Error::NoCommand);
-        }
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::ExecTty { cmd, cols, rows },
-        )
-        .map_err(|e| Error::io("sending the command", e))
-    }
-
     /// Write `data` to the stdin of the process `id`, started with one by
-    /// [`exec`](Machine::exec), and close it after if `eof` -- or to its terminal, as typed:
-    /// answered by a [`Written`](CtrlResp::Written) from [`recv`](Machine::recv), each in turn.
+    /// [`exec`](Machine::exec), and close it after if `eof`: answered by a
+    /// [`Written`](CtrlResp::Written) from [`recv`](Machine::recv), each in turn.
     pub fn write_stdin(&self, id: u32, data: String, eof: bool) -> Result<()> {
         wire::send(
             &mut *self.ctrlin.lock().unwrap(),
             &CtrlReq::Stdin { id, data, eof },
         )
         .map_err(|e| Error::io("writing to a process's stdin", e))
-    }
-
-    /// Make the terminal of the process `id` `cols` by `rows`.
-    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Resize { id, cols, rows },
-        )
-        .map_err(|e| Error::io("resizing the terminal", e))
-    }
-
-    /// Ask whether the process `id`, on a terminal, runs another in its foreground: answered by
-    /// a [`Foreground`](CtrlResp::Foreground) from [`recv`](Machine::recv).
-    pub fn foreground(&self, id: u32) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Foreground { id },
-        )
-        .map_err(|e| Error::io("asking about the terminal", e))
     }
 
     /// Mark its disk `mark`, before a copy of it: answered by a

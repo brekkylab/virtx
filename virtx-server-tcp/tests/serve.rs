@@ -13,7 +13,8 @@ use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
 use virtx_core::{
-    Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, SandboxState, Step,
+    Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, Step,
 };
 use virtx_uvm::{ImageStore, RegistryClient};
 
@@ -30,6 +31,9 @@ struct Served {
     issuer: tokio::task::JoinHandle<()>,
     /// The directory of the project `demo`, the tests' own.
     demo: PathBuf,
+    /// What its environment has besides this process's, as each server over its home is
+    /// started.
+    env: Vec<(&'static str, &'static str)>,
 }
 
 /// The issuer the server's config names, and a P-256 key of its, with its public half as a
@@ -89,11 +93,12 @@ fn mirrored(reference: &str) -> String {
 
 impl Served {
     async fn spawn(name: &str) -> Served {
-        Served::spawn_with(name, json!({})).await
+        Served::spawn_with(name, json!({}), &[]).await
     }
 
-    /// As [`Served::spawn`], its config with `more` in it besides.
-    async fn spawn_with(name: &str, more: Value) -> Served {
+    /// As [`Served::spawn`], its config with `more` in it besides, and its environment with
+    /// `env`.
+    async fn spawn_with(name: &str, more: Value, env: &[(&'static str, &'static str)]) -> Served {
         let home = std::env::temp_dir().join(format!("virtx-http-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -113,11 +118,11 @@ impl Served {
             config[key] = value.clone();
         }
         std::fs::write(home.join("config.json"), config.to_string()).unwrap();
-        Served::start(home).await
+        Served::start(home, env.to_vec()).await
     }
 
-    /// A server over `home`, as its `config.json` says.
-    async fn start(home: PathBuf) -> Served {
+    /// A server over `home`, as its `config.json` says, with `env` in its environment.
+    async fn start(home: PathBuf, env: Vec<(&'static str, &'static str)>) -> Served {
         let path = home.join("config.json");
         // The issuer's keys served anew, at the address the config now names.
         let (keys, issuer) = issuer().await;
@@ -129,6 +134,7 @@ impl Served {
             .arg("serve")
             .arg("--config")
             .arg(&path)
+            .envs(env.iter().copied())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         // A process group of its own, which ctrl-break can be sent to alone (`again`).
@@ -183,6 +189,7 @@ impl Served {
             home,
             issuer,
             demo,
+            env,
         }
     }
 
@@ -205,7 +212,39 @@ impl Served {
         self.process.wait().await.unwrap();
         // Not removed: the next is over it.
         let home = std::mem::take(&mut self.home);
-        Served::start(home).await
+        Served::start(home, std::mem::take(&mut self.env)).await
+    }
+
+    /// Sandbox `id`'s machine as `PUT /sandboxes/{id}/resources` answers it, asking no change:
+    /// whether it is up.
+    async fn up(&self, id: &str) -> bool {
+        let answer: Value = reqwest::Client::new()
+            .put(format!(
+                "{}/sandboxes/{id}/resources",
+                self.url.trim_end_matches('/')
+            ))
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        answer["up"].as_bool().unwrap_or_else(|| panic!("{answer}"))
+    }
+
+    /// Until sandbox `id`'s machine is parked: a guard against a hang, not a measure of how
+    /// soon.
+    async fn parked(&self, id: &str) {
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while self.up(id).await {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+        .await;
+        assert!(parked.is_ok(), "sandbox {id} never parked");
     }
 
     /// A client of `user`'s, in `demo`.
@@ -279,15 +318,28 @@ fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
     }
 }
 
+/// A sandbox of `image` with 1 GiB of memory: enough for what these tests run in it, and little
+/// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
+/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+fn small(image: impl Into<virtx_core::ImageName>) -> SandboxCreateArgs {
+    let mut args = SandboxCreateArgs::new(image);
+    args.memory_mib = Some(1024);
+    args
+}
+
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
 /// guest kernel where libkrun finds it.
+/// A server whose sandboxes stay up a minute past their last use, for a test of what a machine
+/// left running between commands: its own default parks them at once.
+const KEPT_UP: (&str, &str) = ("VIRTX_PARK_AFTER_MS", "60000");
+
 #[tokio::test]
 #[ignore]
 async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let served = Served::spawn("port-reached").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = client.create_sandbox(&args).await.unwrap();
     assert_eq!(created.ports[0].port, 8000);
@@ -335,7 +387,7 @@ async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
     let served = Served::spawn("port-listened-twice").await;
     served.pull_image("nginx:1.27-alpine").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("nginx:1.27-alpine");
+    let mut args = small("nginx:1.27-alpine");
     args.ports = vec![80.into()];
     let created = client.create_sandbox(&args).await.unwrap();
     let url = served.port_url(&created.ports[0].url);
@@ -456,15 +508,16 @@ async fn a_built_image_keeps_its_recipe_and_its_steps_in_its_history() {
     );
 }
 
-/// Boots VMs, as the one above does. A stopped sandbox resized: its machine booted with the
-/// vCPUs and memory it was given, from its next start on; a running one's refused.
+/// Boots VMs, as the one above does. A sandbox resized: its machine parked, if nothing uses
+/// it, and booted with the vCPUs and memory it was given from its next boot on; one in use
+/// refused.
 #[tokio::test]
 #[ignore]
-async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
+async fn an_unused_sandbox_is_resized_as_it_next_boots() {
     let served = Served::spawn("resize").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.vcpus = Some(2);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let said = async |cmd: &'static str| -> String {
@@ -501,38 +554,49 @@ async fn a_stopped_sandbox_is_resized_as_it_starts_again() {
     };
     assert_eq!(said("nproc").await.trim(), "2");
 
-    // Running: its machine is the size it booted as.
+    // In use: its machine is the size it booted as.
+    let sleeping = client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["sleep", "600"]))
+        .await
+        .unwrap();
     let (status, refused) = resize(json!({ "vcpus": 3 })).await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-    assert_eq!(refused["error"]["code"], "running");
+    assert_eq!(refused["error"]["code"], "in_use");
+    assert!(served.up(&id).await);
 
-    // Stopped: resized, and booted so.
-    client.stop_sandbox(&id).await.unwrap();
-    let (status, answer) = resize(json!({ "vcpus": 3, "memory_mib": 1024 })).await;
+    // Unused: parked, resized, and booted so.
+    client.remove_sandbox_job(&id, &sleeping.id).await.unwrap();
+    let (status, answer) = resize(json!({ "vcpus": 3, "memory_mib": 1536 })).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(
-        (answer["vcpus"].as_u64(), answer["memory_mib"].as_u64()),
-        (Some(3), Some(1024))
+        (
+            answer["vcpus"].as_u64(),
+            answer["memory_mib"].as_u64(),
+            answer["up"].as_bool()
+        ),
+        (Some(3), Some(1536), Some(false))
     );
+    assert!(client.get_sandbox(&id).await.unwrap().running);
     assert_eq!(said("nproc").await.trim(), "3");
     let kib: u64 = said("awk '/MemTotal/ {print $2}' /proc/meminfo")
         .await
         .trim()
         .parse()
         .unwrap();
-    assert!((800 << 10..=1024 << 10).contains(&kib), "{kib} KiB");
+    assert!((1300 << 10..=1536 << 10).contains(&kib), "{kib} KiB");
     client.remove_sandbox(&id).await.unwrap();
 }
 
 /// Boots VMs, as the one above does. A sandbox's disk grown: its filesystem as large as it
-/// once it starts again, what was on it kept; never shrunk.
+/// once its machine boots again, what was on it kept; never shrunk.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
-    let served = Served::spawn("disk").await;
+async fn a_sandbox_s_disk_is_grown_as_it_next_boots() {
+    // Kept up between commands: grown while up, it is the old size until it next boots.
+    let served = Served::spawn_with("disk", json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.disk_gib = Some(1);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let said = async |cmd: &'static str| -> String {
@@ -577,14 +641,25 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
             .json(&json!({ "disk_gib": n }))
             .send()
     };
-    // Running: grown once it starts again.
+    // Up: grown once it boots again -- here, once a resize has parked it.
     let r = grow(3).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let answer: Value = r.json().await.unwrap();
-    assert_eq!(answer, json!({ "disk_gib": 3, "running": true }));
+    assert_eq!(answer, json!({ "disk_gib": 3, "up": true }));
     assert_eq!(gib().await, 1);
-    client.stop_sandbox(&id).await.unwrap();
-    client.start_sandbox(&id).await.unwrap();
+    let parked = reqwest::Client::new()
+        .put(format!(
+            "{}/sandboxes/{id}/resources",
+            served.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .json(&json!({ "vcpus": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parked.status(), StatusCode::OK);
+    assert!(!served.up(&id).await);
     assert_eq!(gib().await, 3);
     assert_eq!(said("cat /root/kept").await, "kept");
     assert_eq!(said("stat -c %a /root/kept").await, "700");
@@ -597,17 +672,17 @@ async fn a_sandbox_s_disk_is_grown_as_it_starts_again() {
     client.remove_sandbox(&id).await.unwrap();
 }
 
-/// Boots a VM, as the one above does. A running sandbox's files, read over WebDAV through its
-/// agent: its image's and what it wrote alike, a directory listed, a file read whole and in
-/// part. Nothing written; a stopped one's not read.
+/// Boots a VM, as the one above does. A sandbox's files, read over WebDAV through its agent:
+/// its image's and what it wrote alike, a directory listed, a file read whole and in part, and
+/// written; once it is parked, read from its disk, and its machine booted to write them.
 #[tokio::test]
 #[ignore]
-async fn a_running_sandbox_s_files_are_read_and_written() {
-    let served = Served::spawn("files").await;
+async fn a_sandbox_s_files_are_read_and_written_its_machine_booted_to_write_them() {
+    let served = Served::spawn_with("files", json!({}), &[("VIRTX_PARK_AFTER_MS", "1000")]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -682,20 +757,289 @@ async fn a_running_sandbox_s_files_are_read_and_written() {
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("put".into()));
 
-    // Stopped: neither read nor started for it -- nor used by it, so a stopped sandbox is not
-    // kept from its deletion by requests it refuses.
-    client.stop_sandbox(&id).await.unwrap();
-    let used = client.get_sandbox(&id).await.unwrap().used_at;
-    // A later time than its stop's, were it used now.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    let r = asked("GET", "/root/d/a.txt").send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::CONFLICT);
-    let said: Value = r.json().await.unwrap();
-    assert_eq!(said["error"]["code"], "stopped");
-    let now = client.get_sandbox(&id).await.unwrap();
-    assert_eq!(now.state, SandboxState::Stopped);
-    assert_eq!(now.used_at, used, "not used by a request it refused");
+    // Parked: read as they were, its machine left parked; booted for a write.
+    served.parked(&id).await;
+    let r = asked("GET", "/root/d/b.txt").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.text().await.unwrap(), "put\n");
+    assert!(!served.up(&id).await);
+    let r = asked("PUT", "/root/d/c.txt")
+        .body("c\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    assert!(served.up(&id).await);
     client.remove_sandbox(&id).await.unwrap();
+}
+
+/// The responses of a `PROPFIND` multistatus, each as it is written, in order: what two
+/// answers listing the same tree agree on whatever order each listed it in.
+fn responses(multistatus: &str) -> Vec<String> {
+    let mut responses: Vec<String> = multistatus
+        .split("<D:response>")
+        .skip(1)
+        .map(|response| response.split("</D:response>").next().unwrap().to_owned())
+        .collect();
+    responses.sort();
+    responses
+}
+
+/// Boots a VM, as the one above does. A parked sandbox's files, read from its disk with its
+/// machine left parked, are what they were with it up: each directory listed alike -- each
+/// entry's length, time and tag -- each file the same bytes, and what is not there not there;
+/// what it wrote over its image, what it took away from it, and its volume's files at their
+/// path among them. A write boots it.
+#[tokio::test]
+#[ignore]
+async fn a_parked_sandbox_s_files_are_read_from_its_disk_as_they_were_up() {
+    let served = Served::spawn_with("parked-files", json!({}), &[KEPT_UP]).await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    client.create_volume(Some("shared")).await.unwrap();
+    let mut args = small("alpine:3.20");
+    args.volumes = vec![virtx_core::SandboxVolume {
+        volume: "shared".into(),
+        path: "/data".into(),
+        readonly: false,
+    }];
+    let id = client.create_sandbox(&args).await.unwrap().id;
+    let wrote = "mkdir -p /root/d /root/many && cd /root/d && echo hello > a.txt \
+        && head -c 3000000 /dev/urandom > big && ln a.txt hard && ln -s a.txt soft \
+        && mkfifo pipe && rm /etc/motd && echo replaced > /etc/alpine-release \
+        && echo volume > /data/v.txt && cd /root/many \
+        && for i in $(seq 1 3000); do echo $i > file-$i; done && sync";
+    let job = client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["sh", "-c", wrote]))
+        .await
+        .unwrap();
+    let log: Vec<_> = client
+        .sandbox_job_log(&id, &job.id, None)
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            log.last().unwrap().entry,
+            SandboxJobEntry::End(SandboxJobEnd { code: 0, .. })
+        ),
+        "{log:?}"
+    );
+
+    let asked = |method: &str, path: &str| {
+        reqwest::Client::new()
+            .request(
+                Method::from_bytes(method.as_bytes()).unwrap(),
+                format!(
+                    "{}/sandboxes/{id}/files{path}",
+                    served.url.trim_end_matches('/')
+                ),
+            )
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+    };
+    let listed = async |path: &str| {
+        let r = asked("PROPFIND", path)
+            .header("Depth", "1")
+            .send()
+            .await
+            .unwrap();
+        let status = r.status().as_u16();
+        let listed = r.text().await.unwrap();
+        (status, responses(&listed))
+    };
+    let got = async |path: &str, range: Option<&str>| {
+        let mut asking = asked("GET", path);
+        if let Some(range) = range {
+            asking = asking.header("Range", range);
+        }
+        let r = asking.send().await.unwrap();
+        let etag = r
+            .headers()
+            .get("etag")
+            .map(|tag| tag.to_str().unwrap().to_owned());
+        (r.status().as_u16(), etag, r.bytes().await.unwrap())
+    };
+    let dirs = [
+        "/",
+        "/root/d/",
+        "/etc/",
+        "/data/",
+        "/root/many/",
+        "/bin/",
+        "/proc/",
+    ];
+    let files = [
+        ("/root/d/a.txt", None),
+        ("/root/d/hard", None),
+        ("/root/d/big", None),
+        ("/root/d/big", Some("bytes=1000000-1999999")),
+        ("/root/d/soft", None),
+        ("/root/d/pipe", None),
+        ("/etc/alpine-release", None),
+        ("/etc/motd", None),
+        ("/etc/os-release", None),
+        ("/bin/busybox", None),
+        ("/bin/sh", None),
+        ("/data/v.txt", None),
+        ("/root/many/file-2999", None),
+        ("/proc/version", None),
+        ("/nothing/here", None),
+    ];
+    let mut up = Vec::new();
+    for dir in dirs {
+        let listing = std::time::Instant::now();
+        up.push(listed(dir).await);
+        if dir == "/root/many/" {
+            let took = listing.elapsed().as_millis();
+            eprintln!("/root/many/, 3000 files, listed up: {took} ms");
+        }
+    }
+    let mut read_up = Vec::new();
+    for (file, range) in files {
+        read_up.push(got(file, range).await);
+    }
+    // What the guest showed, as its writes and its image make it.
+    assert_eq!(up[1].0, 207);
+    assert_eq!(
+        up[1].1.len(),
+        4,
+        "the directory, a.txt, hard and big: {:?}",
+        up[1].1
+    );
+    assert!(
+        !up[2]
+            .1
+            .iter()
+            .any(|response| response.contains("/etc/motd<"))
+    );
+    assert_eq!(up[4].1.len(), 3001);
+    assert_eq!(read_up[0].0, 200);
+    assert_eq!(&read_up[6].2[..], b"replaced\n");
+    assert_eq!(read_up[7].0, 404);
+    assert_eq!(&read_up[11].2[..], b"volume\n");
+
+    // Parked: the same, its machine left parked.
+    let parked: Value = reqwest::Client::new()
+        .put(format!(
+            "{}/sandboxes/{id}/resources",
+            served.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .json(&json!({ "memory_mib": 1100 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(parked["up"], json!(false), "{parked}");
+    let listing = std::time::Instant::now();
+    let many = listed("/root/many/").await;
+    let first = listing.elapsed();
+    let listing = std::time::Instant::now();
+    assert_eq!(listed("/root/many/").await, many);
+    let again = listing.elapsed();
+    eprintln!(
+        "/root/many/, 3000 files, listed parked: {} ms first, {} ms again",
+        first.as_millis(),
+        again.as_millis()
+    );
+    for (dir, up) in dirs.iter().zip(&up) {
+        assert_eq!(&listed(dir).await, up, "{dir}");
+    }
+    for ((file, range), up) in files.iter().zip(&read_up) {
+        assert_eq!(&got(file, *range).await, up, "{file} {range:?}");
+    }
+    assert!(!served.up(&id).await);
+
+    // Written: booted, and what it wrote read through its machine.
+    let booting = std::time::Instant::now();
+    let r = asked("PUT", "/root/d/new.txt")
+        .body("new\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    eprintln!(
+        "a PUT to it parked, booting it: {} ms",
+        booting.elapsed().as_millis()
+    );
+    assert!(served.up(&id).await);
+    let (status, _, read) = got("/root/d/new.txt", None).await;
+    assert_eq!((status, &read[..]), (200, &b"new\n"[..]));
+    client.remove_sandbox(&id).await.unwrap();
+}
+
+/// Boots a VM, as the one above does. Reading a parked sandbox's files is no use of it: read
+/// over and over, it is reclaimed once it has been unused for as long as its server keeps one
+/// unused, never booted by a read meanwhile -- which would use it.
+#[tokio::test]
+#[ignore]
+async fn reading_a_parked_sandbox_s_files_is_no_use_of_it() {
+    let served = Served::spawn_with(
+        "parked-unused",
+        json!({}),
+        &[("VIRTX_RECLAIM_AFTER_MS", "8000")],
+    )
+    .await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    let id = client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let job = client
+        .exec_sandbox(
+            &id,
+            &SandboxExecArgs::new(["sh", "-c", "echo kept > /root/note"]),
+        )
+        .await
+        .unwrap();
+    let _: Vec<_> = client
+        .sandbox_job_log(&id, &job.id, None)
+        .try_collect()
+        .await
+        .unwrap();
+    served.parked(&id).await;
+
+    let asked = |method: &str, path: &str| {
+        reqwest::Client::new()
+            .request(
+                Method::from_bytes(method.as_bytes()).unwrap(),
+                format!(
+                    "{}/sandboxes/{id}/files{path}",
+                    served.url.trim_end_matches('/')
+                ),
+            )
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+    };
+    let reading = std::time::Instant::now();
+    loop {
+        let r = asked("PROPFIND", "/root/")
+            .header("Depth", "1")
+            .send()
+            .await
+            .unwrap();
+        if r.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        assert_eq!(r.status().as_u16(), 207);
+        let r = asked("GET", "/root/note").send().await.unwrap();
+        if r.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        assert_eq!(r.text().await.unwrap(), "kept\n");
+        assert!(
+            reading.elapsed() < std::time::Duration::from_secs(60),
+            "never reclaimed: the reads used it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert_eq!(status(client.get_sandbox(&id).await), 404);
 }
 
 /// Boots VMs, as the one above does.
@@ -706,7 +1050,7 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -719,26 +1063,110 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     client.remove_sandbox_job(&id, &job.id).await.unwrap();
     assert_eq!(status(client.get_sandbox_job(&id, &job.id).await), 404);
     assert_eq!(client.list_sandbox_job(&id).await.unwrap(), []);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Running
-    );
+    assert!(client.get_sandbox(&id).await.unwrap().running);
 }
 
-/// Boots VMs, as the one above does.
+/// Boots VMs, as the one above does. A job's end says why the server ended it, and only
+/// then: its timeout run out, or it cancelled; not a signal sent it, nor its own exit.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
-    let served = Served::spawn("lifecycle").await;
+async fn a_job_s_end_says_why_the_server_ended_it() {
+    let served = Served::spawn_with("job-ends", json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let id = client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let end = async |job: &str| {
+        let log: Vec<_> = client
+            .sandbox_job_log(&id, job, None)
+            .try_collect()
+            .await
+            .unwrap();
+        match log.last().map(|entry| &entry.entry) {
+            Some(SandboxJobEntry::End(end)) => end.clone(),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 as well: no reason.
+    for code in [0, 137] {
+        let exit = SandboxExecArgs::new(["sh".into(), "-c".into(), format!("exit {code}")]);
+        let job = client.exec_sandbox(&id, &exit).await.unwrap();
+        assert_eq!(end(&job.id).await, SandboxJobEnd::exited(code));
+        let job = client.get_sandbox_job(&id, &job.id).await.unwrap();
+        assert_eq!((job.code, job.reason), (Some(code), None));
+    }
+
+    // Past its `timeout_ms`: killed, for its timeout.
+    let sleep = SandboxExecArgs::new(["sleep", "300"]);
+    let job = client
+        .exec_sandbox(&id, &sleep.clone().timeout_ms(500))
+        .await
+        .unwrap();
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job.id).await, timed_out);
+    let job = client.get_sandbox_job(&id, &job.id).await.unwrap();
+    assert_eq!(
+        (job.code, job.reason),
+        (Some(137), Some(SandboxJobEndReason::Timeout))
+    );
+
+    // `SIGKILL` sent it: the process's own end, as the signal made it.
+    let job = client.exec_sandbox(&id, &sleep).await.unwrap();
+    client
+        .signal_sandbox_job(&id, &job.id, "SIGKILL")
+        .await
+        .unwrap();
+    assert_eq!(end(&job.id).await, SandboxJobEnd::exited(137));
+
+    // Cancelled while its log is read: the log reads on to its end, cancelled, and the job is
+    // gone.
+    let job = client.exec_sandbox(&id, &sleep).await.unwrap();
+    let reading = reqwest::Client::new()
+        .get(format!(
+            "{}sandboxes/{id}/jobs/{}/events",
+            served.url, job.id
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reading.status(), StatusCode::OK);
+    client.remove_sandbox_job(&id, &job.id).await.unwrap();
+    let log = tokio::time::timeout(std::time::Duration::from_secs(60), reading.text())
+        .await
+        .expect("the log of a job cancelled ends")
+        .unwrap();
+    assert!(
+        log.ends_with("data: {\"end\":{\"code\":137,\"reason\":\"cancelled\"}}\n\n"),
+        "{log}"
+    );
+    assert_eq!(status(client.get_sandbox_job(&id, &job.id).await), 404);
+}
+
+/// Boots VMs, as the one above does. A sandbox's machine parked once nothing uses it, and
+/// booted again over its disk as it was left for the next job; its ports' connections boot it
+/// not.
+#[tokio::test]
+#[ignore]
+async fn an_unused_sandbox_is_parked_and_booted_again_as_it_was_left() {
+    let served =
+        Served::spawn_with("lifecycle", json!({}), &[("VIRTX_PARK_AFTER_MS", "1000")]).await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    let mut args = small("alpine:3.20");
     args.name = Some("work".into());
     args.ports = vec![8000.into()];
     let made = client.create_sandbox(&args).await.unwrap();
-    assert_eq!(made.state, SandboxState::Running);
-    assert_eq!(made.auto_stop_minutes, 15);
-    assert_eq!(made.auto_delete_days, Some(30));
+    assert!(made.running);
     assert!(made.image.starts_with("sha256:"));
     let id = made.id.clone();
     assert_eq!(client.find_sandbox("work").await.unwrap().unwrap().id, id);
@@ -759,47 +1187,39 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
             })
             .collect::<Vec<_>>()
     };
-    ran(&id, "echo kept > /root/note && sync").await;
+    ran(&id, "echo kept > /root/note; sleep 1000 >/dev/null 2>&1 &").await;
 
-    // Stopped: its machine down, its jobs ended and kept, its disk kept.
+    // A job that runs keeps it up, past its park many times over.
     let sleeping = client
         .exec_sandbox(&id, &SandboxExecArgs::new(["sleep", "600"]))
         .await
         .unwrap();
-    let stopped = client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(stopped.state, SandboxState::Stopped);
-    let ended = client.get_sandbox_job(&id, &sleeping.id).await.unwrap();
-    assert!(!ended.running);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Stopped
-    );
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(served.up(&id).await);
+    client.remove_sandbox_job(&id, &sleeping.id).await.unwrap();
 
-    // Started again: its files as they were, its port at the same URL.
-    let started = client.start_sandbox(&id).await.unwrap();
-    assert_eq!(started.state, SandboxState::Running);
-    assert_eq!(started.ports, made.ports);
-    assert_eq!(ran(&id, "cat /root/note").await, ["kept"]);
-
-    // A job started in a stopped one starts it.
-    client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(ran(&id, "cat /root/note").await, ["kept"]);
-    assert_eq!(
-        client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Running
+    // Unused: parked, running still; a connection to its port refused, and booting nothing.
+    served.parked(&id).await;
+    assert!(client.get_sandbox(&id).await.unwrap().running);
+    let url = served.port_url(&made.ports[0].url);
+    let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
+    assert!(
+        !matches!(socket.next().await, Some(Ok(Message::Binary(_)))),
+        "closed, as a port nothing listens on is"
     );
+    assert!(!served.up(&id).await);
+
+    // A job boots it: its files as they were, what ran in it gone.
+    assert_eq!(
+        ran(&id, "cat /root/note; ps | grep -c '[s]leep 1000'").await,
+        ["kept", "0"]
+    );
+    assert!(served.up(&id).await);
 
     // Deleted: gone, its disk with it.
     client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.get_sandbox(&id).await), 404);
     assert!(!served.demo.join(format!("sandbox/{id}.ext4")).exists());
-
-    // Ephemeral: deleted when it stops.
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
-    args.ephemeral = true;
-    let gone = client.create_sandbox(&args).await.unwrap();
-    client.stop_sandbox(&gone.id).await.unwrap();
-    assert_eq!(status(client.get_sandbox(&gone.id).await), 404);
 }
 
 /// Boots VMs, as the one above does.
@@ -809,7 +1229,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
     let served = Served::spawn("kept").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("kept".into());
     args.ports = vec![8000.into()];
     let made = client.create_sandbox(&args).await.unwrap();
@@ -825,26 +1245,15 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .try_collect()
         .await
         .unwrap();
-    let ephemeral = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").ephemeral(true))
-        .await
-        .unwrap()
-        .id;
 
-    // Stopped with its server, and known stopped to the next, its job with it -- but an
-    // ephemeral one, deleted.
+    // Parked with its server, and known to the next, parked and running still.
     let served = served.again().await;
     let client = served.connect("tester");
     let found = client.find_sandbox("kept").await.unwrap().unwrap();
-    assert_eq!(
-        (found.id.as_str(), found.state),
-        (made.id.as_str(), SandboxState::Stopped)
-    );
-    assert_eq!(status(client.get_sandbox(&ephemeral).await), 404);
+    assert_eq!((found.id.as_str(), found.running), (made.id.as_str(), true));
+    assert!(!served.up(&made.id).await);
 
-    // Started, as it was left, its port behind the capability it had.
-    let started = client.start_sandbox(&made.id).await.unwrap();
-    assert_eq!(started.ports, made.ports);
+    // Booted by a job, as it was left, its port behind the capability it had.
     let job = client
         .exec_sandbox(&made.id, &SandboxExecArgs::new(["cat", "/root/kept"]))
         .await
@@ -855,274 +1264,10 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .await
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("kept".into()));
+    let url = served.port_url(&made.ports[0].url);
+    assert!(Served::open(&url, Some("virtx.tcp")).await.is_ok());
     client.remove_sandbox(&made.id).await.unwrap();
-}
-
-/// Boots VMs, as the one above does. A terminal's bash writes each command to its history
-/// as it runs -- on the sandbox's disk, before the shell exits, so a stop does not lose it.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_s_history_is_written_as_each_command_runs() {
-    let served = Served::spawn("history").await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap()
-        .id;
-    let said = async |cmd: &'static str| -> String {
-        let job = client
-            .exec_sandbox(&id, &SandboxExecArgs::new(["sh", "-c", cmd]))
-            .await
-            .unwrap();
-        let log: Vec<_> = client
-            .sandbox_job_log(&id, &job.id, None)
-            .try_collect()
-            .await
-            .unwrap();
-        log.into_iter()
-            .filter_map(|entry| match entry.entry {
-                SandboxJobEntry::Stdout(line) => Some(line),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    said("apk add --no-cache bash >/dev/null && echo ok").await;
-
-    let mut url = Url::parse(&served.url)
-        .unwrap()
-        .join(&format!("terminal/{id}?cols=100&rows=30"))
-        .unwrap();
-    url.set_scheme("ws").unwrap();
-    let mut request = url.as_str().into_client_request().unwrap();
-    let headers = request.headers_mut();
-    headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", token("tester")).parse().unwrap(),
-    );
-    headers.insert("virtx-project", "demo".parse().unwrap());
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let mut shown = Vec::new();
-    let mut read_until = async |socket: &mut Socket, until: &str| {
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !String::from_utf8_lossy(&shown).contains(until) {
-                match socket.next().await {
-                    Some(Ok(Message::Binary(bytes))) => shown.extend_from_slice(&bytes),
-                    Some(Ok(_)) => {}
-                    other => panic!("before {until:?}: {other:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("no {until:?}: {}", String::from_utf8_lossy(&shown)));
-    };
-    read_until(&mut socket, "# ").await;
-    socket
-        .send(Message::binary(b"echo kept-$((40+2))\n".to_vec()))
-        .await
-        .unwrap();
-    read_until(&mut socket, "kept-42").await;
-    // The shell still open: its history on the disk all the same.
-    let mut history = String::new();
-    // Looked for a minute: what is tried is that it is written, not how soon.
-    for _ in 0..240 {
-        history = said("cat /root/.bash_history 2>/dev/null").await;
-        if history.contains("echo kept-") {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    assert!(history.contains("echo kept-$((40+2))"), "{history:?}");
-    drop(socket);
-    client.remove_sandbox(&id).await.unwrap();
-}
-
-/// Boots VMs, as the one above does.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
-    let served = Served::spawn("terminal").await;
-    served.pull_image("alpine:3.20").await;
-    let created = served
-        .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap();
-    // A connection to the terminal, attaching to `session` if given: it and what it is told
-    // first, the session's id and whether it attached.
-    let connect = async |session: Option<&str>| {
-        let mut url = Url::parse(&served.url)
-            .unwrap()
-            .join(&format!("terminal/{}?cols=100&rows=30", created.id))
-            .unwrap();
-        if let Some(session) = session {
-            url.query_pairs_mut().append_pair("session", session);
-        }
-        url.set_scheme("ws").unwrap();
-        let mut request = url.as_str().into_client_request().unwrap();
-        let headers = request.headers_mut();
-        headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", token("tester")).parse().unwrap(),
-        );
-        headers.insert("virtx-project", "demo".parse().unwrap());
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let hello = match socket.next().await {
-            Some(Ok(Message::Text(text))) => serde_json::from_str::<Value>(&text).unwrap(),
-            other => panic!("before its session: {other:?}"),
-        };
-        (socket, hello)
-    };
-    // What `socket` shows, read until it has shown `until`.
-    let read_until = async |socket: &mut _, said: &mut Vec<u8>, until: &str| {
-        let socket: &mut tokio_tungstenite::WebSocketStream<_> = socket;
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !String::from_utf8_lossy(said).contains(until) {
-                match socket.next().await {
-                    Some(Ok(Message::Binary(bytes))) => said.extend_from_slice(&bytes),
-                    other => panic!("before {until:?}: {other:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("no {until:?}: {}", String::from_utf8_lossy(said)));
-    };
-
-    let (mut socket, hello) = connect(None).await;
-    assert_eq!(hello["attached"], false);
-    let session = hello["session"].as_str().unwrap().to_owned();
-    // Typed once the shell prompts: typed before, it is echoed as it arrives and again after
-    // the prompt, as on any terminal.
-    let mut said = Vec::new();
-    read_until(&mut socket, &mut said, "# ").await;
-    socket
-        .send(Message::binary(
-            b"echo answer=$((6*7)); [ -t 0 ] && echo on-a-tty; stty size; cd /tmp\n".to_vec(),
-        ))
-        .await
-        .unwrap();
-    read_until(&mut socket, &mut said, "30 100").await;
-
-    // Gone, and back: the same shell, where it was left, and what it wrote shown again.
-    drop(socket);
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let (mut socket, hello) = connect(Some(&session)).await;
-    assert_eq!(hello, json!({ "session": session, "attached": true }));
-    let mut again = Vec::new();
-    read_until(&mut socket, &mut again, "answer=42").await;
-    socket
-        .send(Message::binary(b"pwd\n".to_vec()))
-        .await
-        .unwrap();
-    read_until(&mut socket, &mut again, "\n/tmp").await;
-    // A session not this sandbox's, or not at all: another shell.
-    let (other, hello) = connect(Some("nosuchsession")).await;
-    assert_eq!(hello["attached"], false);
-    assert_ne!(hello["session"], session.as_str());
-    drop(other);
-
-    socket
-        .send(Message::text(r#"{"cols": 120, "rows": 40}"#))
-        .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    socket
-        .send(Message::binary(b"stty size; exit 3\n".to_vec()))
-        .await
-        .unwrap();
-    let (said, ended) = tokio::time::timeout(std::time::Duration::from_secs(90), async {
-        while let Some(Ok(message)) = socket.next().await {
-            match message {
-                Message::Binary(bytes) => said.extend_from_slice(&bytes),
-                Message::Text(text) => {
-                    return (said, serde_json::from_str::<Value>(&text).unwrap());
-                }
-                _ => {}
-            }
-        }
-        panic!(
-            "closed before it said how it ended: {}",
-            String::from_utf8_lossy(&said)
-        );
-    })
-    .await
-    .unwrap();
-    let said = String::from_utf8_lossy(&said);
-    assert!(said.contains("answer=42"), "{said}");
-    assert!(said.contains("\non-a-tty"), "a tty: {said}");
-    assert_eq!(
-        said.matches("answer=$((6*7))").count(),
-        1,
-        "echoed once: {said}"
-    );
-    assert!(said.contains("30 100"), "its size: {said}");
-    assert!(said.contains("40 120"), "resized: {said}");
-    assert_eq!(ended, json!({"exit": 3}), "{said}");
-    // Ended with its shell: named again, another opens.
-    let (_, hello) = connect(Some(&session)).await;
-    assert_eq!(hello["attached"], false);
-}
-
-/// Boots VMs, as the one above does, and waits for them to stop by themselves: a minute is a
-/// second here. A terminal at its prompt does not keep its sandbox from stopping unused; one
-/// running a command does, as the guest says when asked.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
-    let served = Served::spawn_with("terminal-idle", json!({ "minute_secs": 1 })).await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
-    args.auto_stop_minutes = Some(1);
-    let idle = client.create_sandbox(&args).await.unwrap();
-    let busy = client.create_sandbox(&args).await.unwrap();
-    // A terminal in each, left open: `busy`'s running a command, `idle`'s at its prompt.
-    let open = async |id: &str, typed: &[u8]| {
-        let mut url = Url::parse(&served.url)
-            .unwrap()
-            .join(&format!("terminal/{id}"))
-            .unwrap();
-        url.set_scheme("ws").unwrap();
-        let mut request = url.as_str().into_client_request().unwrap();
-        let headers = request.headers_mut();
-        headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", token("tester")).parse().unwrap(),
-        );
-        headers.insert("virtx-project", "demo".parse().unwrap());
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let mut said = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !said.windows(2).any(|w| w == b"# ") {
-                if let Some(Ok(Message::Binary(bytes))) = socket.next().await {
-                    said.extend_from_slice(&bytes);
-                }
-            }
-        })
-        .await
-        .unwrap();
-        socket.send(Message::binary(typed.to_vec())).await.unwrap();
-        socket
-    };
-    let _idle = open(&idle.id, b"").await;
-    let _busy = open(&busy.id, b"sleep 600\n").await;
-
-    let state = async |id: &str| client.get_sandbox(id).await.unwrap().state;
-    let stopped = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while state(&idle.id).await == SandboxState::Running {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    })
-    .await;
-    assert!(stopped.is_ok(), "a terminal at its prompt kept its sandbox");
-    // Asked about many times since, a minute at a time: running still.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    assert_eq!(state(&busy.id).await, SandboxState::Running);
+    assert_eq!(Served::open(&url, Some("virtx.tcp")).await.err(), Some(404));
 }
 
 /// Boots VMs, as the one above does.
@@ -1133,7 +1278,7 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap();
     let answer = reqwest::Client::new()
@@ -1179,11 +1324,12 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
 #[tokio::test]
 #[ignore]
 async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
-    let served = Served::spawn("exec-background").await;
+    // Kept up between its commands: what a program left running is there for the next.
+    let served = Served::spawn_with("exec-background", json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap();
     let exec = async |cmd: &str| {
@@ -1255,7 +1401,7 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -1318,10 +1464,7 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
 
 /// Boots VMs, as the one above does. Input a process does not read holds back whoever writes
 /// it, and nothing else in its sandbox (issue #159): a job's stdin write is answered only once
-/// it is written, and typing into a shell that does not read holds up no command run beside
-/// it. Until then, a write to a job's stdin was answered at
-/// once and piled up in the guest, and typing into a busy shell held every request to the
-/// sandbox until the shell read it.
+/// it is written, and holds up no command run beside it.
 #[tokio::test]
 #[ignore]
 async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() {
@@ -1329,7 +1472,7 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let id = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -1361,47 +1504,7 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
         })
     };
 
-    // A shell on a terminal running a command, typed far past what it reads.
-    let mut url = Url::parse(&served.url)
-        .unwrap()
-        .join(&format!("terminal/{id}?cols=80&rows=24"))
-        .unwrap();
-    url.set_scheme("ws").unwrap();
-    let mut request = url.as_str().into_client_request().unwrap();
-    let headers = request.headers_mut();
-    headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", token("tester")).parse().unwrap(),
-    );
-    headers.insert("virtx-project", "demo".parse().unwrap());
-    let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let (mut typing, mut shown) = socket.split();
-    let mut said = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        while !String::from_utf8_lossy(&said).contains("# ") {
-            if let Some(Ok(Message::Binary(bytes))) = shown.next().await {
-                said.extend_from_slice(&bytes);
-            }
-        }
-    })
-    .await
-    .expect("a prompt");
-    let typed = tokio::spawn(async move {
-        typing
-            .send(Message::binary(b"sleep 600\n".to_vec()))
-            .await
-            .unwrap();
-        let line = format!("# {}\n", "y".repeat(78)).into_bytes();
-        for _ in 0..3300 {
-            if typing.send(Message::binary(line.clone())).await.is_err() {
-                break;
-            }
-        }
-    });
-    // Shown what it writes all along, read so nothing holds there.
-    tokio::spawn(async move { while shown.next().await.is_some() {} });
-    // Let the typing get ahead of the shell.
+    // Let the write get ahead of the sleeper.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let answered = tokio::time::timeout(std::time::Duration::from_secs(60), beside()).await;
@@ -1423,7 +1526,6 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     if written.is_err() {
         assert_eq!(status(written), 409, "refused as ended");
     }
-    typed.abort();
 }
 
 /// Boots VMs, as the one above does.
@@ -1447,10 +1549,11 @@ async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering() {
 /// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
 /// end, as it goes on.
 async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
-    let served = Served::spawn(name).await;
+    // Kept up between its commands: the bomb left running goes on beside the next.
+    let served = Served::spawn_with(name, json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.memory_mib = Some(memory_mib);
     let id = client.create_sandbox(&args).await.unwrap().id;
     let ran = async |cmd: &str| {
@@ -1489,5 +1592,5 @@ async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
     assert_eq!(answered[0], "alive", "{answered:?}");
     let processes: u32 = answered[1].parse().unwrap_or(0);
     assert!(processes > 100, "the bomb went on beside it: {answered:?}");
-    client.stop_sandbox(&id).await.unwrap();
+    client.remove_sandbox(&id).await.unwrap();
 }

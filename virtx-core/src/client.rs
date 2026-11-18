@@ -454,20 +454,8 @@ impl Client {
         sandbox::client::find(&self.inner, name.as_ref()).await
     }
 
-    /// Start the sandbox `id` if it is stopped -- its VM booted over its disk as it was left --
-    /// and answer it once it runs, with where its ports are now. A job started in a stopped
-    /// sandbox starts it too.
-    pub async fn start_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
-        sandbox::client::start(&self.inner, id.as_ref()).await
-    }
-
-    /// Stop the sandbox `id` if it runs: its jobs end, and its disk is kept -- or, for an
-    /// ephemeral one, deleted with it. Answered once it has stopped.
-    pub async fn stop_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
-        sandbox::client::stop(&self.inner, id.as_ref()).await
-    }
-
-    /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes stay.
+    /// Delete the sandbox `id`: its VM stopped if it is up, and its disk removed. Its volumes
+    /// stay.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
@@ -1768,10 +1756,8 @@ pub(crate) mod ffi {
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "state": "running",
-    /// "ephemeral": bool, "auto_stop_minutes": n, "auto_delete_days": n, "used_at": "..."}, ...]`,
-    /// `name` only for one that has one, `state` `"running"` or `"stopped"`, and
-    /// `auto_delete_days` `null` for one kept until it is deleted.
+    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool}, ...]`, `name`
+    /// only for one that has one, and `running` `false` once its VM has exited on its own.
     ///
     /// # Safety
     ///
@@ -1784,11 +1770,10 @@ pub(crate) mod ffi {
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "name": "...", "ephemeral": bool, "auto_stop_minutes": n,
-    /// "auto_delete_days": n, "disk_gib": n, "network": bool, "ports": [n],
+    /// `{"image": {...}, "name": "...", "disk_gib": n, "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
-    /// `auto_delete_days` `null` to keep it until it is deleted, the image as
+    /// the image as
     /// `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, and
@@ -1840,41 +1825,8 @@ pub(crate) mod ffi {
             .future(|client| async move { client.find_sandbox(args?.name).await })
     }
 
-    /// Starts the sandbox `id` if it is stopped, given `{"id": "..."}`. Answers once it runs,
-    /// as `virtx_client_create_sandbox` does, with where its ports are now.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_start_sandbox(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move { client.start_sandbox(args?.id).await })
-    }
-
-    /// Stops the sandbox `id` if it runs, given `{"id": "..."}`: its jobs end, and its disk is
-    /// kept -- or, for an ephemeral one, deleted with it. Answers once it has stopped, as
-    /// `virtx_client_list_sandbox` answers each.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_stop_sandbox(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<Id>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move { client.stop_sandbox(args?.id).await })
-    }
-
-    /// Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
-    /// removed. Answers with `null`.
+    /// Deletes the sandbox `id`, given `{"id": "..."}`: its VM stopped if it is up, and its
+    /// disk removed. Answers with `null`.
     ///
     /// # Safety
     ///

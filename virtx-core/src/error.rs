@@ -110,7 +110,7 @@ impl Error {
     }
 
     /// The protocol's code of a refusal the server answered as `PROTOCOL.md`'s Resources do
-    /// (`{"error": {"code", "message"}}`): `not_found`, `stopped`, `in_use` and the like. What a
+    /// (`{"error": {"code", "message"}}`): `not_found`, `ended`, `in_use` and the like. What a
     /// client branches on, rather than the message.
     pub fn code(&self) -> Option<&str> {
         let Error::Status(_, said) = self else {
@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn a_refusal_in_the_protocol_s_shape_says_its_code() {
-        let stopped = Error::Status(409, "stopped: the sandbox is stopped".into());
-        assert_eq!(stopped.code(), Some("stopped"));
+        let ended = Error::Status(409, "ended: the sandbox's machine has exited".into());
+        assert_eq!(ended.code(), Some("ended"));
         assert_eq!(
             Error::Status(404, "not_found: no sandbox s1".into()).code(),
             Some("not_found")

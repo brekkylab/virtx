@@ -53,32 +53,19 @@ pub enum CtrlReq {
     /// Put what the guest has written on its disks, and end the machine. Not answered: its
     /// process ends.
     Shutdown,
-    /// Run `cmd` on a terminal of its own, `cols` by `rows`, which is its stdin, stdout and
-    /// stderr and its controlling terminal. Answered as [`Exec`](CtrlReq::Exec) is, in the
-    /// same turn; what it writes comes back as [`Output`](CtrlResp::Output).
-    ExecTty {
-        cmd: Vec<String>,
-        cols: u16,
-        rows: u16,
-    },
-    /// Write `data` to the terminal of the process `id`, as typed -- or to the stdin of one
-    /// [`Exec`](CtrlReq::Exec) started with it, closed after if `eof`. Answered with
-    /// [`Written`](CtrlResp::Written) once it is written, each in turn: a process that does
-    /// not read it holds up none but whoever writes to it.
+    /// Write `data` to the stdin of the process `id`, one [`Exec`](CtrlReq::Exec) started with
+    /// it, closed after if `eof`. Answered with [`Written`](CtrlResp::Written) once it is
+    /// written, each in turn: a process that does not read it holds up none but whoever writes
+    /// to it.
     Stdin {
         id: u32,
         data: String,
         #[serde(default)]
         eof: bool,
     },
-    /// Make the terminal of the process `id` `cols` by `rows`.
-    Resize { id: u32, cols: u16, rows: u16 },
     /// Put what the guest has written on its disks, and say so with
     /// [`Synced`](CtrlResp::Synced): before its disks are copied as they are.
     Sync,
-    /// Whether the process `id`, on a terminal, has another in the terminal's foreground -- a
-    /// command a shell runs -- answered with [`Foreground`](CtrlResp::Foreground).
-    Foreground { id: u32 },
     /// Mark its disk `mark`, as it is about to be copied: what is written from now on noted
     /// apart ([`MachineDisk::mark`](crate::disks::MachineDisk::mark)). Answered with
     /// [`Marked`](CtrlResp::Marked).
@@ -106,9 +93,6 @@ pub enum CtrlResp {
     /// What the guest had written is on its disks, as the last [`Sync`](CtrlReq::Sync)
     /// asked.
     Synced,
-    /// What the process `id`, on a terminal, wrote there: as it came, control sequences and
-    /// all, cut only between whole characters.
-    Output { id: u32, data: String },
     /// The process `id` ended with `code`; `128 + signal` for one a signal ended. The last
     /// thing said of it.
     Exited { id: u32, code: i32 },
@@ -118,9 +102,6 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
-    /// The answer to a [`Foreground`](CtrlReq::Foreground): whether the process `id` has
-    /// another in its terminal's foreground; `false` for one with no terminal, or ended.
-    Foreground { id: u32, busy: bool },
     /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: what it
     /// asked is written -- or will never be, the process or its input gone.
     Written { id: u32 },

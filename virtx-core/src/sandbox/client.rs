@@ -40,21 +40,6 @@ pub(crate) async fn find(client: &TransportClient, name: &str) -> Result<Option<
     Ok(found.into_iter().next())
 }
 
-/// Start the sandbox `id`, if it is stopped: answered once it runs, with where its ports are.
-pub(crate) async fn start(client: &TransportClient, id: &str) -> Result<Sandbox, Error> {
-    http::post(client, &format!("{}/start", sandbox(id)), &Empty {}).await
-}
-
-/// Stop the sandbox `id`, if it runs: answered once it has stopped, its disk kept -- or, for
-/// an ephemeral one, deleted.
-pub(crate) async fn stop(client: &TransportClient, id: &str) -> Result<Sandbox, Error> {
-    http::post(client, &format!("{}/stop", sandbox(id)), &Empty {}).await
-}
-
-/// `{}`: the body `start` and `stop` take.
-#[derive(serde::Serialize)]
-struct Empty {}
-
 /// Make a sandbox as `args` says.
 pub(crate) async fn create(
     client: &TransportClient,

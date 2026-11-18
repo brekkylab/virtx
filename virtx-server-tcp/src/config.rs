@@ -44,11 +44,6 @@ pub struct Config {
     #[serde(default)]
     pub origins: Vec<String>,
     pub oidc: crate::oidc::Config,
-    /// How long one of a sandbox's `auto_stop_minutes` lasts, in seconds: 60, unless a test
-    /// that waits on sandboxes stopping by themselves makes it shorter. Sandboxes are looked at
-    /// once a minute so measured, every 60 seconds at most.
-    #[serde(default)]
-    pub minute_secs: Option<u64>,
     /// Docker Hub's mirror, which anonymous pulls of its images go to first (`mirror.gcr.io`,
     /// say): Docker Hub refuses anonymous pulls past a few an hour from one address, which a
     /// server pulling for many reaches. None, unless set.

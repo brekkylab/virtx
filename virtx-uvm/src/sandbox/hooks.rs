@@ -2,8 +2,8 @@
 //! names, and may refuse it. Every one has a default that does nothing, which a server on its
 //! own -- its sandboxes' disks here and nowhere else -- leaves as it is.
 //!
-//! A hook runs while its sandbox starts, stops or is deleted, one of those at a time: it must
-//! not start, stop or delete a sandbox itself, which would wait on it.
+//! A hook runs while its sandbox's machine boots or is parked, or it is deleted, one of those
+//! at a time: it must not boot, park or delete a sandbox itself, which would wait on it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ pub trait Hooks: Send + Sync + 'static {
     }
 
     /// Where `port` of `sandbox` is answered from now on, and what answers it there, until it
-    /// drops: as the sandbox first starts. `None`, and it is answered at its URL as it is.
+    /// drops: as the sandbox's machine first boots. `None`, and it is answered at its URL as it is.
     fn listen<'a>(
         &'a self,
         sandbox: &'a Arc<Sandbox>,
@@ -79,7 +79,7 @@ pub trait Hooks: Send + Sync + 'static {
     }
 
     /// Sandbox `id` made again here, its disk [adopted](Hooks::adopted) and not booted: ready
-    /// for it to start at once when it is next asked to.
+    /// for its machine to boot at once when it is next used.
     fn readied(&self, id: &str) {
         let _ = id;
     }
@@ -102,9 +102,18 @@ pub trait Hooks: Send + Sync + 'static {
         Ok(())
     }
 
-    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, where the
-    /// server's disks fetch it as it is read ([`Disks::open`](crate::disks::Disks::open)): a
-    /// socket, and what answers on it until it drops. `None` for a disk that is all here.
+    /// Sandbox `id`'s disk about to be read in this process while its machine is parked,
+    /// before its disk is held: what it holds while it is read. Its machine is not booted for
+    /// it, and nothing the disk is read for is a use of the sandbox.
+    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Held>, Error>> {
+        let _ = id;
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, or while it
+    /// is read in this process ([`reading`](Hooks::reading)), where the server's disks fetch it
+    /// as it is read ([`Disks::open`](crate::disks::Disks::open)): a socket, and what answers
+    /// on it until it drops. `None` for a disk that is all here.
     fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, Error> {
         let _ = (id, disk);
         Ok(None)

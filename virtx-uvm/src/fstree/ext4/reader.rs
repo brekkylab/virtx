@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use crate::fstree::{Entry, Error, FsTree, Meta, Result, Timestamp};
 
@@ -91,18 +92,37 @@ pub(super) struct Reader<R> {
     filetype: bool,
     /// The blocks the journal's committed transactions left, by number, read in place of
     /// the image's.
-    journaled: HashMap<u64, Vec<u8>>,
+    journaled: Arc<HashMap<u64, Vec<u8>>>,
 }
 
 /// One inode, as far as this reads them.
 pub(super) struct Inode {
     pub(super) mode: u16,
-    size: u64,
+    pub(super) size: u64,
     flags: u32,
     links: u16,
     /// Where it maps its blocks, or a short symlink's target, or a device's number.
     block: [u8; 60],
     meta: Meta,
+}
+
+impl<R> Reader<R> {
+    /// The same image's layout, read from `image`, which has to be the image this one was
+    /// opened over: its superblock and journal not read again.
+    pub(super) fn with<S>(&self, image: S) -> Reader<S> {
+        Reader {
+            image,
+            block: self.block,
+            bytes: self.bytes,
+            inodes_per_group: self.inodes_per_group,
+            inode_size: self.inode_size,
+            descriptors: self.descriptors,
+            desc_size: self.desc_size,
+            groups: self.groups,
+            filetype: self.filetype,
+            journaled: Arc::clone(&self.journaled),
+        }
+    }
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -193,7 +213,7 @@ impl<R: Read + Seek> Reader<R> {
             desc_size,
             groups: (blocks - first_data_block).div_ceil(blocks_per_group),
             filetype: incompat & INCOMPAT_FILETYPE != 0,
-            journaled: HashMap::new(),
+            journaled: Arc::default(),
         };
         if incompat & INCOMPAT_RECOVER != 0 {
             let ino = u32_at(0xE0);
@@ -202,7 +222,7 @@ impl<R: Read + Seek> Reader<R> {
                     "ext4 image: a journal on a device of its own".into(),
                 ));
             }
-            reader.journaled = reader.replay(ino)?;
+            reader.journaled = Arc::new(reader.replay(ino)?);
         }
         Ok(reader)
     }
@@ -329,15 +349,7 @@ impl<R: Read + Seek> Reader<R> {
 
     /// An inode's contents, `size` bytes of them: what its extents map, and zeros where
     /// they map nothing or what they map is allocated but not yet written.
-    fn contents(&mut self, ino: u32, inode: &Inode) -> Result<Vec<u8>> {
-        if inode.flags & EXTENTS_FL == 0 {
-            if inode.size == 0 {
-                return Ok(Vec::new());
-            }
-            return Err(Error::Unsupported(format!(
-                "ext4 image: inode {ino} maps its blocks without extents, as ext2 and ext3 did"
-            )));
-        }
+    pub(super) fn contents(&mut self, ino: u32, inode: &Inode) -> Result<Vec<u8>> {
         // Held whole, holes too, so a file has to fit in what the image could hold.
         if inode.size > self.bytes {
             return Err(Error::Unsupported(format!(
@@ -345,18 +357,49 @@ impl<R: Read + Seek> Reader<R> {
                 inode.size
             )));
         }
+        self.range(ino, inode, 0, inode.size)
+    }
+
+    /// `len` bytes of an inode's contents from `offset`, as [`contents`](Self::contents) reads
+    /// them: fewer where they run past its end, none from past it.
+    pub(super) fn range(
+        &mut self,
+        ino: u32,
+        inode: &Inode,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>> {
+        let end = inode.size.min(offset.saturating_add(len));
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        if inode.flags & EXTENTS_FL == 0 {
+            return Err(Error::Unsupported(format!(
+                "ext4 image: inode {ino} maps its blocks without extents, as ext2 and ext3 did"
+            )));
+        }
+        // Asked before anything is allocated, as `at` asks of what it reads.
+        if end - offset > self.bytes {
+            return Err(Error::Unsupported(format!(
+                "ext4 image: {} bytes of inode {ino}, more than the image could hold",
+                end - offset
+            )));
+        }
 
         let mut extents = Vec::new();
         self.extents(ino, &inode.block, MAX_EXTENT_DEPTH, &mut extents)?;
-        let mut data = vec![0u8; inode.size as usize];
+        let mut data = vec![0u8; (end - offset) as usize];
         for (logical, first, count) in extents {
-            let start = logical * self.block;
-            if start >= inode.size {
+            let start = logical.saturating_mul(self.block);
+            let (from, to) = (
+                start.max(offset),
+                start.saturating_add(count * self.block).min(end),
+            );
+            if from >= to {
                 continue;
             }
-            let len = (count * self.block).min(inode.size - start);
-            let bytes = self.at(first * self.block, len)?;
-            data[start as usize..(start + len) as usize].copy_from_slice(&bytes);
+            let bytes = self.at(first * self.block + (from - start), to - from)?;
+            data[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&bytes);
         }
         Ok(data)
     }
@@ -700,25 +743,47 @@ fn acl_from_ext4(value: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The tree being read into, and what the walk has to remember on the way.
-pub(super) struct Walk {
-    pub(super) tree: FsTree,
-    /// The first path each file with more than one name was read at, so that the names
-    /// after it are links to it and not copies of it.
-    pub(super) files: HashMap<u32, Vec<u8>>,
-    /// The directories being read, to refuse one that is inside itself.
-    pub(super) open: HashSet<u32>,
+/// The tree in the image `reader` reads, each file's contents what `file` makes of its inode.
+pub(super) fn walk<R: Read + Seek, D>(
+    reader: &mut Reader<R>,
+    mut file: impl FnMut(&mut Reader<R>, u32, &Inode) -> Result<D>,
+) -> Result<FsTree<D>> {
+    let root = reader.inode(ROOT)?;
+    if root.mode & S_IFMT != S_IFDIR {
+        return Err(Error::Malformed(format!(
+            "ext4 image: the root inode is mode {:o}, which is not a directory",
+            root.mode
+        )));
+    }
+    let mut walk = Walk {
+        tree: FsTree::new(),
+        files: HashMap::new(),
+        open: HashSet::new(),
+    };
+    walk.directory(reader, ROOT, root, Vec::new(), 0, &mut file)?;
+    Ok(walk.tree)
 }
 
-impl Walk {
+/// The tree being read into, and what the walk has to remember on the way.
+struct Walk<D> {
+    tree: FsTree<D>,
+    /// The first path each file with more than one name was read at, so that the names
+    /// after it are links to it and not copies of it.
+    files: HashMap<u32, Vec<u8>>,
+    /// The directories being read, to refuse one that is inside itself.
+    open: HashSet<u32>,
+}
+
+impl<D> Walk<D> {
     /// The directory `ino` at `path`, and everything under it.
-    pub(super) fn directory<R: Read + Seek>(
+    fn directory<R: Read + Seek>(
         &mut self,
         reader: &mut Reader<R>,
         ino: u32,
         inode: Inode,
         path: Vec<u8>,
         depth: usize,
+        file: &mut impl FnMut(&mut Reader<R>, u32, &Inode) -> Result<D>,
     ) -> Result<()> {
         if depth > MAX_DEPTH {
             return Err(Error::Malformed(format!(
@@ -753,7 +818,7 @@ impl Walk {
             let inode = reader.inode(child)?;
             let entry = match inode.mode & S_IFMT {
                 S_IFDIR => {
-                    self.directory(reader, child, inode, path, depth + 1)?;
+                    self.directory(reader, child, inode, path, depth + 1, file)?;
                     continue;
                 }
                 S_IFREG => {
@@ -765,7 +830,7 @@ impl Walk {
                         self.files.insert(child, path.clone());
                     }
                     Entry::File {
-                        data: reader.contents(child, &inode)?,
+                        data: file(reader, child, &inode)?,
                         meta: inode.meta,
                     }
                 }

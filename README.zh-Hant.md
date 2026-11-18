@@ -149,29 +149,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 遠端
 
-每個[版本](https://github.com/brekkylab/virtx/releases)都附有伺服器 `virtx-server-tcp-<os>-<arch>.tar.gz`（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。
-其中包含 `virtx-server-tcp`、客體核心、`abin/` 和 `alib/`。
-解壓縮到單獨的目錄後，`virtx-server-tcp` 會在自己旁邊找到客體核心，因此不用設定 `PATH` 或函式庫路徑就能直接執行。
+依照[自行架設伺服器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的機器上架設 `virtx-server-tcp`。
 
-在伺服器那台機器上寫一份 `server.json`，指定 OpenID Connect 提供者，然後啟動伺服器：
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-在用戶端，改為連線到這台伺服器，取代 `Client.spawn()`。
+用從 `virtx-cli/` 建置的 `virtx` 登入一次，再改為帶上它印出的權杖連線，取代 `Client.spawn()`。
 其餘部分和本機範例完全相同。
-
-使用者就是提供者核發給 `client_id` 所指用戶端的 ID 權杖中的 `email`，該用戶端須是使用裝置流程的公開用戶端。
-用從 `virtx-cli/` 建置的 `virtx` 登入一次，再帶上它印出的權杖連線：
 
 ```sh
 virtx login https://virtx.example
@@ -216,11 +197,6 @@ let client = Client::connect(
 ```
 
 </details>
-
-`virtx token` 會給出最後登入的提供者的權杖。
-如果登入了多個，請在參數中指定伺服器的提供者：`token --json --issuer https://idp.example --client-id virtx`。
-
-用戶端只有在連到本機的回送位址時，才會透過明文 `http` 傳送權杖，所以放在其他機器上的伺服器，請在前面加上一層 HTTPS。
 
 ## 功能特色
 

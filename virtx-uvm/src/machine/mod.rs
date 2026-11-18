@@ -28,6 +28,7 @@ mod net;
 mod ports;
 pub mod wire;
 
+pub(crate) use boot::alib;
 pub use error::{Error, Result};
 pub use machine::*;
 pub use net::Network;

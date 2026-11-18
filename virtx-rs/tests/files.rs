@@ -1,6 +1,6 @@
 //! The files of a volume and a sandbox, against the fixture's `virtx-stdio`.
 
-use virtx::{Files, MountSource, MountType, SandboxCreateArgs, SandboxState};
+use virtx::{Files, MountSource, MountType, SandboxCreateArgs};
 
 mod common;
 
@@ -169,7 +169,7 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
 }
 
 #[test]
-fn a_stopped_sandbox_keeps_what_it_wrote_and_is_found_by_its_name() {
+fn a_sandbox_keeps_what_it_wrote_and_is_found_by_its_name() {
     let client = common::client();
     common::alpine(&client);
     let name = common::unique("kept");
@@ -189,35 +189,16 @@ fn a_stopped_sandbox_keeps_what_it_wrote_and_is_found_by_its_name() {
         0
     );
 
-    // Stopped: found by its name, and its files refused until it runs.
-    let stopped = sandbox.stop().wait().unwrap();
-    assert_eq!(stopped.info().state, SandboxState::Stopped);
+    // Found by its name, its files are what its processes wrote, and what is put there is in
+    // it for them.
     let found = client.find_sandbox(&name).wait().unwrap().unwrap();
-    assert_eq!(
-        (found.id(), found.info().state),
-        (sandbox.id(), SandboxState::Stopped)
-    );
-    let refused = found.read_text("root/kept").wait().unwrap_err();
-    assert_eq!(
-        (refused.status(), refused.code()),
-        (Some(409), Some("stopped")),
-        "{refused}"
-    );
-
-    // Started again, its disk is as it was left, and what is put there is in it for its next
-    // start.
-    let started = found.start().wait().unwrap();
-    assert_eq!(started.info().state, SandboxState::Running);
-    assert_eq!(started.read_text("root/kept").wait().unwrap(), "kept\n");
-    started
-        .write_file("root/put", "put\n", None)
-        .wait()
-        .unwrap();
-    started.stop().wait().unwrap();
-    let read = common::run(&started, &["cat", "/root/kept", "/root/put"]);
+    assert_eq!((found.id(), found.info().running), (sandbox.id(), true));
+    assert_eq!(found.read_text("root/kept").wait().unwrap(), "kept\n");
+    found.write_file("root/put", "put\n", None).wait().unwrap();
+    let read = common::run(&found, &["cat", "/root/kept", "/root/put"]);
     assert_eq!(read, (vec!["kept".into(), "put".into()], 0));
 
-    started.remove().wait().unwrap();
+    found.remove().wait().unwrap();
     assert!(client.find_sandbox(&name).wait().unwrap().is_none());
 }
 

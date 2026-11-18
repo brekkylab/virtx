@@ -99,12 +99,21 @@ An upper disk is what makes one of those machines writable: an ext4 of its own, 
 ```
 
 Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
-stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
-unless it says otherwise, `0` for never) and booted again over the same upper disk when something
-does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and why each, are in
+parked -- stopped, its disk kept -- once nothing uses the sandbox (`VIRTX_PARK_AFTER_MS` for a while after,
+`0` for never) and booted again over the same upper disk when something does: see
+[`sandbox`](src/sandbox/sandbox.rs). Each machine's coming up and going down, with when, is told in order to
+whoever embeds it ([`sandbox::runs`](src/sandbox/runs.rs)). The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
 
-**The stacking happens in the guest**, because overlayfs is a kernel filesystem
+A parked sandbox's files are read without booting it ([`files/parked.rs`](src/files/parked.rs)): its upper
+disk's ext4 read on the host for its metadata alone ([`Ext4`](src/fstree/ext4/mod.rs)), stacked over the
+layers' by the rules overlayfs stacks them by ([`FsTree::stack`](src/fstree/tree.rs)), once for each boot
+of the disk, and a file's bytes read from its layer or its inode as a `GET` asks for them. Each read of the
+disk holds the sandbox against a boot and the disk's lock, and goes through the embedder's
+[`Disks::read`](src/disks.rs), so a lazy disk is fetched as it is read. Writes boot it, as before.
+
+**The stacking happens in the guest** -- the host stacks the two only to read a parked
+sandbox's files, in memory -- because overlayfs is a kernel filesystem
 and the host has no way to mount one — let alone an EROFS a macOS kernel cannot
 read at all. libkrun's init already knows how to mount a block device as the
 root and pivot onto it (`KRUN_BLOCK_ROOT_DEVICE`), but it takes exactly one

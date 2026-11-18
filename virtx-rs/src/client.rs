@@ -780,7 +780,7 @@ impl Client {
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
-    /// here and by [`start_sandbox`](Self::start_sandbox) only.
+    /// here only.
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -812,26 +812,7 @@ impl Client {
         call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
     }
 
-    /// Start the sandbox `id` if it is stopped -- its VM booted over its disk as it was left --
-    /// and answer it once it runs, with where its ports are now. A job started in a stopped
-    /// sandbox starts it too.
-    pub fn start_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
-        let args = json!({ "id": id.as_ref() });
-        let client = self.clone();
-        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_start_sandbox, args);
-        call.map(move |info| Sandbox::new(client.clone(), info))
-    }
-
-    /// Stop the sandbox `id` if it runs: its jobs end, and its disk is kept -- or, for an
-    /// ephemeral one, deleted with it.
-    pub fn stop_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
-        let args = json!({ "id": id.as_ref() });
-        let client = self.clone();
-        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_stop_sandbox, args);
-        call.map(move |info| Sandbox::new(client.clone(), info))
-    }
-
-    /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes
+    /// Delete the sandbox `id`: its VM stopped if it is up, and its disk removed. Its volumes
     /// stay.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });

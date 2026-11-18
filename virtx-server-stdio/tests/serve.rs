@@ -12,7 +12,7 @@ use tokio::process::Command;
 use virtx_core::{
     Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, Recipe,
     SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry,
-    SandboxState, SandboxVolume, Step,
+    SandboxVolume, Step,
 };
 use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 
@@ -96,7 +96,7 @@ impl Server {
     /// This server's client gone, and another server spawned over its home, as the next client
     /// spawns one.
     async fn again(mut self) -> Server {
-        // Gone before the next is spawned: its sandboxes stopped, and kept.
+        // Gone before the next is spawned: its sandboxes parked, and kept.
         let nowhere = Client::connect("http://127.0.0.1:9", Auth::None, Default::default());
         let gone = std::mem::replace(&mut self.client, nowhere.unwrap());
         gone.close().await;
@@ -195,6 +195,15 @@ fn names(entries: Vec<DirEntry>) -> Vec<String> {
     entries.into_iter().map(|entry| entry.name).collect()
 }
 
+/// A sandbox of `image` with 1 GiB of memory: enough for what these tests run in it, and little
+/// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
+/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+fn small(image: impl Into<ImageName>) -> SandboxCreateArgs {
+    let mut args = SandboxCreateArgs::new(image);
+    args.memory_mib = Some(1024);
+    args
+}
+
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
 /// guest kernel where libkrun finds it.
 #[tokio::test]
@@ -203,7 +212,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
     let server = Server::spawn("sandbox");
     server.pull_image("alpine:3.20").await;
     server.client.create_volume(Some("data")).await.unwrap();
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("work".into());
     args.volumes = vec![SandboxVolume {
         volume: "data".into(),
@@ -216,8 +225,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
     assert_eq!(status(server.client.create_sandbox(&args).await), 409);
     let listed = server.client.list_sandbox().await.unwrap();
     assert_eq!(listed.len(), 1);
-    // Its machine is up from its making.
-    assert_eq!(listed[0].state, SandboxState::Running);
+    assert!(listed[0].running);
     assert_eq!(listed[0].name.as_deref(), Some("work"));
     assert!(server.disk(&id).is_file());
 
@@ -270,7 +278,6 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
         .await;
     assert_eq!(lines, ["0"]);
 
-    // What is written to its disk needs no `sync`: stopping the sandbox does it.
     let (_, ended) = server
         .exec(
             &id,
@@ -287,21 +294,16 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
         std::fs::read_to_string(server.project().await.join("volume/data/files/shared")).unwrap(),
         "shared\n"
     );
-    let stopped = server.client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(stopped.state, SandboxState::Stopped);
-
-    // Started again, by a job: what it wrote is on its disk still.
     let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
-    assert_eq!(
+    assert!(
         server
             .client
             .find_sandbox("work")
             .await
             .unwrap()
             .unwrap()
-            .state,
-        SandboxState::Running
+            .running
     );
 
     server.client.remove_sandbox(&id).await.unwrap();
@@ -315,7 +317,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
 async fn a_sandbox_is_kept_across_a_server_started_again() {
     let server = Server::spawn("kept");
     server.pull_image("alpine:3.20").await;
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("kept".into());
     args.ports = vec![8000.into()];
     let id = server.client.create_sandbox(&args).await.unwrap().id;
@@ -323,28 +325,14 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
         .await;
     assert_eq!(ended.unwrap(), 0);
-    let ephemeral = server
-        .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").ephemeral(true))
-        .await
-        .unwrap()
-        .id;
 
-    // Its client gone, the server stops it, and the next one over the home knows it stopped.
+    // Its client gone, the server parks it, and the next one over the home knows it, running
+    // still.
     let server = server.again().await;
     let found = server.client.find_sandbox("kept").await.unwrap().unwrap();
-    assert_eq!(
-        (found.id.as_str(), found.state),
-        (id.as_str(), SandboxState::Stopped)
-    );
-    assert_eq!(status(server.client.get_sandbox(&ephemeral).await), 404);
-    assert!(!server.disk(&ephemeral).exists());
+    assert_eq!((found.id.as_str(), found.running), (id.as_str(), true));
 
-    // Started again, as it was left, its port answered where this server answers it.
-    let started = server.client.start_sandbox(&id).await.unwrap();
-    assert_eq!(started.state, SandboxState::Running);
-    assert_eq!(started.ports.len(), 1);
-    assert!(started.ports[0].url.starts_with("http://127.0.0.1:"));
+    // Booted by a job, as it was left.
     let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
     server.client.remove_sandbox(&id).await.unwrap();
@@ -354,11 +342,13 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_running_in_another_server_is_refused() {
-    let server = Server::spawn("beside");
+    // Kept up a minute past its last use, so that it runs as the other server asks for it: this
+    // server's default parks it at once.
+    let server = Server::spawn_with("beside", &[("VIRTX_PARK_AFTER_MS", "60000")]);
     server.pull_image("alpine:3.20").await;
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -367,14 +357,15 @@ async fn a_sandbox_running_in_another_server_is_refused() {
         .await;
     assert_eq!(ended.unwrap(), 0);
 
-    // Its disk is held by the machine the first runs: the second starts it not, nor deletes
-    // it, nor reads its files.
+    // Its disk is held by the machine the first runs: the second boots it not, for a job or
+    // for its files, nor deletes it.
     let other = server.beside();
-    assert_eq!(
-        other.client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Stopped
-    );
-    assert_eq!(status(other.client.start_sandbox(&id).await), 409);
+    assert!(other.client.get_sandbox(&id).await.unwrap().running);
+    let refused = other
+        .client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["true"]))
+        .await;
+    assert_eq!(status(refused), 409);
     assert_eq!(status(other.client.remove_sandbox(&id).await), 409);
     let root = FileRoot::Sandbox(id.clone());
     assert_eq!(
@@ -384,8 +375,8 @@ async fn a_sandbox_running_in_another_server_is_refused() {
     let (lines, ended) = server.exec(&id, &["cat", "/root/kept"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
 
-    // Stopped there, it is the other's to start.
-    server.client.stop_sandbox(&id).await.unwrap();
+    // Parked there, its client gone, it is the other's to boot.
+    let _server = server.again().await;
     let (lines, ended) = other.exec(&id, &["cat", "/root/kept"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
     other.client.remove_sandbox(&id).await.unwrap();
@@ -394,15 +385,19 @@ async fn a_sandbox_running_in_another_server_is_refused() {
 /// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
-async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
-    let server = Server::spawn_with("auto-stop", &[("VIRTX_MINUTE_MS", "500")]);
+async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote() {
+    let server = Server::spawn_with("park", &[("VIRTX_PARK_AFTER_MS", "500")]);
     server.pull_image("alpine:3.20").await;
-    let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
-    let id = server.client.create_sandbox(&args).await.unwrap().id;
-    let state = async || server.client.get_sandbox(&id).await.unwrap().state;
+    let id = server
+        .client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
     let root = FileRoot::Sandbox(id.clone());
-    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
+    // What runs past its job ends with the machine, so seeing it gone is seeing it parked.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
+    let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
 
     let (_, ended) = server
         .exec(&id, &["sh", "-c", "echo kept > /root/kept"], None)
@@ -420,36 +415,34 @@ async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["1".into()], 0));
 
-    // Unused, it stops, and says so; its files are not read then, nor is it started for them.
+    // Unused, it is parked, running still; its files read as it wrote them, and a job boots
+    // it over them.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(state().await, SandboxState::Stopped);
+    assert!(server.client.get_sandbox(&id).await.unwrap().running);
     assert_eq!(
-        status(server.client.read_text(&root, "root/kept").await),
-        409
+        server.client.read_text(&root, "root/kept").await.unwrap(),
+        "kept\n"
     );
-    assert_eq!(state().await, SandboxState::Stopped);
-
-    // A job starts it again, over what it wrote.
-    let (lines, _) = server
-        .exec(
-            &id,
-            &["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"],
-            None,
-        )
-        .await;
+    let (lines, _) = server.exec(&id, &still, None).await;
     assert_eq!(lines, ["kept", "0"]);
-    assert_eq!(state().await, SandboxState::Running);
 
-    // A request to its files is a use of it, and what it wrote is there after it stops again.
+    // What a write to its files wrote is there after it is parked again, and a job boots it.
     server
         .client
         .write_file(&root, "root/written", "written\n", None)
         .await
         .unwrap();
+    let (_, ended) = server.exec(&id, &behind, None).await;
+    assert_eq!(ended.unwrap(), 0);
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(state().await, SandboxState::Stopped);
-    let (lines, _) = server.exec(&id, &["cat", "/root/written"], None).await;
-    assert_eq!(lines, ["written"]);
+    let (lines, _) = server
+        .exec(
+            &id,
+            &["sh", "-c", "cat /root/written; ps | grep -c '[s]leep 1000'"],
+            None,
+        )
+        .await;
+    assert_eq!(lines, ["written", "0"]);
 
     server.client.remove_sandbox(&id).await.unwrap();
     let left = std::fs::read_dir(server.project().await.join("sandbox"))
@@ -458,40 +451,53 @@ async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
     assert_eq!(left, 0);
 }
 
-/// Boots VMs, as the one above does.
+/// Boots VMs, as the one above does. A sandbox parked once unused has all it wrote on its
+/// disk, left in the guest's page cache as it was.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_stopped_while_it_stops_unused_answers_once_it_has_synced() {
-    let server = Server::spawn_with("auto-stop-stop", &[("VIRTX_MINUTE_MS", "500")]);
+async fn a_sandbox_parked_unused_has_synced_what_it_wrote() {
+    let server = Server::spawn_with("park-synced", &[("VIRTX_PARK_AFTER_MS", "500")]);
     server.pull_image("alpine:3.20").await;
-    // It stops some 500 to 1000 ms after its last job ends, and syncs for a while: one stop
-    // asked for per delay across that.
-    for delay in (400..=1100).step_by(100) {
-        let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
-        let id = server.client.create_sandbox(&args).await.unwrap().id;
-        // Left in the guest's page cache, so stopping the machine takes the while it syncs.
-        let (_, ended) = server
-            .exec(
-                &id,
-                &["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=64"],
-                None,
-            )
-            .await;
-        assert_eq!(ended.unwrap(), 0);
+    let id = server
+        .client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let (_, ended) = server
+        .exec(
+            &id,
+            &["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=64"],
+            None,
+        )
+        .await;
+    assert_eq!(ended.unwrap(), 0);
 
-        // Asked to stop as it may be stopping already, it answers once its machine has synced,
-        // so its disk holds all it wrote.
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-        server.client.stop_sandbox(&id).await.unwrap();
-        let disk = std::fs::File::open(server.disk(&id)).unwrap();
-        let tree = FsTree::from_ext4(disk).unwrap();
-        let size = match tree.entry(b"upper/root/big").unwrap() {
-            Some(Entry::File { data, .. }) => data.len(),
-            other => panic!("{other:?}, stopped after {delay} ms"),
-        };
-        assert_eq!(size, 64 << 20, "stopped after {delay} ms");
-        server.client.remove_sandbox(&id).await.unwrap();
-    }
+    // Read from its disk until it is all there, which it is once its machine is parked: a
+    // guard against a hang, not a measure of how soon.
+    let size = || {
+        let disk = std::fs::File::open(server.disk(&id)).ok()?;
+        match FsTree::from_ext4(disk)
+            .ok()?
+            .entry(b"upper/root/big")
+            .ok()?
+        {
+            Some(Entry::File { data, .. }) => Some(data.len()),
+            _ => None,
+        }
+    };
+    let synced = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while size() != Some(64 << 20) {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await;
+    assert!(
+        synced.is_ok(),
+        "its disk never held all it wrote: {:?}",
+        size()
+    );
+    server.client.remove_sandbox(&id).await.unwrap();
 }
 
 /// Boots VMs, as the one above does.
@@ -502,7 +508,7 @@ async fn a_job_s_stdin_is_written_and_its_log_answers_its_exec() {
     server.pull_image("alpine:3.20").await;
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -565,7 +571,7 @@ async fn a_job_s_stdin_is_written_and_its_log_answers_its_exec() {
         entries,
         [
             SandboxJobEntry::Stdout("héllo".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 4 })
+            SandboxJobEntry::End(SandboxJobEnd::exited(4))
         ]
     );
     server.client.remove_sandbox(&id).await.unwrap();
@@ -577,7 +583,7 @@ async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     let server = Server::spawn("sandbox-files");
     server.pull_image("alpine:3.20").await;
     server.client.create_volume(Some("data")).await.unwrap();
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.volumes = vec![SandboxVolume {
         volume: "data".into(),
         path: "/data".into(),
@@ -689,13 +695,6 @@ async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     let read = tokio::time::timeout(std::time::Duration::from_secs(10), fifo).await;
     assert_eq!(read.expect("a pipe held the files up"), "made\n");
 
-    // Stopped, its files are not reached, and it is not started for them.
-    server.client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(status(client.read_dir(&root, "").await), 409);
-    assert_eq!(
-        server.client.get_sandbox(&id).await.unwrap().state,
-        SandboxState::Stopped
-    );
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.read_dir(&root, "").await), 404);
 }
@@ -711,7 +710,7 @@ fn address(url: &str) -> &str {
 async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let server = Server::spawn("port-reached");
     server.pull_image("alpine:3.20").await;
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = server.client.create_sandbox(&args).await.unwrap();
     let at = address(&created.ports[0].url).to_owned();
@@ -760,13 +759,13 @@ async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 /// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
-async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
+async fn a_disk_a_parked_machine_left_reads_as_its_kernel_committed() {
     let server = Server::spawn("killed");
     server.pull_image("alpine:3.20").await;
-    let args = SandboxCreateArgs::new("alpine:3.20");
+    let args = small("alpine:3.20");
     let id = server.client.create_sandbox(&args).await.unwrap().id;
 
-    // Synced, so committed, and then stopped with its disk still mounted.
+    // Synced, so committed, and then parked with its disk still mounted.
     let (lines, ended) = server
         .exec(
             &id,
@@ -780,7 +779,8 @@ async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
         )
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["synced".into()], 0));
-    server.client.stop_sandbox(&id).await.unwrap();
+    // Parked as its client goes.
+    let server = server.again().await;
 
     let path = server.disk(&id);
     let image = std::fs::read(&path).unwrap();
@@ -795,7 +795,6 @@ async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
     assert_eq!(kept, 100);
 
     // And its next machine finds the same.
-    server.client.start_sandbox(&id).await.unwrap();
     let (lines, ended) = server.exec(&id, &["cat", "/root/kept/100"], None).await;
     assert_eq!((lines, ended.unwrap()), (vec!["100".into()], 0));
 }
@@ -821,7 +820,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
 
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("built:latest"))
+        .create_sandbox(&small("built:latest"))
         .await
         .unwrap()
         .id;
@@ -843,7 +842,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
             0
         )
     );
-    let by_digest = SandboxCreateArgs::new(ImageName::Digest { digest });
+    let by_digest = small(ImageName::Digest { digest });
     assert!(server.client.create_sandbox(&by_digest).await.is_ok());
 
     // A step that fails fails the build, and names nothing.
@@ -851,10 +850,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
         .build(Recipe::new("built:latest").step("exit 3"), "failed:latest")
         .await;
     assert!(failed.error.is_some(), "{failed:?}");
-    let created = server
-        .client
-        .create_sandbox(&SandboxCreateArgs::new("failed:latest"))
-        .await;
+    let created = server.client.create_sandbox(&small("failed:latest")).await;
     assert_eq!(status(created), 404);
 }
 

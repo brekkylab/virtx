@@ -3,8 +3,8 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use virtx_core::{ImageName, SandboxCreateArgs, SandboxPort};
 
@@ -14,30 +14,22 @@ use super::sandbox::{Shared, label_fits, pick, spec_of};
 use super::{Error, Sandbox};
 use crate::{Digest, ImageStore, ImageStoreError, Reference, SnapshotStore, VolumeStore};
 
-/// How long a sandbox runs unused before it stops, and how long one is kept stopped and unused
-/// before it is deleted, where its making names neither.
-pub const AUTO_STOP_MINUTES: u32 = 15;
-pub const AUTO_DELETE_DAYS: u32 = 30;
+/// How long a sandbox is unused before it is deleted, where `VIRTX_RECLAIM_AFTER_MS` does not
+/// say.
+const RECLAIM_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-static MINUTE: OnceLock<Duration> = OnceLock::new();
-
-/// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;
-/// before any sandbox is tended.
-pub fn set_minute(minute: Duration) {
-    let _ = MINUTE.set(minute);
+/// How long a sandbox is unused before it is deleted, `None` for never:
+/// `VIRTX_RECLAIM_AFTER_MS`, in milliseconds, `0` for never; or 30 days.
+pub fn reclaim_after() -> Option<Duration> {
+    match std::env::var("VIRTX_RECLAIM_AFTER_MS").map(|ms| ms.parse::<u64>()) {
+        Ok(Ok(0)) => None,
+        Ok(Ok(ms)) => Some(Duration::from_millis(ms)),
+        _ => Some(RECLAIM_AFTER),
+    }
 }
 
-/// How long one of a sandbox's `auto_stop_minutes` lasts, and a day of its `auto_delete_days`
-/// is 1440 of: as [`set_minute`] made it, else `VIRTX_MINUTE_MS` milliseconds, else a minute.
-pub fn minute() -> Duration {
-    *MINUTE.get_or_init(|| {
-        std::env::var("VIRTX_MINUTE_MS")
-            .ok()
-            .and_then(|ms| ms.parse::<u64>().ok())
-            .filter(|ms| *ms > 0)
-            .map_or(Duration::from_secs(60), Duration::from_millis)
-    })
-}
+/// How often [`Sandboxes::spawn_reclaiming`] looks for sandboxes to reclaim, at most.
+const RECLAIM_EVERY: Duration = Duration::from_secs(60);
 
 /// A sandbox made again here under the id it had elsewhere, and the key each of its ports had
 /// there, by key.
@@ -46,8 +38,9 @@ pub struct Given {
     pub keys: HashMap<String, u16>,
 }
 
-/// A server's sandboxes, running or stopped, from each one's making until it is deleted: each
-/// kept on disk ([`record`](super::record)), so a server started again knows each, stopped.
+/// A server's sandboxes, from each one's making until it is deleted: each kept on disk
+/// ([`record`](super::record)), so a server started again knows each, parked -- or exited, one
+/// whose machine ended on its own.
 ///
 /// A handle: cloned, it is the same sandboxes.
 #[derive(Clone)]
@@ -61,9 +54,9 @@ struct Inner {
 
 impl Sandboxes {
     /// The sandboxes kept under `root`, of what `images`, `snapshots` and `volumes` hold, each
-    /// machine run as `vm` (see [`Machine::start`](crate::Machine::start)), with `hooks`
-    /// plugged in. An ephemeral sandbox a server before this one left -- ended before it could
-    /// delete it -- is deleted now.
+    /// machine run as `vm` (see [`Machine::start`](crate::Machine::start)) and parked once its
+    /// sandbox has been unused for `park_after` ([`park_after`](super::park_after) is a
+    /// server's), with `hooks` plugged in.
     pub fn new(
         images: ImageStore,
         snapshots: SnapshotStore,
@@ -71,6 +64,7 @@ impl Sandboxes {
         root: &Path,
         vm: Vec<OsString>,
         hooks: Arc<dyn Hooks>,
+        park_after: Option<Duration>,
     ) -> std::io::Result<Sandboxes> {
         let kept = root.join("sandbox");
         std::fs::create_dir_all(&kept)?;
@@ -83,20 +77,10 @@ impl Sandboxes {
             vm,
             hooks,
             kept,
+            park_after,
         });
         let mut all = HashMap::new();
         for record in records {
-            if record.ephemeral {
-                // Left alone while another server runs it.
-                match shared.snapshots.remove(&record.id) {
-                    Ok(()) | Err(crate::SnapshotError::Unknown(_)) => {
-                        let _ =
-                            std::fs::remove_file(shared.kept.join(format!("{}.json", record.id)));
-                    }
-                    Err(_) => {}
-                }
-                continue;
-            }
             all.insert(record.id.clone(), Sandbox::new(record, Arc::clone(&shared)));
         }
         Ok(Sandboxes(Arc::new(Inner {
@@ -122,7 +106,7 @@ impl Sandboxes {
         &self.0.shared.vm
     }
 
-    /// The sandbox `id`, running or stopped.
+    /// The sandbox `id`, whether its machine is up or not.
     pub fn get(&self, id: &str) -> Result<Arc<Sandbox>, Error> {
         self.0
             .all
@@ -133,8 +117,7 @@ impl Sandboxes {
             .ok_or_else(|| Error::NotFound(format!("no sandbox here has the id {id}")))
     }
 
-    /// Every sandbox, running or stopped, as the protocol answers each; those named `name`
-    /// alone, given one.
+    /// Every sandbox, as the protocol answers each; those named `name` alone, given one.
     pub fn list(&self, name: Option<&str>) -> Vec<virtx_core::Sandbox> {
         let all: Vec<_> = self.0.all.lock().unwrap().values().cloned().collect();
         all.iter()
@@ -143,19 +126,19 @@ impl Sandboxes {
             .collect()
     }
 
-    /// Every sandbox that runs.
-    fn running(&self) -> Vec<Arc<Sandbox>> {
+    /// Every sandbox whose machine is up.
+    fn up(&self) -> Vec<Arc<Sandbox>> {
         let all = self.0.all.lock().unwrap();
         all.values()
-            .filter(|sandbox| sandbox.is_running())
+            .filter(|sandbox| sandbox.up())
             .cloned()
             .collect()
     }
 
     /// A sandbox made of `args` -- or, `given` an id and its ports' keys, made again here
     /// under that id, its disk taken from where it is kept -- and booted, unless not `booted`:
-    /// then made, and its disk brought here, for it to start at once when it is next asked to.
-    /// Answered with its ports.
+    /// then made, and its disk brought here, parked, for it to boot at once when it is next
+    /// used. Answered with its ports.
     pub async fn create(
         &self,
         mut args: SandboxCreateArgs,
@@ -207,11 +190,6 @@ impl Sandboxes {
             }
             _ => {}
         }
-        if args.auto_stop_minutes == Some(0) {
-            return Err(Error::Invalid(
-                "auto_stop_minutes: 0 stops it before it is used".into(),
-            ));
-        }
         super::sandbox::abins_refused(&args.abins, &super::sandbox::abin_programs(&shared.vm))?;
 
         let digest = match &args.image {
@@ -238,7 +216,7 @@ impl Sandboxes {
             ImageStoreError::Missing(_) => Error::NotFound(format!("no image here is {digest}")),
             e => e.into(),
         })?;
-        // Booted by digest every time it starts, whatever its tag points at by then.
+        // Booted by digest every time, whatever its tag points at by then.
         args.image = ImageName::Digest {
             digest: digest.to_string(),
         };
@@ -291,13 +269,11 @@ impl Sandboxes {
                 name: args.name.clone(),
                 image: digest,
                 _held: held,
-                ephemeral: args.ephemeral,
-                auto_stop_minutes: args.auto_stop_minutes.unwrap_or(AUTO_STOP_MINUTES),
-                auto_delete_days: args.auto_delete_days.unwrap_or(Some(AUTO_DELETE_DAYS)),
                 args,
                 opened: Mutex::new(opened),
                 keys: Mutex::new(keys),
-                used: Mutex::new(SystemTime::now()),
+                used: Mutex::new(std::time::SystemTime::now()),
+                exited: Mutex::new(false),
                 disk_gib: Mutex::new(None),
                 resized: Mutex::new(Resized::default()),
             };
@@ -365,7 +341,7 @@ impl Sandboxes {
                 shared.hooks.made(&id, size).await?;
             }
             if booted {
-                sandbox.running().await?;
+                sandbox.wake().await?;
             }
             Ok::<_, Error>(())
         };
@@ -389,24 +365,11 @@ impl Sandboxes {
         if kept && !booted {
             shared.hooks.readied(&id);
         }
-        Ok(sandbox.record.answer(booted, true))
+        Ok(sandbox.record.answer(true))
     }
 
-    /// Sandbox `id` stopped, if it runs: its jobs ended, its machine stopped with what the guest
-    /// wrote on its disk, and its disk kept -- or, for an ephemeral one, deleted with it.
-    /// Answered as it was as it stopped.
-    pub async fn stop(&self, id: &str) -> Result<virtx_core::Sandbox, Error> {
-        let sandbox = self.get(id)?;
-        sandbox.stop().await?;
-        let stopped = sandbox.record.answer(false, false);
-        if sandbox.ephemeral() {
-            self.delete(id).await?;
-        }
-        Ok(stopped)
-    }
-
-    /// Sandbox `id` deleted: stopped first if it runs, its jobs removed, and its disk
-    /// removed. Its volumes stay.
+    /// Sandbox `id` deleted: its machine stopped first if it is up, its jobs removed, and its
+    /// disk removed. Its volumes stay.
     pub async fn delete(&self, id: &str) -> Result<(), Error> {
         let sandbox = self.get(id)?;
         sandbox.delete().await?;
@@ -414,9 +377,10 @@ impl Sandboxes {
         Ok(())
     }
 
-    /// Sandbox `id`, stopped, let go of here, its disk left as it is: its record and its jobs
-    /// gone, as a delete does, but nothing removed from where it is kept -- what a server does
-    /// once the sandbox is to run elsewhere. Refused while it runs.
+    /// Sandbox `id`, its machine down, let go of here, its disk left as it is: its record and
+    /// its jobs gone, as a delete does, but nothing removed from where it is kept -- what a
+    /// server does once the sandbox is to run elsewhere. Refused [`InUse`](Error::InUse) while
+    /// its machine is up.
     pub async fn forget(&self, id: &str) -> Result<(), Error> {
         let sandbox = self.get(id)?;
         sandbox.forget().await?;
@@ -424,157 +388,106 @@ impl Sandboxes {
         Ok(())
     }
 
-    /// The sandbox that runs with a port named by `key`, and the port.
+    /// The sandbox with a port named by `key`, its machine up or not, and the port.
     pub fn find_port(&self, key: &str) -> Option<(Arc<Sandbox>, u16)> {
-        self.running()
-            .into_iter()
-            .find_map(|sandbox| Some((Arc::clone(&sandbox), sandbox.keyed(key)?)))
+        let all = self.0.all.lock().unwrap();
+        all.values()
+            .find_map(|sandbox| Some((Arc::clone(sandbox), sandbox.keyed(key)?)))
     }
 
     /// The sandbox whose disk is `id`, with its machine up.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
-        self.get(id).ok().filter(|sandbox| sandbox.is_running())
+        self.get(id).ok().filter(|sandbox| sandbox.up())
     }
 
-    /// How many sandboxes run, and how many jobs run in them now.
+    /// How many sandboxes have their machines up, and how many jobs run in them now.
     pub fn counts(&self) -> (usize, usize) {
-        let running = self.running();
-        let jobs = running.iter().map(|sandbox| sandbox.running_jobs()).sum();
-        (running.len(), jobs)
+        let up = self.up();
+        let jobs = up.iter().map(|sandbox| sandbox.running_jobs()).sum();
+        (up.len(), jobs)
     }
 
     /// What the machines up now may write.
     pub fn writes(&self) -> Vec<Written> {
-        self.running()
+        self.up()
             .iter()
             .flat_map(|sandbox| sandbox.writes())
             .collect()
     }
 
-    /// Stop every sandbox, in use or not: what runs in each ends, and its disk is kept as it
-    /// stopped.
-    pub async fn stop_all(&self) {
-        for sandbox in self.running() {
-            if let Err(e) = self.stop(sandbox.id()).await {
-                eprintln!("sandbox {} not stopped: {e}", sandbox.id());
+    /// Park every sandbox, in use or not: what runs in each ends, as cancelling it does, and
+    /// its disk is kept as its machine stopped.
+    pub async fn park_all(&self) {
+        for sandbox in self.up() {
+            if let Err(e) = sandbox.park_anyway().await {
+                eprintln!("sandbox {} not parked: {e}", sandbox.id());
             }
         }
     }
 
-    /// Stop every sandbox that runs nothing and is reached through nothing now, whatever its
-    /// `auto_stop_minutes`. A terminal open in one does not keep it.
-    pub async fn stop_unused(&self) {
-        for sandbox in self.running() {
-            if sandbox.busy() {
-                continue;
-            }
-            if let Err(e) = self.stop(sandbox.id()).await {
-                eprintln!("sandbox {}, unused, not stopped: {e}", sandbox.id());
+    /// Park every sandbox that nothing uses now ([`Sandbox::park`]), however recently it was
+    /// used.
+    pub async fn park_unused(&self) {
+        for sandbox in self.up() {
+            match sandbox.park().await {
+                Ok(()) | Err(Error::InUse(_)) => {}
+                Err(e) => eprintln!("sandbox {}, unused, not parked: {e}", sandbox.id()),
             }
         }
     }
 
-    /// Stop every sandbox in a thread of its own: what they wrote is on their disks once each
-    /// has ended, and each is kept, stopped, for a server started again -- but an ephemeral
-    /// one, deleted.
+    /// Park every sandbox in a thread of its own: what they wrote is on their disks once each
+    /// machine has ended, and each is kept, parked, for a server started again.
     pub fn close_all(&self) {
         let closing = self.clone();
         std::thread::spawn(move || closing.close_all_blocking());
     }
 
-    /// As [`close_all`](Self::close_all), side by side, blocking until each has stopped: not on
-    /// an async runtime's thread.
+    /// As [`close_all`](Self::close_all), side by side, blocking until each machine has
+    /// stopped: not on an async runtime's thread.
     pub fn close_all_blocking(&self) {
         let all: Vec<_> = self.0.all.lock().unwrap().values().cloned().collect();
         std::thread::scope(|scope| {
             for sandbox in &all {
-                scope.spawn(|| match sandbox.ephemeral() {
-                    true => sandbox.delete_blocking(),
-                    false => sandbox.stop_blocking(),
-                });
+                scope.spawn(|| sandbox.park_blocking());
             }
         });
-        let mut kept = self.0.all.lock().unwrap();
-        for sandbox in all.iter().filter(|sandbox| sandbox.ephemeral()) {
-            kept.remove(sandbox.id());
-        }
     }
 
-    /// Stop each sandbox that has run nothing, and been reached through nothing, for its
-    /// `auto_stop_minutes`; and delete each kept stopped and unused for its
-    /// `auto_delete_days`. A terminal counts as use while it is typed in, or runs a command --
-    /// its shell's foreground another's, as the guest says when asked -- not while it sits at a
-    /// prompt.
-    pub fn tend(&self) {
-        let now = SystemTime::now();
-        let idle = |sandbox: &Sandbox, limit: Duration| {
-            now.duration_since(sandbox.used_at())
-                .is_ok_and(|unused| unused >= limit)
-        };
+    /// Delete each sandbox unused for `after`: nothing in use now, and last used that long
+    /// ago, whether its machine is up, parked or exited.
+    pub fn reclaim(&self, after: Duration) {
         let all: Vec<_> = self.0.all.lock().unwrap().values().cloned().collect();
-        let (mut stopping, mut deleting) = (Vec::new(), Vec::new());
         for sandbox in all {
-            if !sandbox.is_running() {
-                if sandbox
-                    .record
-                    .auto_delete_days
-                    .is_some_and(|days| idle(&sandbox, minute() * days * 24 * 60))
-                {
-                    deleting.push(sandbox.id().to_owned());
-                }
+            if sandbox.idle().is_none_or(|idle| idle < after) {
                 continue;
             }
-            let limit = minute() * sandbox.record.auto_stop_minutes;
-            if sandbox.busy() || !idle(&sandbox, limit) {
-                sandbox
-                    .asked
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                continue;
-            }
-            // A terminal open, untouched: asked first whether a command runs in it, which
-            // keeps it used if one does; stopped the next time if none said so.
-            let terminals = sandbox.terminals();
-            if terminals.is_empty() || sandbox.asked.load(std::sync::atomic::Ordering::Relaxed) {
-                stopping.push(sandbox.id().to_owned());
-                continue;
-            }
-            sandbox
-                .asked
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            for pid in terminals {
-                sandbox.ask_foreground(pid);
-            }
-        }
-        for id in stopping {
-            let sandboxes = self.clone();
+            let (sandboxes, id) = (self.clone(), sandbox.id().to_owned());
             tokio::spawn(async move {
-                if let Err(e) = sandboxes.stop(&id).await {
-                    eprintln!("sandbox {id}, unused, not stopped: {e}");
-                }
-            });
-        }
-        for id in deleting {
-            let sandboxes = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = sandboxes.delete(&id).await {
-                    eprintln!("sandbox {id}, unused past its days, not deleted: {e}");
+                match sandboxes.delete(&id).await {
+                    Ok(()) => eprintln!("sandbox {id}, unused, reclaimed"),
+                    Err(e) => eprintln!("sandbox {id}, unused, not reclaimed: {e}"),
                 }
             });
         }
     }
 
-    /// [`tend`](Self::tend) once a minute, or as often as a minute made shorter lasts, for as
-    /// long as these sandboxes are.
-    pub fn spawn_tending(&self) {
-        let tended: Weak<Inner> = Arc::downgrade(&self.0);
+    /// [`reclaim`](Self::reclaim) those unused for [`reclaim_after`], looked for once a
+    /// minute -- or as often as that lasts, if it is shorter -- for as long as these sandboxes
+    /// are.
+    pub fn spawn_reclaiming(&self) {
+        let Some(after) = reclaim_after() else {
+            return;
+        };
+        let reclaimed: Weak<Inner> = Arc::downgrade(&self.0);
         tokio::spawn(async move {
-            let mut every = tokio::time::interval(minute().min(Duration::from_secs(60)));
+            let mut every = tokio::time::interval(after.min(RECLAIM_EVERY));
             loop {
                 every.tick().await;
-                let Some(inner) = tended.upgrade() else {
+                let Some(inner) = reclaimed.upgrade() else {
                     return;
                 };
-                Sandboxes(inner).tend();
+                Sandboxes(inner).reclaim(after);
             }
         });
     }
@@ -701,6 +614,7 @@ mod tests {
             root,
             Vec::new(),
             hooks,
+            None,
         )
         .unwrap()
     }
@@ -829,17 +743,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sandbox_is_kept_for_the_next_server_and_an_ephemeral_one_is_not() {
+    async fn a_sandbox_is_kept_for_the_next_server_until_it_is_deleted() {
         let root = std::env::temp_dir().join(format!("virtx-sandboxes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let here = sandboxes(&root);
         let args = SandboxCreateArgs::new("here:latest")
             .name("work")
-            .port(8000)
-            .auto_delete_days(None);
+            .port(8000);
         let made = here.create(args.clone(), None, false).await.unwrap();
-        assert_eq!(made.state, virtx_core::SandboxState::Stopped);
+        assert!(made.running, "parked, it is running still");
+        assert!(!here.get(&made.id).unwrap().up());
         assert!(made.image.starts_with("sha256:"));
         assert!(root.join(format!("sandbox/{}.ext4", made.id)).is_file());
         // One name to one sandbox, and one id.
@@ -853,38 +767,86 @@ mod tests {
             .create(SandboxCreateArgs::new("here:latest"), Some(given), false)
             .await;
         assert!(matches!(again, Err(Error::Exists(_))), "{again:?}");
-        let gone = here
-            .create(
-                SandboxCreateArgs::new("here:latest").ephemeral(true),
-                None,
-                false,
-            )
-            .await
-            .unwrap();
         assert_eq!(here.list(Some("work")).len(), 1);
-        assert_eq!(here.list(None).len(), 2);
+        let used = here.get(&made.id).unwrap().last_used();
 
-        // The next server over the same root knows it, stopped, as it was made; not the
-        // ephemeral one.
+        // The next server over the same root knows it, parked, as it was made.
         drop(here);
         let next = sandboxes(&root);
         let listed = next.list(None);
         assert_eq!(listed.len(), 1);
-        let kept = &listed[0];
+        let kept = next.get(&made.id).unwrap();
         assert_eq!(
-            (
-                kept.id.as_str(),
-                kept.name.as_deref(),
-                kept.auto_delete_days
-            ),
-            (made.id.as_str(), Some("work"), None)
+            (kept.id(), kept.name(), kept.up()),
+            (made.id.as_str(), Some("work"), false)
         );
-        assert_eq!(kept.used_at, made.used_at);
-        assert_eq!(next.get(&made.id).unwrap().answer(true).ports, made.ports);
-        assert!(!root.join(format!("sandbox/{}.ext4", gone.id)).exists());
+        assert!(listed[0].running);
+        let at = |time: std::time::SystemTime| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        assert_eq!(at(kept.last_used()), at(used));
+        assert_eq!(kept.answer(true).ports, made.ports);
 
         next.delete(&made.id).await.unwrap();
         assert!(matches!(next.get(&made.id), Err(Error::NotFound(_))));
+        assert!(!root.join(format!("sandbox/{}.ext4", made.id)).exists());
+        assert!(!root.join(format!("sandbox/{}.json", made.id)).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One whose machine ended on its own is kept exited, across a server started again: not
+    /// running, and booted for nothing.
+    #[tokio::test]
+    async fn a_sandbox_whose_machine_exited_stays_exited_for_the_next_server() {
+        let root = std::env::temp_dir().join(format!("virtx-exited-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let here = sandboxes(&root);
+        let made = here
+            .create(SandboxCreateArgs::new("here:latest"), None, false)
+            .await
+            .unwrap();
+        // As its machine ending on its own leaves it.
+        let sandbox = here.get(&made.id).unwrap();
+        *sandbox.record.exited.lock().unwrap() = true;
+        sandbox.keep();
+        drop((sandbox, here));
+
+        let next = sandboxes(&root);
+        assert!(!next.list(None)[0].running);
+        let sandbox = next.get(&made.id).unwrap();
+        let started = sandbox.start().await;
+        assert!(matches!(started, Err(Error::Ended)), "{started:?}");
+        let exec = sandbox.exec(vec!["true".into()], false, None).await;
+        assert!(matches!(exec, Err(Error::Ended)), "{:?}", exec.err());
+        next.delete(&made.id).await.unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sandbox unused for as long as reclaiming waits is deleted, whether its machine was
+    /// ever up or not.
+    #[tokio::test]
+    async fn a_sandbox_unused_long_enough_is_reclaimed() {
+        let root = std::env::temp_dir().join(format!("virtx-reclaim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let here = sandboxes(&root);
+        let made = here
+            .create(SandboxCreateArgs::new("here:latest"), None, false)
+            .await
+            .unwrap();
+        here.reclaim(Duration::from_secs(3600));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(here.list(None).len(), 1, "used just now");
+
+        here.reclaim(Duration::ZERO);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !here.list(None).is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "never reclaimed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(!root.join(format!("sandbox/{}.ext4", made.id)).exists());
         assert!(!root.join(format!("sandbox/{}.json", made.id)).exists());
         let _ = std::fs::remove_dir_all(&root);

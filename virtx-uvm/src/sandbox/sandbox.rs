@@ -4,12 +4,14 @@ use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
-use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use tokio::sync::oneshot;
+use virtx_core::{
+    SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+};
 
 use super::hooks::{Held, Hooks, Written};
 use super::record::{Record, Resized};
@@ -57,9 +59,27 @@ fn keep_ended(jobs: &mut BTreeMap<String, Arc<Job>>, keep: usize) {
 /// The most a port's label is, in characters.
 pub const LABEL_MOST: usize = 128;
 
-/// How long a sandbox starting waits for its disk to be let go of: by what keeps it, as it
-/// stopped, or by a process spawned as it was held.
-const DISK_WAIT: Duration = Duration::from_secs(10);
+/// How long a sandbox booting waits for its disk to be let go of: by what keeps it, as it was
+/// parked, or by a process spawned as it was held.
+pub(super) const DISK_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a sandbox is unused before its machine is parked, where `VIRTX_PARK_AFTER_MS` does
+/// not say: not at all, its machine parked as nothing uses it any more.
+const PARK_AFTER: Duration = Duration::ZERO;
+
+/// How often a sandbox in use is looked at again, to park it once it is not: what bounds how
+/// soon after it is it parked.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
+
+/// How long a sandbox is unused before its machine is parked, `None` for never:
+/// `VIRTX_PARK_AFTER_MS`, in milliseconds, `0` for never; or at once.
+pub fn park_after() -> Option<Duration> {
+    match std::env::var("VIRTX_PARK_AFTER_MS").map(|ms| ms.parse::<u64>()) {
+        Ok(Ok(0)) => None,
+        Ok(Ok(ms)) => Some(Duration::from_millis(ms)),
+        _ => Some(PARK_AFTER),
+    }
+}
 
 /// The signals a job is sent, by name, each numbered as Linux numbers it: its index, plus one.
 const SIGNALS: [&str; 31] = [
@@ -105,7 +125,7 @@ pub fn signal_number(name: &str) -> Option<i32> {
 
 /// The directory beside the program machines run as that virtx's own programs for `/abin` are
 /// in, and where each one's `SKILL.md` is in that.
-const ABIN_HOST: &str = "abin";
+pub(super) const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
 
@@ -119,20 +139,24 @@ pub(super) struct Shared {
     pub(super) hooks: Arc<dyn Hooks>,
     /// Where each record is kept, `<id>.json`.
     pub(super) kept: PathBuf,
+    /// How long each sandbox is unused before its machine is parked, `None` for never.
+    pub(super) park_after: Option<Duration>,
 }
 
 /// Where a sandbox's machine is.
 enum State {
-    Running(Arc<Run>),
-    Stopped,
+    Up(Arc<Run>),
+    /// Stopped while nothing used it, its disk kept: booted again for what next needs it.
+    Parked,
+    /// Ended on its own: nothing boots it again.
+    Exited,
     Deleted,
 }
 
-/// A command sent to a sandbox's machine, not yet answered: what it is, where its output goes
-/// if it is on a terminal, and who waits for its job.
+/// A command sent to a sandbox's machine, not yet answered: what it is, and who waits for its
+/// job.
 struct Starting {
     cmd: Vec<String>,
-    terminal: Option<mpsc::UnboundedSender<String>>,
     waiter: oneshot::Sender<Result<Arc<Job>, String>>,
 }
 
@@ -142,6 +166,10 @@ type Waiting = (u64, oneshot::Sender<Result<bool, String>>);
 /// A sandbox's run: the machine it booted, up until it stops, and what is asked of it.
 pub(super) struct Run {
     pub(super) machine: Arc<Machine>,
+    /// Its sandbox's id, and when its machine came up: what [`runs`](super::runs) is told as
+    /// it comes up and as it goes down.
+    sandbox: String,
+    started: SystemTime,
     /// Its disk's lock, and what the hooks hold for it, until it has stopped.
     held: Mutex<Option<(SnapshotLock, Vec<Held>)>>,
     /// What it may write: its disk, and the volumes it mounts to write.
@@ -150,8 +178,6 @@ pub(super) struct Run {
     pub(super) up: AtomicBool,
     /// Each command sent to the machine and not yet answered, in the order sent.
     starting: Mutex<VecDeque<Starting>>,
-    /// Where what each process on a terminal writes goes, by its pid, until it ends.
-    terminals: Mutex<HashMap<u32, mpsc::UnboundedSender<String>>>,
     /// Who waits for the guest to say it has synced, and for its machine to say its disk is
     /// marked, and rebased, and at which mark.
     pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
@@ -159,21 +185,21 @@ pub(super) struct Run {
     pub(super) rebased: Mutex<Option<Waiting>>,
     /// Its jobs started with a stdin still open, by id.
     stdins: Mutex<HashSet<String>>,
-    /// Who waits for each write to a process's input -- its stdin, or its terminal -- to be
-    /// [`Written`](CtrlResp::Written), by pid, in the order sent; and each process's turn to
-    /// write, one write at a time ([`Run::typed`]).
+    /// Who waits for each write to a process's stdin to be [`Written`](CtrlResp::Written), by
+    /// pid, in the order sent; and each process's turn to write, one write at a time
+    /// ([`Run::write_stdin`]).
     written: Mutex<HashMap<u32, VecDeque<oneshot::Sender<()>>>>,
-    typing: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+    turns: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Run {
-    /// `data` written to the input of process `pid` -- its stdin, closed after if `eof`, or its
-    /// terminal -- answered once the guest has written it (issue #159): one write at a time for
-    /// each process, so a process that does not read holds back whoever writes to it, as
-    /// PROTOCOL.md says of a job's stdin, and what it has not read never piles up in the guest.
+    /// `data` written to the stdin of process `pid`, closed after if `eof`, answered once the
+    /// guest has written it (issue #159): one write at a time for each process, so a process
+    /// that does not read holds back whoever writes to it, as PROTOCOL.md says of a job's stdin,
+    /// and what it has not read never piles up in the guest.
     /// Refused as ended once the process, or the machine, is.
-    async fn typed(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
-        let turn = Arc::clone(self.typing.lock().unwrap().entry(pid).or_default());
+    async fn write_stdin(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
+        let turn = Arc::clone(self.turns.lock().unwrap().entry(pid).or_default());
         let _turn = turn.lock().await;
         let written = {
             // Sent and waited for in one order: the guest answers each process's in turn.
@@ -188,23 +214,28 @@ impl Run {
             .map_err(|_| Error::JobEnded("the job has ended"))
     }
 
-    /// What it held let go of: its machine has ended.
+    /// What it held let go of: its machine has ended, its run told as ended, once.
     fn release(&self) {
-        drop(self.held.lock().unwrap().take());
+        if let Some(held) = self.held.lock().unwrap().take() {
+            drop(held);
+            super::runs::down(&self.sandbox, self.started);
+        }
     }
 }
 
 /// A sandbox: a machine booted from an image over a disk of its own, with volumes mounted
 /// into it, and the processes run in it as [jobs](Job), each with its log. It lasts from its
-/// making until it is deleted, running or stopped; what it wrote is on its disk across its
-/// stops, and what ran in it is not.
+/// making until it is deleted. Its machine is parked once it has been unused for a while, and
+/// booted again for the next job or write to its files: what it wrote is on its
+/// disk across that, and what ran in it is not.
 pub struct Sandbox {
     pub(super) record: Record,
     pub(super) shared: Arc<Shared>,
     state: Mutex<State>,
-    /// Held while it starts, stops or is deleted, so one does at a time.
+    /// Held while its machine boots or is parked, or it is resized or deleted, so one does at a
+    /// time.
     pub(super) turn: tokio::sync::Mutex<()>,
-    /// Its jobs, by id, until each is removed or it is deleted: a stop ends them, and keeps
+    /// Its jobs, by id, until each is removed or it is deleted: a park ends them, and keeps
     /// them.
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
     /// Where its machine's ports are reached, whichever machine runs.
@@ -216,24 +247,28 @@ pub struct Sandbox {
     /// What a conditional write to its files holds first as it lands (see
     /// [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
-    /// Whether its terminals were asked if a command runs in them, and none has answered that
-    /// one does, nor been typed in, since.
-    pub(super) asked: AtomicBool,
+    /// Its disk's boot, as its [era](super::parked::Era) tells it: new as it is made here, and
+    /// as its machine boots.
+    pub(super) era: std::sync::atomic::AtomicU64,
 }
 
 impl Sandbox {
     pub(super) fn new(record: Record, shared: Arc<Shared>) -> Arc<Sandbox> {
+        let state = match *record.exited.lock().unwrap() {
+            true => State::Exited,
+            false => State::Parked,
+        };
         Arc::new(Sandbox {
             record,
             shared,
-            state: Mutex::new(State::Stopped),
+            state: Mutex::new(state),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::default(),
             ports: Ports::default(),
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
-            asked: AtomicBool::new(false),
+            era: super::parked::next_era().into(),
         })
     }
 
@@ -268,7 +303,7 @@ impl Sandbox {
         &self.record.id
     }
 
-    /// Whether a sandbox lives under the home `root`, running or stopped, of this process or
+    /// Whether a sandbox lives under the home `root`, its machine up or not, of this process or
     /// another: a record of one kept there, or a disk there a machine holds.
     pub fn lives_under(root: &std::path::Path) -> bool {
         let Ok(entries) = std::fs::read_dir(root.join("sandbox")) else {
@@ -296,26 +331,37 @@ impl Sandbox {
         &self.record.args
     }
 
-    pub fn ephemeral(&self) -> bool {
-        self.record.ephemeral
+    /// Whether its machine is up now: not parked, nor exited.
+    pub fn up(&self) -> bool {
+        self.run().is_some()
     }
 
-    /// Whether its machine runs.
-    pub fn is_running(&self) -> bool {
-        self.run().is_some()
+    /// When its machine came up, if it is up now.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        self.run().map(|run| run.started)
     }
 
     /// It, as the protocol answers a sandbox, with its ports or not.
     pub fn answer(&self, ports: bool) -> virtx_core::Sandbox {
-        self.record.answer(self.is_running(), ports)
+        self.record.answer(ports)
     }
 
     /// Its run, while its machine runs.
     pub(super) fn run(&self) -> Option<Arc<Run>> {
         match &*self.state.lock().unwrap() {
-            State::Running(run) if run.up.load(Ordering::Relaxed) => Some(Arc::clone(run)),
+            State::Up(run) if run.up.load(Ordering::Relaxed) => Some(Arc::clone(run)),
             _ => None,
         }
+    }
+
+    /// Whether `run` is its machine's run now.
+    fn is(&self, run: &Arc<Run>) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, run))
+    }
+
+    /// Whether its machine is parked: not up, nor exited, nor it deleted.
+    pub(super) fn is_parked(&self) -> bool {
+        matches!(*self.state.lock().unwrap(), State::Parked)
     }
 
     fn is_deleted(&self) -> bool {
@@ -326,15 +372,28 @@ impl Sandbox {
         Error::NotFound(format!("no sandbox here has the id {}", self.record.id))
     }
 
-    /// Used now: what auto-stop counts from.
+    /// Used now: what parking it, and reclaiming it, count from.
     pub(super) fn used(&self) {
         *self.record.used.lock().unwrap() = SystemTime::now();
-        self.asked.store(false, Ordering::Relaxed);
     }
 
-    /// When it was last used.
-    pub(super) fn used_at(&self) -> SystemTime {
+    /// When it was made, or last used: a job started, run or ended in it, a connection through
+    /// its ports, a request to its files its machine answered.
+    pub fn last_used(&self) -> SystemTime {
         *self.record.used.lock().unwrap()
+    }
+
+    /// How long it has been unused: nothing in use now ([`busy`](Self::busy)), and last used
+    /// that long ago. `None` while it is in use.
+    pub(super) fn idle(&self) -> Option<Duration> {
+        if self.busy() {
+            return None;
+        }
+        Some(
+            SystemTime::now()
+                .duration_since(self.last_used())
+                .unwrap_or_default(),
+        )
     }
 
     /// Its record written where it is kept, as it is now, unless it is deleted.
@@ -355,14 +414,15 @@ impl Sandbox {
         }
     }
 
-    /// Started if it is stopped, over its disk as it was left: answered with its ports.
+    /// Its machine booted if it is parked, over its disk as it was left: answered with its
+    /// ports. Refused once it has exited.
     pub async fn start(self: &Arc<Self>) -> Result<virtx_core::Sandbox, Error> {
-        self.running().await?;
-        Ok(self.record.answer(true, true))
+        self.wake().await?;
+        Ok(self.record.answer(true))
     }
 
-    /// Its run: its machine booted first if it is stopped.
-    pub(super) async fn running(self: &Arc<Self>) -> Result<Arc<Run>, Error> {
+    /// Its run: its machine booted first if it is parked.
+    pub(super) async fn wake(self: &Arc<Self>) -> Result<Arc<Run>, Error> {
         if let Some(run) = self.run() {
             return Ok(run);
         }
@@ -375,14 +435,18 @@ impl Sandbox {
     }
 
     /// Its machine booted, over its disk as it was left -- held here, and by the hooks as they
-    /// hold it -- with its volumes mounted and its ports published; or the one that runs
-    /// already. Called under its turn.
+    /// hold it -- with its volumes mounted and its ports published, to be parked once it has
+    /// been unused for its server's `park_after`; or the one that runs already. Refused once it
+    /// has exited. Called under its turn.
     async fn boot(self: &Arc<Self>) -> Result<Arc<Run>, Error> {
         match &*self.state.lock().unwrap() {
-            State::Running(run) if run.up.load(Ordering::Relaxed) => return Ok(Arc::clone(run)),
+            State::Up(run) if run.up.load(Ordering::Relaxed) => return Ok(Arc::clone(run)),
             State::Deleted => return Err(self.gone()),
-            _ => {}
+            State::Exited => return Err(Error::Ended),
+            State::Up(_) | State::Parked => {}
         }
+        // Whatever this boot comes to, its disk may be written from here on.
+        self.era.store(super::parked::next_era(), Ordering::Relaxed);
         let shared = &self.shared;
         let id = self.record.id.clone();
         let spec = spec_of(&self.record.args_now())?;
@@ -483,22 +547,28 @@ impl Sandbox {
         shared.hooks.booted(&id, began.elapsed(), lazily);
         let run = Arc::new(Run {
             machine: Arc::new(machine),
+            sandbox: id.to_string(),
+            started: SystemTime::now(),
             held: Mutex::new(Some((lock, held))),
             writes,
             up: AtomicBool::new(true),
             starting: Mutex::default(),
-            terminals: Mutex::default(),
             synced: Mutex::default(),
             marked: Mutex::default(),
             rebased: Mutex::default(),
             stdins: Mutex::default(),
             written: Mutex::default(),
-            typing: Mutex::default(),
+            turns: Mutex::default(),
         });
-        *self.state.lock().unwrap() = State::Running(Arc::clone(&run));
+        *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
+        super::runs::up(&run.sandbox, run.started);
         self.used();
         let (reading, read) = (Arc::clone(self), Arc::clone(&run));
         std::thread::spawn(move || reading.read(&read));
+        if let Some(after) = shared.park_after {
+            let (sandbox, parked) = (Arc::downgrade(self), Arc::downgrade(&run));
+            tokio::spawn(park_when_idle(sandbox, parked, after));
+        }
         self.keep();
         Ok(run)
     }
@@ -532,15 +602,48 @@ impl Sandbox {
         }
     }
 
-    /// Stopped, if it runs: its jobs ended, its machine stopped with what the guest wrote on
-    /// its disk, and its disk kept.
-    pub(super) async fn stop(self: &Arc<Self>) -> Result<(), Error> {
+    /// Its machine parked now, unless it is in use ([`busy`](Self::busy)): refused
+    /// [`InUse`](Error::InUse) then. Its machine stopped with what the guest wrote on its disk,
+    /// and its disk kept, to boot again for what next needs it. Nothing is done to one whose
+    /// machine is not up.
+    pub async fn park(self: &Arc<Self>) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
-        self.stop_turned().await
+        if self.is_deleted() {
+            return Err(self.gone());
+        }
+        if !self.up() {
+            return Ok(());
+        }
+        if self.busy() {
+            return Err(Error::InUse(format!(
+                "sandbox {} is in use: a job runs in it, or it is reached",
+                self.record.id
+            )));
+        }
+        self.halt_turned().await
     }
 
-    /// As [`stop`](Self::stop), under its turn.
-    async fn stop_turned(self: &Arc<Self>) -> Result<(), Error> {
+    /// Its machine parked now, whatever uses it: its jobs ended, as cancelling each does -- what an
+    /// embedder does for a sandbox whose owner may use it no more.
+    pub async fn park_anyway(self: &Arc<Self>) -> Result<(), Error> {
+        let _turn = self.turn.lock().await;
+        self.halt_turned().await
+    }
+
+    /// Its machine parked if it has been unused for `after`, while `run` is its run.
+    async fn park_idle(self: &Arc<Self>, run: &Arc<Run>, after: Duration) {
+        let _turn = self.turn.lock().await;
+        if !self.is(run) || self.idle().is_none_or(|idle| idle < after) {
+            return;
+        }
+        if let Err(e) = self.halt_turned().await {
+            eprintln!("sandbox {}, unused, not parked: {e}", self.record.id);
+        }
+    }
+
+    /// Its machine stopped if it is up, under its turn: its jobs ended, what the guest wrote
+    /// put on its disk, and its disk kept.
+    async fn halt_turned(self: &Arc<Self>) -> Result<(), Error> {
         let Some(run) = self.take_run()? else {
             return Ok(());
         };
@@ -550,23 +653,26 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Its run, taken out to be stopped: what it may write marked changed first, so that it
-    /// is kept once its machine has ended, not let go of meanwhile.
+    /// Its run, taken out for its machine to be stopped, the sandbox parked: what it may write
+    /// marked changed first, so that it is kept once its machine has ended, not let go of
+    /// meanwhile.
     fn take_run(&self) -> Result<Option<Arc<Run>>, Error> {
         let run = {
             let mut state = self.state.lock().unwrap();
             match &*state {
                 State::Deleted => return Err(self.gone()),
-                State::Stopped => return Ok(None),
-                State::Running(run) => {
+                State::Parked | State::Exited => return Ok(None),
+                // Ended on its own already: what reads it makes it exited.
+                State::Up(run) if !run.up.load(Ordering::Relaxed) => return Ok(None),
+                State::Up(run) => {
                     let run = Arc::clone(run);
-                    *state = State::Stopped;
+                    *state = State::Parked;
                     run
                 }
             }
         };
         if let Err(e) = self.shared.hooks.changed(&run.writes) {
-            eprintln!("sandbox {}, stopped, not to be kept: {e}", self.record.id);
+            eprintln!("sandbox {}, parked, not to be kept: {e}", self.record.id);
         }
         Ok(Some(run))
     }
@@ -576,13 +682,13 @@ impl Sandbox {
     fn halt(&self, run: &Run) {
         run.machine.stop();
         for job in self.jobs.lock().unwrap().values() {
-            job.end(128 + SIGKILL);
+            job.cut(SandboxJobEndReason::Cancelled);
         }
         run.release();
     }
 
-    /// As [`stop`](Self::stop), blocking: not on an async runtime's thread.
-    pub(super) fn stop_blocking(&self) {
+    /// As [`park_anyway`](Self::park_anyway), blocking: not on an async runtime's thread.
+    pub(super) fn park_blocking(&self) {
         let _turn = self.turn.blocking_lock();
         if let Ok(Some(run)) = self.take_run() {
             self.halt(&run);
@@ -605,11 +711,11 @@ impl Sandbox {
         self.forgotten();
     }
 
-    /// Deleted: stopped first if it runs, its disk removed -- from wherever else it is kept
-    /// first -- and its jobs and its record with it. Its volumes stay.
+    /// Deleted: its machine stopped first if it is up, its disk removed -- from wherever else
+    /// it is kept first -- and its jobs and its record with it. Its volumes stay.
     pub(super) async fn delete(self: &Arc<Self>) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
-        self.stop_turned().await?;
+        self.halt_turned().await?;
         let id = &self.record.id;
         self.shared.hooks.deleting(id).await?;
         match self.shared.snapshots.remove(id) {
@@ -620,29 +726,19 @@ impl Sandbox {
         Ok(())
     }
 
-    /// As [`delete`](Self::delete), blocking and with nothing else told: what a server going
-    /// does with an ephemeral sandbox.
-    pub(super) fn delete_blocking(&self) {
-        self.stop_blocking();
-        let _turn = self.turn.blocking_lock();
-        if self.shared.snapshots.remove(&self.record.id).is_ok() {
-            self.forgotten();
-        }
-    }
-
     /// Let go of here, its disk left as it is: its record and its jobs gone, as a delete does,
-    /// nothing removed from where its disk is kept. Refused while it runs.
+    /// nothing removed from where its disk is kept. Refused while its machine is up.
     pub(super) async fn forget(&self) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
         match &*self.state.lock().unwrap() {
             State::Deleted => return Err(self.gone()),
-            State::Running(_) => {
-                return Err(Error::Running(format!(
-                    "sandbox {} runs here: stop it first",
+            State::Up(_) => {
+                return Err(Error::InUse(format!(
+                    "sandbox {}'s machine is up here: park it first",
                     self.record.id
                 )));
             }
-            State::Stopped => {}
+            State::Parked | State::Exited => {}
         }
         self.forgotten();
         Ok(())
@@ -658,7 +754,8 @@ impl Sandbox {
         let _ = std::fs::remove_file(self.shared.kept.join(format!("{}.json", self.record.id)));
     }
 
-    /// Start `cmd` in it, beside whatever else runs there -- started first if it is stopped --
+    /// Start `cmd` in it, beside whatever else runs there -- its machine booted first if it is
+    /// parked --
     /// with a stdin to write to if `stdin`, and kill it after `timeout`.
     pub async fn exec(
         self: &Arc<Self>,
@@ -671,7 +768,7 @@ impl Sandbox {
         }
         // In use until the job runs, which keeps it in use from there.
         let _activity = self.activity();
-        let run = self.running().await?;
+        let run = self.wake().await?;
         let (waiter, started) = oneshot::channel();
         {
             let mut starting = run.starting.lock().unwrap();
@@ -679,11 +776,7 @@ impl Sandbox {
                 return Err(Error::Ended);
             }
             run.machine.exec(cmd.clone(), stdin)?;
-            starting.push_back(Starting {
-                cmd,
-                terminal: None,
-                waiter,
-            });
+            starting.push_back(Starting { cmd, waiter });
         }
         let job = started
             .await
@@ -697,49 +790,11 @@ impl Sandbox {
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
                 if let Some(run) = run.upgrade() {
-                    kill(&run, &job);
+                    kill(&run, &job, SandboxJobEndReason::Timeout);
                 }
             });
         }
         Ok(job)
-    }
-
-    /// `cmd` on a terminal of its own, `cols` by `rows`: a job of it, as an exec is, which ends
-    /// with the [`Terminal`]. Started first if it is stopped.
-    pub async fn terminal(
-        self: &Arc<Self>,
-        cmd: Vec<String>,
-        cols: u16,
-        rows: u16,
-    ) -> Result<Terminal, Error> {
-        let _activity = self.activity();
-        let run = self.running().await?;
-        let (waiter, started) = oneshot::channel();
-        let (output, read) = mpsc::unbounded_channel();
-        {
-            let mut starting = run.starting.lock().unwrap();
-            if !run.up.load(Ordering::Relaxed) {
-                return Err(Error::Ended);
-            }
-            run.machine.exec_tty(cmd.clone(), cols, rows)?;
-            starting.push_back(Starting {
-                cmd,
-                terminal: Some(output),
-                waiter,
-            });
-        }
-        let job = started
-            .await
-            .map_err(|_| Error::Ended)?
-            .map_err(Error::NotStarted)?;
-        let pid = job.pid().0;
-        Ok(Terminal {
-            sandbox: Arc::clone(self),
-            run,
-            job,
-            pid,
-            output: read,
-        })
     }
 
     /// Its jobs as they are now, in the order of their ids.
@@ -755,13 +810,15 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))
     }
 
-    /// Kill the job `id` if it runs, and remove it.
+    /// Kill the job `id` if it runs, ending it as cancelled, and remove it: what reads its log
+    /// reads on to that end.
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
         if let Some(run) = self.run() {
-            kill(&run, &job);
+            kill(&run, &job, SandboxJobEndReason::Cancelled);
         }
+        job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
         Ok(())
     }
@@ -777,7 +834,7 @@ impl Sandbox {
 
     /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
     /// answered once it is written, so a job that does not read holds the writer back
-    /// ([`Run::typed`]).
+    /// ([`Run::write_stdin`]).
     pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
         let (pid, running) = self.job(id)?.pid();
         let ended = Error::JobEnded(
@@ -795,7 +852,7 @@ impl Sandbox {
                 stdins.remove(id);
             }
         }
-        run.typed(pid, data, eof).await
+        run.write_stdin(pid, data, eof).await
     }
 
     /// The port key `key` names, if it is one of its own.
@@ -803,24 +860,14 @@ impl Sandbox {
         self.record.keys.lock().unwrap().get(key).copied()
     }
 
-    /// Its machine while it runs, to ask of its files: refused while it is stopped, which a
-    /// request to its files does not start. The caller holds an [`Activity`] for as long as it
-    /// asks.
-    pub fn running_machine(&self) -> Result<Arc<Machine>, Error> {
-        if self.is_deleted() {
-            return Err(self.gone());
-        }
-        match self.run() {
-            Some(run) => Ok(Arc::clone(&run.machine)),
-            None => Err(Error::Stopped(format!(
-                "sandbox {} is stopped: its files are read and written while it runs",
-                self.record.id
-            ))),
-        }
+    /// Its machine, booted first if it is parked, to ask of its files. The caller holds an
+    /// [`Activity`] for as long as it asks, so it is not parked under it.
+    pub async fn machine(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        Ok(Arc::clone(&self.wake().await?.machine))
     }
 
-    /// A connection to `port` in its machine. Refused while it is stopped, as a port nothing
-    /// listens on is: it is not started for it.
+    /// A connection to `port` in its machine. Refused while its machine is not up, as a port
+    /// nothing listens on is: a parked one is not booted for it.
     pub async fn connect(&self, port: u16) -> io::Result<TcpStream> {
         self.ports.connect(port).await
     }
@@ -835,36 +882,13 @@ impl Sandbox {
         }
     }
 
-    /// Whether it is in use now: an [`Activity`] under way, or a job running that is not on a
-    /// terminal -- which counts as use only while it is typed in, or runs a command.
+    /// Whether it is in use now: an [`Activity`] under way, or a job running.
     pub(super) fn busy(&self) -> bool {
         if self.active.load(Ordering::Relaxed) > 0 {
             return true;
         }
-        let terminals: HashSet<u32> = match self.run() {
-            Some(run) => run.terminals.lock().unwrap().keys().copied().collect(),
-            None => HashSet::new(),
-        };
         let jobs = self.jobs.lock().unwrap();
-        jobs.values().any(|job| {
-            let (pid, running) = job.pid();
-            running && !terminals.contains(&pid)
-        })
-    }
-
-    /// The processes on its terminals, by pid.
-    pub(super) fn terminals(&self) -> Vec<u32> {
-        match self.run() {
-            Some(run) => run.terminals.lock().unwrap().keys().copied().collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Asked whether the process `pid`, on a terminal, runs a command: a busy one is used.
-    pub(super) fn ask_foreground(&self, pid: u32) {
-        if let Some(run) = self.run() {
-            let _ = run.machine.foreground(pid);
-        }
+        jobs.values().any(|job| job.pid().1)
     }
 
     /// How many of its jobs run now.
@@ -878,8 +902,8 @@ impl Sandbox {
         self.run().map(|run| run.writes.clone()).unwrap_or_default()
     }
 
-    /// Its disk to grow to `gib` GiB as it next starts -- never shrunk: smaller than it is,
-    /// refused. Whether it runs, to be grown once it starts again.
+    /// Its disk to grow to `gib` GiB as it next boots -- never shrunk: smaller than it is,
+    /// refused. Whether its machine is up, its disk to be grown once it boots again.
     pub fn grow_disk(&self, gib: u32) -> Result<bool, Error> {
         let wanted = u64::from(gib) << 30;
         let now = self.disk_now();
@@ -891,10 +915,10 @@ impl Sandbox {
         }
         *self.record.disk_gib.lock().unwrap() = Some(gib);
         self.keep();
-        Ok(self.is_running())
+        Ok(self.up())
     }
 
-    /// The bytes its disk is, or is to be as it next starts.
+    /// The bytes its disk is, or is to be as it next boots.
     fn disk_now(&self) -> u64 {
         let length = self
             .shared
@@ -906,30 +930,25 @@ impl Sandbox {
         self.record.disk_size().max(length)
     }
 
-    /// Its machine resized, and its disk grown, as it next starts: its vCPUs and memory only
-    /// while it is stopped, a machine being the size it booted as; its disk never shrunk.
-    /// Answered as it is to be.
+    /// Its machine resized, and its disk grown, as it next boots; its disk never shrunk.
+    /// A machine is the size it booted as: one up whose vCPUs or memory change is parked now
+    /// if nothing uses it, and refused [`InUse`](Error::InUse) if something does. Answered as
+    /// it is to be.
     pub async fn resize(
-        &self,
+        self: &Arc<Self>,
         vcpus: Option<u8>,
         memory_mib: Option<u32>,
         disk_gib: Option<u32>,
     ) -> Result<Resources, Error> {
-        // Not started meanwhile, nor stopped.
+        // Not booted meanwhile, nor parked.
         let _turn = self.turn.lock().await;
         if self.is_deleted() {
             return Err(self.gone());
         }
         let now = self.record.args_now();
         let changes = |asked: Option<u32>, is: Option<u32>| asked.is_some_and(|a| Some(a) != is);
-        if (changes(vcpus.map(u32::from), now.vcpus.map(u32::from))
-            || changes(memory_mib, now.memory_mib))
-            && self.is_running()
-        {
-            return Err(Error::Running(
-                "its vCPUs and memory change while it is stopped: stop it first".into(),
-            ));
-        }
+        let machine_changes = changes(vcpus.map(u32::from), now.vcpus.map(u32::from))
+            || changes(memory_mib, now.memory_mib);
         let resized = Resized {
             vcpus: vcpus.or(now.vcpus),
             memory_mib: memory_mib.or(now.memory_mib),
@@ -939,14 +958,24 @@ impl Sandbox {
             memory_mib: resized.memory_mib,
             ..now.clone()
         })?;
-        if let Some(gib) = disk_gib {
-            let is = self.disk_now();
-            if (u64::from(gib) << 30) < is {
-                return Err(Error::Invalid(format!(
-                    "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
-                    is.div_ceil(1 << 30)
+        if let Some(gib) = disk_gib
+            && (u64::from(gib) << 30) < self.disk_now()
+        {
+            return Err(Error::Invalid(format!(
+                "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
+                self.disk_now().div_ceil(1 << 30)
+            )));
+        }
+        if machine_changes && self.up() {
+            if self.busy() {
+                return Err(Error::InUse(format!(
+                    "sandbox {} is in use: its vCPUs and memory change once nothing uses it",
+                    self.record.id
                 )));
             }
+            self.halt_turned().await?;
+        }
+        if let Some(gib) = disk_gib {
             *self.record.disk_gib.lock().unwrap() = Some(gib);
         }
         *self.record.resized.lock().unwrap() = resized;
@@ -956,7 +985,7 @@ impl Sandbox {
             vcpus: now.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: now.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             disk_gib: self.record.disk_size().div_ceil(1 << 30) as u32,
-            running: self.is_running(),
+            up: self.up(),
         })
     }
 
@@ -969,17 +998,10 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some(Starting {
-                        cmd,
-                        terminal,
-                        waiter,
-                    }) = run.starting.lock().unwrap().pop_front()
+                    let Some(Starting { cmd, waiter }) = run.starting.lock().unwrap().pop_front()
                     else {
                         continue;
                     };
-                    if let (Ok(pid), Some(terminal)) = (&started, terminal) {
-                        run.terminals.lock().unwrap().insert(*pid, terminal);
-                    }
                     let started = started.map(|pid| {
                         self.used();
                         let mut jobs = self.jobs.lock().unwrap();
@@ -992,6 +1014,7 @@ impl Sandbox {
                             cmd,
                             running: true,
                             code: None,
+                            reason: None,
                         });
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
@@ -1009,16 +1032,10 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Output { id, data } => {
-                    if let Some(terminal) = run.terminals.lock().unwrap().get(&id) {
-                        let _ = terminal.send(data);
-                    }
-                }
                 CtrlResp::Exited { id, code } => {
-                    run.terminals.lock().unwrap().remove(&id);
                     // Its writes not yet written never will be: their writers told so.
                     run.written.lock().unwrap().remove(&id);
-                    run.typing.lock().unwrap().remove(&id);
+                    run.turns.lock().unwrap().remove(&id);
                     if let Some(job) = running.remove(&id) {
                         self.used();
                         job.end(code);
@@ -1048,12 +1065,6 @@ impl Sandbox {
                         let _ = told.send(rebased);
                     }
                 }
-                // A command runs on a terminal: used, as long as it does.
-                CtrlResp::Foreground { busy, .. } => {
-                    if busy {
-                        self.used();
-                    }
-                }
                 CtrlResp::Written { id } => {
                     if let Some(waiting) = run.written.lock().unwrap().get_mut(&id)
                         && let Some(told) = waiting.pop_front()
@@ -1069,43 +1080,73 @@ impl Sandbox {
         run.up.store(false, Ordering::Relaxed);
         starting.clear();
         drop(starting);
-        run.terminals.lock().unwrap().clear();
         run.written.lock().unwrap().clear();
-        for job in running.into_values() {
-            job.end(128 + SIGKILL);
-        }
-        // Ended on its own, not stopped: stopped now, and started again as anything asks.
+        // Ended on its own, not parked: exited, for good, its disk kept as it was left.
         let ended = {
             let mut state = self.state.lock().unwrap();
-            let ended = matches!(&*state, State::Running(up) if Arc::ptr_eq(up, run));
+            let ended = matches!(&*state, State::Up(up) if Arc::ptr_eq(up, run));
             if ended {
-                *state = State::Stopped;
+                *state = State::Exited;
             }
             ended
         };
+        let reason = match ended {
+            true => SandboxJobEndReason::VmExited,
+            false => SandboxJobEndReason::Cancelled,
+        };
+        for job in running.into_values() {
+            job.cut(reason);
+        }
         if ended {
+            *self.record.exited.lock().unwrap() = true;
             if let Err(e) = self.shared.hooks.changed(&run.writes) {
                 eprintln!("sandbox {}, ended, not to be kept: {e}", self.record.id);
             }
             eprintln!("sandbox {}'s machine ended on its own", self.record.id);
+            self.keep();
         }
         run.release();
     }
 }
 
-/// What a sandbox's machine is, as resized: what [`Sandbox::resize`] answers.
+/// What a sandbox's machine is, as resized: what [`Sandbox::resize`] answers. `up`, whether
+/// its machine is up now, the size it booted as until it boots again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Resources {
     pub vcpus: u8,
     pub memory_mib: u32,
     pub disk_gib: u32,
-    pub running: bool,
+    pub up: bool,
 }
 
-/// Kill `job` if it runs, in `run`'s machine.
-fn kill(run: &Run, job: &Job) {
+/// Park `sandbox` once it has been unused for `after`, for as long as `run` is its run.
+async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration) {
+    let mut wait = after;
+    loop {
+        tokio::time::sleep(wait).await;
+        let (Some(sandbox), Some(run)) = (sandbox.upgrade(), run.upgrade()) else {
+            return;
+        };
+        if !sandbox.is(&run) {
+            return;
+        }
+        wait = match sandbox.idle() {
+            Some(idle) if idle >= after => {
+                sandbox.park_idle(&run, after).await;
+                after
+            }
+            Some(idle) => after - idle,
+            None => after,
+        }
+        .max(LOOK_EVERY);
+    }
+}
+
+/// Kill `job` if it runs, in `run`'s machine, for `reason`.
+fn kill(run: &Run, job: &Job, reason: SandboxJobEndReason) {
     let (pid, running) = job.pid();
     if running && run.up.load(Ordering::Relaxed) {
+        job.killing(reason);
         let _ = run.machine.signal(pid, SIGKILL);
     }
 }
@@ -1181,8 +1222,8 @@ impl Activity {
         &self.sandbox
     }
 
-    /// Ended as nothing done: refused, the sandbox stopped. It is not used by it, so a request
-    /// it refused keeps a stopped sandbox no longer from its deletion.
+    /// Ended as nothing done: refused, the sandbox's machine not up. It is not used by it, so a
+    /// request it refused keeps the sandbox no longer from being reclaimed.
     pub fn unused(mut self) {
         self.used = false;
     }
@@ -1194,66 +1235,6 @@ impl Drop for Activity {
             self.sandbox.used();
         }
         self.sandbox.active.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-/// What types into a [`Terminal`] ([`Terminal::typing`]).
-#[derive(Clone)]
-pub struct Typing {
-    sandbox: Arc<Sandbox>,
-    run: Arc<Run>,
-    pid: u32,
-}
-
-impl Typing {
-    /// As [`Terminal::write`].
-    pub async fn write(&self, data: String) -> Result<(), Error> {
-        self.sandbox.used();
-        self.run.typed(self.pid, data, false).await
-    }
-}
-
-/// A process on a terminal in a sandbox, as [`Sandbox::terminal`] starts it: its job, what it
-/// writes, and how to type into it, resize it and end it.
-pub struct Terminal {
-    sandbox: Arc<Sandbox>,
-    run: Arc<Run>,
-    job: Arc<Job>,
-    pid: u32,
-    /// What it writes, as it comes; ended once it has.
-    pub output: mpsc::UnboundedReceiver<String>,
-}
-
-impl Terminal {
-    /// What types into it, apart from it: so a write is waited for with nothing of it held.
-    pub fn typing(&self) -> Typing {
-        Typing {
-            sandbox: Arc::clone(&self.sandbox),
-            run: Arc::clone(&self.run),
-            pid: self.pid,
-        }
-    }
-
-    /// `data` typed into it: the sandbox used now. Answered once the guest has written it, so
-    /// a program that does not read holds the typist back ([`Run::typed`]).
-    pub async fn write(&self, data: String) -> Result<(), Error> {
-        self.typing().write(data).await
-    }
-
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Error> {
-        Ok(self.run.machine.resize(self.pid, cols, rows)?)
-    }
-
-    /// How it ended, once it has: its exit code, `128 + signal` for one a signal ended.
-    pub async fn ended(&self) -> i32 {
-        self.job.ended().await
-    }
-}
-
-impl Drop for Terminal {
-    /// It, and what it started, killed if they run still: the terminal is gone.
-    fn drop(&mut self) {
-        kill(&self.run, &self.job);
     }
 }
 
@@ -1279,6 +1260,7 @@ mod keeping_ended {
             cmd: vec!["true".into()],
             running: true,
             code: None,
+            reason: None,
         });
         if ended {
             job.end(0);
@@ -1341,7 +1323,7 @@ pub(super) fn abins_refused(abins: &[String], programs: &Path) -> Result<(), Err
 /// for and kept: every machine shows it read-only, so the sandboxes made with the same share
 /// it, and a boot after the first links and copies nothing. Programs replaced since are another
 /// set, of their sizes and times.
-fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
+pub(super) fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
     let io = |context: String| move |source| SnapshotError::Io { context, source };
     let mut sorted: Vec<&String> = names.iter().collect();
     sorted.sort();

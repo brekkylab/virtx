@@ -372,7 +372,7 @@ pub(super) async fn there(volume: &Volume, path: &str) -> Result<Option<Meta>, F
     }
 }
 
-fn described(stat: &Stat) -> Meta {
+pub(super) fn described(stat: &Stat) -> Meta {
     Meta {
         is_dir: stat.kind == DirentKind::Dir,
         len: stat.size,
@@ -392,7 +392,7 @@ pub(super) fn written(read: Option<Meta>, meta: &Meta) -> Meta {
 /// What `dav-server` is told of a volume's failure, which it answers with the status
 /// RFC 4918 gives: a parent that is no directory is `NotFound`, which a `PUT` or `MKCOL`
 /// turns into `409`, and a change a mount will not take is `Forbidden`.
-fn refused(e: &Error) -> FsError {
+pub(super) fn refused(e: &Error) -> FsError {
     match e {
         Error::Unknown(_) | Error::NoMount { .. } => FsError::NotFound,
         Error::AlreadyExists(_) | Error::MountExists(_) => FsError::Exists,

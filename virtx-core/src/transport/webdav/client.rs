@@ -700,7 +700,7 @@ mod refusals {
                 .status(StatusCode::CONFLICT)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(full(Bytes::from(
-                    r#"{"error": {"code": "stopped", "message": "the sandbox is stopped"}}"#,
+                    r#"{"error": {"code": "ended", "message": "the sandbox's machine has exited"}}"#,
                 )))
                 .unwrap()
         });
@@ -708,10 +708,10 @@ mod refusals {
         let error = read(&client, &FileRoot::Sandbox("s1".into()), "a.txt", 0, None)
             .await
             .unwrap_err();
-        assert_eq!(error.code(), Some("stopped"));
+        assert_eq!(error.code(), Some("ended"));
         assert_eq!(
             error.to_string(),
-            "the server answered 409 Conflict: stopped: the sandbox is stopped"
+            "the server answered 409 Conflict: ended: the sandbox's machine has exited"
         );
     }
 

@@ -10,7 +10,7 @@ use crate::{Error, Source};
 /// Why a call failed, as C reads it: `{"message": "...", "source": "server"}`, `source` where
 /// it failed (`server`, `job`, `transport` or `client`), with `"status": 404` beside it when
 /// the server refused the request with that HTTP status, `"code"` the protocol's where it
-/// answered its error as the protocol does (`not_found`, `stopped`), and `"body"` where the
+/// answered its error as the protocol does (`not_found`, `ended`), and `"body"` where the
 /// refusal had a body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {

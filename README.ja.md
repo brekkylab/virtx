@@ -147,28 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### リモート
 
-各[リリース](https://github.com/brekkylab/virtx/releases)にはサーバーが `virtx-server-tcp-<os>-<arch>.tar.gz` として含まれます（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。
-中身は `virtx-server-tcp`、ゲストカーネル、`abin/`、`alib/` です。
-専用のディレクトリに展開すると、`virtx-server-tcp` は隣にあるゲストカーネルを見つけるので、`PATH` やライブラリパスを設定せずにそのまま実行できます。
+[自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、手元のマシンに`virtx-server-tcp`をセットアップします。
 
-サーバーマシンで、OpenID Connectプロバイダーを指定した`server.json`を書き、サーバーを起動します。
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-クライアント側では、`Client.spawn()`の代わりにサーバーへ接続します。それ以外はローカルの例と同じです。
-
-ユーザーは、プロバイダーが`client_id`のクライアントに発行するIDトークンの`email`です。このクライアントはデバイスフローを使う公開クライアントである必要があります。
-`virtx-cli/`からビルドした`virtx`で一度サインインし、それが出力するトークンで接続します。
+`virtx-cli/`からビルドした`virtx`で一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
+それ以外はローカルの例と同じです。
 
 ```sh
 virtx login https://virtx.example
@@ -213,10 +195,6 @@ let client = Client::connect(
 ```
 
 </details>
-
-`virtx token`は最後にサインインしたプロバイダーのトークンを返します。複数にサインインしている場合は、引数でサーバーのプロバイダーを指定してください: `token --json --issuer https://idp.example --client-id virtx`。
-
-クライアントが平文の`http`でトークンを送るのは自分のマシンのループバック宛てだけなので、別のマシンで動かすサーバーは前段にHTTPSを置いてください。
 
 ## 特長
 

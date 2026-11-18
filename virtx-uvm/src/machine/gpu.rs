@@ -122,8 +122,10 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
 /// started and changed only by its own `_putenv`; its `getenv` reads the copy. So the window
 /// went to libkrun and never reached venus, and the guest's device reported the host's whole
 /// heap -- 32 GiB on a 5090, for a 2 GiB window -- until a mapping past the window failed.
-/// virglrenderer's DLL and this binary share the one UCRT (`/MD`, and Rust's msvc default),
-/// so setting it here is setting it there.
+/// Setting it here is setting it there only because there is one C runtime: this binary links
+/// it statically (`+crt-static`, `.cargo/config.toml`), and virglrenderer is a static library
+/// built to match (`-Db_vscrt=mt`, `xtask/scripts/build-deps.ps1`), linked into it. Were
+/// virglrenderer a DLL with a C runtime of its own, the cap would stop reaching it again.
 #[cfg(windows)]
 fn crt_setenv(name: &str, value: &str) {
     use std::ffi::{CString, c_char, c_int};

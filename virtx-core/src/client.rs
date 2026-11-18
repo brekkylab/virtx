@@ -13,7 +13,7 @@ use tokio::process::Command;
 use crate::{
     Auth, Error,
     image::{
-        self, Event, ImageBuildArgs, ImageCommitArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
+        self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
     },
@@ -22,9 +22,8 @@ use crate::{
         ProjectMemberSetArgs, Role,
     },
     sandbox::{
-        self, InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs,
-        SandboxExecItem, SandboxJob, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs,
-        SandboxSignalArgs, SandboxStdinArgs,
+        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+        SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -269,22 +268,6 @@ impl Client {
         Box::pin(oci::upload(&self.inner, path.into(), reference.into()))
     }
 
-    /// Start making an image of the sandbox `sandbox` -- its image, with what it has written
-    /// as one more layer -- to point `reference` at. Of a running one, it is as it is when the
-    /// job starts; of a stopped one, as it was left. Its log is
-    /// [`image_job_log`](Self::image_job_log)'s.
-    pub async fn commit_image(
-        &self,
-        sandbox: impl Into<String>,
-        reference: impl Into<String>,
-    ) -> Result<ImageJob, Error> {
-        let args = ImageCommitArgs {
-            sandbox: sandbox.into(),
-            reference: reference.into(),
-        };
-        image::client::commit(&self.inner, &args).await
-    }
-
     /// Delete each image no tag points at and no sandbox stands on, and what only such images
     /// held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
@@ -489,59 +472,6 @@ impl Client {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
 
-    /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
-    /// where it is reached from: as secret as a port's URL is. A program in it that listens on
-    /// `port` already is reached once it listens again.
-    pub async fn open_sandbox_port(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-    ) -> Result<SandboxPort, Error> {
-        self.open_sandbox_port_with(id, port, &SandboxPortOpenArgs::default())
-            .await
-    }
-
-    /// Close the port `port` in the sandbox `id`: its URL reaches it no more, and it is not
-    /// opened again as the sandbox starts. One not open is refused `404`.
-    pub async fn close_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Result<(), Error> {
-        sandbox::client::close_port(&self.inner, id.as_ref(), port).await
-    }
-
-    /// Open the port `port` in the sandbox `id` as `args` say -- what it is for, and how it is
-    /// reached, TCP or HTTP -- and answer where it is reached from.
-    pub async fn open_sandbox_port_with(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-        args: &SandboxPortOpenArgs,
-    ) -> Result<SandboxPort, Error> {
-        sandbox::client::open_port(&self.inner, id.as_ref(), port, args).await
-    }
-
-    /// The inbound rules of the port `port` in the sandbox `id`, and its public address if it
-    /// has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port
-    /// is refused `409`, `not_public`; one not open, `404`.
-    pub async fn get_sandbox_port_inbound(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-    ) -> Result<PortInbound, Error> {
-        sandbox::client::port_inbound(&self.inner, id.as_ref(), port).await
-    }
-
-    /// Make the inbound rules of the port `port` in the sandbox `id` `rules`, all of them -- none
-    /// lets in no one -- and answer them as the server keeps them, as
-    /// [`get_sandbox_port_inbound`](Self::get_sandbox_port_inbound) does. A source that is not
-    /// an address or a CIDR is refused `400`, `invalid`.
-    pub async fn set_sandbox_port_inbound(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-        rules: &[InboundRule],
-    ) -> Result<PortInbound, Error> {
-        sandbox::client::set_port_inbound(&self.inner, id.as_ref(), port, rules).await
-    }
-
     /// Every job in the sandbox `id`.
     pub async fn list_sandbox_job(&self, id: impl AsRef<str>) -> Result<Vec<SandboxJob>, Error> {
         sandbox::client::list_job(&self.inner, id.as_ref()).await
@@ -658,11 +588,11 @@ pub(crate) mod ffi {
             release, retain, share, start_on_thread, write,
         },
         image::{
-            ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs,
-            ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
+            ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
+            ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
         project::{ProjectCreateArgs, Role},
-        sandbox::{InboundRule, SandboxCreateArgs, SandboxExecArgs},
+        sandbox::{SandboxCreateArgs, SandboxExecArgs},
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
@@ -719,14 +649,6 @@ pub(crate) mod ffi {
         #[serde(default)]
         stdin: bool,
         timeout_ms: Option<u64>,
-    }
-
-    /// What names a port in a sandbox: `{"id": "...", "port": n}`.
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct IdPort {
-        id: String,
-        port: u16,
     }
 
     /// What names a sandbox's jobs, or one of them, and what each request to one takes beside:
@@ -1276,26 +1198,6 @@ pub(crate) mod ffi {
                     yield event;
                 }
             }
-        })
-    }
-
-    /// Starts making an image of a sandbox -- its image, with what it has written as one more
-    /// layer -- to point a reference at, given `{"sandbox": "...", "reference": "name:tag"}`.
-    /// Answers with the job, as `virtx_client_build_image` does.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_commit_image(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<ImageCommitArgs>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client.commit_image(args.sandbox, args.reference).await
         })
     }
 
@@ -1969,114 +1871,6 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move { client.stop_sandbox(args?.id).await })
-    }
-
-    /// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
-    /// "protocol"?: "tcp" | "http", "inbound"?: [{"source": "...", "description"?: "..."}]}`.
-    /// Answers with `{"port": n, "url": "...", "label"?, "protocol"?, "address"?}`: where it is
-    /// reached from now.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_open_sandbox_port(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct IdPort {
-            id: String,
-            port: u16,
-            #[serde(default)]
-            label: Option<String>,
-            #[serde(default)]
-            protocol: Option<crate::PortProtocol>,
-            #[serde(default)]
-            inbound: Option<Vec<InboundRule>>,
-        }
-        let args = unsafe { json::<IdPort>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            let open = crate::SandboxPortOpenArgs {
-                label: args.label,
-                protocol: args.protocol,
-                inbound: args.inbound,
-            };
-            client
-                .open_sandbox_port_with(args.id, args.port, &open)
-                .await
-        })
-    }
-
-    /// Closes the port `port` in the sandbox `id`, given `{"id": "...", "port": n}`: its URL
-    /// reaches it no more. Answers with `null`.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_close_sandbox_port(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<IdPort>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client.close_sandbox_port(args.id, args.port).await
-        })
-    }
-
-    /// Answers with the inbound rules of the port `port` in the sandbox `id`, given
-    /// `{"id": "...", "port": n}`, as `{"port": n, "rules": [{"source": "...",
-    /// "description"?: "..."}], "address"?: "..."}`: virtx cloud's.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_get_sandbox_port_inbound(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<IdPort>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client.get_sandbox_port_inbound(args.id, args.port).await
-        })
-    }
-
-    /// Makes the inbound rules of the port `port` in the sandbox `id` `rules`, all of them, given
-    /// `{"id": "...", "port": n, "rules": [{"source": "...", "description"?: "..."}]}`. Answers
-    /// with them as `virtx_client_get_sandbox_port_inbound` does.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_set_sandbox_port_inbound(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Rules {
-            id: String,
-            port: u16,
-            rules: Vec<InboundRule>,
-        }
-        let args = unsafe { json::<Rules>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let args = args?;
-            client
-                .set_sandbox_port_inbound(args.id, args.port, &args.rules)
-                .await
-        })
     }
 
     /// Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk

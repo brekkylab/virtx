@@ -15,14 +15,12 @@ mod volume;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
-    image_build::{
-        Error as BuildError, RECIPE_LABEL, build_step, history_kept, recipe_forgotten, recipe_kept,
-        written_layer,
-    },
+    image_build::{Error as BuildError, RECIPE_LABEL, build_step, history_kept, recipe_kept},
     registry_client::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,
     },
+    registry_proxy::PublicRegistries,
     registry_server::{Body as RegistryBody, RegistryServer},
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };

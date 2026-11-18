@@ -1,17 +1,14 @@
-//! A sandbox's disk read whole while its machine runs -- copied as the machine has it, and
-//! marked as it is, for the copy to become the disk's base once it is kept -- and committed
-//! to an image, running or stopped.
+//! A sandbox's disk read whole while its machine runs: copied as the machine has it, and
+//! marked as it is, for the copy to become the disk's base once it is kept.
 
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
 use super::{Error, Sandbox};
-use crate::{Digest, ImageStoreError, Reference, written_layer};
 
 /// How long a guest has to say it has synced before its disk is copied as it is.
 const SYNC_WAIT: Duration = Duration::from_secs(5);
@@ -88,87 +85,6 @@ impl Sandbox {
             ))),
             _ => Ok(false),
         }
-    }
-
-    /// An image of it, tagged `reference`: the image it stands on, with what it has written as
-    /// one more layer, and that image's config. Of a running sandbox, its disk is copied as its
-    /// machine has it, paused meanwhile ([`copy_disk`](Self::copy_disk)); of a stopped one, as
-    /// it was left. Neither uses the sandbox, nor starts it.
-    pub async fn commit(
-        self: &Arc<Self>,
-        reference: &Reference,
-        report: &mut (dyn FnMut(String) + Send),
-    ) -> Result<Digest, Error> {
-        let shared = &self.shared;
-        let id = &self.record.id;
-        report(format!("committing sandbox {id}"));
-        let (image, mut layers) = shared
-            .images
-            .get_image(&self.record.image)?
-            .ok_or(ImageStoreError::Missing(self.record.image.clone()))?;
-        let scratch = Scratch::new()?;
-        let copy = scratch.0.join("disk.ext4");
-        {
-            // Not started meanwhile, if it is stopped.
-            let turn = self.turn.lock().await;
-            if !self.is_running() {
-                // Its disk as it was left, brought up to what is kept first.
-                shared.hooks.reading(id).await?;
-                let from = shared.snapshots.open(id)?.path;
-                let to = copy.clone();
-                tokio::task::spawn_blocking(move || copy_sparse(&from, &to))
-                    .await?
-                    .map_err(|e| Error::Failed(format!("copying its disk: {e}")))?;
-                drop(turn);
-            } else {
-                drop(turn);
-                if self.copy_disk(&copy).await?.is_none() {
-                    return Err(Error::Stopped(format!(
-                        "sandbox {id} stopped as it was committed"
-                    )));
-                }
-                // Made all here, to be read, as the server's disks have it.
-                shared.hooks.materialize(id, &copy).await?;
-            }
-        }
-        report("filing what it wrote as a layer".into());
-        let images = shared.images.clone();
-        let layer = tokio::task::spawn_blocking(move || written_layer(&images, &copy)).await??;
-        let layered = layer.is_some();
-        layers.extend(layer);
-        let mut image = image;
-        crate::recipe_forgotten(&mut image);
-        crate::history_kept(
-            &mut image,
-            format!("virtx commit {id}"),
-            layered,
-            layers.len(),
-        );
-        let digest = shared.images.insert_image(&image, &layers)?;
-        shared.images.insert_tag(reference, &digest)?;
-        Ok(digest)
-    }
-}
-
-/// A directory of its own under the host's temporary one, removed as this drops.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Result<Scratch, Error> {
-        let dir = std::env::temp_dir().join(format!(
-            "virtx-commit-{}-{}",
-            std::process::id(),
-            super::sandbox::pick(|_| false)
-        ));
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| Error::Failed(format!("making {}: {e}", dir.display())))?;
-        Ok(Scratch(dir))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

@@ -23,7 +23,7 @@ describe('against virtx-stdio', () => {
   })
   afterEach(() => client.close())
 
-  test('a sandbox stops, starts again, is found by its name and committed', async () => {
+  test('a sandbox stops, starts again and is found by its name', async () => {
     await alpine(client)
     const name = unique('work')
     const made = await client.createSandbox(ALPINE, { name, ports: [8000] })
@@ -63,54 +63,8 @@ describe('against virtx-stdio', () => {
     await gone.stop()
     await assert.rejects(client.getSandbox(gone.id), { status: 404 })
 
-    const [first, second] = [`${unique('mine')}:v1`, `${unique('mine')}:v2`]
-    const job = await made.commit(first)
-    assert.ok(job instanceof virtx.ImageJob)
-    assert.equal(job.kind, 'commit')
-    const end = (await Array.fromAsync(job.log())).at(-1).end
-    assert.deepEqual(end, { digest: (await tags(client))[first] })
-    const again = await client.commitImage(made, second)
-    assert.equal(again.kind, 'commit')
-    await Array.fromAsync(again.log())
-    await client.removeImage(first)
-    await client.removeImage(second)
     await made.remove()
     await assert.rejects(client.getSandbox(made.id), { status: 404 })
-  })
-
-  test("a port opened after is kept in the sandbox's ports", async () => {
-    await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
-    const opened = await sandbox.openPort(8080)
-    assert.equal(opened.port, 8080)
-    assert.deepEqual(
-      sandbox.ports.map(({ port }) => port),
-      [8000, 8080],
-    )
-    assert.deepEqual(await sandbox.openPort(8080), opened)
-    assert.deepEqual(
-      (await client.startSandbox(sandbox.id)).ports.map(({ port }) => port),
-      [8000, 8080],
-    )
-
-    const got = await client.getSandbox(sandbox.id)
-    assert.equal(got.ports, undefined)
-    assert.deepEqual(await got.openPort(8000), sandbox.ports[0])
-    assert.deepEqual(got.ports, [sandbox.ports[0]])
-    await sandbox.remove()
-  })
-
-  test("a port closed is dropped from the sandbox's ports", async () => {
-    await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { ports: [8000, 8080] })
-    const kept = sandbox.ports[1]
-    await sandbox.closePort(8000)
-    assert.deepEqual(sandbox.ports, [kept])
-    await (await client.getSandbox(sandbox.id)).closePort(8080)
-    assert.deepEqual((await client.startSandbox(sandbox.id)).ports ?? [], [])
-    await assert.rejects(sandbox.closePort(8080), { status: 404, code: 'not_found' })
-    assert.deepEqual(sandbox.ports, [kept])
-    await sandbox.remove()
   })
 
   test('a port says what it is for, and whether it is HTTP', async () => {
@@ -126,14 +80,6 @@ describe('against virtx-stdio', () => {
     assert.deepEqual([vnc.port, vnc.label, vnc.protocol], [5900, undefined, undefined])
     assert.deepEqual([dev.port, dev.label, dev.protocol], [5173, 'dev server', 'http'])
     assert.deepEqual([api.port, api.label, api.protocol], [3000, 'api', undefined])
-
-    const web = await sandbox.openPort(8080, { label: 'docs', protocol: 'http' })
-    assert.deepEqual(web, { port: 8080, url: web.url, label: 'docs', protocol: 'http' })
-    assert.deepEqual(sandbox.ports.at(-1), web)
-    const renamed = await sandbox.openPort(8080, { label: 'manual' })
-    assert.deepEqual([renamed.label, renamed.protocol], ['manual', 'http'])
-    const plain = await sandbox.openPort(9000)
-    assert.deepEqual([plain.label, plain.protocol], [undefined, undefined])
     await sandbox.remove()
   })
 

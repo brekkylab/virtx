@@ -50,8 +50,7 @@ pub trait Hooks: Send + Sync + 'static {
     }
 
     /// Where `port` of `sandbox` is answered from now on, and what answers it there, until it
-    /// drops: as the sandbox first starts, or as the port is opened. `None`, and it is
-    /// answered at its URL as it is.
+    /// drops: as the sandbox first starts. `None`, and it is answered at its URL as it is.
     fn listen<'a>(
         &'a self,
         sandbox: &'a Arc<Sandbox>,
@@ -126,12 +125,6 @@ pub trait Hooks: Send + Sync + 'static {
     /// it is fetched as it is read: for a reader other than its machine.
     fn materialize<'a>(&'a self, id: &'a str, disk: &'a Path) -> BoxFuture<'a, Result<(), Error>> {
         let _ = (id, disk);
-        Box::pin(async { Ok(()) })
-    }
-
-    /// Sandbox `id`'s disk, stopped, brought up to what is kept, to be read.
-    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), Error>> {
-        let _ = id;
         Box::pin(async { Ok(()) })
     }
 

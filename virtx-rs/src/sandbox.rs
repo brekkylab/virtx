@@ -1,15 +1,15 @@
 //! A sandbox and the jobs in it, each with the client its requests go through.
 
 use virtx_core::{
-    FileRoot, ImageJobEntry, InboundRule, LogEntry, PortInbound, Sandbox as SandboxInfo,
-    SandboxExecArgs, SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort,
+    FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry,
 };
 
-use crate::{Call, Client, Error, Events, ImageJob, JobEnd, StartedJob, files, job::sealed::Ends};
+use crate::{Call, Client, Error, Events, JobEnd, StartedJob, files, job::sealed::Ends};
 
 /// A sandbox the server holds, as making, finding or asking for it answered, and the client
-/// that reaches it: what is needed to start and stop it, run processes in it, open its ports,
-/// make an image of it, and reach its files, through [`Files`](crate::Files).
+/// that reaches it: what is needed to start and stop it, run processes in it, and reach its
+/// files, through [`Files`](crate::Files).
 ///
 /// Cloning holds the same client once more. Dropping it leaves the sandbox as it is, running
 /// or stopped; it is kept until [`remove`](Self::remove).
@@ -55,38 +55,6 @@ impl Sandbox {
     /// deleted with it.
     pub fn stop(&self) -> Call<Sandbox> {
         self.client.stop_sandbox(&self.info.id)
-    }
-
-    /// Open the TCP port `port` in it, as those it was made with are, and answer where it is
-    /// reached from.
-    pub fn open_port(&self, port: u16) -> Call<SandboxPort> {
-        self.client.open_sandbox_port(&self.info.id, port)
-    }
-
-    /// Close the port `port` in it: its URL reaches it no more, and it is not opened again as
-    /// it starts. One not open is refused `404`.
-    pub fn close_port(&self, port: u16) -> Call<()> {
-        self.client.close_sandbox_port(&self.info.id, port)
-    }
-
-    /// The inbound rules of its port `port`, as [`Client::get_sandbox_port_inbound`] answers
-    /// them: virtx cloud's.
-    pub fn inbound(&self, port: u16) -> Call<PortInbound> {
-        self.client.get_sandbox_port_inbound(&self.info.id, port)
-    }
-
-    /// Make the inbound rules of its port `port` `rules`, all of them, as
-    /// [`Client::set_sandbox_port_inbound`] does.
-    pub fn set_inbound(&self, port: u16, rules: &[InboundRule]) -> Call<PortInbound> {
-        self.client
-            .set_sandbox_port_inbound(&self.info.id, port, rules)
-    }
-
-    /// Start making an image of it -- its image, with what it has written as one more layer --
-    /// to point `reference` at: how a sandbox is kept to start others from. Of a running one,
-    /// as it is when the job starts; of a stopped one, as it was left.
-    pub fn commit(&self, reference: impl Into<String>) -> StartedJob<ImageJob, ImageJobEntry> {
-        self.client.commit_image(&self.info.id, reference)
     }
 
     /// Start a process in it as `args` says; see [`SandboxExecArgs::new`]. Its output and how

@@ -11,7 +11,6 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/images/jobs/pull/` | [HTTP](#image-jobs) | Starting an image pull from another registry |
 | `/images/jobs/push/` | [HTTP](#image-jobs) | Starting an image push to another registry |
 | `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
-| `/images/jobs/commit/` | [HTTP](#image-jobs) | Starting an image made of a sandbox |
 | `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
 | `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
 | `/projects/` | [HTTP](#projects) | Project CRUD |
@@ -22,7 +21,6 @@ A server offers several endpoints, and each speaks its own protocol:
 | `/sandboxes/` | [HTTP](#sandboxes) | Sandbox CRUD |
 | `/sandboxes/{id}/files/` | [WebDAV](#files) | The files in a sandbox, as its processes see them |
 | `/sandboxes/{id}/start`, `/sandboxes/{id}/stop` | [HTTP](#sandboxes) | Starting and stopping a sandbox |
-| `/sandboxes/{id}/ports/{port}` | [HTTP](#ports) | Opening a port in a sandbox |
 | `/sandboxes/{id}/jobs/` | [HTTP](#sandbox-jobs) | Sandbox jobs: read, signal, cancel |
 | `/sandboxes/{id}/jobs/exec/` | [HTTP](#sandbox-jobs) | Starting a process in a sandbox |
 | `/sandboxes/{id}/jobs/{job}/stdin` | [HTTP](#sandbox-jobs) | Writing to a process's stdin |
@@ -193,7 +191,7 @@ A slow reader slows only its own stream: the server does not buffer for it beyon
 
 ### Image jobs
 
-An image job copies an image between the server's [images](#images) and another registry, or makes one into them: built from a recipe, or of a sandbox.
+An image job copies an image between the server's [images](#images) and another registry, or builds one into them.
 
 | Request | Body | Answer |
 | --- | --- | --- |
@@ -201,7 +199,6 @@ An image job copies an image between the server's [images](#images) and another 
 | `POST /images/jobs/pull/` | `{reference, auth?}` | `201`, the job |
 | `POST /images/jobs/push/` | `{reference, auth?}` | `201`, the job |
 | `POST /images/jobs/build/` | `{recipe, reference}` | `201`, the job |
-| `POST /images/jobs/commit/` | `{sandbox, reference}` | `201`, the job |
 | `GET /images/jobs/{id}` | | `200`, the job |
 | `DELETE /images/jobs/{id}` | | `204` |
 | `GET /images/jobs/{id}/events` | | `200`, its [log](#events) |
@@ -209,7 +206,7 @@ An image job copies an image between the server's [images](#images) and another 
 
 An image job is `{id, kind, reference, running, digest?, error?}`:
 
-- `kind` is `"pull"`, `"push"`, `"build"` or `"commit"`, and `reference` the one it was started with.
+- `kind` is `"pull"`, `"push"` or `"build"`, and `reference` the one it was started with.
 - `digest`, once it has succeeded, is the digest of the manifest it copied or built; for an image index, the index's own.
 - `error`, once it has failed, is why, for a person to read.
 
@@ -223,20 +220,14 @@ Each skips a blob the other side already has, and moves the tag on the receiving
 Without it the server goes to the registry anonymously.
 The server uses `auth` for that job alone: it MUST NOT keep it beyond the job, show it in the job or its log, write it to a log of its own, or send it to any other host.
 
+A server MAY refuse to connect to a registry, or to a host that registry sends it on to, at an address it does not let its sandboxes reach, such as its own loopback or its private network.
+The job then fails, its `error` naming the host.
+
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
-
-A commit makes an image of [sandbox](#sandboxes) `sandbox` and tags it `reference`: the image it stands on, with what it has written to its root filesystem as one more layer, and that image's config.
-It is how a sandbox is kept to start others from: any number boot the image, each with a disk of its own.
-
-- Of a running sandbox, it is what its processes had written by the time the job started, as one moment: as a disk is when its machine stops, with everything written flushed first. The server MAY pause the sandbox while it copies, and its processes then go on as they were.
-- Of a stopped one, it is its disk as it was left.
-- It holds files, not processes, and the root filesystem alone: what the sandbox's volumes hold stays in them.
-- The sandbox goes on as it was: a commit does not use it, and does not start a stopped one.
 
 Cancelling one stops it:
 
 - A build leaves no tag changed. Layers already built MAY be kept for reuse.
-- A commit leaves no tag changed.
 - A pull leaves no tag changed. Blobs already fetched MAY be kept for reuse.
 - A push puts no manifest to the other registry. Blobs already pushed there stay.
 
@@ -299,8 +290,6 @@ Its disk outlives its VM. A sandbox stops, when it is not used or is told to, an
 | `POST /sandboxes/{id}/start` | `{}` | `200`, the sandbox, with `ports` |
 | `POST /sandboxes/{id}/stop` | `{}` | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
-| `PUT /sandboxes/{id}/ports/{port}` | `{label?, protocol?, inbound?}` | `201`, the port; `200` for one open already |
-| `DELETE /sandboxes/{id}/ports/{port}` | | `204` |
 
 A sandbox is `{id, name?, image, state, ephemeral, auto_stop_minutes, auto_delete_days, used_at, abins?}`, and in the answer to its `POST` and to `start`, `ports` too:
 
@@ -359,16 +348,12 @@ Deleting one stops it first if it runs, and then removes its disk; its volumes s
 
 - `label` is what it is for, free text of up to 128 characters, answered with it.
 - `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP refuses `http` with `400`, `invalid`.
-- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: virtx cloud's, beside the protocol, which answers them at `/sandboxes/{id}/ports/{port}/inbound`. A server that keeps none refuses `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out.
+- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: virtx cloud's, beside the protocol. A server that keeps none refuses `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out.
 
 They are reserved when the sandbox is made, and kept through every stop and start until it is deleted. `0` and a port given twice are refused.
 A connection to a port of a stopped sandbox is closed, as one nothing listens on is: it does not start the sandbox.
 
-A port is opened in a sandbox already made, running or stopped, with `PUT /sandboxes/{id}/ports/{port}`, its body `{label?, protocol?, inbound?}` as above -- `{}`, or none, for TCP named nothing -- and kept from then on as those it was made with are. Opened again, it is answered `200` with where it is now: how a client whose sandbox started without its `start`, for a job, learns a port's `url` if it changed; a `label` given then is its label from then on, and a `protocol` other than the one it was opened with is refused with `409`, `exists`. A program in the sandbox already listening on the port when it is opened MAY not be reached until it listens again.
-
-A port is closed with `DELETE /sandboxes/{id}/ports/{port}`: its URL reaches it no more from then on, and it is not opened again as the sandbox starts; one not open is answered `404`, `not_found`. A server MAY refuse to close a port it opens in every sandbox, with `409`, `in_use`. To reach a port another way -- `http` rather than `tcp` -- it is closed and opened again, at another URL.
-
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?}` -- `protocol` left out for `tcp`, `address` for a port that has none -- in the order given, and only there, in `start`, and in the `PUT` that opens one: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?}` -- `protocol` left out for `tcp`, `address` for a port that has none -- in the order given, and only there and in `start`: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.

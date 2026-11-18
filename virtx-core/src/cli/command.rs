@@ -392,10 +392,7 @@ mod tests {
         assert_eq!(cli.cloud.domain, cloud::DOMAIN);
         assert_eq!(
             cli.command.into_image().err(),
-            Some(CloudCommand::Token {
-                json: true,
-                project: None
-            })
+            Some(CloudCommand::Token { json: true })
         );
         let help = Cli::command().render_help().to_string();
         for command in ["login", "token", "whoami", "logout", "build", "images"] {

@@ -40,20 +40,19 @@ use tokio::task::AbortHandle;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
-    DEFAULT_PROJECT, ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry,
-    ImageJobKind, ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec,
-    ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPortOpenArgs, SandboxSignalArgs,
-    SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec, ProjectCreateArgs,
+    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted, Written};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, ImageConfiguration,
     ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os,
-    PublicImages, Reference, RegistryClient, RegistryError, RegistryProxy, RegistryServer,
-    SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError, VolumeStore, build_step,
-    signal_number,
+    PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
+    RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError,
+    VolumeStore, build_step, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -99,29 +98,18 @@ pub fn set_registry_mirror(mirror: &str) {
     let _ = REGISTRY_MIRROR.set(mirror.to_owned());
 }
 
-/// The proxy this server's pulls, pushes and builds connect through, as an embedder sets it --
-/// virtx cloud's nodes hold them to registries on public addresses so: none, unless set, and any
-/// registry is reached, the host's own and its network's among them. See
-/// [`RegistryClient::through`].
-static REGISTRY_PROXY: OnceLock<Arc<dyn RegistryProxy>> = OnceLock::new();
-
-/// Connect to registries through `proxy`, from now on: said once, before any is reached.
-pub fn set_registry_proxy(proxy: Arc<dyn RegistryProxy>) {
-    let _ = REGISTRY_PROXY.set(proxy);
-}
-
 /// A registry client for this server's pulls and pushes: anonymous pulls from Docker Hub's
-/// mirror, if one was set, and shared through `public`, given one; through the registry proxy,
-/// if one was set.
+/// mirror, if one was set, and shared through `public`, given one; through `registries`.
 fn registry(
     images: ImageStore,
     auth: Option<virtx_core::RegistryAuth>,
     public: Option<Arc<dyn PublicImages>>,
+    registries: &dyn RegistryProxy,
 ) -> Result<RegistryClient, RegistryError> {
     RegistryClient::new(images, auth)
         .with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
         .with_public(public)
-        .through(REGISTRY_PROXY.get().map(|proxy| proxy.as_ref()))
+        .through(Some(registries))
 }
 
 /// A minute made `minute` long, as a test waiting on sandboxes stopping by themselves makes it;
@@ -165,6 +153,10 @@ pub struct HomeInner {
     pub snapshots: SnapshotStore,
     pub volumes: VolumeStore,
     /// The home: its sandboxes' records and disks are under its `sandbox/`.
+    /// What its image jobs -- a pull, a push, a build's base -- connect to registries through, as
+    /// the [`Access`] it is made for says ([`Home::through`]); [`PublicRegistries`] with none
+    /// named until it does.
+    registries: OnceLock<Arc<dyn RegistryProxy>>,
     pub root: PathBuf,
     /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
     files: Files,
@@ -189,7 +181,9 @@ pub struct HomeInner {
 impl Home {
     /// The images in `images` -- its own, or shared with other projects -- and the snapshots,
     /// volumes and sandboxes under `root`, kept past this server by what `keeping` makes, given
-    /// one.
+    /// one. Its image jobs connect to
+    /// registries on public addresses alone, through [`PublicRegistries`] with none named, unless
+    /// the [`Access`] it is made for says otherwise ([`Access::through`]).
     pub fn new(
         images: ImageStore,
         root: &Path,
@@ -223,6 +217,7 @@ impl Home {
         let home = Home(Arc::new(HomeInner {
             registry: Arc::new(registry),
             images,
+            registries: OnceLock::new(),
             files: Files::new(volumes.clone()),
             writing: Arc::default(),
             snapshots,
@@ -315,6 +310,21 @@ impl Home {
     /// Its images, as an OCI registry.
     pub fn registry(&self) -> Arc<RegistryServer> {
         Arc::clone(&self.registry)
+    }
+
+    /// This, its image jobs connecting to registries through `registries`: said once, as it is
+    /// made.
+    pub(crate) fn through(self, registries: Arc<dyn RegistryProxy>) -> Home {
+        let _ = self.registries.set(registries);
+        self
+    }
+
+    /// What its image jobs connect to registries through.
+    fn registries(&self) -> Arc<dyn RegistryProxy> {
+        match self.registries.get() {
+            Some(registries) => Arc::clone(registries),
+            None => Arc::new(PublicRegistries::default()),
+        }
     }
 
     /// Its images.
@@ -724,15 +734,6 @@ impl Hooks for HomeHooks {
         })
     }
 
-    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            self.home()?
-                .bring_up(Kind::Snapshot, id)
-                .await
-                .map_err(hooked)
-        })
-    }
-
     /// Its disk removed from the storage home first, if there is one -- one never kept there,
     /// made and deleted before it was, is nothing to remove -- and a fill ahead of it stopped.
     fn deleting<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
@@ -823,7 +824,6 @@ pub fn router() -> Router {
         .route("/images/jobs/pull/", post(image_pull))
         .route("/images/jobs/push/", post(image_push))
         .route("/images/jobs/build/", post(image_build))
-        .route("/images/jobs/commit/", post(image_commit))
         .route(
             "/images/jobs/{id}",
             get(image_job_get).delete(image_job_remove),
@@ -844,10 +844,6 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
         .route("/sandboxes/{id}/start", post(sandbox_start))
         .route("/sandboxes/{id}/stop", post(sandbox_stop))
-        .route(
-            "/sandboxes/{id}/ports/{port}",
-            put(sandbox_port_open).delete(sandbox_port_close),
-        )
         .route("/sandboxes/{id}/disk", put(sandbox_disk))
         .route("/sandboxes/{id}/resources", put(sandbox_resources))
         .route("/sandboxes/{id}/files", any(sandbox_files))
@@ -1149,13 +1145,13 @@ where
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let (images, public) = (home.images.clone(), home.public());
+    let (images, public, registries) = (home.images.clone(), home.public(), home.registries());
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = registry(images.clone(), args.auth, public)?;
+            let registry = registry(images.clone(), args.auth, public, &*registries)?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -1167,13 +1163,13 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
 async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let images = home.images.clone();
+    let (images, registries) = (home.images.clone(), home.registries());
     image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = registry(images, args.auth, None)?;
+            let registry = registry(images, args.auth, None, &*registries)?;
             Ok(registry.push(&reference, report).await?)
         },
     )
@@ -1213,6 +1209,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         self::reference(&args.recipe.base)?;
     }
     let (images, vm, public) = (home.images.clone(), home.vm.clone(), home.public());
+    let registries = home.registries();
     let recipe = args.recipe;
     let room = build_room(None, &recipe)?;
     image_job(
@@ -1223,7 +1220,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             // Held until the build ends, or is cancelled: its future dropped.
             let _room = room;
             let (mut image, mut layers, _base) =
-                base(&images, public, &recipe.base, &mut report).await?;
+                base(&images, public, &*registries, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -1255,10 +1252,12 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
+/// pulled into the store now, anonymously, through `registries`, and left untagged: a build
+/// tags only what it builds.
 async fn base(
     images: &ImageStore,
     public: Option<Arc<dyn PublicImages>>,
+    registries: &dyn RegistryProxy,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -1271,7 +1270,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            registry(images.clone(), None, public)?
+            registry(images.clone(), None, public, registries)?
                 .pull(&reference, report)
                 .await?
                 .1
@@ -1282,20 +1281,6 @@ async fn base(
         .get_image(&image)?
         .ok_or(ImageStoreError::Missing(image))?;
     Ok((config, layers, Some(held)))
-}
-
-/// A commit: the image the sandbox stands on, with what it has written as one more layer, and
-/// that image's config, tagged `reference`; see [`Sandbox::commit`].
-async fn image_commit(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
-    let args: ImageCommitArgs = body(&request)?;
-    let reference = reference(&args.reference)?;
-    let sandbox = home.sandbox(&args.sandbox)?;
-    image_job(
-        &home,
-        ImageJobKind::Commit,
-        args.reference,
-        move |mut report| async move { Ok(sandbox.commit(&reference, &mut *report).await?) },
-    )
 }
 
 async fn image_job_get(
@@ -1608,44 +1593,6 @@ async fn sandbox_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     home.sandboxes.delete(&id).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-/// Port `port` of sandbox `id` opened, as those it was made with are: answered as each of
-/// those was, `201` and where it is reached -- or `200` and where, for one open already. A
-/// program in it that listens on the port already is reached once it listens again.
-async fn sandbox_port_open(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-    request: Bytes,
-) -> Answer {
-    // None, `null` or `{}`: TCP, named nothing.
-    let asked: SandboxPortOpenArgs = match request.iter().all(u8::is_ascii_whitespace) {
-        true => SandboxPortOpenArgs::default(),
-        false => serde_json::from_slice::<Option<SandboxPortOpenArgs>>(&request)
-            .map_err(invalid)?
-            .unwrap_or_default(),
-    };
-    if asked.inbound.is_some() {
-        return Err(invalid(
-            "inbound: a port's inbound rules are virtx cloud's; this server keeps none",
-        ));
-    }
-    let sandbox = home.sandbox(&id)?;
-    match sandbox.open_port(port, asked.label, asked.protocol).await? {
-        (open, true) => Ok(created(format!("/sandboxes/{id}/ports/{port}"), &open)),
-        (open, false) => Ok(json(&open)),
-    }
-}
-
-/// Port `port` of sandbox `id` closed: its capability reaches it no more from now on, and it is
-/// not opened again as the sandbox starts. `404` for one not open. A connection through it open
-/// now runs on until it ends.
-async fn sandbox_port_close(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-) -> Answer {
-    home.sandbox(&id)?.close_port(port)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

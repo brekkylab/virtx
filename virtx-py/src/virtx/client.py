@@ -29,14 +29,9 @@ from .image import (
 from .job import StartedJob
 from .project import Project
 from .sandbox import (
-    InboundRule,
-    PortInbound,
-    PortProtocol,
     PortSpec,
     Sandbox,
-    SandboxPort,
     SandboxVolume,
-    inbound_rules,
 )
 from .volume import Volume
 
@@ -239,8 +234,8 @@ class Client:
     def from_env(cls) -> Client:
         """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` if set, which names its
         project: with ``VIRTX_PROJECT`` and no key, as the person signed in with ``virtx login``,
-        whose token for that project ``virtx token --json --project <VIRTX_PROJECT>`` prints,
-        again as it runs out. ``VIRTX_PROJECT`` names the project of every request.
+        whose token ``virtx token --json`` prints, again as it runs out. ``VIRTX_PROJECT``, a
+        project's id, names the project of every request.
 
         Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
         cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
@@ -262,7 +257,7 @@ class Client:
             auth = BearerAuth(key)
         elif project:
             program, args = SIGNED_IN
-            auth = CommandAuth(program, (*args, "--project", project))
+            auth = CommandAuth(program, args)
         return cls.connect(url, auth, project)
 
     @classmethod
@@ -366,19 +361,6 @@ class Client:
         recipe = recipe.to_dict() if isinstance(recipe, Recipe) else recipe
         return self._image_job(
             "virtx_client_build_image", _args(recipe=recipe, reference=reference)
-        )
-
-    def commit_image(
-        self, sandbox: str | Sandbox, reference: str
-    ) -> StartedJob[ImageJob, ImageJobEntry]:
-        """Make an image of ``sandbox``, a ``Sandbox`` or its id -- its image, with what it has
-        written as one more layer -- to point ``reference`` at: how a sandbox is kept to start
-        others from. Of a running one, as it is when the job starts; of a stopped one, as it was
-        left. Awaited, the job; iterated, its log, as ``ImageJob.log``'s. Sent when first
-        awaited or iterated."""
-        sandbox = sandbox.id if isinstance(sandbox, Sandbox) else sandbox
-        return self._image_job(
-            "virtx_client_commit_image", _args(sandbox=sandbox, reference=reference)
         )
 
     def pull_image(
@@ -572,54 +554,6 @@ class Client:
         """Stop the sandbox ``id`` if it runs: its jobs end, and its disk is kept -- or, for an
         ephemeral one, deleted with it. Answered once it has stopped."""
         return Sandbox.from_dict(self, await self._call("virtx_client_stop_sandbox", _args(id=id)))
-
-    async def open_sandbox_port(
-        self,
-        id: str,
-        port: int,
-        *,
-        label: str | None = None,
-        protocol: PortProtocol | str | None = None,
-        inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None,
-    ) -> SandboxPort:
-        """Open the port ``port`` in the sandbox ``id``, as those it was made with are, and
-        answer where it is reached from: TCP unless ``protocol`` says HTTP, ``label`` saying
-        what it is for, ``inbound`` its inbound rules, virtx cloud's. Opened already, it is
-        answered as it is, ``label`` renaming it. A program in it listening on ``port`` already
-        is reached once it listens again."""
-        args = _args(
-            id=id,
-            port=port,
-            label=label,
-            protocol=None if protocol is None else PortProtocol(protocol).value,
-            inbound=None if inbound is None else inbound_rules(inbound),
-        )
-        return SandboxPort.from_dict(await self._call("virtx_client_open_sandbox_port", args))
-
-    async def get_sandbox_port_inbound(self, id: str, port: int) -> PortInbound:
-        """The inbound rules of the port ``port`` in the sandbox ``id``, and its public address
-        if it has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's
-        port is refused ``409``, ``not_public``; one not open, ``404``."""
-        args = _args(id=id, port=port)
-        return PortInbound.from_dict(
-            await self._call("virtx_client_get_sandbox_port_inbound", args)
-        )
-
-    async def set_sandbox_port_inbound(
-        self, id: str, port: int, rules: Iterable[InboundRule | Mapping[str, Any]]
-    ) -> PortInbound:
-        """Make the inbound rules of the port ``port`` in the sandbox ``id`` ``rules``, all of
-        them -- ``[]`` lets in no one -- and answer them as the server keeps them. A source that
-        is not an address or a CIDR is refused ``400``, ``invalid``."""
-        args = _args(id=id, port=port, rules=inbound_rules(rules))
-        return PortInbound.from_dict(
-            await self._call("virtx_client_set_sandbox_port_inbound", args)
-        )
-
-    async def close_sandbox_port(self, id: str, port: int) -> None:
-        """Close the port ``port`` in the sandbox ``id``: its ``url`` reaches it no more, and it
-        is not opened again as the sandbox starts. One not open is refused ``404``."""
-        await self._call("virtx_client_close_sandbox_port", _args(id=id, port=port))
 
 
 DOMAIN = "virtx.sh"

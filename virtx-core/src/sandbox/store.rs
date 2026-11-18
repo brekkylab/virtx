@@ -340,8 +340,7 @@ pub struct PortSpec {
     pub port: u16,
     pub label: Option<String>,
     pub protocol: PortProtocol,
-    /// Its inbound rules, set once it is open ([`PortInbound`]): virtx cloud's. `None` leaves
-    /// them to the server.
+    /// Its inbound rules: virtx cloud's. `None` leaves them to the server.
     pub inbound: Option<Vec<InboundRule>>,
 }
 
@@ -409,20 +408,6 @@ impl<'de> Deserialize<'de> for PortSpec {
     }
 }
 
-/// What opening a port in a sandbox already made asks for (`PUT /sandboxes/{id}/ports/{port}`):
-/// what it is for, how it is reached, TCP if not said, and whom it lets in.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxPortOpenArgs {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<PortProtocol>,
-    /// Its inbound rules, set once it is open, as [`PortSpec::inbound`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inbound: Option<Vec<InboundRule>>,
-}
-
 /// One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they are.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -449,24 +434,6 @@ impl InboundRule {
         self.description = Some(description.into());
         self
     }
-}
-
-/// A port's inbound rules, as virtx cloud answers them (`/sandboxes/{id}/ports/{port}/inbound`):
-/// whom a TCP port lets in at its public `address`, and an HTTP one at its URL. A connection
-/// from an address no rule's source holds is not let in there, so a port with none is reached
-/// there by no one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortInbound {
-    /// The port in the sandbox.
-    pub port: u16,
-
-    /// Its rules, each source a CIDR as the server keeps it.
-    pub rules: Vec<InboundRule>,
-
-    /// Its public `host:port`, once a rule has given it one, as [`SandboxPort::address`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
 }
 
 /// A volume mounted into a sandbox.
@@ -673,19 +640,5 @@ mod port_tests {
             serde_json::to_value(&ssh).unwrap(),
             serde_json::json!({"port": 22, "inbound": []})
         );
-
-        let open = SandboxPortOpenArgs {
-            inbound: Some(vec![InboundRule::new("10.0.0.0/8")]),
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(&open).unwrap(),
-            serde_json::json!({"inbound": [{"source": "10.0.0.0/8"}]})
-        );
-
-        let answered = serde_json::json!({"port": 22, "rules": [{"source": "10.0.0.0/8"}]});
-        let inbound: PortInbound = serde_json::from_value(answered.clone()).unwrap();
-        assert_eq!((inbound.port, inbound.address), (22, None));
-        assert_eq!(inbound.rules, [InboundRule::new("10.0.0.0/8")]);
     }
 }

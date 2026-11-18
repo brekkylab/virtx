@@ -332,17 +332,6 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// Starts making an image of a sandbox -- its image, with what it has written as one more
-// layer -- to point a reference at, given `{"sandbox": "...", "reference": "name:tag"}`.
-// Answers with the job, as `virtx_client_build_image` does.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_commit_image(struct VirtxClient *client,
-                                              const uint8_t *args,
-                                              size_t args_len);
-
 // Deletes each image no tag points at and no sandbox stands on, and what only such images
 // held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
 // and the bytes freed.
@@ -711,50 +700,6 @@ struct VirtxFuture *virtx_client_start_sandbox(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_stop_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
-
-// Opens the port `port` in the sandbox `id`, given `{"id": "...", "port": n, "label"?: "...",
-// "protocol"?: "tcp" | "http", "inbound"?: [{"source": "...", "description"?: "..."}]}`.
-// Answers with `{"port": n, "url": "...", "label"?, "protocol"?, "address"?}`: where it is
-// reached from now.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_open_sandbox_port(struct VirtxClient *client,
-                                                   const uint8_t *args,
-                                                   size_t args_len);
-
-// Closes the port `port` in the sandbox `id`, given `{"id": "...", "port": n}`: its URL
-// reaches it no more. Answers with `null`.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_close_sandbox_port(struct VirtxClient *client,
-                                                    const uint8_t *args,
-                                                    size_t args_len);
-
-// Answers with the inbound rules of the port `port` in the sandbox `id`, given
-// `{"id": "...", "port": n}`, as `{"port": n, "rules": [{"source": "...",
-// "description"?: "..."}], "address"?: "..."}`: virtx cloud's.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_get_sandbox_port_inbound(struct VirtxClient *client,
-                                                          const uint8_t *args,
-                                                          size_t args_len);
-
-// Makes the inbound rules of the port `port` in the sandbox `id` `rules`, all of them, given
-// `{"id": "...", "port": n, "rules": [{"source": "...", "description"?: "..."}]}`. Answers
-// with them as `virtx_client_get_sandbox_port_inbound` does.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_set_sandbox_port_inbound(struct VirtxClient *client,
-                                                          const uint8_t *args,
-                                                          size_t args_len);
 
 // Deletes the sandbox `id`, given `{"id": "..."}`: stopped first if it runs, and its disk
 // removed. Answers with `null`.

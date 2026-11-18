@@ -1,7 +1,7 @@
 """What every job's log shares: each entry numbered, and the mark of a log cut short.
 
-A job, an image's build, pull, push or commit or a process in a sandbox, runs on the server
-apart from the request that started it. Its log is read with the job's ``log``, from its start
+A job, an image's build, pull or push or a process in a sandbox, runs on the server apart
+from the request that started it. Its log is read with the job's ``log``, from its start
 or after an entry's ``id``, until its end entry, or the ``VirtxError`` it failed with. A request
 that starts one answers a ``StartedJob``: awaited, the job; iterated, its log; or followed to its
 end with ``complete``.

@@ -14,15 +14,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use virtx_core::{
     Auth, DirEntry, Event, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot,
-    FileWriteArgs, ImageBuildArgs, ImageCommitArgs, ImageDownloadArgs, ImageDownloadOutput,
+    FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, InboundRule, LogEntry, Metadata, MountSource, PortInbound,
-    ProjectCreateArgs, ProjectListOutputItem as ProjectInfo,
-    ProjectMemberListOutputItem as ProjectMemberInfo, Recipe, RegistryAuth, Role,
-    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, Source,
-    VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
+    ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
+    RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, Source, VolumeCreateArgs,
+    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -178,9 +177,9 @@ impl Client {
     }
 
     /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
-    /// project: with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`,
-    /// whose token for that project `virtx token --json --project <VIRTX_PROJECT>` prints, again
-    /// as it runs out ([`Auth::Command`]). `VIRTX_PROJECT` names the project of every request.
+    /// project: with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose
+    /// token `virtx token --json` prints, again as it runs out ([`Auth::Command`]).
+    /// `VIRTX_PROJECT`, a project's id, names the project of every request.
     ///
     /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
     /// `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS
@@ -215,14 +214,9 @@ impl Client {
         })?;
         let auth = match (key, &project) {
             (Some(token), _) => Auth::Bearer { token },
-            (None, Some(project)) => Auth::Command {
+            (None, Some(_)) => Auth::Command {
                 program: "virtx".into(),
-                args: vec![
-                    "token".into(),
-                    "--json".into(),
-                    "--project".into(),
-                    project.clone(),
-                ],
+                args: vec!["token".into(), "--json".into()],
             },
             (None, None) => Auth::None,
         };
@@ -475,22 +469,6 @@ impl Client {
             self.api,
             self.start(self.api.virtx_client_upload_image, args),
         )
-    }
-
-    /// Start making an image of the sandbox `sandbox` -- its image, with what it has written
-    /// as one more layer -- to point `reference` at: how a sandbox is kept to start others
-    /// from. Of a running one, as it is when the job starts; of a stopped one, as it was left.
-    /// Its log is [`ImageJob::log`]'s, or [`StartedJob::log`].
-    pub fn commit_image(
-        &self,
-        sandbox: impl Into<String>,
-        reference: impl Into<String>,
-    ) -> StartedJob<ImageJob, ImageJobEntry> {
-        let args = ImageCommitArgs {
-            sandbox: sandbox.into(),
-            reference: reference.into(),
-        };
-        self.start_image_job(self.call(self.api.virtx_client_commit_image, args))
     }
 
     /// Delete each image no tag points at and no sandbox stands on, and what only such images
@@ -851,59 +829,6 @@ impl Client {
         let client = self.clone();
         let call: Call<SandboxInfo> = self.call(self.api.virtx_client_stop_sandbox, args);
         call.map(move |info| Sandbox::new(client.clone(), info))
-    }
-
-    /// Open the TCP port `port` in the sandbox `id`, as those it was made with are, and answer
-    /// where it is reached from.
-    pub fn open_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<SandboxPort> {
-        self.open_sandbox_port_with(id, port, &SandboxPortOpenArgs::default())
-    }
-
-    /// Open the port `port` in the sandbox `id` as `args` say -- what it is for, and whether it
-    /// is TCP or HTTP -- and answer where it is reached from. Opened already, it is answered as
-    /// it is, a `label` given renaming it.
-    pub fn open_sandbox_port_with(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-        args: &SandboxPortOpenArgs,
-    ) -> Call<SandboxPort> {
-        let args = json!({
-            "id": id.as_ref(),
-            "port": port,
-            "label": args.label,
-            "protocol": args.protocol,
-            "inbound": args.inbound,
-        });
-        self.call(self.api.virtx_client_open_sandbox_port, args)
-    }
-
-    /// The inbound rules of the port `port` in the sandbox `id`, and its public address if it
-    /// has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port
-    /// is refused `409`, `not_public`; one not open, `404`.
-    pub fn get_sandbox_port_inbound(&self, id: impl AsRef<str>, port: u16) -> Call<PortInbound> {
-        let args = json!({ "id": id.as_ref(), "port": port });
-        self.call(self.api.virtx_client_get_sandbox_port_inbound, args)
-    }
-
-    /// Make the inbound rules of the port `port` in the sandbox `id` `rules`, all of them -- none
-    /// lets in no one -- and answer them as the server keeps them. A source that is not an
-    /// address or a CIDR is refused `400`, `invalid`.
-    pub fn set_sandbox_port_inbound(
-        &self,
-        id: impl AsRef<str>,
-        port: u16,
-        rules: &[InboundRule],
-    ) -> Call<PortInbound> {
-        let args = json!({ "id": id.as_ref(), "port": port, "rules": rules });
-        self.call(self.api.virtx_client_set_sandbox_port_inbound, args)
-    }
-
-    /// Close the port `port` in the sandbox `id`: its URL reaches it no more, and it is not
-    /// opened again as the sandbox starts. One not open is refused `404`.
-    pub fn close_sandbox_port(&self, id: impl AsRef<str>, port: u16) -> Call<()> {
-        let args = json!({ "id": id.as_ref(), "port": port });
-        self.call(self.api.virtx_client_close_sandbox_port, args)
     }
 
     /// Delete the sandbox `id`: stopped first if it runs, and its disk removed. Its volumes

@@ -8,13 +8,16 @@
 //! virtx logout    sign out: the session ends
 //! ```
 //!
-//! Signing in is RFC 8628's device flow against the control plane at `https://api.<domain>`,
-//! `<domain>` being `--domain`, `VIRTX_DOMAIN`, or [`DOMAIN`]. The session is kept in files, each
-//! its owner's alone: the refresh token in `~/.config/virtx/<domain>.token`, the last access
-//! token in `<domain>.access`. Files, not the OS's keychain, so that the `virtx` the Python and
-//! Node packages ship signs in as the one built from this repository does, and an SDK's
-//! `Client.from_env()` -- `VIRTX_ORG` and no `VIRTX_API_KEY` -- finds a token wherever it runs
-//! (issue #158). An access token lasts 15 minutes.
+//! Signing in is RFC 8628's device flow against virtx cloud's OpenID Connect provider, its
+//! control plane at `https://api.<domain>` -- `<domain>` being `--domain`, `VIRTX_DOMAIN`, or
+//! [`DOMAIN`] -- as its public client [`CLIENT_ID`], at `/oauth/device` and `/oauth/token`,
+//! refreshing there and revoking at `/oauth/revoke`: what a cell's `GET /auth` names. The token
+//! is the ID token, the session's access token. The session is kept in files, each its owner's
+//! alone: the refresh token in `~/.config/virtx/<domain>.token`, the last token in
+//! `<domain>.access`. Files, not the OS's keychain, so that the `virtx` the Python and Node
+//! packages ship signs in as the one built from this repository does, and an SDK's
+//! `Client.from_env()` -- `VIRTX_PROJECT` and no `VIRTX_API_KEY` -- finds a token wherever it runs
+//! (issue #158). A token lasts 15 minutes.
 //!
 //! Many processes may ask for a token at once -- an SDK runs `virtx token --json` in each, as
 //! an agent's workers start together -- and each refresh replaces the refresh token: two at
@@ -24,10 +27,9 @@
 //! more than [`FRESH_FOR`] left: one refresh serves them all. Run with `VIRTX_TOKEN_REFUSED`
 //! set, as an SDK runs it once a server refused the token it had, it refreshes whatever it has.
 //!
-//! A cell takes a person's token for one project: `virtx token --project <its UUID>`, or with
-//! `VIRTX_PROJECT` set, exchanges the session's for that project's (`/auth/token/project`), from
-//! which the cell's gateway learns the project. Its cell's endpoint is `VIRTX_URL`, or the
-//! nearest: unlike an API key, a person's token names no cell.
+//! A person's token names no project: a cell takes it with the project each request names by its
+//! id (`virtx-project`), as `from_env` names `VIRTX_PROJECT`. Nor does it name a cell: its
+//! endpoint is `VIRTX_URL`, or the nearest.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,9 @@ use serde_json::{Value, json};
 
 /// Where virtx cloud is, by default, as the SDKs have it.
 pub(crate) const DOMAIN: &str = "virtx.sh";
+/// The public client signing in is as: what a cell's `GET /auth` names.
+const CLIENT_ID: &str = "virtx";
+const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// How long an access token kept has to have left to be given again: more than the minute
 /// before it runs out in which an SDK asks for another.
 const FRESH_FOR: Duration = Duration::from_secs(120);
@@ -56,15 +61,11 @@ pub(crate) struct CloudArgs {
 pub(crate) enum CloudCommand {
     /// Sign in to virtx cloud, approving the code shown in the console.
     Login,
-    /// Print an access token to virtx cloud, refreshed.
+    /// Print a token to virtx cloud, refreshed: what its cells and its control plane take.
     Token {
         /// Print `{"token": ..., "expires_in": <seconds>}`, as the SDKs read it.
         #[arg(long)]
         json: bool,
-        /// The project the token is for, by its UUID: what a cell takes. Without one, the
-        /// session's own, which virtx cloud's console API takes.
-        #[arg(long, env = "VIRTX_PROJECT")]
-        project: Option<String>,
     },
     /// Say who is signed in to virtx cloud.
     Whoami,
@@ -80,11 +81,8 @@ pub(crate) async fn run(domain: &str, command: CloudCommand) -> anyhow::Result<(
     let cloud = Cloud::at(domain, config)?;
     match command {
         CloudCommand::Login => cloud.login(open).await,
-        CloudCommand::Token { json, project } => {
-            let tokens = match project.as_deref().filter(|p| !p.is_empty()) {
-                Some(project) => cloud.project_token(project).await?,
-                None => cloud.token().await?,
-            };
+        CloudCommand::Token { json } => {
+            let tokens = cloud.token().await?;
             if json {
                 let printed = json!({
                     "token": tokens.access_token,
@@ -114,6 +112,7 @@ struct Codes {
     interval: u64,
 }
 
+/// What the token endpoint answers: its `id_token` is its `access_token`.
 #[derive(Deserialize, Serialize)]
 struct Tokens {
     access_token: String,
@@ -233,13 +232,14 @@ impl Cloud {
         })
     }
 
-    /// `POST <api><path>` with `body` as JSON.
-    async fn post(&self, path: &str, body: &Value) -> anyhow::Result<reqwest::Response> {
+    /// `POST <api><path>` of the form `fields`, with who the client is.
+    async fn post(&self, path: &str, fields: &[(&str, &str)]) -> anyhow::Result<reqwest::Response> {
+        let mut form = fields.to_vec();
+        form.push(("client_id", CLIENT_ID));
         Ok(self
             .http
             .post(format!("{}{path}", self.api))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(serde_json::to_vec(body)?)
+            .form(&form)
             .send()
             .await?)
     }
@@ -248,7 +248,8 @@ impl Cloud {
     /// domain's ([`Domain::serves`]): virtx cloud's answer names it, and the system opens a
     /// file or a program as readily as a page.
     async fn login(&self, open: impl FnOnce(&str)) -> anyhow::Result<()> {
-        let codes: Codes = json_of(checked(self.post("/auth/device", &json!({})).await?)?).await?;
+        let asked = self.post("/oauth/device", &[("scope", "openid email")]);
+        let codes: Codes = json_of(checked(asked.await?)?).await?;
         let page = &codes.verification_uri_complete;
         eprintln!(
             "To sign in, open this page and approve the code {}:",
@@ -273,8 +274,11 @@ impl Cloud {
             tokio::time::sleep(interval).await;
             let answer = self
                 .post(
-                    "/auth/device/token",
-                    &json!({ "device_code": codes.device_code }),
+                    "/oauth/token",
+                    &[
+                        ("grant_type", DEVICE_GRANT),
+                        ("device_code", &codes.device_code),
+                    ],
                 )
                 .await?;
             if answer.status().is_success() {
@@ -335,42 +339,21 @@ impl Cloud {
         Ok(tokens)
     }
 
-    /// An access token for project `project`, exchanged for the session's ([`token`]): one
-    /// refused `401` -- kept, though its session ended or it was revoked since -- is refreshed
-    /// once and exchanged again.
-    ///
-    /// [`token`]: Self::token
-    async fn project_token(&self, project: &str) -> anyhow::Result<Tokens> {
-        for retried in [false, true] {
-            let session = self.token().await?;
-            let answer = self
-                .http
-                .post(format!("{}/auth/token/project", self.api))
-                .bearer_auth(&session.access_token)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(serde_json::to_vec(&json!({ "project": project }))?)
-                .send()
-                .await
-                .context("reaching virtx cloud")?;
-            if answer.status() == reqwest::StatusCode::UNAUTHORIZED && !retried {
-                let _ = self.forget_access();
-                continue;
-            }
-            if answer.status() == reqwest::StatusCode::NOT_FOUND {
-                bail!("{project} is no project of yours");
-            }
-            return json_of(checked(answer)?).await;
-        }
-        bail!("the session has ended; run virtx login")
-    }
-
-    /// The tokens `refresh` is replaced with -- or none, `401`, for a session that has ended.
+    /// The tokens `refresh` is replaced with -- or none, `invalid_grant`, for a session that
+    /// has ended.
     async fn refreshed(&self, refresh: &str) -> anyhow::Result<Option<Tokens>> {
         let answer = self
-            .post("/auth/token", &json!({ "refresh_token": refresh }))
+            .post(
+                "/oauth/token",
+                &[("grant_type", "refresh_token"), ("refresh_token", refresh)],
+            )
             .await?;
-        if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Ok(None);
+        if answer.status() == reqwest::StatusCode::BAD_REQUEST {
+            let error: Value = json_of(answer).await.unwrap_or_default();
+            return match error["error"].as_str() {
+                Some("invalid_grant") => Ok(None),
+                _ => bail!("refreshing the session failed: {error}"),
+            };
         }
         Ok(Some(json_of(checked(answer)?).await?))
     }
@@ -392,10 +375,7 @@ impl Cloud {
     async fn logout(&self) -> anyhow::Result<()> {
         let _lock = self.lock()?;
         let revoked = match self.kept()? {
-            Some(refresh) => match self
-                .post("/auth/token/revoke", &json!({ "refresh_token": refresh }))
-                .await
-            {
+            Some(refresh) => match self.post("/oauth/revoke", &[("token", &refresh)]).await {
                 Ok(answer) => checked(answer).map(drop),
                 Err(e) => Err(e),
             },
@@ -690,7 +670,7 @@ mod tests {
                 .login(|page| opened = Some(page.to_owned()))
                 .await;
             assert!(signed_in.is_err(), "the code had run out");
-            assert!(asked.join().unwrap().starts_with("POST /auth/device "));
+            assert!(asked.join().unwrap().starts_with("POST /oauth/device "));
             assert_eq!(opened.as_deref(), opens.then_some(page), "{page}");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -737,7 +717,7 @@ mod tests {
             .refreshed("made-up-refresh-token")
             .await;
         assert!(refreshed.is_err(), "{:?}", refreshed.map(|t| t.is_some()));
-        assert!(asked.join().unwrap().starts_with("POST /auth/token "));
+        assert!(asked.join().unwrap().starts_with("POST /oauth/token "));
         assert!(
             elsewhere.accept().is_err(),
             "nothing reached where the redirect pointed"
@@ -791,7 +771,7 @@ mod tests {
         write_private(&cloud.config("token"), b"old-refresh").unwrap();
         let tokens = cloud.token().await.unwrap();
         assert_eq!(tokens.access_token, "new-access");
-        assert!(asked.join().unwrap().starts_with("POST /auth/token "));
+        assert!(asked.join().unwrap().starts_with("POST /oauth/token "));
         assert_eq!(
             std::fs::read_to_string(cloud.config("token")).unwrap(),
             "new-refresh"

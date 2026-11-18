@@ -26,8 +26,7 @@ pub(super) struct Record {
     /// `image` is the digest it stands on, and its `ports` are not read: those it has are
     /// `opened`'s.
     pub(super) args: SandboxCreateArgs,
-    /// Each port it opened, and where it is answered: those it was made with, and those
-    /// opened since.
+    /// Each port it was made with, and where it is answered.
     pub(super) opened: Mutex<Vec<SandboxPort>>,
     /// The port each key names, the secret a server reaches a port by (a tcp server's
     /// capability): by key. Empty on a server that names its ports by nothing.

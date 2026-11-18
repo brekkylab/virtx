@@ -268,16 +268,6 @@ impl Machine {
         .map_err(|e| Error::io("resizing the terminal", e))
     }
 
-    /// Publish guest port `port` from now on, as those it booted with are: answered by a
-    /// [`Published`](CtrlResp::Published) from [`recv`](Machine::recv), each in turn.
-    pub fn publish(&self, port: u16) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Publish { port },
-        )
-        .map_err(|e| Error::io("publishing the port", e))
-    }
-
     /// Ask whether the process `id`, on a terminal, runs another in its foreground: answered by
     /// a [`Foreground`](CtrlResp::Foreground) from [`recv`](Machine::recv).
     pub fn foreground(&self, id: u32) -> Result<()> {

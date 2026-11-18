@@ -58,7 +58,7 @@ env:
   GH_REPO: ${{ github.repository }}
   TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   # The twine `verify` checks the wheels with and `pypi` uploads them with.
-  TWINE: twine==7.0.0
+  TWINE: twine~=7.0
 
 jobs:
   verify:

@@ -97,7 +97,7 @@ while let Some(entry) = log.next().await {
 ### What keeps its VM up
 
 A sandbox is used while a job runs in it, while a connection through one of its [ports](/docs/guides/networks-ports/) is open, while a request to its [files](/docs/guides/reading-writing-files/) is answered, and while a terminal in it is typed in or runs a command; starting a job uses it too.
-The server parks it once it has gone unused for a while, about a minute on `virtx-server-tcp` and the stdio server.
+The server parks it once it has gone unused for a while: on `virtx-server-tcp` and the stdio server, at once, unless `VIRTX_PARK_AFTER_MS` says otherwise.
 Getting or listing it does not use it.
 
 A parked sandbox has no VM: what is kept of it is its disk.

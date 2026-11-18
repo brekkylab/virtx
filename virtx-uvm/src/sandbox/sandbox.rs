@@ -62,11 +62,15 @@ pub const LABEL_MOST: usize = 128;
 const DISK_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a sandbox is unused before its machine is parked, where `VIRTX_PARK_AFTER_MS` does
-/// not say.
-const PARK_AFTER: Duration = Duration::from_secs(60);
+/// not say: not at all, its machine parked as nothing uses it any more.
+const PARK_AFTER: Duration = Duration::ZERO;
+
+/// How often a sandbox in use is looked at again, to park it once it is not: what bounds how
+/// soon after it is it parked.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
 
 /// How long a sandbox is unused before its machine is parked, `None` for never:
-/// `VIRTX_PARK_AFTER_MS`, in milliseconds, `0` for never; or a minute.
+/// `VIRTX_PARK_AFTER_MS`, in milliseconds, `0` for never; or at once.
 pub fn park_after() -> Option<Duration> {
     match std::env::var("VIRTX_PARK_AFTER_MS").map(|ms| ms.parse::<u64>()) {
         Ok(Ok(0)) => None,
@@ -165,6 +169,10 @@ type Waiting = (u64, oneshot::Sender<Result<bool, String>>);
 /// A sandbox's run: the machine it booted, up until it stops, and what is asked of it.
 pub(super) struct Run {
     pub(super) machine: Arc<Machine>,
+    /// Its sandbox's id, and when its machine came up: what [`runs`](super::runs) is told as
+    /// it comes up and as it goes down.
+    sandbox: String,
+    started: SystemTime,
     /// Its disk's lock, and what the hooks hold for it, until it has stopped.
     held: Mutex<Option<(SnapshotLock, Vec<Held>)>>,
     /// What it may write: its disk, and the volumes it mounts to write.
@@ -211,9 +219,12 @@ impl Run {
             .map_err(|_| Error::JobEnded("the job has ended"))
     }
 
-    /// What it held let go of: its machine has ended.
+    /// What it held let go of: its machine has ended, its run told as ended, once.
     fn release(&self) {
-        drop(self.held.lock().unwrap().take());
+        if let Some(held) = self.held.lock().unwrap().take() {
+            drop(held);
+            super::runs::down(&self.sandbox, self.started);
+        }
     }
 }
 
@@ -328,6 +339,11 @@ impl Sandbox {
     /// Whether its machine is up now: not parked, nor exited.
     pub fn up(&self) -> bool {
         self.run().is_some()
+    }
+
+    /// When its machine came up, if it is up now.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        self.run().map(|run| run.started)
     }
 
     /// It, as the protocol answers a sandbox, with its ports or not.
@@ -530,6 +546,8 @@ impl Sandbox {
         shared.hooks.booted(&id, began.elapsed(), lazily);
         let run = Arc::new(Run {
             machine: Arc::new(machine),
+            sandbox: id.to_string(),
+            started: SystemTime::now(),
             held: Mutex::new(Some((lock, held))),
             writes,
             up: AtomicBool::new(true),
@@ -543,6 +561,7 @@ impl Sandbox {
             typing: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
+        super::runs::up(&run.sandbox, run.started);
         self.used();
         let (reading, read) = (Arc::clone(self), Arc::clone(&run));
         std::thread::spawn(move || reading.read(&read));
@@ -1218,7 +1237,8 @@ async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration)
             },
             Some(idle) => after - idle,
             None => after,
-        };
+        }
+        .max(LOOK_EVERY);
     }
 }
 

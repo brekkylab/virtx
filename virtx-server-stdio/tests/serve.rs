@@ -342,7 +342,9 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_running_in_another_server_is_refused() {
-    let server = Server::spawn("beside");
+    // Kept up a minute past its last use, so that it runs as the other server asks for it: this
+    // server's default parks it at once.
+    let server = Server::spawn_with("beside", &[("VIRTX_PARK_AFTER_MS", "60000")]);
     server.pull_image("alpine:3.20").await;
     let id = server
         .client

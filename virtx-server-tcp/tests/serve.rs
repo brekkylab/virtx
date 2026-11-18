@@ -326,6 +326,10 @@ fn small(image: impl Into<virtx_core::ImageName>) -> SandboxCreateArgs {
 
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
 /// guest kernel where libkrun finds it.
+/// A server whose sandboxes stay up a minute past their last use, for a test of what a machine
+/// left running between commands: its own default parks them at once.
+const KEPT_UP: (&str, &str) = ("VIRTX_PARK_AFTER_MS", "60000");
+
 #[tokio::test]
 #[ignore]
 async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() {
@@ -1221,7 +1225,8 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
 #[tokio::test]
 #[ignore]
 async fn a_job_ends_with_its_process_not_with_what_it_left_running() {
-    let served = Served::spawn("exec-background").await;
+    // Kept up between its commands: what a program left running is there for the next.
+    let served = Served::spawn_with("exec-background", json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let created = served
         .connect("tester")
@@ -1489,7 +1494,8 @@ async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering() {
 /// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
 /// end, as it goes on.
 async fn answered_beside_a_bomb(name: &str, memory_mib: u32, bomb: &str) {
-    let served = Served::spawn(name).await;
+    // Kept up between its commands: the bomb left running goes on beside the next.
+    let served = Served::spawn_with(name, json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let mut args = small("alpine:3.20");

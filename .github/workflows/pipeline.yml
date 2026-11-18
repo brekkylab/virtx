@@ -61,10 +61,15 @@
 #
 # Every job is on GitHub's runners but one: `tests (windows-x86_64)`, which boots machines on the
 # Windows hypervisor platform (WHP), which no GitHub runner has -- they have no nested
-# virtualization. It runs on brekkylab's own (brekkylab/aws-ci-runners): a spot EC2 instance in
-# ap-northeast-2 with nested virtualization, new for the job, asked for by its labels
-# `[self-hosted, windows, x64, m8i-2xlarge]` and gone after it. Its image has what the job
-# would install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache.
+# virtualization. It asks for `[self-hosted, windows, x64, whp]`, which two kinds of brekkylab's
+# own runners answer, whichever is free first:
+#
+# - a spot EC2 instance in ap-northeast-2 with nested virtualization (brekkylab/aws-ci-runners'
+#   m8i-2xlarge), launched for the job and gone after it, its image with what the job would
+#   install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache;
+# - brekkylab0-windows, a machine of brekkylab's with a GPU (also labelled `gpu`), in a runner
+#   group of virtx's alone, its tools under C:\ci, and `VIRTX_TEST_GPU=1` in its runner's
+#   environment, where the job runs the GPU's tests too.
 #
 # A fork's pull request has no Windows tests: ours hold brekkylab's caches, and that a fork's
 # own workflow cannot ask for them is the repository's setting's to say -- a maintainer approves
@@ -803,17 +808,21 @@ jobs:
 
       - run: cargo xtask test
 
-  # The machine-booting crates' tests on Windows, over WHP, on our runner: the one job not on
-  # GitHub's, whose Windows runners have no hypervisor (see Runners). Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested,
-  # the faults a guest takes as it first touches its memory are most of a boot.
+  # The machine-booting crates' tests on Windows, over WHP, on a runner of our own: GitHub's
+  # Windows runners have no hypervisor (see Runners). Any runner labelled `whp` takes it -- a
+  # spot instance of aws-ci-runners, launched for the job, or brekkylab's own machine with a
+  # GPU, whichever is free first. That one also says so in its environment (`VIRTX_TEST_GPU=1`),
+  # and there the GPU's tests run too: the GPU libraries built, and `virtx-uvm` tested with its
+  # `gpu` feature. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the
+  # faults a guest takes as it first touches its memory are most of a boot.
   #
   # It starts with the run rather than after `guest`, and takes the kernel from it once it has
-  # compiled its tests and `guest` has ended: a Windows runner's boot (about four minutes) and the compile happen
-  # while the kernel is built, not after.
+  # compiled its tests and `guest` has ended: a new runner's boot (about four minutes) and the
+  # compile happen while the kernel is built, not after.
   tests-windows:
     name: tests (windows-x86_64)
     if: ${{ !github.event.pull_request.head.repo.fork }}
-    runs-on: [self-hosted, windows, x64, m8i-2xlarge]
+    runs-on: [self-hosted, windows, x64, whp]
     timeout-minutes: 60
     defaults:
       run:
@@ -823,8 +832,6 @@ jobs:
       actions: read
     env:
       VIRTX_PREFAULT_MEMORY: "1"
-      # sccache's, in S3 beside the runner; a release compiles from nothing.
-      RUSTC_WRAPPER: ${{ !inputs.release && 'sccache' || '' }}
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
@@ -841,14 +848,38 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
+      # What this runner is: sccache's where it has its bucket (aws-ci-runners'), but for a
+      # release, which compiles from nothing; and the GPU's tests where it has a GPU.
+      - id: runner
+        name: This runner
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          if [ -n "${SCCACHE_BUCKET:-}" ] && [ "$RELEASE" != true ]; then
+            echo RUSTC_WRAPPER=sccache >> "$GITHUB_ENV"
+          fi
+          if [ "${VIRTX_TEST_GPU:-}" = 1 ]; then
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "TEST_FEATURES=--features virtx-uvm/gpu" >> "$GITHUB_ENV"
+          fi
+          echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${VIRTX_TEST_GPU:-no}"
+
       - uses: ./.github/actions/cargo-deps
+
+      # The GPU libraries `virtx-uvm`'s `gpu` feature links, on a runner with a GPU.
+      - if: steps.runner.outputs.gpu
+        uses: ./.github/actions/gpu-deps
+
+      - name: GPU libraries
+        if: steps.runner.outputs.gpu
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File xtask/scripts/build-deps.ps1
 
       - name: Add the guest's musl target
         run: cargo xtask init
 
       # What `cargo xtask test` below builds first, which needs no kernel.
       - name: Compile the tests
-        run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio
+        run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES
 
       # `guest (x86_64)`'s, once it has ended; this job ends with it if it fails.
       - uses: ./.github/actions/guest
@@ -863,4 +894,4 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.dll build/krunfw/
 
-      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored

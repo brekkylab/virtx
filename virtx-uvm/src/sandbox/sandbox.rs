@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+};
 
 use super::hooks::{Held, Hooks, Written};
 use super::record::{Record, Resized};
@@ -669,7 +671,7 @@ impl Sandbox {
     fn halt(&self, run: &Run) {
         run.machine.stop();
         for job in self.jobs.lock().unwrap().values() {
-            job.end(128 + SIGKILL);
+            job.cut(SandboxJobEndReason::Cancelled);
         }
         run.release();
     }
@@ -777,7 +779,7 @@ impl Sandbox {
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
                 if let Some(run) = run.upgrade() {
-                    kill(&run, &job);
+                    kill(&run, &job, SandboxJobEndReason::Timeout);
                 }
             });
         }
@@ -797,13 +799,15 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))
     }
 
-    /// Kill the job `id` if it runs, and remove it.
+    /// Kill the job `id` if it runs, ending it as cancelled, and remove it: what reads its log
+    /// reads on to that end.
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
         if let Some(run) = self.run() {
-            kill(&run, &job);
+            kill(&run, &job, SandboxJobEndReason::Cancelled);
         }
+        job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
         Ok(())
     }
@@ -999,6 +1003,7 @@ impl Sandbox {
                             cmd,
                             running: true,
                             code: None,
+                            reason: None,
                         });
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
@@ -1065,9 +1070,6 @@ impl Sandbox {
         starting.clear();
         drop(starting);
         run.written.lock().unwrap().clear();
-        for job in running.into_values() {
-            job.end(128 + SIGKILL);
-        }
         // Ended on its own, not parked: exited, for good, its disk kept as it was left.
         let ended = {
             let mut state = self.state.lock().unwrap();
@@ -1077,6 +1079,13 @@ impl Sandbox {
             }
             ended
         };
+        let reason = match ended {
+            true => SandboxJobEndReason::VmExited,
+            false => SandboxJobEndReason::Cancelled,
+        };
+        for job in running.into_values() {
+            job.cut(reason);
+        }
         if ended {
             *self.record.exited.lock().unwrap() = true;
             if let Err(e) = self.shared.hooks.changed(&run.writes) {
@@ -1122,10 +1131,11 @@ async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration)
     }
 }
 
-/// Kill `job` if it runs, in `run`'s machine.
-fn kill(run: &Run, job: &Job) {
+/// Kill `job` if it runs, in `run`'s machine, for `reason`.
+fn kill(run: &Run, job: &Job, reason: SandboxJobEndReason) {
     let (pid, running) = job.pid();
     if running && run.up.load(Ordering::Relaxed) {
+        job.killing(reason);
         let _ = run.machine.signal(pid, SIGKILL);
     }
 }
@@ -1239,6 +1249,7 @@ mod keeping_ended {
             cmd: vec!["true".into()],
             running: true,
             code: None,
+            reason: None,
         });
         if ended {
             job.end(0);

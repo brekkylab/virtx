@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
-use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEntry};
+use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
 use super::sandbox::LOG_LIMIT;
 
@@ -13,6 +13,8 @@ pub struct Job {
     code: watch::Sender<Option<i32>>,
     /// When it ended, once it has: the oldest ended go first ([`super::sandbox::KEEP_ENDED`]).
     ended_at: Mutex<Option<std::time::Instant>>,
+    /// Why the server kills it, once it has set out to: what its end says if it is killed.
+    killing: Mutex<Option<SandboxJobEndReason>>,
 }
 
 impl Job {
@@ -22,6 +24,7 @@ impl Job {
             log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
             code: watch::channel(None).0,
             ended_at: Mutex::new(None),
+            killing: Mutex::new(None),
         })
     }
 
@@ -48,14 +51,40 @@ impl Job {
         self.log.push(entry);
     }
 
-    /// End it with `code`, if it runs still.
+    /// The server kills it for `reason`, if it runs still: what its end says once a `SIGKILL`
+    /// ends it, unless it is killed for another reason first.
+    pub(super) fn killing(&self, reason: SandboxJobEndReason) {
+        let running = self.job.lock().unwrap().running;
+        let mut killing = self.killing.lock().unwrap();
+        if running && killing.is_none() {
+            *killing = Some(reason);
+        }
+    }
+
+    /// End it with `code`, as its process ended, if it runs still: killed, for why the server
+    /// killed it, if it did.
     pub(super) fn end(&self, code: i32) {
-        let ended = self
-            .log
-            .end(SandboxJobEntry::End(SandboxJobEnd { code }), || {
-                let mut job = self.job.lock().unwrap();
-                (job.running, job.code) = (false, Some(code));
-            });
+        let killed = code == 128 + super::sandbox::SIGKILL;
+        let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
+        self.end_as(SandboxJobEnd { code, reason });
+    }
+
+    /// End it now, if it runs still, as killed for `reason`, or for the reason it is being
+    /// killed for already: whatever its process does after is not its job's.
+    pub(super) fn cut(&self, reason: SandboxJobEndReason) {
+        let reason = self.killing.lock().unwrap().unwrap_or(reason);
+        self.end_as(SandboxJobEnd {
+            code: 128 + super::sandbox::SIGKILL,
+            reason: Some(reason),
+        });
+    }
+
+    fn end_as(&self, end: SandboxJobEnd) {
+        let (code, reason) = (end.code, end.reason);
+        let ended = self.log.end(SandboxJobEntry::End(end), || {
+            let mut job = self.job.lock().unwrap();
+            (job.running, job.code, job.reason) = (false, Some(code), reason);
+        });
         if ended {
             *self.ended_at.lock().unwrap() = Some(std::time::Instant::now());
             self.code.send_replace(Some(code));

@@ -12,7 +12,10 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
-use virtx_core::{Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, Step};
+use virtx_core::{
+    Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, Step,
+};
 use virtx_uvm::{ImageStore, RegistryClient};
 
 type Socket =
@@ -785,6 +788,92 @@ async fn a_cancelled_job_is_killed_and_the_sandbox_kept() {
     assert_eq!(status(client.get_sandbox_job(&id, &job.id).await), 404);
     assert_eq!(client.list_sandbox_job(&id).await.unwrap(), []);
     assert!(client.get_sandbox(&id).await.unwrap().running);
+}
+
+/// Boots VMs, as the one above does. A job's end says why the server ended it, and only
+/// then: its timeout run out, or it cancelled; not a signal sent it, nor its own exit.
+#[tokio::test]
+#[ignore]
+async fn a_job_s_end_says_why_the_server_ended_it() {
+    let served = Served::spawn_with("job-ends", json!({}), &[KEPT_UP]).await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    let id = client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let end = async |job: &str| {
+        let log: Vec<_> = client
+            .sandbox_job_log(&id, job, None)
+            .try_collect()
+            .await
+            .unwrap();
+        match log.last().map(|entry| &entry.entry) {
+            Some(SandboxJobEntry::End(end)) => end.clone(),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 as well: no reason.
+    for code in [0, 137] {
+        let exit = SandboxExecArgs::new(["sh".into(), "-c".into(), format!("exit {code}")]);
+        let job = client.exec_sandbox(&id, &exit).await.unwrap();
+        assert_eq!(end(&job.id).await, SandboxJobEnd::exited(code));
+        let job = client.get_sandbox_job(&id, &job.id).await.unwrap();
+        assert_eq!((job.code, job.reason), (Some(code), None));
+    }
+
+    // Past its `timeout_ms`: killed, for its timeout.
+    let sleep = SandboxExecArgs::new(["sleep", "300"]);
+    let job = client
+        .exec_sandbox(&id, &sleep.clone().timeout_ms(500))
+        .await
+        .unwrap();
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job.id).await, timed_out);
+    let job = client.get_sandbox_job(&id, &job.id).await.unwrap();
+    assert_eq!(
+        (job.code, job.reason),
+        (Some(137), Some(SandboxJobEndReason::Timeout))
+    );
+
+    // `SIGKILL` sent it: the process's own end, as the signal made it.
+    let job = client.exec_sandbox(&id, &sleep).await.unwrap();
+    client
+        .signal_sandbox_job(&id, &job.id, "SIGKILL")
+        .await
+        .unwrap();
+    assert_eq!(end(&job.id).await, SandboxJobEnd::exited(137));
+
+    // Cancelled while its log is read: the log reads on to its end, cancelled, and the job is
+    // gone.
+    let job = client.exec_sandbox(&id, &sleep).await.unwrap();
+    let reading = reqwest::Client::new()
+        .get(format!(
+            "{}sandboxes/{id}/jobs/{}/events",
+            served.url, job.id
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reading.status(), StatusCode::OK);
+    client.remove_sandbox_job(&id, &job.id).await.unwrap();
+    let log = tokio::time::timeout(std::time::Duration::from_secs(60), reading.text())
+        .await
+        .expect("the log of a job cancelled ends")
+        .unwrap();
+    assert!(
+        log.ends_with("data: {\"end\":{\"code\":137,\"reason\":\"cancelled\"}}\n\n"),
+        "{log}"
+    );
+    assert_eq!(status(client.get_sandbox_job(&id, &job.id).await), 404);
 }
 
 /// Boots VMs, as the one above does. A sandbox's machine parked once nothing uses it, and

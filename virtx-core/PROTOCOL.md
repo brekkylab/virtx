@@ -155,7 +155,7 @@ A job is something the server does for a while: an [image job](#image-jobs), suc
 Each is a resource of its own, under an id the server gives it, and every job is read as the others are:
 
 - As JSON it is an object with at least `id`, `kind`, such as `"build"` or `"exec"`, and `running`, whether it runs still. What it ended with is beside them once it has ended.
-- A `DELETE` of one that runs cancels it, as its kind says, and then removes it. A `DELETE` of one that has ended removes it.
+- A `DELETE` of one that runs cancels it, as its kind says, which ends its log, and then removes it. A `DELETE` of one that has ended removes it.
 - Its log is its [event stream](#events), at `{job}/events` under its path, and kept as long as the job is.
 
 A client that needs what a job did reads it from the job, or from its last event, not from the lines of its log.
@@ -181,7 +181,7 @@ A client that sends `Last-Event-ID: n` gets the entries after the `n`th only, so
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.
-A job removed while a client reads its log ends that stream where it is.
+A job removed while a client reads its log ends that stream at its `end`, or where it is if it has none.
 
 A log is kept whole up to the server's limit, and no further: an entry past it is neither kept nor sent, and the first one past it is replaced by `{"truncated": {}}`, once.
 The `end` entry is kept and sent anyway.
@@ -363,12 +363,13 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | `POST /sandboxes/{id}/jobs/{job}/stdin` | `{data?, eof?}` | `204` |
 | `GET /sandboxes/{id}/jobs/{job}/events` | | `200`, its [log](#events) |
 
-A sandbox job is `{id, kind, pid, cmd, running, code?}`:
+A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 
 - `kind` is `"exec"`.
 - `pid` is its process's pid in the sandbox. The job is named by `id`, not by it, so a pid the sandbox gives again never names another job.
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
+- `reason`, once it has ended, is why, where the process did not end by itself, as below.
 
 A job started in a sandbox whose VM is [parked](#parking) boots it first.
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
@@ -377,11 +378,19 @@ Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
 - `{"truncated": {}}`, as [Events](#events) says.
-- `{"end": {"code": n}}`, last.
+- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code` and `reason` as the job has them.
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, or with its sandbox's VM.
+In each of the last three, it and every process it started are killed, as `SIGKILL` does, its `code` is `137`, and its end, and its job, say why with `reason`:
+
+- `"timeout"`: its `timeout_ms` ran out.
+- `"cancelled"`: its job was cancelled -- by its `DELETE` while it ran, which ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it, as a server that ends parks its sandboxes.
+- `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+
+A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ends by itself, and has no `reason`.
+
 The job, and its log, are kept until its `DELETE` or its sandbox's deletion: a sandbox parked ends its jobs and keeps them.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.

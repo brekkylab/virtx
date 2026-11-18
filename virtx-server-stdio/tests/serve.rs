@@ -571,7 +571,7 @@ async fn a_job_s_stdin_is_written_and_its_log_answers_its_exec() {
         entries,
         [
             SandboxJobEntry::Stdout("héllo".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 4 })
+            SandboxJobEntry::End(SandboxJobEnd::exited(4))
         ]
     );
     server.client.remove_sandbox(&id).await.unwrap();

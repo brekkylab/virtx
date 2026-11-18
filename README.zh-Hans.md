@@ -147,28 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
-每个[版本](https://github.com/brekkylab/virtx/releases)都附带服务器 `virtx-server-tcp-<os>-<arch>.tar.gz`（`macos-aarch64`、`linux-x86_64`、`linux-aarch64`、`windows-x86_64`）。
-其中包含 `virtx-server-tcp`、客户机内核、`abin/` 和 `alib/`。
-解压到单独的目录后，`virtx-server-tcp` 会在自身旁边找到客户机内核，因此无需设置 `PATH` 或库路径即可直接运行。
+按照[自行运行服务器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
 
-在服务器上写一份 `server.json`，指定 OpenID Connect 提供方，然后启动服务器：
-
-```json
-{
-  "listen": "0.0.0.0:8470",
-  "home": "/var/lib/virtx",
-  "oidc": { "issuer": "https://idp.example", "client_id": "virtx" }
-}
-```
-
-```sh
-virtx-server-tcp serve --config server.json
-```
-
-在客户端，不再调用 `Client.spawn()`，而是连接到这台服务器。其余部分和本地示例完全一样。
-
-用户就是提供方签发给 `client_id` 这个客户端的 ID 令牌里的 `email`。该客户端需要是使用设备流程的公开客户端。
-用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后带上它打印的令牌去连接：
+用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后不再调用 `Client.spawn()`，而是带上它打印的令牌去连接。
+其余部分和本地示例完全一样。
 
 ```sh
 virtx login https://virtx.example
@@ -213,10 +195,6 @@ let client = Client::connect(
 ```
 
 </details>
-
-`virtx token` 给出最后登录的提供方的令牌。如果登录了多个，请在参数中指定服务器的提供方：`token --json --issuer https://idp.example --client-id virtx`。
-
-客户端只有在目标是本机回环地址时，才会通过明文 `http` 发送令牌，所以部署在其他机器上的服务器，请在前面加一层 HTTPS。
 
 ## 功能亮点
 

@@ -24,11 +24,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-node@v7
+    - uses: actions/setup-node@v7.1.0
       with:
         node-version: 22
 
-    - uses: actions/setup-python@v7
+    - uses: actions/setup-python@v7.1.0
       with:
         python-version: "3.12"
 
@@ -40,7 +40,7 @@ runs:
         PLATFORM: ${{ inputs.platform }}
       run: |
         node scripts/packages/pack-npm.mjs dist/lib dist/release --allow-missing
-        python -m pip install --quiet build wheel
+        python -m pip install --quiet build~=1.6 wheel~=0.48
         scripts/packages/pack-wheels.sh dist/lib dist/release --allow-missing
         cd dist/release
         ls -la
@@ -76,7 +76,7 @@ runs:
     - name: Install from a local registry
       shell: bash
       run: |
-        npm install --global --silent verdaccio@6
+        npm install --global --silent verdaccio@^6.11.2
         registry="$RUNNER_TEMP/verdaccio"
         mkdir -p "$registry"
         cp scripts/packages/verdaccio.yaml "$registry/"

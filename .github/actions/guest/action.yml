@@ -36,6 +36,6 @@ runs:
           sleep 5
         done
 
-    - uses: actions/download-artifact@v8
+    - uses: actions/download-artifact@v8.0.2
       with:
         name: guest-${{ inputs.arch }}

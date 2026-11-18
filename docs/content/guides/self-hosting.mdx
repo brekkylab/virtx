@@ -116,5 +116,5 @@ let client = Client::connect(
 For a provider that gives its public clients a secret, pass it to `virtx login` with `--client-secret`.
 A program that gets its token some other way passes it as it is, with `BearerAuth` in Python, `{ type: 'bearer', token }` in Node.js, or `Auth::Bearer` in Rust.
 
-`virtx whoami` shows who is signed in, and `virtx logout` signs out.
+`virtx whoami` shows who is signed in, and `virtx logout` signs out; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
 Signed in to more than one provider, name the server's to `virtx token`: `virtx token --json --issuer https://idp.example --client-id virtx`.

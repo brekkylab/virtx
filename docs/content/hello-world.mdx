@@ -95,7 +95,7 @@ use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::spawn_virtx([] as [&str; 0])?;
+    let client = Client::spawn_virtx([] as [&str; 0]).await?;
     client.pull_image("alpine:latest", None).complete(false).await?;
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
@@ -125,11 +125,45 @@ Pick one:
 - A server on your machine, which the client starts itself.
 - A server you run on another machine.
 
-<img src={clientServer.src} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
+<img src={clientServer.src} width={clientServer.width} height={clientServer.height} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
 
 ### virtx cloud
 
-TODO
+Sign in to the [console](/signin/) with Google, and make an API key in a project: every organization has one named `default`.
+The console shows the key once. Put it in the environment:
+
+```sh
+export VIRTX_API_KEY=vx_sk_...
+```
+
+Then, in the program, make the client from the environment in place of `Client.spawn()`:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+with Client.from_env() as client:
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.fromEnv()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let client = Client::from_env()?;
+```
+
+</TabItem>
+</Tabs>
+
+The key is its project's, so the program names no project, and the client reaches the region of virtx cloud nearest the machine it runs on.
+A client can also run as the person `virtx login` signed in, with no key; see the CLI's [sign-in to virtx cloud](/docs/reference/cli/#virtx-cloud).
 
 ### On your machine (stdio)
 
@@ -187,6 +221,8 @@ let client = Client::connect(
 
 </TabItem>
 </Tabs>
+
+`virtx token` gives the token, refreshed as needed; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
 
 ## Next
 

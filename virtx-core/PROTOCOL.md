@@ -219,6 +219,9 @@ Each skips a blob the other side already has, and moves the tag on the receiving
 Without it the server goes to the registry anonymously.
 The server uses `auth` for that job alone: it MUST NOT keep it beyond the job, show it in the job or its log, write it to a log of its own, or send it to any other host.
 
+A server MAY refuse to connect to a registry, or to a host that registry sends it on to, at an address it does not let its sandboxes reach, such as its own loopback or its private network.
+The job then fails, its `error` naming the host.
+
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
 
 Cancelling one stops it:

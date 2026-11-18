@@ -163,7 +163,7 @@ let client = Client::from_env()?;
 </Tabs>
 
 The key is its project's, so the program names no project, and the client reaches the region of virtx cloud nearest the machine it runs on.
-A client can also run as the person `virtx login` signed in, with no key; see [CLI](/docs/reference/cli/#virtx-cloud).
+A client can also run as the person `virtx login` signed in, with no key; see the CLI's [sign-in to virtx cloud](/docs/reference/cli/#virtx-cloud).
 
 ### On your machine (stdio)
 
@@ -240,7 +240,7 @@ let client = Client::connect(
 </TabItem>
 </Tabs>
 
-`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`. See [CLI](/docs/reference/cli/#signing-in).
+`virtx token` gives a token of the provider last signed in to. Signed in to more than one, name the server's in its arguments: `token --json --issuer https://idp.example --client-id virtx`. See the CLI's [Signing in](/docs/reference/cli/#signing-in).
 
 A client's requests are in a project of its user's own, `default`, which the server makes the first time; a client names another with `project`, a project of the user's by its name or any by its id.
 The `virtx` command names one with `--project`, beside `--host` and `$VIRTX_TOKEN`; see [CLI](/docs/reference/cli/#which-server).

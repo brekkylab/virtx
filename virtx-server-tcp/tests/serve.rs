@@ -589,7 +589,8 @@ async fn an_unused_sandbox_is_resized_as_it_next_boots() {
 #[tokio::test]
 #[ignore]
 async fn a_sandbox_s_disk_is_grown_as_it_next_boots() {
-    let served = Served::spawn("disk").await;
+    // Kept up between commands: grown while up, it is the old size until it next boots.
+    let served = Served::spawn_with("disk", json!({}), &[KEPT_UP]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
     let mut args = small("alpine:3.20");
@@ -904,273 +905,6 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
     assert_eq!(Served::open(&url, Some("virtx.tcp")).await.err(), Some(404));
 }
 
-/// Boots VMs, as the one above does. A terminal's bash writes each command to its history
-/// as it runs -- on the sandbox's disk, before the shell exits, so a park does not lose it.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_s_history_is_written_as_each_command_runs() {
-    let served = Served::spawn("history").await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let id = client
-        .create_sandbox(&small("alpine:3.20"))
-        .await
-        .unwrap()
-        .id;
-    let said = async |cmd: &'static str| -> String {
-        let job = client
-            .exec_sandbox(&id, &SandboxExecArgs::new(["sh", "-c", cmd]))
-            .await
-            .unwrap();
-        let log: Vec<_> = client
-            .sandbox_job_log(&id, &job.id, None)
-            .try_collect()
-            .await
-            .unwrap();
-        log.into_iter()
-            .filter_map(|entry| match entry.entry {
-                SandboxJobEntry::Stdout(line) => Some(line),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    said("apk add --no-cache bash >/dev/null && echo ok").await;
-
-    let mut url = Url::parse(&served.url)
-        .unwrap()
-        .join(&format!("terminal/{id}?cols=100&rows=30"))
-        .unwrap();
-    url.set_scheme("ws").unwrap();
-    let mut request = url.as_str().into_client_request().unwrap();
-    let headers = request.headers_mut();
-    headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", token("tester")).parse().unwrap(),
-    );
-    headers.insert("virtx-project", "demo".parse().unwrap());
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let mut shown = Vec::new();
-    let mut read_until = async |socket: &mut Socket, until: &str| {
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !String::from_utf8_lossy(&shown).contains(until) {
-                match socket.next().await {
-                    Some(Ok(Message::Binary(bytes))) => shown.extend_from_slice(&bytes),
-                    Some(Ok(_)) => {}
-                    other => panic!("before {until:?}: {other:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("no {until:?}: {}", String::from_utf8_lossy(&shown)));
-    };
-    read_until(&mut socket, "# ").await;
-    socket
-        .send(Message::binary(b"echo kept-$((40+2))\n".to_vec()))
-        .await
-        .unwrap();
-    read_until(&mut socket, "kept-42").await;
-    // The shell still open: its history on the disk all the same.
-    let mut history = String::new();
-    // Looked for a minute: what is tried is that it is written, not how soon.
-    for _ in 0..240 {
-        history = said("cat /root/.bash_history 2>/dev/null").await;
-        if history.contains("echo kept-") {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    assert!(history.contains("echo kept-$((40+2))"), "{history:?}");
-    drop(socket);
-    client.remove_sandbox(&id).await.unwrap();
-}
-
-/// Boots VMs, as the one above does.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_runs_an_interactive_shell_on_a_tty_of_its_size() {
-    let served = Served::spawn("terminal").await;
-    served.pull_image("alpine:3.20").await;
-    let created = served
-        .connect("tester")
-        .create_sandbox(&small("alpine:3.20"))
-        .await
-        .unwrap();
-    // A connection to the terminal, attaching to `session` if given: it and what it is told
-    // first, the session's id and whether it attached.
-    let connect = async |session: Option<&str>| {
-        let mut url = Url::parse(&served.url)
-            .unwrap()
-            .join(&format!("terminal/{}?cols=100&rows=30", created.id))
-            .unwrap();
-        if let Some(session) = session {
-            url.query_pairs_mut().append_pair("session", session);
-        }
-        url.set_scheme("ws").unwrap();
-        let mut request = url.as_str().into_client_request().unwrap();
-        let headers = request.headers_mut();
-        headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", token("tester")).parse().unwrap(),
-        );
-        headers.insert("virtx-project", "demo".parse().unwrap());
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let hello = match socket.next().await {
-            Some(Ok(Message::Text(text))) => serde_json::from_str::<Value>(&text).unwrap(),
-            other => panic!("before its session: {other:?}"),
-        };
-        (socket, hello)
-    };
-    // What `socket` shows, read until it has shown `until`.
-    let read_until = async |socket: &mut _, said: &mut Vec<u8>, until: &str| {
-        let socket: &mut tokio_tungstenite::WebSocketStream<_> = socket;
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !String::from_utf8_lossy(said).contains(until) {
-                match socket.next().await {
-                    Some(Ok(Message::Binary(bytes))) => said.extend_from_slice(&bytes),
-                    other => panic!("before {until:?}: {other:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("no {until:?}: {}", String::from_utf8_lossy(said)));
-    };
-
-    let (mut socket, hello) = connect(None).await;
-    assert_eq!(hello["attached"], false);
-    let session = hello["session"].as_str().unwrap().to_owned();
-    // Typed once the shell prompts: typed before, it is echoed as it arrives and again after
-    // the prompt, as on any terminal.
-    let mut said = Vec::new();
-    read_until(&mut socket, &mut said, "# ").await;
-    socket
-        .send(Message::binary(
-            b"echo answer=$((6*7)); [ -t 0 ] && echo on-a-tty; stty size; cd /tmp\n".to_vec(),
-        ))
-        .await
-        .unwrap();
-    read_until(&mut socket, &mut said, "30 100").await;
-
-    // Gone, and back: the same shell, where it was left, and what it wrote shown again.
-    drop(socket);
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let (mut socket, hello) = connect(Some(&session)).await;
-    assert_eq!(hello, json!({ "session": session, "attached": true }));
-    let mut again = Vec::new();
-    read_until(&mut socket, &mut again, "answer=42").await;
-    socket
-        .send(Message::binary(b"pwd\n".to_vec()))
-        .await
-        .unwrap();
-    read_until(&mut socket, &mut again, "\n/tmp").await;
-    // A session not this sandbox's, or not at all: another shell.
-    let (other, hello) = connect(Some("nosuchsession")).await;
-    assert_eq!(hello["attached"], false);
-    assert_ne!(hello["session"], session.as_str());
-    drop(other);
-
-    socket
-        .send(Message::text(r#"{"cols": 120, "rows": 40}"#))
-        .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    socket
-        .send(Message::binary(b"stty size; exit 3\n".to_vec()))
-        .await
-        .unwrap();
-    let (said, ended) = tokio::time::timeout(std::time::Duration::from_secs(90), async {
-        while let Some(Ok(message)) = socket.next().await {
-            match message {
-                Message::Binary(bytes) => said.extend_from_slice(&bytes),
-                Message::Text(text) => {
-                    return (said, serde_json::from_str::<Value>(&text).unwrap());
-                }
-                _ => {}
-            }
-        }
-        panic!(
-            "closed before it said how it ended: {}",
-            String::from_utf8_lossy(&said)
-        );
-    })
-    .await
-    .unwrap();
-    let said = String::from_utf8_lossy(&said);
-    assert!(said.contains("answer=42"), "{said}");
-    assert!(said.contains("\non-a-tty"), "a tty: {said}");
-    assert_eq!(
-        said.matches("answer=$((6*7))").count(),
-        1,
-        "echoed once: {said}"
-    );
-    assert!(said.contains("30 100"), "its size: {said}");
-    assert!(said.contains("40 120"), "resized: {said}");
-    assert_eq!(ended, json!({"exit": 3}), "{said}");
-    // Ended with its shell: named again, another opens.
-    let (_, hello) = connect(Some(&session)).await;
-    assert_eq!(hello["attached"], false);
-}
-
-/// Boots VMs, as the one above does, and waits for them to be parked by themselves, a second
-/// unused here. A terminal at its prompt does not keep its sandbox from being parked; one
-/// running a command does, as the guest says when asked.
-#[tokio::test]
-#[ignore]
-async fn a_terminal_keeps_its_sandbox_only_while_it_runs_a_command() {
-    let served = Served::spawn_with(
-        "terminal-idle",
-        json!({}),
-        &[("VIRTX_PARK_AFTER_MS", "1000")],
-    )
-    .await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let args = small("alpine:3.20");
-    let idle = client.create_sandbox(&args).await.unwrap();
-    let busy = client.create_sandbox(&args).await.unwrap();
-    // A terminal in each, left open: `busy`'s running a command, `idle`'s at its prompt.
-    let open = async |id: &str, typed: &[u8]| {
-        let mut url = Url::parse(&served.url)
-            .unwrap()
-            .join(&format!("terminal/{id}"))
-            .unwrap();
-        url.set_scheme("ws").unwrap();
-        let mut request = url.as_str().into_client_request().unwrap();
-        let headers = request.headers_mut();
-        headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", token("tester")).parse().unwrap(),
-        );
-        headers.insert("virtx-project", "demo".parse().unwrap());
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let mut said = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            while !said.windows(2).any(|w| w == b"# ") {
-                if let Some(Ok(Message::Binary(bytes))) = socket.next().await {
-                    said.extend_from_slice(&bytes);
-                }
-            }
-        })
-        .await
-        .unwrap();
-        socket.send(Message::binary(typed.to_vec())).await.unwrap();
-        socket
-    };
-    let _idle = open(&idle.id, b"").await;
-    let _busy = open(&busy.id, b"sleep 600\n").await;
-
-    served.parked(&idle.id).await;
-    // Asked about many times since, a second at a time: up still.
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-    assert!(
-        served.up(&busy.id).await,
-        "a terminal running a command was parked"
-    );
-}
-
 /// Boots VMs, as the one above does.
 #[tokio::test]
 #[ignore]
@@ -1365,10 +1099,7 @@ async fn a_job_started_with_stdin_reads_what_is_written_to_it() {
 
 /// Boots VMs, as the one above does. Input a process does not read holds back whoever writes
 /// it, and nothing else in its sandbox (issue #159): a job's stdin write is answered only once
-/// it is written, and typing into a shell that does not read holds up no command run beside
-/// it. Until then, a write to a job's stdin was answered at
-/// once and piled up in the guest, and typing into a busy shell held every request to the
-/// sandbox until the shell read it.
+/// it is written, and holds up no command run beside it.
 #[tokio::test]
 #[ignore]
 async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() {
@@ -1408,47 +1139,7 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
         })
     };
 
-    // A shell on a terminal running a command, typed far past what it reads.
-    let mut url = Url::parse(&served.url)
-        .unwrap()
-        .join(&format!("terminal/{id}?cols=80&rows=24"))
-        .unwrap();
-    url.set_scheme("ws").unwrap();
-    let mut request = url.as_str().into_client_request().unwrap();
-    let headers = request.headers_mut();
-    headers.insert("sec-websocket-protocol", "virtx.terminal".parse().unwrap());
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", token("tester")).parse().unwrap(),
-    );
-    headers.insert("virtx-project", "demo".parse().unwrap());
-    let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    let (mut typing, mut shown) = socket.split();
-    let mut said = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        while !String::from_utf8_lossy(&said).contains("# ") {
-            if let Some(Ok(Message::Binary(bytes))) = shown.next().await {
-                said.extend_from_slice(&bytes);
-            }
-        }
-    })
-    .await
-    .expect("a prompt");
-    let typed = tokio::spawn(async move {
-        typing
-            .send(Message::binary(b"sleep 600\n".to_vec()))
-            .await
-            .unwrap();
-        let line = format!("# {}\n", "y".repeat(78)).into_bytes();
-        for _ in 0..3300 {
-            if typing.send(Message::binary(line.clone())).await.is_err() {
-                break;
-            }
-        }
-    });
-    // Shown what it writes all along, read so nothing holds there.
-    tokio::spawn(async move { while shown.next().await.is_some() {} });
-    // Let the typing get ahead of the shell.
+    // Let the write get ahead of the sleeper.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let answered = tokio::time::timeout(std::time::Duration::from_secs(60), beside()).await;
@@ -1470,7 +1161,6 @@ async fn input_a_process_does_not_read_holds_back_its_writer_and_nothing_else() 
     if written.is_err() {
         assert_eq!(status(written), 409, "refused as ended");
     }
-    typed.abort();
 }
 
 /// Boots VMs, as the one above does.

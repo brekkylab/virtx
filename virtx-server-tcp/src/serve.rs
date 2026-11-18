@@ -11,10 +11,6 @@
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
 //! making the sandbox answers, is all a connection needs, and gives no more than the one port.
-//!
-//! A shell in a sandbox, on a terminal, is at `/terminal/{sandbox}`: a WebSocket of the
-//! subprotocol `virtx.terminal` ([`terminal`]), for the same callers as the endpoints, kept
-//! across connections ([`crate::terminals`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,22 +30,8 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower_http::cors::CorsLayer;
 
-use crate::terminals::{Session, Shown};
-
 /// What this binary is spawned with to be a machine.
 pub const MACHINE_SUBCOMMAND: &str = "vm";
-
-/// The subprotocol `/terminal/{sandbox}` is spoken in.
-const TERMINAL_SUBPROTOCOL: &str = "virtx.terminal";
-
-/// The shell a terminal runs: bash where the image has it, sh otherwise, as a login shell.
-/// Bash writes each command to its history as it is run, not as it exits -- a sandbox
-/// parked ends its shells without their exiting -- so that its history is on its disk, and
-/// there as it boots again.
-const SHELL: &str = "export TERM=xterm-256color; cd ~ 2>/dev/null; \
-    if command -v bash >/dev/null 2>&1; then \
-    export BASHOPTS=histappend PROMPT_COMMAND='history -a' HISTSIZE=10000 HISTFILESIZE=10000; \
-    exec bash -l; else exec sh -l; fi";
 
 /// The WebSocket subprotocol a port's TCP is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
@@ -103,15 +85,15 @@ pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::R
 }
 
 /// Everything served, each request checked against `access`: the endpoints, in the home a
-/// request reaches, the images' registry at `/images/oci/v2/`, the ports, the terminals, and the CORS a browser at one of its origins has -- with `own` beside them, routes
-/// that take no home and check for themselves.
+/// request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
+/// browser at one of its origins has -- with `own` beside them, routes that take no home and
+/// check for themselves.
 pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
     let origins = access.origins().to_vec();
     let registry = format!("{}/v2", access::REGISTRY_PATH);
     let checked = Arc::clone(&access);
     let reaching = Arc::clone(&access);
     let reading = Arc::clone(&access);
-    let opening = Arc::clone(&access);
 
     let images = move |request: axum::extract::Request| {
         let access = Arc::clone(&reading);
@@ -179,19 +161,6 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
         .route(&format!("{registry}/{{*rest}}"), any(images))
-        .route(
-            "/terminal/{sandbox}",
-            any(
-                move |Path(sandbox): Path<String>,
-                      uri: http::Uri,
-                      headers: HeaderMap,
-                      upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>| {
-                    let access = Arc::clone(&opening);
-                    let size = Size::asked(uri.query().unwrap_or_default());
-                    async move { terminal(&access, sandbox, size, &headers, upgrade).await }
-                },
-            ),
-        )
         .route(
             "/ports/{capability}",
             any(
@@ -289,187 +258,6 @@ async fn interrupted() {
         return;
     }
     let _ = tokio::signal::ctrl_c().await;
-}
-
-/// The size a terminal is opened at, and the session it attaches to, if any.
-#[derive(serde::Deserialize)]
-struct Size {
-    cols: Option<u16>,
-    rows: Option<u16>,
-    session: Option<String>,
-}
-
-impl Size {
-    /// As a query asks for it: `cols=120&rows=40`.
-    fn asked(query: &str) -> Size {
-        let of = |name: &str| {
-            query
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.to_owned())
-        };
-        Size {
-            cols: of("cols").and_then(|v| v.parse().ok()),
-            rows: of("rows").and_then(|v| v.parse().ok()),
-            session: of("session").filter(|v| v.bytes().all(|b| b.is_ascii_alphanumeric())),
-        }
-    }
-}
-
-/// `GET /terminal/{sandbox}?cols=&rows=&session=`: a shell in the sandbox on a terminal, a job of
-/// it, over a WebSocket of the subprotocol `virtx.terminal` -- kept across connections, as a
-/// session ([`crate::terminals`]). Binary messages are the terminal's bytes, each way.
-///
-/// - It is first told `{"session": id, "attached": bool}`: the session's id, and whether it
-///   attached to one named by `session`, which then sends what its shell wrote so far, before
-///   what it writes from then on. A `session` that is not, or not this sandbox's, opens another.
-/// - A text message to it, `{"cols": n, "rows": n}`, resizes it; `{"end": true}` kills the
-///   shell, and ends the session.
-/// - It ends with a text message from it, `{"exit": code}`, or `{"error": {code, message}}`
-///   for one that did not run, or `taken` for a session another connection attached to since.
-///   Closed otherwise, the shell runs on, for a connection to attach to again.
-async fn terminal(
-    access: &Access,
-    sandbox: String,
-    size: Size,
-    headers: &HeaderMap,
-    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-) -> Response {
-    let home = match access.home(headers).await {
-        Ok((_, home)) => home,
-        Err(status) => return refusal(status),
-    };
-    let Ok(upgrade) = upgrade else {
-        return StatusCode::UPGRADE_REQUIRED.into_response();
-    };
-    let (cols, rows) = (
-        size.cols.unwrap_or(80).max(2),
-        size.rows.unwrap_or(24).max(2),
-    );
-    upgrade
-        .protocols([TERMINAL_SUBPROTOCOL])
-        .on_upgrade(move |mut socket| async move {
-            let kept = size
-                .session
-                .as_deref()
-                .and_then(|id| home.terminals.get(id, &sandbox));
-            let attached = kept.is_some();
-            let session = match kept {
-                Some(session) => {
-                    let _ = session.resize(cols, rows);
-                    session
-                }
-                None => {
-                    let cmd = vec!["sh".into(), "-c".into(), SHELL.into()];
-                    match home.terminal(&sandbox, cmd, cols, rows).await {
-                        Ok(opened) => home.terminals.start(&sandbox, opened),
-                        Err(refused) => {
-                            let said = serde_json::json!({ "error": refused.said() });
-                            let _ = socket.send(Message::Text(said.to_string().into())).await;
-                            let _ = socket.send(Message::Close(None)).await;
-                            return;
-                        }
-                    }
-                }
-            };
-            shell(socket, session, attached).await
-        })
-}
-
-/// Carry a terminal's bytes between `socket` and the shell of `session` until the shell ends,
-/// or the socket does -- detached, the shell left running -- or another attaches.
-async fn shell(mut socket: WebSocket, session: Arc<Session>, attached: bool) {
-    let (which, mut shown, written) = session.attach();
-    let hello = serde_json::json!({ "session": session.id, "attached": attached });
-    if socket
-        .send(Message::Text(hello.to_string().into()))
-        .await
-        .is_err()
-    {
-        return session.detach(which);
-    }
-    if !written.is_empty()
-        && socket
-            .send(Message::Binary(written.into_bytes().into()))
-            .await
-            .is_err()
-    {
-        return session.detach(which);
-    }
-    // What it typed last, until the guest has written it: nothing more is read from it until
-    // then, so a shell that does not read holds the connection back, while what it writes is
-    // still shown.
-    let mut typing: Option<std::pin::Pin<Box<dyn Future<Output = bool> + Send>>> = None;
-    let said = loop {
-        tokio::select! {
-            typed = async { typing.as_mut().expect("typing").await }, if typing.is_some() => {
-                typing = None;
-                if !typed {
-                    break None;
-                }
-            }
-            out = shown.recv() => match out {
-                Some(Shown::Data(data)) => {
-                    if socket.send(Message::Binary(data.into_bytes().into())).await.is_err() {
-                        break None;
-                    }
-                }
-                Some(Shown::Exit(code)) => break Some(serde_json::json!({ "exit": code })),
-                // Another connection attached to it since.
-                None => break Some(serde_json::json!({ "error": {
-                    "code": "taken",
-                    "message": "the terminal is open in another window",
-                } })),
-            },
-            received = socket.recv(), if typing.is_none() => match received {
-                Some(Ok(Message::Binary(bytes))) => {
-                    let (session, data) =
-                        (Arc::clone(&session), String::from_utf8_lossy(&bytes).into_owned());
-                    typing = Some(Box::pin(async move { session.write(data).await.is_ok() }));
-                }
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(asked) = serde_json::from_str::<Asked>(&text) {
-                        if asked.end {
-                            session.end();
-                        } else if let (Some(cols), Some(rows)) = (asked.cols, asked.rows) {
-                            let _ = session.resize(cols.max(2), rows.max(2));
-                        }
-                    }
-                }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                // Closed: detached, the shell running on.
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break None,
-            },
-        }
-    };
-    session.detach(which);
-    if let Some(said) = said {
-        let _ = socket.send(Message::Text(said.to_string().into())).await;
-    }
-    let _ = socket.send(Message::Close(None)).await;
-}
-
-/// What a text message to a terminal asks: a size, or its end.
-#[derive(serde::Deserialize)]
-struct Asked {
-    cols: Option<u16>,
-    rows: Option<u16>,
-    #[serde(default)]
-    end: bool,
-}
-
-/// A request [`Access`] refused with `status`, as the endpoints refuse one.
-fn refusal(status: StatusCode) -> Response {
-    let (code, message) = match status {
-        StatusCode::UNAUTHORIZED => ("unauthorized", "no token this server knows"),
-        StatusCode::FORBIDDEN => ("forbidden", "not a member of the project, or not from here"),
-        _ => (
-            "invalid",
-            "a request names its project in the virtx-project header",
-        ),
-    };
-    endpoints::refused(status, code, message).into_response()
 }
 
 /// The tag a registry request names a manifest by, as `name:tag`: what a storage home may

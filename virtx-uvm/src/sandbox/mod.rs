@@ -3,8 +3,8 @@
 //! until it is deleted, and kept on disk past its server ([`Sandboxes`]).
 //!
 //! A sandbox's machine is parked once nothing has used it for [`park_after`], and booted again
-//! over its disk as it was left for the next job, terminal or request to its files; a machine
-//! that ends on its own leaves its sandbox exited, for good. A sandbox unused for
+//! over its disk as it was left for the next job or request to its files; a machine that ends
+//! on its own leaves its sandbox exited, for good. A sandbox unused for
 //! [`reclaim_after`] is deleted ([`Sandboxes::reclaim`]). What a server adds to that -- where
 //! else a disk is kept, how many machines it runs at once, how its ports are reached from
 //! outside the host -- it plugs in as [`Hooks`].
@@ -25,6 +25,6 @@ pub use hooks::{Held, Hooks, NoHooks, Wanted, Written};
 pub use job::Job;
 pub use sandbox::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LABEL_MOST, LOG_LIMIT, MAX_DISK_GIB, Resources,
-    Sandbox, Terminal, Typing, park_after, signal_number,
+    Sandbox, park_after, signal_number,
 };
 pub use sandboxes::{Given, Sandboxes, forget_unrecorded, reclaim_after};

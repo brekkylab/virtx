@@ -29,7 +29,7 @@ pub(super) struct Record {
     /// capability): by key. Empty on a server that names its ports by nothing.
     pub(super) keys: Mutex<HashMap<String, u16>>,
     /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files, a terminal typed in.
+    /// its ports, a request to its files.
     pub(super) used: Mutex<SystemTime>,
     /// Whether its machine ended on its own: nothing boots it again.
     pub(super) exited: Mutex<bool>,

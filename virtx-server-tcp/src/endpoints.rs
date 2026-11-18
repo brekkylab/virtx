@@ -61,7 +61,7 @@ use crate::access::{Access, Principal};
 use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
 use crate::project::Project;
 
-pub use virtx_uvm::sandbox::{Terminal, cloned};
+pub use virtx_uvm::sandbox::cloned;
 
 /// What decides whether a machine may boot now, every project's together, as an embedder sets
 /// it ([`set_admission`]): virtx cloud's nodes hold their machines to the room their host has.
@@ -162,8 +162,6 @@ pub struct HomeInner {
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
     /// Where its snapshots, volumes and images are kept past this server, if anywhere.
     keeping: Option<Arc<dyn Keeping>>,
-    /// Its sandboxes' terminals, kept across connections.
-    pub terminals: Arc<crate::terminals::Sessions>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
     closed: AtomicBool,
 }
@@ -218,7 +216,6 @@ impl Home {
             sandboxes,
             image_jobs: Mutex::default(),
             keeping,
-            terminals: Arc::default(),
             closed: AtomicBool::default(),
         }));
         let _ = hooks.home.set(Arc::downgrade(&home.0));
@@ -367,19 +364,6 @@ impl Home {
             .lock()
             .unwrap()
             .contains_key(&(kind, name.to_owned()))
-    }
-
-    /// `cmd` on a terminal of its own, `cols` by `rows`, in sandbox `id`: a job of it, as an
-    /// exec is, which keeps it in use while it runs, and ends with the [`Terminal`].
-    pub async fn terminal(
-        &self,
-        id: &str,
-        cmd: Vec<String>,
-        cols: u16,
-        rows: u16,
-    ) -> Result<Terminal, Refused> {
-        let sandbox = self.sandboxes.get(id)?;
-        Ok(sandbox.terminal(cmd, cols, rows).await?)
     }
 
     /// `kind` `name` may be changed now: kept again once nothing has it.
@@ -1930,11 +1914,6 @@ impl Refused {
     /// What it is answered with.
     pub fn status(&self) -> StatusCode {
         self.0
-    }
-
-    /// Its `code` and `message`, as its body's `error` says them.
-    pub fn said(&self) -> serde_json::Value {
-        serde_json::json!({"code": self.1, "message": self.2})
     }
 }
 

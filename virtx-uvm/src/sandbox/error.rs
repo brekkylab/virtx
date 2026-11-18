@@ -32,7 +32,7 @@ pub enum Error {
     JobEnded(&'static str),
 
     /// What is asked of a sandbox while nothing uses it, and something does: a job runs in
-    /// it, or it is reached through its files, its ports or a terminal.
+    /// it, or it is reached through its files or its ports.
     #[error("{0}")]
     InUse(String),
 

@@ -3,8 +3,7 @@
 //! libkrun's init has already built the root -- the image under the machine's ext4, the shares
 //! mounted -- and execs this standing where the image said. What is left is to open the
 //! channel, say the guest is up, and run the commands the host sends side by side, each in a
-//! process group of its own, sending what they write a line at a time -- or, for one on a
-//! terminal, as it comes.
+//! process group of its own, sending what they write a line at a time.
 //!
 //! Beside them it does what the host asks of the guest's files on the I/O channel, one request
 //! at a time. What the host sees is the root as the guest's processes see it, volumes and all,
@@ -21,7 +20,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -40,10 +39,6 @@ use wire::{
 /// The port's writing half, shared by everything that says something on it, so two messages
 /// never interleave.
 type Out = Arc<Mutex<File>>;
-
-/// The terminal of each process on one, by its pid: what is resized, and asked whose group has
-/// it -- and its [`Input`], what the host types into it.
-type Terminals = Arc<Mutex<HashMap<u32, (File, Input)>>>;
 
 /// The cgroup every command run here goes under -- each in one of its own within it -- its
 /// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, its memory to all
@@ -155,26 +150,26 @@ type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 const INPUT_QUEUED: usize = 4;
 
 /// What one write to a process's input asks: `data`, then its stdin closed if `eof`.
-struct Typed {
+struct Queued {
     data: String,
     eof: bool,
 }
 
-/// A process's input -- its stdin, or its terminal -- written on a thread of its own, each write
-/// said [`Written`](CtrlResp::Written) once it is (issue #159). The loop that takes the host's
+/// A process's stdin, written on a thread of its own, each write said
+/// [`Written`](CtrlResp::Written) once it is (issue #159). The loop that takes the host's
 /// requests never waits on a process's reading, and what a process has not read is never more
 /// than [`INPUT_QUEUED`] writes: the host holds the next back until the last is written.
 /// Dropped, what is queued is still written, and then its input closed.
-struct Input(std::sync::mpsc::SyncSender<Typed>);
+struct Input(std::sync::mpsc::SyncSender<Queued>);
 
 impl Input {
     /// The input of process `id`, written to `to`.
     fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
-        let (queued, taken) = std::sync::mpsc::sync_channel::<Typed>(INPUT_QUEUED);
+        let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
         let out = Arc::clone(out);
         thread::spawn(move || {
             let mut to = Some(to);
-            while let Ok(Typed { data, eof }) = taken.recv() {
+            while let Ok(Queued { data, eof }) = taken.recv() {
                 if let Some(writer) = &mut to
                     && !data.is_empty()
                     && writer.write_all(data.as_bytes()).is_err()
@@ -191,10 +186,10 @@ impl Input {
         Input(queued)
     }
 
-    /// `typed` queued, for process `id`: said written at once -- and dropped -- where the queue
+    /// `queued` queued, for process `id`: said written at once -- and dropped -- where the queue
     /// is full or the writer is gone.
-    fn put(&self, out: &Out, id: u32, typed: Typed) {
-        if let Err(e) = self.0.try_send(typed) {
+    fn put(&self, out: &Out, id: u32, queued: Queued) {
+        if let Err(e) = self.0.try_send(queued) {
             if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
                 eprintln!(
                     "{}: process {id}'s input past {INPUT_QUEUED} writes: one dropped",
@@ -294,35 +289,21 @@ fn serve() -> io::Result<()> {
     });
 
     send(&out, &CtrlResp::Ready(Vec::new()));
-    let terminals = Terminals::default();
     let stdins = Stdins::default();
     JOBS.get_or_init(jobs_cgroup);
     while let Some(message) = wire::recv(&mut input)? {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
-            CtrlReq::ExecTty { cmd, cols, rows } => exec_tty(&out, &terminals, cmd, cols, rows),
             // Handed to its writer, never written here: a process not reading holds up no other.
             // Each answered `Written` -- at once, for a process with no input here.
             CtrlReq::Stdin { id, data, eof } => {
-                if let Some((_, input)) = terminals.lock().unwrap().get(&id) {
-                    // A terminal's is not closed: typing has no end.
-                    input.put(&out, id, Typed { data, eof: false });
-                } else {
-                    let mut stdins = stdins.lock().unwrap();
-                    match stdins.get(&id) {
-                        Some(input) => input.put(&out, id, Typed { data, eof }),
-                        None => send(&out, &CtrlResp::Written { id }),
-                    }
-                    if eof {
-                        stdins.remove(&id);
-                    }
+                let mut stdins = stdins.lock().unwrap();
+                match stdins.get(&id) {
+                    Some(input) => input.put(&out, id, Queued { data, eof }),
+                    None => send(&out, &CtrlResp::Written { id }),
                 }
-            }
-            CtrlReq::Resize { id, cols, rows } => {
-                if let Some((terminal, _)) = terminals.lock().unwrap().get(&id) {
-                    let size = window(cols, rows);
-                    // SAFETY: a pty's descriptor, and a valid winsize.
-                    unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+                if eof {
+                    stdins.remove(&id);
                 }
             }
             // SAFETY: `kill` takes plain values; a group that is gone is an error it returns.
@@ -342,20 +323,6 @@ fn serve() -> io::Result<()> {
             },
             // The machine's process answers it, and never passes it on.
             CtrlReq::Mark { .. } | CtrlReq::Rebase { .. } => {}
-            // Its terminal's foreground group not its own -- it leads its session, so its
-            // group is its pid -- is another it started: a command a shell runs.
-            CtrlReq::Foreground { id } => {
-                let busy = terminals
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .is_some_and(|(terminal, _)| {
-                        // SAFETY: a pty's descriptor.
-                        let group = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
-                        group > 0 && group != id as libc::pid_t
-                    });
-                send(&out, &CtrlResp::Foreground { id, busy });
-            }
         }
     }
     Ok(())
@@ -580,127 +547,6 @@ fn readable(fd: i32, ms: i32) -> bool {
     };
     // SAFETY: one `pollfd` of ours.
     unsafe { libc::poll(&mut polled, 1, ms) > 0 }
-}
-
-/// Start `cmd` on a new terminal, `cols` by `rows`, leading a session of its own with the
-/// terminal as its controlling one; answered as [`exec`] answers, and what it writes sent as it
-/// comes. The terminal is kept for the host's typing and resizing until the process ends.
-fn exec_tty(out: &Out, terminals: &Terminals, cmd: Vec<String>, cols: u16, rows: u16) {
-    let refused = |why: String| send(out, &CtrlResp::Started(Err(why)));
-    let (master, slave) = match pty(cols, rows) {
-        Ok(ends) => ends,
-        Err(e) => return refused(format!("a terminal for {}: {e}", cmd[0])),
-    };
-    let clone = |fd: &OwnedFd| fd.try_clone().map(Stdio::from);
-    let (stdin, stdout, stderr) = match (clone(&slave), clone(&slave), clone(&slave)) {
-        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-        _ => return refused(format!("a terminal for {}", cmd[0])),
-    };
-    let mut command = Command::new(&cmd[0]);
-    command
-        .args(&cmd[1..])
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr);
-    // SAFETY: `setsid` and `ioctl` are async-signal-safe.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let _cgroup = in_jobs(&mut command);
-    let started = command.spawn();
-    // The process's alone now: held here too, the terminal would not end with it.
-    drop((command, slave));
-    let mut child = match started {
-        Ok(child) => child,
-        Err(e) => return refused(format!("{}: {e}", cmd[0])),
-    };
-    let id = child.id();
-    let master = File::from(master);
-    let (resized, typed) = match (master.try_clone(), master.try_clone()) {
-        (Ok(resized), Ok(typed)) => (resized, typed),
-        (Err(e), _) | (_, Err(e)) => {
-            let _ = child.kill();
-            return refused(format!("a terminal for {}: {e}", cmd[0]));
-        }
-    };
-    terminals
-        .lock()
-        .unwrap()
-        .insert(id, (resized, Input::start(out, id, typed)));
-    send(out, &CtrlResp::Started(Ok(id)));
-
-    let (out, terminals) = (Arc::clone(out), Arc::clone(terminals));
-    thread::spawn(move || {
-        let mut master = master;
-        let mut buffer = vec![0u8; 16 << 10];
-        // Bytes of a character cut by the read before, put in front of the next.
-        let mut cut = Vec::new();
-        loop {
-            // Ended once nothing has the terminal open but this: `EIO`.
-            let n = match master.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            cut.extend_from_slice(&buffer[..n]);
-            let whole = match std::str::from_utf8(&cut) {
-                Ok(_) => cut.len(),
-                Err(e) if e.error_len().is_none() => e.valid_up_to(),
-                Err(_) => cut.len(),
-            };
-            let data = String::from_utf8_lossy(&cut[..whole]).into_owned();
-            cut.drain(..whole);
-            send(&out, &CtrlResp::Output { id, data });
-        }
-        terminals.lock().unwrap().remove(&id);
-        send(
-            &out,
-            &CtrlResp::Exited {
-                id,
-                code: code(&mut child),
-            },
-        );
-    });
-}
-
-/// A new pty, `cols` by `rows`: its master end, and the end the process is given.
-fn pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
-    let (mut master, mut slave) = (-1, -1);
-    let size = window(cols, rows);
-    // SAFETY: both out-pointers are valid; no name or termios is asked for.
-    let opened = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &size,
-        )
-    };
-    if opened == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `openpty` answered two descriptors of its own.
-    let ends = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    for fd in [&ends.0, &ends.1] {
-        // SAFETY: a descriptor of ours; not left to the processes this starts but as their
-        // stdio.
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
-    Ok(ends)
-}
-
-fn window(cols: u16, rows: u16) -> libc::winsize {
-    libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    }
 }
 
 /// How `child` ended: its exit code, `128 + signal` for one a signal ended.

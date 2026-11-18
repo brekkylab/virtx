@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
 
 use super::hooks::{Held, Hooks, Written};
@@ -78,10 +78,6 @@ pub fn park_after() -> Option<Duration> {
         _ => Some(PARK_AFTER),
     }
 }
-
-/// How long the terminals of a sandbox otherwise unused have to say a command runs in them
-/// before it is parked.
-const ASK_WAIT: Duration = Duration::from_secs(2);
 
 /// The signals a job is sent, by name, each numbered as Linux numbers it: its index, plus one.
 const SIGNALS: [&str; 31] = [
@@ -155,11 +151,10 @@ enum State {
     Deleted,
 }
 
-/// A command sent to a sandbox's machine, not yet answered: what it is, where its output goes
-/// if it is on a terminal, and who waits for its job.
+/// A command sent to a sandbox's machine, not yet answered: what it is, and who waits for its
+/// job.
 struct Starting {
     cmd: Vec<String>,
-    terminal: Option<mpsc::UnboundedSender<String>>,
     waiter: oneshot::Sender<Result<Arc<Job>, String>>,
 }
 
@@ -181,8 +176,6 @@ pub(super) struct Run {
     pub(super) up: AtomicBool,
     /// Each command sent to the machine and not yet answered, in the order sent.
     starting: Mutex<VecDeque<Starting>>,
-    /// Where what each process on a terminal writes goes, by its pid, until it ends.
-    terminals: Mutex<HashMap<u32, mpsc::UnboundedSender<String>>>,
     /// Who waits for the guest to say it has synced, and for its machine to say its disk is
     /// marked, and rebased, and at which mark.
     pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
@@ -190,21 +183,21 @@ pub(super) struct Run {
     pub(super) rebased: Mutex<Option<Waiting>>,
     /// Its jobs started with a stdin still open, by id.
     stdins: Mutex<HashSet<String>>,
-    /// Who waits for each write to a process's input -- its stdin, or its terminal -- to be
-    /// [`Written`](CtrlResp::Written), by pid, in the order sent; and each process's turn to
-    /// write, one write at a time ([`Run::typed`]).
+    /// Who waits for each write to a process's stdin to be [`Written`](CtrlResp::Written), by
+    /// pid, in the order sent; and each process's turn to write, one write at a time
+    /// ([`Run::write_stdin`]).
     written: Mutex<HashMap<u32, VecDeque<oneshot::Sender<()>>>>,
-    typing: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+    turns: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Run {
-    /// `data` written to the input of process `pid` -- its stdin, closed after if `eof`, or its
-    /// terminal -- answered once the guest has written it (issue #159): one write at a time for
-    /// each process, so a process that does not read holds back whoever writes to it, as
-    /// PROTOCOL.md says of a job's stdin, and what it has not read never piles up in the guest.
+    /// `data` written to the stdin of process `pid`, closed after if `eof`, answered once the
+    /// guest has written it (issue #159): one write at a time for each process, so a process
+    /// that does not read holds back whoever writes to it, as PROTOCOL.md says of a job's stdin,
+    /// and what it has not read never piles up in the guest.
     /// Refused as ended once the process, or the machine, is.
-    async fn typed(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
-        let turn = Arc::clone(self.typing.lock().unwrap().entry(pid).or_default());
+    async fn write_stdin(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
+        let turn = Arc::clone(self.turns.lock().unwrap().entry(pid).or_default());
         let _turn = turn.lock().await;
         let written = {
             // Sent and waited for in one order: the guest answers each process's in turn.
@@ -231,7 +224,7 @@ impl Run {
 /// A sandbox: a machine booted from an image over a disk of its own, with volumes mounted
 /// into it, and the processes run in it as [jobs](Job), each with its log. It lasts from its
 /// making until it is deleted. Its machine is parked once it has been unused for a while, and
-/// booted again for the next job, terminal or request to its files: what it wrote is on its
+/// booted again for the next job or request to its files: what it wrote is on its
 /// disk across that, and what ran in it is not.
 pub struct Sandbox {
     pub(super) record: Record,
@@ -252,9 +245,6 @@ pub struct Sandbox {
     /// What a conditional write to its files holds first as it lands (see
     /// [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
-    /// Whether its terminals were asked if a command runs in them, and none has answered that
-    /// one does, nor been typed in, since.
-    pub(super) asked: AtomicBool,
 }
 
 impl Sandbox {
@@ -273,7 +263,6 @@ impl Sandbox {
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
-            asked: AtomicBool::new(false),
         })
     }
 
@@ -375,11 +364,10 @@ impl Sandbox {
     /// Used now: what parking it, and reclaiming it, count from.
     pub(super) fn used(&self) {
         *self.record.used.lock().unwrap() = SystemTime::now();
-        self.asked.store(false, Ordering::Relaxed);
     }
 
     /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files, a terminal typed in or running a command.
+    /// its ports, a request to its files.
     pub fn last_used(&self) -> SystemTime {
         *self.record.used.lock().unwrap()
     }
@@ -552,13 +540,12 @@ impl Sandbox {
             writes,
             up: AtomicBool::new(true),
             starting: Mutex::default(),
-            terminals: Mutex::default(),
             synced: Mutex::default(),
             marked: Mutex::default(),
             rebased: Mutex::default(),
             stdins: Mutex::default(),
             written: Mutex::default(),
-            typing: Mutex::default(),
+            turns: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
         super::runs::up(&run.sandbox, run.started);
@@ -630,32 +617,15 @@ impl Sandbox {
         self.halt_turned().await
     }
 
-    /// Its machine parked if it has been unused for `after`, while `run` is its run: one with
-    /// a terminal open is parked only once its terminals were asked whether a command runs in
-    /// them, and none has said so since ([`ask_terminals`](Self::ask_terminals)).
+    /// Its machine parked if it has been unused for `after`, while `run` is its run.
     async fn park_idle(self: &Arc<Self>, run: &Arc<Run>, after: Duration) {
         let _turn = self.turn.lock().await;
-        let unasked = !self.terminals().is_empty() && !self.asked.load(Ordering::Relaxed);
-        if !self.is(run) || unasked || self.idle().is_none_or(|idle| idle < after) {
+        if !self.is(run) || self.idle().is_none_or(|idle| idle < after) {
             return;
         }
         if let Err(e) = self.halt_turned().await {
             eprintln!("sandbox {}, unused, not parked: {e}", self.record.id);
         }
-    }
-
-    /// Whether its terminals were asked now whether a command runs in them, which keeps it in
-    /// use if one does: not where it has none, nor where they were asked already and none has
-    /// said so, nor been typed in, since.
-    fn ask_terminals(&self) -> bool {
-        let terminals = self.terminals();
-        if terminals.is_empty() || self.asked.swap(true, Ordering::Relaxed) {
-            return false;
-        }
-        for pid in terminals {
-            self.ask_foreground(pid);
-        }
-        true
     }
 
     /// Its machine stopped if it is up, under its turn: its jobs ended, what the guest wrote
@@ -793,11 +763,7 @@ impl Sandbox {
                 return Err(Error::Ended);
             }
             run.machine.exec(cmd.clone(), stdin)?;
-            starting.push_back(Starting {
-                cmd,
-                terminal: None,
-                waiter,
-            });
+            starting.push_back(Starting { cmd, waiter });
         }
         let job = started
             .await
@@ -816,44 +782,6 @@ impl Sandbox {
             });
         }
         Ok(job)
-    }
-
-    /// `cmd` on a terminal of its own, `cols` by `rows`: a job of it, as an exec is, which ends
-    /// with the [`Terminal`]. Its machine booted first if it is parked.
-    pub async fn terminal(
-        self: &Arc<Self>,
-        cmd: Vec<String>,
-        cols: u16,
-        rows: u16,
-    ) -> Result<Terminal, Error> {
-        let _activity = self.activity();
-        let run = self.wake().await?;
-        let (waiter, started) = oneshot::channel();
-        let (output, read) = mpsc::unbounded_channel();
-        {
-            let mut starting = run.starting.lock().unwrap();
-            if !run.up.load(Ordering::Relaxed) {
-                return Err(Error::Ended);
-            }
-            run.machine.exec_tty(cmd.clone(), cols, rows)?;
-            starting.push_back(Starting {
-                cmd,
-                terminal: Some(output),
-                waiter,
-            });
-        }
-        let job = started
-            .await
-            .map_err(|_| Error::Ended)?
-            .map_err(Error::NotStarted)?;
-        let pid = job.pid().0;
-        Ok(Terminal {
-            sandbox: Arc::clone(self),
-            run,
-            job,
-            pid,
-            output: read,
-        })
     }
 
     /// Its jobs as they are now, in the order of their ids.
@@ -891,7 +819,7 @@ impl Sandbox {
 
     /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
     /// answered once it is written, so a job that does not read holds the writer back
-    /// ([`Run::typed`]).
+    /// ([`Run::write_stdin`]).
     pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
         let (pid, running) = self.job(id)?.pid();
         let ended = Error::JobEnded(
@@ -909,7 +837,7 @@ impl Sandbox {
                 stdins.remove(id);
             }
         }
-        run.typed(pid, data, eof).await
+        run.write_stdin(pid, data, eof).await
     }
 
     /// The port key `key` names, if it is one of its own.
@@ -939,36 +867,13 @@ impl Sandbox {
         }
     }
 
-    /// Whether it is in use now: an [`Activity`] under way, or a job running that is not on a
-    /// terminal -- which counts as use only while it is typed in, or runs a command.
+    /// Whether it is in use now: an [`Activity`] under way, or a job running.
     pub(super) fn busy(&self) -> bool {
         if self.active.load(Ordering::Relaxed) > 0 {
             return true;
         }
-        let terminals: HashSet<u32> = match self.run() {
-            Some(run) => run.terminals.lock().unwrap().keys().copied().collect(),
-            None => HashSet::new(),
-        };
         let jobs = self.jobs.lock().unwrap();
-        jobs.values().any(|job| {
-            let (pid, running) = job.pid();
-            running && !terminals.contains(&pid)
-        })
-    }
-
-    /// The processes on its terminals, by pid.
-    pub(super) fn terminals(&self) -> Vec<u32> {
-        match self.run() {
-            Some(run) => run.terminals.lock().unwrap().keys().copied().collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Asked whether the process `pid`, on a terminal, runs a command: a busy one is used.
-    pub(super) fn ask_foreground(&self, pid: u32) {
-        if let Some(run) = self.run() {
-            let _ = run.machine.foreground(pid);
-        }
+        jobs.values().any(|job| job.pid().1)
     }
 
     /// How many of its jobs run now.
@@ -1078,17 +983,10 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some(Starting {
-                        cmd,
-                        terminal,
-                        waiter,
-                    }) = run.starting.lock().unwrap().pop_front()
+                    let Some(Starting { cmd, waiter }) = run.starting.lock().unwrap().pop_front()
                     else {
                         continue;
                     };
-                    if let (Ok(pid), Some(terminal)) = (&started, terminal) {
-                        run.terminals.lock().unwrap().insert(*pid, terminal);
-                    }
                     let started = started.map(|pid| {
                         self.used();
                         let mut jobs = self.jobs.lock().unwrap();
@@ -1118,16 +1016,10 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Output { id, data } => {
-                    if let Some(terminal) = run.terminals.lock().unwrap().get(&id) {
-                        let _ = terminal.send(data);
-                    }
-                }
                 CtrlResp::Exited { id, code } => {
-                    run.terminals.lock().unwrap().remove(&id);
                     // Its writes not yet written never will be: their writers told so.
                     run.written.lock().unwrap().remove(&id);
-                    run.typing.lock().unwrap().remove(&id);
+                    run.turns.lock().unwrap().remove(&id);
                     if let Some(job) = running.remove(&id) {
                         self.used();
                         job.end(code);
@@ -1157,12 +1049,6 @@ impl Sandbox {
                         let _ = told.send(rebased);
                     }
                 }
-                // A command runs on a terminal: used, as long as it does.
-                CtrlResp::Foreground { busy, .. } => {
-                    if busy {
-                        self.used();
-                    }
-                }
                 CtrlResp::Written { id } => {
                     if let Some(waiting) = run.written.lock().unwrap().get_mut(&id)
                         && let Some(told) = waiting.pop_front()
@@ -1178,7 +1064,6 @@ impl Sandbox {
         run.up.store(false, Ordering::Relaxed);
         starting.clear();
         drop(starting);
-        run.terminals.lock().unwrap().clear();
         run.written.lock().unwrap().clear();
         for job in running.into_values() {
             job.end(128 + SIGKILL);
@@ -1214,9 +1099,7 @@ pub struct Resources {
     pub up: bool,
 }
 
-/// Park `sandbox` once it has been unused for `after`, for as long as `run` is its run. A
-/// terminal open in it, untouched, is asked first whether a command runs in it, which keeps it
-/// in use if one does.
+/// Park `sandbox` once it has been unused for `after`, for as long as `run` is its run.
 async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration) {
     let mut wait = after;
     loop {
@@ -1228,13 +1111,10 @@ async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration)
             return;
         }
         wait = match sandbox.idle() {
-            Some(idle) if idle >= after => match sandbox.ask_terminals() {
-                true => ASK_WAIT,
-                false => {
-                    sandbox.park_idle(&run, after).await;
-                    after
-                }
-            },
+            Some(idle) if idle >= after => {
+                sandbox.park_idle(&run, after).await;
+                after
+            }
             Some(idle) => after - idle,
             None => after,
         }
@@ -1334,66 +1214,6 @@ impl Drop for Activity {
             self.sandbox.used();
         }
         self.sandbox.active.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-/// What types into a [`Terminal`] ([`Terminal::typing`]).
-#[derive(Clone)]
-pub struct Typing {
-    sandbox: Arc<Sandbox>,
-    run: Arc<Run>,
-    pid: u32,
-}
-
-impl Typing {
-    /// As [`Terminal::write`].
-    pub async fn write(&self, data: String) -> Result<(), Error> {
-        self.sandbox.used();
-        self.run.typed(self.pid, data, false).await
-    }
-}
-
-/// A process on a terminal in a sandbox, as [`Sandbox::terminal`] starts it: its job, what it
-/// writes, and how to type into it, resize it and end it.
-pub struct Terminal {
-    sandbox: Arc<Sandbox>,
-    run: Arc<Run>,
-    job: Arc<Job>,
-    pid: u32,
-    /// What it writes, as it comes; ended once it has.
-    pub output: mpsc::UnboundedReceiver<String>,
-}
-
-impl Terminal {
-    /// What types into it, apart from it: so a write is waited for with nothing of it held.
-    pub fn typing(&self) -> Typing {
-        Typing {
-            sandbox: Arc::clone(&self.sandbox),
-            run: Arc::clone(&self.run),
-            pid: self.pid,
-        }
-    }
-
-    /// `data` typed into it: the sandbox used now. Answered once the guest has written it, so
-    /// a program that does not read holds the typist back ([`Run::typed`]).
-    pub async fn write(&self, data: String) -> Result<(), Error> {
-        self.typing().write(data).await
-    }
-
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Error> {
-        Ok(self.run.machine.resize(self.pid, cols, rows)?)
-    }
-
-    /// How it ended, once it has: its exit code, `128 + signal` for one a signal ended.
-    pub async fn ended(&self) -> i32 {
-        self.job.ended().await
-    }
-}
-
-impl Drop for Terminal {
-    /// It, and what it started, killed if they run still: the terminal is gone.
-    fn drop(&mut self) {
-        kill(&self.run, &self.job);
     }
 }
 

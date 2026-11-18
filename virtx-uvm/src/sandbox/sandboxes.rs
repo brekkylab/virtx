@@ -426,7 +426,7 @@ impl Sandboxes {
     }
 
     /// Park every sandbox that nothing uses now ([`Sandbox::park`]), however recently it was
-    /// used. A terminal open in one, untouched, does not keep it.
+    /// used.
     pub async fn park_unused(&self) {
         for sandbox in self.up() {
             match sandbox.park().await {

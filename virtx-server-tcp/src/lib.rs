@@ -9,6 +9,9 @@
 //! - [`access::Homes`]: what makes a project's home as it is first reached. The binary's is
 //!   [`virtx_uvm::ProjectStore`], each home in the project's directory.
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
+//! - [`access::Access::through`]: what its image jobs connect to registries through. The
+//!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
+//!   jobs reach registries on public addresses alone.
 
 pub mod access;
 pub mod config;

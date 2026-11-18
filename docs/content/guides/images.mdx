@@ -182,6 +182,8 @@ client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 </TabItem>
 </Tabs>
 
+A server run over TCP (`virtx-server-tcp`) connects only to registries on public addresses, for a pull, a push and a build's base alike. A job that names a registry on the server's own machine or its private network fails with `is not reachable from this server`. To use such a registry, list it in the server's `server.json` as the reference names it, `host` or `host:port`: `"private_registries": ["registry.internal:5000"]`. A listed registry that sends the job on to another host on a private address, for its token or for a layer, needs that host listed as well. These connections do not go through an `HTTPS_PROXY` set in the server's environment, so a server whose only way to the internet is such a proxy reaches no registry. The local server reaches whatever your machine does.
+
 ## Copy a local image to a remote server
 
 An image built on your machine can go to a server without a registry in between. `download_image` writes it from the local server to an OCI archive, and `upload_image` sends the archive to the remote server and tags it there, uploading only what that server lacks.
@@ -224,7 +226,7 @@ const sandbox = await remote.createSandbox('jq:latest')
 <TabItem label="Rust">
 
 ```rust
-let local = Client::spawn_virtx([] as [&str; 0])?;
+let local = Client::spawn_virtx([] as [&str; 0]).await?;
 let mut events = local.download_image("jq:latest", "jq.tar");
 while let Some(event) = events.next().await {
     event?;

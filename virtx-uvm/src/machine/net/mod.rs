@@ -49,6 +49,7 @@ use krun::{TsiFlags, VsockDevice};
 use serde::{Deserialize, Serialize};
 
 use policy::Policy;
+pub(crate) use policy::routed;
 
 use super::{Error, Result};
 

@@ -23,6 +23,7 @@ pub use image::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,
     },
+    registry_proxy::PublicRegistries,
     registry_server::{Body as RegistryBody, RegistryServer},
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };

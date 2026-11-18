@@ -256,7 +256,7 @@ fn loopback(ip: IpAddr) -> IpAddr {
 
 /// Whether the internet routes `ip`, taken canonical: an address no network but this
 /// host's own reaches is not, and neither is one every network reaches somewhere else.
-fn routed(ip: IpAddr) -> bool {
+pub(crate) fn routed(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             let [a, b, c, _] = ip.octets();

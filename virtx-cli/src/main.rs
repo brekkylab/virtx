@@ -191,27 +191,24 @@ fn keep(session: &Session, tokens: Tokens) -> anyhow::Result<Kept> {
     Ok(kept)
 }
 
-/// Show a person the `page` to approve `code` on, and `open` it where it is a web page.
+/// Show a person the `page` to approve `code` on, and `open` the URL it reads as where that is
+/// a web page: `http` or `https`. The provider answers the page, and what opens one takes a
+/// path, or another scheme's URL, as readily.
 fn announce(code: &str, page: &str, open: impl FnOnce(&str)) {
     eprintln!("To sign in, open this page and approve the code {code}:");
     eprintln!();
     eprintln!("    {page}");
     eprintln!();
-    match web_page(page) {
+    match reqwest::Url::parse(page)
+        .ok()
+        .filter(|page| matches!(page.scheme(), "http" | "https"))
+    {
         Some(page) => open(page.as_str()),
         None => {
             eprintln!("virtx did not open it: it is not an http or https page.");
             eprintln!();
         }
     }
-}
-
-/// `page` as a web page's URL, where it is one: `http` or `https`. The provider answers the
-/// page, and what opens one takes a path, or another scheme's URL, as readily.
-fn web_page(page: &str) -> Option<reqwest::Url> {
-    reqwest::Url::parse(page)
-        .ok()
-        .filter(|page| matches!(page.scheme(), "http" | "https"))
 }
 
 /// Sign in to `sign_in`'s provider asking for `scope`, the page to approve the code on opened

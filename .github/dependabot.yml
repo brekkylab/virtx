@@ -1,6 +1,6 @@
-# The actions under `.github` are pinned to commits, so a newer release of one arrives as a pull
-# request: weekly, those that have one together. `/` is `.github/workflows`; the glob beside it
-# is the composite actions' directories.
+# A newer release of an action under `.github` arrives as a pull request: weekly, those that
+# have one together. `/` is `.github/workflows`; the glob beside it is the composite actions'
+# directories.
 version: 2
 updates:
   - package-ecosystem: github-actions

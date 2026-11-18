@@ -7,7 +7,7 @@ use virtx_core::Source;
 pub enum Error {
     /// `libvirtx_core` did not open, or lacks a function this crate calls.
     Library(String),
-    /// The server refused the request with this HTTP status, as `PROTOCOL.md` lists them: `404`
+    /// The server refused the request with this HTTP status, as the protocol lists them: `404`
     /// for what does not exist, `409` for what is in use or has ended, and the like; with the
     /// protocol's code where the server answered one (`not_found`, `in_use`), and the message.
     Status {

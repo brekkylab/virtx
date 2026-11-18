@@ -14,7 +14,7 @@ use crate::{
     transport::{Body, TransportClient, full, http::refused, resolved, segment, segments},
 };
 
-/// What a `PROPFIND` asks for: the properties `PROTOCOL.md` says every server answers.
+/// What a `PROPFIND` asks for: the properties the protocol says every server answers.
 const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/><D:getetag/></D:prop></D:propfind>"#;
 
 /// The WebDAV namespace.

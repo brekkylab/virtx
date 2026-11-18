@@ -1,4 +1,4 @@
-//! A job's log, which `PROTOCOL.md`'s Events has a server send as an event stream: each entry
+//! A job's log, which the protocol's Events has a server send as an event stream: each entry
 //! numbered, read from its start or from after the entry a client last saw. The client's end is
 //! [`client`], the server's [`server`].
 

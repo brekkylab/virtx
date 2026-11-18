@@ -29,7 +29,7 @@ pub enum Error {
     /// connection failed or the session ended.
     Transport(String),
     /// The server refused the request with an HTTP status: the status, and why, for a person,
-    /// as `code: message` where the server answered its error as `PROTOCOL.md`'s Resources do,
+    /// as `code: message` where the server answered its error as the protocol's Resources do,
     /// and as the codes and messages of its `errors` where its registry refused. A `401` or a
     /// `403` from any endpoint says the headers are not what it wants: a client may set new ones
     /// and send the request again.
@@ -109,7 +109,7 @@ impl Error {
         }
     }
 
-    /// The code of a refusal the server answered as `PROTOCOL.md`'s Resources do
+    /// The code of a refusal the server answered as the protocol's Resources do
     /// (`{"error": {"code", "message"}}`): `not_found`, `in_use`, `quota` and the like. What a
     /// client branches on, rather than the message.
     pub fn code(&self) -> Option<&str> {

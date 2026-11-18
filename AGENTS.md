@@ -8,7 +8,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, which every package ships as its own, and its translations (`README.*.md`), and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.
-- The wire between client and server is `virtx-core/PROTOCOL.md`, and both ends of it are here: the types and both transports in `virtx-core`, the servers that answer them beside it. A change to the protocol moves both ends in the same pull request.
+- The wire between client and server is the protocol, `docs/content/reference/protocol.mdx` (what code comments mean by "the protocol"), and both ends of it are here: the types and both transports in `virtx-core`, the servers that answer them beside it. A change to the protocol moves both ends in the same pull request.
 
 ## Where a change goes
 

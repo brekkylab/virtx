@@ -1,4 +1,4 @@
-//! Listing, tagging and removing images in the server's registry, as `PROTOCOL.md`'s Images
+//! Listing, tagging and removing images in the server's registry, as the protocol's Images
 //! says each is done.
 
 use super::{

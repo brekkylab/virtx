@@ -1,4 +1,4 @@
-//! The files of a volume or a sandbox, which `PROTOCOL.md`'s Files has a server serve with
+//! The files of a volume or a sandbox, which the protocol's Files has a server serve with
 //! WebDAV (RFC 4918) under `/volumes/{name}/files/` or `/sandboxes/{id}/files/`: what each
 //! request names, and what a `PROPFIND` reads into. The client's end is [`client`].
 //!

@@ -76,4 +76,4 @@ Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`
 
 - [`README.md`](../../README.md): the Quickstart, for a local server and a remote one.
 - [`docs/content/`](../../docs/content/): the guides and the API reference.
-- [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.
+- [`docs/content/reference/protocol.mdx`](../../docs/content/reference/protocol.mdx): what client and server say to each other, for a server of your own.

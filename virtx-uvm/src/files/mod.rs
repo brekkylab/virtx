@@ -1,4 +1,4 @@
-//! The files endpoints of `virtx-core`'s `PROTOCOL.md`: the files of a volume or a sandbox over
+//! The files endpoints of the protocol: the files of a volume or a sandbox over
 //! WebDAV at `/volumes/{name}/files/` and `/sandboxes/{id}/files/`.
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their

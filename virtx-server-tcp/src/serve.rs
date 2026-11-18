@@ -1,4 +1,4 @@
-//! The server's routes, for an [`Access`]: the endpoints of `virtx-core`'s `PROTOCOL.md`
+//! The server's routes, for an [`Access`]: the endpoints of the protocol
 //! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an
 //! OCI registry, and each sandbox's ports. A server built on this one gives [`router`] an
 //! authenticator of its own in the access, and routes of its own beside these; the server a
@@ -1166,7 +1166,7 @@ mod tests {
         assert_eq!(told.pulled.lock().unwrap().len(), 2);
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client
     /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
     /// and a path whose segment does not read as one is `400` `invalid`.
     #[tokio::test]

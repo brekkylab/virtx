@@ -46,7 +46,7 @@ fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
     ))
 }
 
-/// What a `429` or a `503` says of the request it answers, as `PROTOCOL.md`'s Refused for now
+/// What a `429` or a `503` says of the request it answers, as the protocol's Refused for now
 /// has it.
 struct ForNow {
     /// Whether to send the request again after a wait: a `429` unless it is a `quota` whose

@@ -104,7 +104,7 @@ fn main() -> std::process::ExitCode {
         let sign_in = sign_in(&cli, server, &dir)?;
         let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
         match cli.command {
-            Command::Login { scope, .. } => login(&dir, &sign_in, &scope, true, announce),
+            Command::Login { scope, .. } => login(&dir, &sign_in, &scope, true, open),
             Command::Token { json } => {
                 let kept = token(&dir, &sign_in, refused, true)?;
                 match json {
@@ -191,22 +191,34 @@ fn keep(session: &Session, tokens: Tokens) -> anyhow::Result<Kept> {
     Ok(kept)
 }
 
-/// Show a person the `page` to approve `code` on, opened in their browser if there is one.
-fn announce(code: &str, page: &str) {
+/// Show a person the `page` to approve `code` on, and `open` the URL it reads as where that is
+/// a web page: `http` or `https`. The provider answers the page, and what opens one takes a
+/// path, or another scheme's URL, as readily.
+fn announce(code: &str, page: &str, open: impl FnOnce(&str)) {
     eprintln!("To sign in, open this page and approve the code {code}:");
     eprintln!();
     eprintln!("    {page}");
     eprintln!();
-    open(page);
+    match reqwest::Url::parse(page)
+        .ok()
+        .filter(|page| matches!(page.scheme(), "http" | "https"))
+    {
+        Some(page) => open(page.as_str()),
+        None => {
+            eprintln!("virtx did not open it: it is not an http or https page.");
+            eprintln!();
+        }
+    }
 }
 
-/// Sign in to `sign_in`'s provider asking for `scope`, the code to approve shown by `announce`.
+/// Sign in to `sign_in`'s provider asking for `scope`, the page to approve the code on opened
+/// by `open`.
 fn login(
     dir: &Path,
     sign_in: &SignIn,
     scope: &str,
     keychain: bool,
-    announce: fn(&str, &str),
+    open: impl FnOnce(&str),
 ) -> anyhow::Result<()> {
     let provider = discover(sign_in)?;
     let codes = provider.device(scope)?;
@@ -214,7 +226,7 @@ fn login(
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&codes.verification_uri);
-    announce(&codes.user_code, page);
+    announce(&codes.user_code, page, open);
 
     let mut interval = Duration::from_secs(codes.interval.max(1));
     let deadline = Instant::now() + Duration::from_secs(codes.expires_in);
@@ -294,8 +306,9 @@ fn open(url: &str) {
 
 #[cfg(test)]
 mod tests {
-    //! Against the fixture: its server, and the provider that names to sign in to, which
-    //! approves a device at the second ask and replaces the refresh token with each refresh.
+    //! Against the fixture where a provider is asked: its server, and the provider that names
+    //! to sign in to, which approves a device at the second ask and replaces the refresh token
+    //! with each refresh.
 
     use super::*;
 
@@ -318,7 +331,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("virtx-cli-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        login(&dir, &sign_in, "openid", false, |_, _| {}).unwrap();
+        let mut opened = None;
+        let open = |page: &str| opened = Some(page.to_owned());
+        login(&dir, &sign_in, "openid", false, open).unwrap();
+        // The page the provider answered, a web page.
+        assert_eq!(opened, Some(format!("{}/approve", sign_in.issuer)));
         assert_eq!(session::signed_in(&dir).unwrap().issuer, sign_in.issuer);
 
         // The one signing in issued has a minute left: refreshed, and the one after it kept.
@@ -363,6 +380,28 @@ mod tests {
         let ended = token(&dir, &sign_in, false, false).err().unwrap();
         assert!(ended.to_string().contains("not signed in"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_page_to_approve_on_is_opened_only_where_it_is_a_web_page() {
+        let device = "https://idp.example/device?user_code=ABCD";
+        let local = "http://127.0.0.1:8080/approve";
+        for (page, opens) in [
+            (device, Some(device)),
+            (local, Some(local)),
+            // As the URL it was read as.
+            (" HTTPS://idp.example/device?user_code=ABCD", Some(device)),
+            ("file:///System/Applications/Calculator.app", None),
+            ("/System/Applications/Calculator.app", None),
+            (r"C:\Windows\System32\calc.exe", None),
+            (r"\\files.example\share\setup.exe", None),
+            ("ssh://idp.example", None),
+            ("-a Calculator", None),
+        ] {
+            let mut opened = None;
+            announce("ABCD", page, |page| opened = Some(page.to_owned()));
+            assert_eq!(opened.as_deref(), opens, "{page}");
+        }
     }
 
     #[test]

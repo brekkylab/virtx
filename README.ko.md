@@ -151,12 +151,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 [직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
 
-`virtx-cli/`에서 빌드한 `virtx`로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
+`pipx`나 `npx`로 설치 없이 실행되는 `virtx` 명령으로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
 나머지는 로컬 예제와 같습니다.
 
 ```sh
-virtx login https://virtx.example
+pipx run virtx login https://virtx.example            # uvx도 됩니다
+
+# 또는
+
+npx -y @brekkylab/virtx login https://virtx.example
 ```
+
+`virtx`를 설치해 쓰려면 [CLI](https://virtx.sh/docs/reference/cli/)를 참고하세요.
 
 <details open>
 <summary><b>Python</b></summary>
@@ -166,7 +172,7 @@ from virtx import Client, CommandAuth
 
 client = Client.connect(
     "https://virtx.example",
-    CommandAuth("virtx", ("token", "--json")),
+    CommandAuth("pipx", ("run", "virtx", "token", "--json")),
 )
 ```
 
@@ -178,7 +184,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] }
+  { type: 'command', program: 'npx', args: ['-y', '@brekkylab/virtx', 'token', '--json'] }
 )
 ```
 
@@ -190,7 +196,7 @@ const client = Client.connect(
 ```rust
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    Auth::Command { program: "pipx".into(), args: vec!["run".into(), "virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;

@@ -22,7 +22,9 @@ use crate::cli::{
 #[command(
     name = "virtx",
     version,
-    about = "Build and manage a virtx server's images"
+    about = "Build and manage a virtx server's images, and sign in to its provider",
+    // The commands of signing in are `sign_in`'s, parsed apart from these.
+    after_help = "Signing in:\n  login [URL]     Sign in to the server at URL, approving the code shown\n  token [--json]  Print an ID token, refreshed\n  whoami          Say who is signed in\n  logout          Sign out, ending the session"
 )]
 pub(crate) struct Cli {
     #[command(flatten)]

@@ -68,11 +68,15 @@ The user name is how others add a user to their projects, so with the default, t
 
 ## Connect to it
 
-Each user signs in once with the `virtx` command, built from `virtx-cli/`.
+Each user signs in once with the `virtx` command, which `pipx` or `npx` runs without installing; to install it instead, see [CLI](/docs/reference/cli/).
 It asks the server which provider to use, and shows a code to approve in the browser:
 
 ```sh
-virtx login https://virtx.example
+pipx run virtx login https://virtx.example            # uvx also works
+
+# or
+
+npx -y @brekkylab/virtx login https://virtx.example
 ```
 
 Then a program connects with the token `virtx token` prints, which the client asks for again whenever it runs out:
@@ -83,7 +87,7 @@ Then a program connects with the token `virtx token` prints, which the client as
 ```python
 from virtx import Client, CommandAuth
 
-client = Client.connect("https://virtx.example", CommandAuth("virtx", ("token", "--json")))
+client = Client.connect("https://virtx.example", CommandAuth("pipx", ("run", "virtx", "token", "--json")))
 ```
 
 </TabItem>
@@ -92,8 +96,8 @@ client = Client.connect("https://virtx.example", CommandAuth("virtx", ("token", 
 ```js
 const client = Client.connect('https://virtx.example', {
   type: 'command',
-  program: 'virtx',
-  args: ['token', '--json'],
+  program: 'npx',
+  args: ['-y', '@brekkylab/virtx', 'token', '--json'],
 })
 ```
 
@@ -105,7 +109,7 @@ use virtx::{Auth, Client};
 
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    Auth::Command { program: "pipx".into(), args: vec!["run".into(), "virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;

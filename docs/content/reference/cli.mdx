@@ -6,8 +6,8 @@ description: "Build and manage a server's images, and sign in, from a shell."
 The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
 
 ```sh
-uvx virtx images                 # or `pip install virtx`
-npx @brekkylab/virtx images      # or `npm install -g @brekkylab/virtx`
+pipx run virtx images            # without installing (uvx also works); or `pipx install virtx`, `uv tool install virtx`
+npx -y @brekkylab/virtx images   # without installing; or `npm install -g @brekkylab/virtx`
 cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
 ```
 
@@ -49,7 +49,9 @@ The `virtx` command also signs a person in, to virtx cloud or to the OpenID Conn
 | `virtx whoami` | Says who is signed in. |
 | `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
 
-The `virtx` the Python and Node.js packages install signs in to virtx cloud alone. The one built from `virtx-cli/` signs in to both: a command is of the provider it names; naming none, of virtx cloud with `--domain`; and otherwise of what was signed in to last, or of virtx cloud where nothing was.
+A client given a command for its token runs it each time it needs one: `pipx run virtx token --json` (or `uvx virtx token --json`) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.
+
+The `virtx` the Python and Node.js packages install and the one built from `virtx-cli/` are the same command. A command is of the provider it names with `--issuer` and `--client-id`, or the one the server `login` is given names, and otherwise of what was signed in to last.
 
 ### virtx cloud
 

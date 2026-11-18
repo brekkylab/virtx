@@ -4400,13 +4400,6 @@ dependencies = [
 name = "virtx-cli"
 version = "0.2.0"
 dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "keyring",
- "reqwest",
- "serde",
- "serde_json",
  "virtx-core",
 ]
 
@@ -4417,6 +4410,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "cbindgen",
  "clap",
@@ -4428,6 +4422,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "hyper-util",
+ "keyring",
  "libc",
  "percent-encoding",
  "reqwest",

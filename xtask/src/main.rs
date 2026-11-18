@@ -216,8 +216,13 @@ fn main() -> anyhow::Result<()> {
             match args.as_slice() {
                 [] => test_all(),
                 [no_run] if no_run == "--no-run" => compile_tests(),
-                // virtx-rs's tests are against the fixture too, and virtx-cli's.
-                _ if args.iter().any(|arg| arg == "virtx" || arg == "virtx-cli") => {
+                [p, package] if p == "-p" && package == "virtx-cli" => {
+                    let fixture = Fixture::start()?;
+                    let args = SIGN_IN_TESTS[2..].iter().map(OsString::from).collect();
+                    run_target(args, true, &fixture.vars())
+                }
+                // virtx-rs's tests are against the fixture too.
+                _ if args.iter().any(|arg| arg == "virtx") => {
                     let fixture = Fixture::start()?;
                     run_target(args, true, &fixture.vars())
                 }
@@ -1451,6 +1456,19 @@ const TEST_CRATES: &[&str] = &[
     "virtx-server-tcp",
 ];
 
+/// The tests of the `virtx` command's signing in, `virtx-cli`'s though they are `virtx-core`'s:
+/// those against the fixture's provider are marked ignored, for the crate's own run to leave out.
+const SIGN_IN_TESTS: &[&str] = &[
+    "cargo",
+    "test",
+    "-p",
+    "virtx-core",
+    "--lib",
+    "--",
+    "cli::sign_in",
+    "--include-ignored",
+];
+
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
 /// pytest, and virtx-node's with Node's own runner.
@@ -1463,7 +1481,7 @@ const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
             &["cargo", "test", "-p", "virtx", "--no-default-features"],
         ],
     ),
-    ("virtx-cli", ".", &[&["cargo", "test", "-p", "virtx-cli"]]),
+    ("virtx-cli", ".", &[SIGN_IN_TESTS]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
     (
         "virtx-node",

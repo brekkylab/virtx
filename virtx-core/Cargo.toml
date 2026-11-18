@@ -1,6 +1,6 @@
 [package]
 name = "virtx-core"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "The virtx client: the types every request takes and answers, the wire, and the C ABI of libvirtx_core."
 license = "Apache-2.0"

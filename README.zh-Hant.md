@@ -64,7 +64,7 @@ from virtx import Client, Recipe
 
 
 async def main() -> None:
-    with Client.spawn() as client:
+    async with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
         await client.build_image(recipe, "jq:latest").complete(print=True)
 

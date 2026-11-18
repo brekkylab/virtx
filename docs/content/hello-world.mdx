@@ -51,7 +51,7 @@ from virtx import Client
 
 
 async def main() -> None:
-    with Client.spawn() as client:
+    async with Client.spawn() as client:
         await client.pull_image("alpine:latest").complete()
         sandbox = await client.create_sandbox("alpine:latest")
         try:
@@ -192,7 +192,7 @@ Then, in the program, connect with the token it prints in place of `Client.spawn
 ```python
 from virtx import CommandAuth
 
-with Client.connect(
+async with Client.connect(
     "https://virtx.example",
     CommandAuth("uvx", ("virtx", "token", "--json")),
 ) as client:

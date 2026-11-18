@@ -36,6 +36,15 @@ const ALPINE: &str = "alpine:3.20";
 /// test.
 const GPU_IMAGE: &str = "alpine:edge";
 
+/// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
+/// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
+/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+fn small() -> SandboxCreateArgs {
+    let mut args = SandboxCreateArgs::new(ALPINE);
+    args.memory_mib = Some(1024);
+    args
+}
+
 /// The stores a test makes its sandboxes of: the images every test shares, and the upper disks
 /// its sandboxes make and its volumes under a home of its own, removed when this drops.
 struct Home {
@@ -111,7 +120,7 @@ async fn close(sandbox: Arc<Sandbox>) {
 }
 
 async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let sandbox = home.sandbox(&small(), None).await;
     let (mut lines, code) = run(
         &sandbox,
         &["sh", "-c", "echo one; echo two >&2; exit 3"],
@@ -137,7 +146,7 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 }
 
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
     assert!(job.get().running);
@@ -154,7 +163,7 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
 
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), park).await;
+    let sandbox = home.sandbox(&small(), park).await;
     // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
     let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
@@ -187,7 +196,7 @@ async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
     // The machine is parked about 500 ms after its last job ends, and syncs for a hundred or
     // so: one close per delay across that.
     for delay in (450..=700).step_by(50) {
-        let args = SandboxCreateArgs::new(ALPINE);
+        let args = small();
         let sandbox = home.sandbox(&args, Some(Duration::from_millis(500))).await;
         // Left in the guest's page cache, so stopping the machine takes the while it syncs.
         let big = ["dd", "if=/dev/zero", "of=/root/big", "bs=1M", "count=256"];
@@ -203,10 +212,7 @@ async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
 }
 
 async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
-    let asked = [
-        (DEFAULT_DISK_GIB, SandboxCreateArgs::new(ALPINE)),
-        (8, SandboxCreateArgs::new(ALPINE).disk_gib(8)),
-    ];
+    let asked = [(DEFAULT_DISK_GIB, small()), (8, small().disk_gib(8))];
     for (gib, args) in asked {
         let sandbox = home.sandbox(&args, None).await;
         // The root is the overlay, whose size is its writable layer's.
@@ -224,7 +230,7 @@ async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
-    let args = SandboxCreateArgs::new(ALPINE);
+    let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
     // Each writes and reads at once with the others, and finds what it wrote alone.
     let writes: Vec<_> = (0..made.len())
@@ -251,7 +257,7 @@ async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
 }
 
 async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
     tokio::join!(close(Arc::clone(&sandbox)), close(Arc::clone(&sandbox)));
@@ -274,7 +280,7 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
             path: "/data".into(),
             readonly,
         }],
-        ..SandboxCreateArgs::new(ALPINE)
+        ..small()
     };
     let (writing, reading) = (mounting(false), mounting(true));
     let (writer, reader) = tokio::join!(home.sandbox(&writing, None), home.sandbox(&reading, None));
@@ -529,7 +535,7 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
             path: "/data".into(),
             readonly: false,
         }],
-        ..SandboxCreateArgs::new(ALPINE)
+        ..small()
     };
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&mounting, park).await;
@@ -550,7 +556,7 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
 }
 
 async fn a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let sandbox = home.sandbox(&small(), None).await;
     let files = Files::new(home.volumes.clone());
     let sent = async |method: Method, if_match: Option<&str>, body: &'static str| {
         let mut request = Request::builder()
@@ -601,7 +607,7 @@ async fn of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands(home: Home
     use http::{Request, header};
     use http_body_util::BodyExt as _;
 
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(ALPINE), None).await;
+    let sandbox = home.sandbox(&small(), None).await;
     let files = Arc::new(Files::new(home.volumes.clone()));
     let send = |request: Request<Body>| {
         let (files, sandbox) = (Arc::clone(&files), Arc::clone(&sandbox));
@@ -664,7 +670,7 @@ async fn of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands(home: Ho
             path: "/data".into(),
             readonly: false,
         }],
-        ..SandboxCreateArgs::new(ALPINE)
+        ..small()
     };
     let sandbox = home.sandbox(&mounting, None).await;
     let files = Arc::new(Files::new(home.volumes.clone()));

@@ -68,8 +68,8 @@
 #   m8i-2xlarge), launched for the job and gone after it, its image with what the job would
 #   install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache;
 # - brekkylab0-windows, a machine of brekkylab's with a GPU (also labelled `gpu`), in a runner
-#   group of virtx's alone, its tools under C:\ci, and `VIRTX_TEST_GPU=1` in its runner's
-#   environment, where the job runs the GPU's tests too.
+#   group of virtx's alone, its tools under C:\ci. The job finds the GPU there itself and runs
+#   the GPU's tests too.
 #
 # A fork's pull request has no Windows tests: ours hold brekkylab's caches, and that a fork's
 # own workflow cannot ask for them is the repository's setting's to say -- a maintainer approves
@@ -811,9 +811,8 @@ jobs:
   # The machine-booting crates' tests on Windows, over WHP, on a runner of our own: GitHub's
   # Windows runners have no hypervisor (see Runners). Any runner labelled `whp` takes it -- a
   # spot instance of aws-ci-runners, launched for the job, or brekkylab's own machine with a
-  # GPU, whichever is free first. That one also says so in its environment (`VIRTX_TEST_GPU=1`),
-  # and there the GPU's tests run too: the GPU libraries built, and `virtx-uvm` tested with its
-  # `gpu` feature. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the
+  # GPU, whichever is free first. Where the job finds a GPU (see `This runner`), the GPU's tests
+  # run too: the GPU libraries built, and `virtx-uvm` tested with its `gpu` feature. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the
   # faults a guest takes as it first touches its memory are most of a boot.
   #
   # It starts with the run rather than after `guest`, and takes the kernel from it once it has
@@ -849,7 +848,10 @@ jobs:
           components: clippy, rustfmt
 
       # What this runner is: sccache's where it has its bucket (aws-ci-runners'), but for a
-      # release, which compiles from nothing; and the GPU's tests where it has a GPU.
+      # release, which compiles from nothing; and the GPU's tests where it has a GPU -- a
+      # display controller on its PCI bus that is not Windows' own basic one, and Vulkan's
+      # loader to reach it with. Found here rather than told: a job cannot read its runner's
+      # labels, and a runner that is told can be told wrong.
       - id: runner
         name: This runner
         env:
@@ -858,11 +860,19 @@ jobs:
           if [ -n "${SCCACHE_BUCKET:-}" ] && [ "$RELEASE" != true ]; then
             echo RUSTC_WRAPPER=sccache >> "$GITHUB_ENV"
           fi
-          if [ "${VIRTX_TEST_GPU:-}" = 1 ]; then
+          cat > "$RUNNER_TEMP/gpu.ps1" <<'PS'
+          $found = Get-CimInstance Win32_VideoController |
+            Where-Object { $_.PNPDeviceID -like 'PCI\*' -and $_.Name -notmatch 'Microsoft Basic' } |
+            ForEach-Object { $_.Name }
+          if ($found -and (Test-Path "$env:SystemRoot\System32\vulkan-1.dll")) { $found -join ', ' }
+          PS
+          gpu=$(powershell -NoProfile -ExecutionPolicy Bypass -File "$RUNNER_TEMP/gpu.ps1" | tr -d '\r')
+          if [ -n "$gpu" ]; then
             echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "VIRTX_TEST_GPU=1" >> "$GITHUB_ENV"
             echo "TEST_FEATURES=--features virtx-uvm/gpu" >> "$GITHUB_ENV"
           fi
-          echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${VIRTX_TEST_GPU:-no}"
+          echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${gpu:-none}"
 
       - uses: ./.github/actions/cargo-deps
 

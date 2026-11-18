@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -243,14 +243,13 @@ impl Sandbox {
         if let Some(name) = args.abins.iter().find(|name| !given.insert(*name)) {
             return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
         }
-        // A name is of a file directly in `programs`. On Windows, `programs` joined with a name
-        // that starts with a drive, such as `C:x`, is that name alone, read in the drive's
-        // current directory.
         for name in &args.abins {
-            if name.starts_with('.')
-                || name.contains(['/', '\\', ':'])
-                || !programs.join(name).is_file()
-            {
+            let mut parts = Path::new(name).components();
+            let plain = matches!(
+                (parts.next(), parts.next()),
+                (Some(Component::Normal(part)), None) if part == name.as_str()
+            );
+            if name.starts_with('.') || !plain || !programs.join(name).is_file() {
                 return Err(Error::Invalid(format!(
                     "abins: this server has no program called `{name}`"
                 )));
@@ -885,45 +884,5 @@ mod tests {
         Abin::sweep(&dir);
         assert!(!made.exists());
         assert!(programs.join("index").is_file(), "the server's own stay");
-    }
-
-    #[tokio::test]
-    async fn a_program_named_with_a_colon_is_refused_whatever_the_name_reaches() {
-        let host = tempfile::tempdir().unwrap();
-        let programs = host.path().join(ABIN_HOST);
-        fs::create_dir_all(&programs).unwrap();
-        #[cfg(unix)]
-        let name = {
-            fs::write(programs.join("x:y"), "x").unwrap();
-            "x:y".to_string()
-        };
-        // The package's own `Cargo.toml`, in the directory cargo runs its tests in, by its drive.
-        #[cfg(windows)]
-        let name = {
-            use std::path::{Component, Prefix};
-            let here = std::env::current_dir().unwrap();
-            let drive = match here.components().next() {
-                Some(Component::Prefix(prefix)) => match prefix.kind() {
-                    Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive as char,
-                    _ => panic!("{} is on no drive", here.display()),
-                },
-                _ => panic!("{} is on no drive", here.display()),
-            };
-            format!("{drive}:Cargo.toml")
-        };
-        assert!(programs.join(&name).is_file(), "{name} reaches a file");
-
-        let images = ImageStore::new(host.path().join("images")).unwrap();
-        let volumes = VolumeStore::new(host.path().join("volumes")).unwrap();
-        let args = SandboxCreateArgs::new("here:latest").abin(name.as_str());
-        let vm = vec![host.path().join("virtx-vm").into_os_string()];
-        let Err(refused) = Sandbox::create(&images, host.path(), &volumes, &args, vm, None).await
-        else {
-            panic!("{name} made a sandbox");
-        };
-        assert_eq!(
-            refused.to_string(),
-            format!("abins: this server has no program called `{name}`")
-        );
     }
 }

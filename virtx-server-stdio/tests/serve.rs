@@ -195,6 +195,15 @@ fn names(entries: Vec<DirEntry>) -> Vec<String> {
     entries.into_iter().map(|entry| entry.name).collect()
 }
 
+/// A sandbox of `image` with 1 GiB of memory: enough for what these tests run in it, and little
+/// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
+/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+fn small(image: impl Into<ImageName>) -> SandboxCreateArgs {
+    let mut args = SandboxCreateArgs::new(image);
+    args.memory_mib = Some(1024);
+    args
+}
+
 /// Boots VMs: needs the network to pull alpine, the binary signed for the hypervisor, and the
 /// guest kernel where libkrun finds it.
 #[tokio::test]
@@ -203,7 +212,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
     let server = Server::spawn("sandbox");
     server.pull_image("alpine:3.20").await;
     server.client.create_volume(Some("data")).await.unwrap();
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("work".into());
     args.volumes = vec![SandboxVolume {
         volume: "data".into(),
@@ -315,7 +324,7 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
 async fn a_sandbox_is_kept_across_a_server_started_again() {
     let server = Server::spawn("kept");
     server.pull_image("alpine:3.20").await;
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.name = Some("kept".into());
     args.ports = vec![8000.into()];
     let id = server.client.create_sandbox(&args).await.unwrap().id;
@@ -325,7 +334,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
     assert_eq!(ended.unwrap(), 0);
     let ephemeral = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20").ephemeral(true))
+        .create_sandbox(&small("alpine:3.20").ephemeral(true))
         .await
         .unwrap()
         .id;
@@ -358,7 +367,7 @@ async fn a_sandbox_running_in_another_server_is_refused() {
     server.pull_image("alpine:3.20").await;
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -397,7 +406,7 @@ async fn a_sandbox_running_in_another_server_is_refused() {
 async fn an_unused_sandbox_stops_and_starts_again_with_what_it_wrote() {
     let server = Server::spawn_with("auto-stop", &[("VIRTX_MINUTE_MS", "500")]);
     server.pull_image("alpine:3.20").await;
-    let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
+    let args = small("alpine:3.20").auto_stop_minutes(1);
     let id = server.client.create_sandbox(&args).await.unwrap().id;
     let state = async || server.client.get_sandbox(&id).await.unwrap().state;
     let root = FileRoot::Sandbox(id.clone());
@@ -467,7 +476,7 @@ async fn a_sandbox_stopped_while_it_stops_unused_answers_once_it_has_synced() {
     // It stops some 500 to 1000 ms after its last job ends, and syncs for a while: one stop
     // asked for per delay across that.
     for delay in (400..=1100).step_by(100) {
-        let args = SandboxCreateArgs::new("alpine:3.20").auto_stop_minutes(1);
+        let args = small("alpine:3.20").auto_stop_minutes(1);
         let id = server.client.create_sandbox(&args).await.unwrap().id;
         // Left in the guest's page cache, so stopping the machine takes the while it syncs.
         let (_, ended) = server
@@ -502,7 +511,7 @@ async fn a_job_s_stdin_is_written_and_its_log_answers_its_exec() {
     server.pull_image("alpine:3.20").await;
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
+        .create_sandbox(&small("alpine:3.20"))
         .await
         .unwrap()
         .id;
@@ -577,7 +586,7 @@ async fn the_files_of_a_sandbox_are_what_its_processes_see() {
     let server = Server::spawn("sandbox-files");
     server.pull_image("alpine:3.20").await;
     server.client.create_volume(Some("data")).await.unwrap();
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.volumes = vec![SandboxVolume {
         volume: "data".into(),
         path: "/data".into(),
@@ -711,7 +720,7 @@ fn address(url: &str) -> &str {
 async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let server = Server::spawn("port-reached");
     server.pull_image("alpine:3.20").await;
-    let mut args = SandboxCreateArgs::new("alpine:3.20");
+    let mut args = small("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = server.client.create_sandbox(&args).await.unwrap();
     let at = address(&created.ports[0].url).to_owned();
@@ -763,7 +772,7 @@ async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 async fn a_disk_a_stopped_machine_left_reads_as_its_kernel_committed() {
     let server = Server::spawn("killed");
     server.pull_image("alpine:3.20").await;
-    let args = SandboxCreateArgs::new("alpine:3.20");
+    let args = small("alpine:3.20");
     let id = server.client.create_sandbox(&args).await.unwrap().id;
 
     // Synced, so committed, and then stopped with its disk still mounted.
@@ -821,7 +830,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
 
     let id = server
         .client
-        .create_sandbox(&SandboxCreateArgs::new("built:latest"))
+        .create_sandbox(&small("built:latest"))
         .await
         .unwrap()
         .id;
@@ -843,7 +852,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
             0
         )
     );
-    let by_digest = SandboxCreateArgs::new(ImageName::Digest { digest });
+    let by_digest = small(ImageName::Digest { digest });
     assert!(server.client.create_sandbox(&by_digest).await.is_ok());
 
     // A step that fails fails the build, and names nothing.
@@ -851,10 +860,7 @@ async fn a_built_image_runs_with_what_its_steps_made() {
         .build(Recipe::new("built:latest").step("exit 3"), "failed:latest")
         .await;
     assert!(failed.error.is_some(), "{failed:?}");
-    let created = server
-        .client
-        .create_sandbox(&SandboxCreateArgs::new("failed:latest"))
-        .await;
+    let created = server.client.create_sandbox(&small("failed:latest")).await;
     assert_eq!(status(created), 404);
 }
 

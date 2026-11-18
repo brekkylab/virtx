@@ -11,7 +11,7 @@ use std::{
 
 use virtx::{
     Error, InboundRule, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPortOpenArgs, Source,
+    Source,
 };
 
 mod common;
@@ -163,7 +163,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
 }
 
 #[test]
-fn a_port_says_what_it_is_for_and_is_opened_and_closed_as_the_sandbox_runs() {
+fn a_port_says_what_it_is_for_and_is_kept_across_a_stop() {
     let client = common::client();
     common::alpine(&client);
     let mut args = SandboxCreateArgs::new(ALPINE);
@@ -177,53 +177,24 @@ fn a_port_says_what_it_is_for_and_is_opened_and_closed_as_the_sandbox_runs() {
         },
     ];
     let made = client.create_sandbox(&args).wait().unwrap();
-    let described: Vec<_> = made
-        .info()
-        .ports
-        .iter()
-        .map(|p| (p.port, p.label.as_deref(), p.protocol))
-        .collect();
-    assert_eq!(
-        described,
-        [
-            (5900, None, PortProtocol::Tcp),
-            (5173, Some("dev server"), PortProtocol::Http)
-        ]
-    );
-    let open = SandboxPortOpenArgs {
-        label: Some("docs".into()),
-        protocol: Some(PortProtocol::Http),
-        ..Default::default()
+    let described = |sandbox: &virtx::Sandbox| -> Vec<_> {
+        sandbox
+            .info()
+            .ports
+            .iter()
+            .map(|p| (p.port, p.label.clone(), p.protocol))
+            .collect()
     };
-    let web = client
-        .open_sandbox_port_with(made.id(), 8080, &open)
-        .wait()
-        .unwrap();
-    assert_eq!(
-        (web.port, web.label.as_deref(), web.protocol),
-        (8080, Some("docs"), PortProtocol::Http)
-    );
-    let plain = made.open_port(9000).wait().unwrap();
-    assert_eq!((plain.label, plain.protocol), (None, PortProtocol::Tcp));
+    let told = [
+        (5900, None, PortProtocol::Tcp),
+        (5173, Some("dev server".to_owned()), PortProtocol::Http),
+    ];
+    assert_eq!(described(&made), told);
 
-    // Kept as those it was made with are, across a stop; closed, gone from them.
+    // Kept, as it was made with them, across a stop.
     made.stop().wait().unwrap();
     let started = made.start().wait().unwrap();
-    let ports: Vec<_> = started.info().ports.iter().map(|p| p.port).collect();
-    assert_eq!(ports, [5900, 5173, 8080, 9000]);
-    made.close_port(9000).wait().unwrap();
-    let started = client.start_sandbox(made.id()).wait().unwrap();
-    let ports: Vec<_> = started.info().ports.iter().map(|p| p.port).collect();
-    assert_eq!(ports, [5900, 5173, 8080]);
-    let closed = client
-        .close_sandbox_port(made.id(), 9000)
-        .wait()
-        .unwrap_err();
-    assert_eq!(
-        (closed.status(), closed.code()),
-        (Some(404), Some("not_found")),
-        "{closed}"
-    );
+    assert_eq!(described(&started), told);
     made.remove().wait().unwrap();
 }
 

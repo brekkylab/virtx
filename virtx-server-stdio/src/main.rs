@@ -291,7 +291,7 @@ mod tests {
 
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
-        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxPortOpenArgs, SandboxVolume,
+        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -500,12 +500,6 @@ mod tests {
         let error = server.client.create_sandbox(&args).await.unwrap_err();
         assert_eq!((error.status(), error.code()), (Some(400), Some("invalid")));
         assert!(error.to_string().contains("virtx cloud's"), "{error}");
-        let open = SandboxPortOpenArgs {
-            inbound: Some(Vec::new()),
-            ..Default::default()
-        };
-        let opened = server.client.open_sandbox_port_with("nobody", 22, &open);
-        assert_eq!(status(opened.await), 400);
         for mib in [0, 16, 32] {
             let mut args = here();
             args.memory_mib = Some(mib);

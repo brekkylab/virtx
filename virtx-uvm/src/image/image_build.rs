@@ -72,21 +72,9 @@ pub fn recipe_kept(image: &mut ImageConfiguration, recipe: &Recipe) {
     image.set_config(Some(config));
 }
 
-/// The recipe kept in `image`'s config let go of: an image made of it otherwise -- a sandbox
-/// committed -- was not built from it.
-pub fn recipe_forgotten(image: &mut ImageConfiguration) {
-    let Some(mut config) = image.config().clone() else {
-        return;
-    };
-    if let Some(labels) = config.labels_mut() {
-        labels.remove(RECIPE_LABEL);
-    }
-    image.set_config(Some(config));
-}
-
-/// What made `image` as it is now -- `created_by`, as a Dockerfile's instruction, or what
-/// committed it -- kept in its history, as `docker history` reads it: with whether it added a
-/// layer, of the `layers` it has now. Not kept where its history did not already tell each layer
+/// What made `image` as it is now -- `created_by`, as a Dockerfile's instruction -- kept in
+/// its history, as `docker history` reads it: with whether it added a layer, of the `layers` it
+/// has now. Not kept where its history did not already tell each layer
 /// apart -- one its base kept none of -- as it would then name the wrong ones.
 pub fn history_kept(
     image: &mut ImageConfiguration,
@@ -258,10 +246,9 @@ fn written(store: &Store, snapshot: &Snapshot) -> Result<Option<Digest>> {
     written_layer(store, &snapshot.path)
 }
 
-/// What machines wrote to the snapshot disk at `disk` -- a copy of one, or one no machine
-/// runs over -- filed in `store` as a layer, as a `RUN` files what it wrote: how a sandbox is
-/// committed to an image. `None` for a disk nothing was written to.
-pub fn written_layer(store: &Store, disk: &std::path::Path) -> Result<Option<Digest>> {
+/// What machines wrote to the snapshot disk at `disk`, one no machine runs over, filed in
+/// `store` as a layer. `None` for a disk nothing was written to.
+fn written_layer(store: &Store, disk: &std::path::Path) -> Result<Option<Digest>> {
     let file = File::open(disk).map_err(|e| Error::Io {
         context: format!("opening {}", disk.display()),
         source: e,
@@ -314,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn a_built_image_keeps_its_recipe_and_a_committed_one_does_not() {
+    fn a_built_image_keeps_its_recipe() {
         let recipe = Recipe::new("alpine:3.20")
             .step("apk add --no-cache jq")
             .step(Step::env("TZ", "UTC"));
@@ -323,18 +310,6 @@ mod tests {
         let kept =
             image.config().as_ref().unwrap().labels().as_ref().unwrap()[RECIPE_LABEL].clone();
         assert_eq!(serde_json::from_str::<Recipe>(&kept).unwrap(), recipe);
-
-        recipe_forgotten(&mut image);
-        assert!(
-            !image
-                .config()
-                .as_ref()
-                .unwrap()
-                .labels()
-                .as_ref()
-                .unwrap()
-                .contains_key(RECIPE_LABEL)
-        );
     }
 
     #[test]

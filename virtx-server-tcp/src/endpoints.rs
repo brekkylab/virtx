@@ -40,12 +40,11 @@ use tokio::task::AbortHandle;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
-    DEFAULT_PROJECT, ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry,
-    ImageJobKind, ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec,
-    ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPortOpenArgs, SandboxSignalArgs,
-    SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec, ProjectCreateArgs,
+    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted, Written};
 use virtx_uvm::{
@@ -735,15 +734,6 @@ impl Hooks for HomeHooks {
         })
     }
 
-    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            self.home()?
-                .bring_up(Kind::Snapshot, id)
-                .await
-                .map_err(hooked)
-        })
-    }
-
     /// Its disk removed from the storage home first, if there is one -- one never kept there,
     /// made and deleted before it was, is nothing to remove -- and a fill ahead of it stopped.
     fn deleting<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
@@ -834,7 +824,6 @@ pub fn router() -> Router {
         .route("/images/jobs/pull/", post(image_pull))
         .route("/images/jobs/push/", post(image_push))
         .route("/images/jobs/build/", post(image_build))
-        .route("/images/jobs/commit/", post(image_commit))
         .route(
             "/images/jobs/{id}",
             get(image_job_get).delete(image_job_remove),
@@ -855,10 +844,6 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
         .route("/sandboxes/{id}/start", post(sandbox_start))
         .route("/sandboxes/{id}/stop", post(sandbox_stop))
-        .route(
-            "/sandboxes/{id}/ports/{port}",
-            put(sandbox_port_open).delete(sandbox_port_close),
-        )
         .route("/sandboxes/{id}/disk", put(sandbox_disk))
         .route("/sandboxes/{id}/resources", put(sandbox_resources))
         .route("/sandboxes/{id}/files", any(sandbox_files))
@@ -1298,20 +1283,6 @@ async fn base(
     Ok((config, layers, Some(held)))
 }
 
-/// A commit: the image the sandbox stands on, with what it has written as one more layer, and
-/// that image's config, tagged `reference`; see [`Sandbox::commit`].
-async fn image_commit(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
-    let args: ImageCommitArgs = body(&request)?;
-    let reference = reference(&args.reference)?;
-    let sandbox = home.sandbox(&args.sandbox)?;
-    image_job(
-        &home,
-        ImageJobKind::Commit,
-        args.reference,
-        move |mut report| async move { Ok(sandbox.commit(&reference, &mut *report).await?) },
-    )
-}
-
 async fn image_job_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -1622,44 +1593,6 @@ async fn sandbox_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     home.sandboxes.delete(&id).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-/// Port `port` of sandbox `id` opened, as those it was made with are: answered as each of
-/// those was, `201` and where it is reached -- or `200` and where, for one open already. A
-/// program in it that listens on the port already is reached once it listens again.
-async fn sandbox_port_open(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-    request: Bytes,
-) -> Answer {
-    // None, `null` or `{}`: TCP, named nothing.
-    let asked: SandboxPortOpenArgs = match request.iter().all(u8::is_ascii_whitespace) {
-        true => SandboxPortOpenArgs::default(),
-        false => serde_json::from_slice::<Option<SandboxPortOpenArgs>>(&request)
-            .map_err(invalid)?
-            .unwrap_or_default(),
-    };
-    if asked.inbound.is_some() {
-        return Err(invalid(
-            "inbound: a port's inbound rules are virtx cloud's; this server keeps none",
-        ));
-    }
-    let sandbox = home.sandbox(&id)?;
-    match sandbox.open_port(port, asked.label, asked.protocol).await? {
-        (open, true) => Ok(created(format!("/sandboxes/{id}/ports/{port}"), &open)),
-        (open, false) => Ok(json(&open)),
-    }
-}
-
-/// Port `port` of sandbox `id` closed: its capability reaches it no more from now on, and it is
-/// not opened again as the sandbox starts. `404` for one not open. A connection through it open
-/// now runs on until it ends.
-async fn sandbox_port_close(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-) -> Answer {
-    home.sandbox(&id)?.close_port(port)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

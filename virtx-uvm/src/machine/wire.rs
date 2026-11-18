@@ -34,17 +34,6 @@ pub const IO_PORT_NAME: &str = "virtx-io";
 /// moves.
 pub const MAX_DATA: usize = 1 << 20;
 
-/// The vsock port the agent dials guest ports from, for a published port whose program in the
-/// guest listened before it was published -- a listen the host was not asked to take, which
-/// stays the guest's own (`net`). The host connects, says the port as two big-endian bytes,
-/// and is answered one byte, [`DIALED`] or [`NOT_DIALED`]; then it is that port's connection,
-/// both ways. Clear of libkrun's own ports (620, 1024-1031, 123).
-pub const DIAL_PORT: u32 = 52_000;
-/// The agent's answer to a dial that reached the port in the guest.
-pub const DIALED: u8 = 0;
-/// The agent's answer to a dial nothing in the guest answered.
-pub const NOT_DIALED: u8 = 1;
-
 /// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CtrlReq {
@@ -87,10 +76,6 @@ pub enum CtrlReq {
     /// Put what the guest has written on its disks, and say so with
     /// [`Synced`](CtrlResp::Synced): before its disks are copied as they are.
     Sync,
-    /// Publish guest port `port` as those the machine booted with are, from now on: answered
-    /// with [`Published`](CtrlResp::Published). The machine's process does it, not the
-    /// guest, which never hears of it.
-    Publish { port: u16 },
     /// Whether the process `id`, on a terminal, has another in the terminal's foreground -- a
     /// command a shell runs -- answered with [`Foreground`](CtrlResp::Foreground).
     Foreground { id: u32 },
@@ -133,9 +118,6 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
-    /// The answer to the last [`Publish`](CtrlReq::Publish): where on this host's loopback
-    /// the port is reached now, or why it could not be published.
-    Published(std::result::Result<(u16, SocketAddr), String>),
     /// The answer to a [`Foreground`](CtrlReq::Foreground): whether the process `id` has
     /// another in its terminal's foreground; `false` for one with no terminal, or ended.
     Foreground { id: u32, busy: bool },

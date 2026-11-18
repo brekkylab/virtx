@@ -9,10 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use virtx_core::{
-    PortProtocol, PortSpec, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind,
-    SandboxPort,
-};
+use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
 
 use super::hooks::{Held, Hooks, Written};
 use super::record::{Record, Resized};
@@ -63,9 +60,6 @@ pub const LABEL_MOST: usize = 128;
 /// How long a sandbox starting waits for its disk to be let go of: by what keeps it, as it
 /// stopped, or by a process spawned as it was held.
 const DISK_WAIT: Duration = Duration::from_secs(10);
-
-/// How long a machine has to say where a port it was asked to publish is.
-const PUBLISH_WAIT: Duration = Duration::from_secs(10);
 
 /// The signals a job is sent, by name, each numbered as Linux numbers it: its index, plus one.
 const SIGNALS: [&str; 31] = [
@@ -142,9 +136,6 @@ struct Starting {
     waiter: oneshot::Sender<Result<Arc<Job>, String>>,
 }
 
-/// Who waits for a port the machine was asked to publish: where it is, or why not.
-type Publishing = oneshot::Sender<Result<(u16, std::net::SocketAddr), String>>;
-
 /// Who waits for a machine's answer about its disk at a mark, and the mark.
 type Waiting = (u64, oneshot::Sender<Result<bool, String>>);
 
@@ -161,8 +152,6 @@ pub(super) struct Run {
     starting: Mutex<VecDeque<Starting>>,
     /// Where what each process on a terminal writes goes, by its pid, until it ends.
     terminals: Mutex<HashMap<u32, mpsc::UnboundedSender<String>>>,
-    /// Who waits for each port asked of the machine and not yet answered, in the order asked.
-    publishing: Mutex<VecDeque<Publishing>>,
     /// Who waits for the guest to say it has synced, and for its machine to say its disk is
     /// marked, and rebased, and at which mark.
     pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
@@ -499,7 +488,6 @@ impl Sandbox {
             up: AtomicBool::new(true),
             starting: Mutex::default(),
             terminals: Mutex::default(),
-            publishing: Mutex::default(),
             synced: Mutex::default(),
             marked: Mutex::default(),
             rebased: Mutex::default(),
@@ -810,133 +798,6 @@ impl Sandbox {
         run.typed(pid, data, eof).await
     }
 
-    /// Port `port` opened, as `label` and `protocol` say -- TCP where it says none -- as those
-    /// it was made with are, and published at once in its machine if it runs: answered with
-    /// where it is reached, and whether it was opened now rather than open already. One open
-    /// already takes the label asked for, and refuses another protocol.
-    pub async fn open_port(
-        self: &Arc<Self>,
-        port: u16,
-        label: Option<String>,
-        protocol: Option<PortProtocol>,
-    ) -> Result<(SandboxPort, bool), Error> {
-        if port == 0 {
-            return Err(Error::Invalid("port: 0 is not one".into()));
-        }
-        if !label_fits(label.as_deref()) {
-            return Err(Error::Invalid(format!(
-                "label: past {LABEL_MOST} characters"
-            )));
-        }
-        if self.is_deleted() {
-            return Err(self.gone());
-        }
-        let already = |opened: &mut Vec<SandboxPort>| -> Option<Result<SandboxPort, Error>> {
-            let open = opened.iter_mut().find(|open| open.port == port)?;
-            if protocol.is_some_and(|protocol| protocol != open.protocol) {
-                return Some(Err(Error::Exists(
-                    format!("port {port} is open as {:?} already", open.protocol).to_lowercase(),
-                )));
-            }
-            if label.is_some() && label != open.label {
-                open.label = label.clone();
-            }
-            Some(Ok(open.clone()))
-        };
-        let was = already(&mut self.record.opened.lock().unwrap());
-        if let Some(was) = was {
-            let open = was?;
-            self.keep();
-            return Ok((open, false));
-        }
-        // A running one's machine publishes it now; a stopped one's, as it boots.
-        if let Some(run) = self.run() {
-            let (told, answer) = oneshot::channel();
-            {
-                // Asked and waited for in one turn, so each answer reaches the one who asked.
-                let mut publishing = run.publishing.lock().unwrap();
-                run.machine.publish(port)?;
-                publishing.push_back(told);
-            }
-            match tokio::time::timeout(PUBLISH_WAIT, answer).await {
-                Ok(Ok(Ok(_))) => {}
-                Ok(Ok(Err(why))) => return Err(Error::Invalid(why)),
-                Ok(Err(_)) => return Err(Error::Ended),
-                Err(_) => {
-                    return Err(Error::Failed(format!(
-                        "its machine did not publish port {port}"
-                    )));
-                }
-            }
-        }
-        let made = {
-            let mut opened = self.record.opened.lock().unwrap();
-            // Opened meanwhile by another request: the same port, the same URL.
-            if let Some(was) = already(&mut opened) {
-                return Ok((was?, false));
-            }
-            let spec = PortSpec {
-                port,
-                label,
-                protocol: protocol.unwrap_or_default(),
-                inbound: None,
-            };
-            let (key, url) = self.shared.hooks.port(&spec, None);
-            let made = SandboxPort {
-                port,
-                url,
-                label: spec.label,
-                protocol: spec.protocol,
-                // A public address is the cloud's to give (its gateway), not a server's.
-                address: None,
-            };
-            opened.push(made.clone());
-            if let Some(key) = key {
-                self.record.keys.lock().unwrap().insert(key, port);
-            }
-            made
-        };
-        self.listen().await;
-        let made = self
-            .record
-            .opened
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|open| open.port == port)
-            .cloned()
-            .unwrap_or(made);
-        self.keep();
-        Ok((made, true))
-    }
-
-    /// Port `port` closed: its URL reaches it no more from now on, and it is not opened again
-    /// as it starts. A connection through it open now runs on until it ends.
-    pub fn close_port(&self, port: u16) -> Result<(), Error> {
-        if self.is_deleted() {
-            return Err(self.gone());
-        }
-        {
-            let mut opened = self.record.opened.lock().unwrap();
-            let before = opened.len();
-            opened.retain(|open| open.port != port);
-            if opened.len() == before {
-                return Err(Error::NotFound(format!(
-                    "port {port} is not open in sandbox {}",
-                    self.record.id
-                )));
-            }
-            self.record
-                .keys
-                .lock()
-                .unwrap()
-                .retain(|_, opened| *opened != port);
-        }
-        self.listening.lock().unwrap().remove(&port);
-        self.keep();
-        Ok(())
-    }
-
     /// The port key `key` names, if it is one of its own.
     pub(super) fn keyed(&self, key: &str) -> Option<u16> {
         self.record.keys.lock().unwrap().get(key).copied()
@@ -1104,8 +965,6 @@ impl Sandbox {
     fn read(&self, run: &Arc<Run>) {
         let machine = &run.machine;
         let _published = self.ports.publish(machine.published.clone());
-        // Those opened since, each published until the machine ends, as those it booted with are.
-        let mut since = Vec::new();
         let mut running = HashMap::new();
         while let Some(message) = machine.recv() {
             match message {
@@ -1189,14 +1048,6 @@ impl Sandbox {
                         let _ = told.send(rebased);
                     }
                 }
-                CtrlResp::Published(published) => {
-                    if let Ok(at) = published {
-                        since.push(self.ports.publish(vec![at]));
-                    }
-                    if let Some(told) = run.publishing.lock().unwrap().pop_front() {
-                        let _ = told.send(published);
-                    }
-                }
                 // A command runs on a terminal: used, as long as it does.
                 CtrlResp::Foreground { busy, .. } => {
                     if busy {
@@ -1219,7 +1070,6 @@ impl Sandbox {
         starting.clear();
         drop(starting);
         run.terminals.lock().unwrap().clear();
-        run.publishing.lock().unwrap().clear();
         run.written.lock().unwrap().clear();
         for job in running.into_values() {
             job.end(128 + SIGKILL);

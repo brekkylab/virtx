@@ -32,11 +32,10 @@ use tokio::net::TcpListener;
 use tokio::task::AbortHandle;
 
 use virtx_core::{
-    DEFAULT_PROJECT, ImageBuildArgs, ImageCommitArgs, ImageJob, ImageJobEnd, ImageJobEntry,
-    ImageJobKind, ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs,
-    ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    SandboxPortOpenArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
+    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::sandbox::{Held, Hooks};
 use virtx_uvm::{
@@ -259,7 +258,6 @@ pub fn router() -> Router {
         .route("/images/jobs/pull/", post(image_pull))
         .route("/images/jobs/push/", post(image_push))
         .route("/images/jobs/build/", post(image_build))
-        .route("/images/jobs/commit/", post(image_commit))
         .route(
             "/images/jobs/{id}",
             get(image_job_get).delete(image_job_remove),
@@ -283,10 +281,6 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
         .route("/sandboxes/{id}/start", post(sandbox_start))
         .route("/sandboxes/{id}/stop", post(sandbox_stop))
-        .route(
-            "/sandboxes/{id}/ports/{port}",
-            put(sandbox_port_open).delete(sandbox_port_close),
-        )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -577,20 +571,6 @@ async fn base(
     Ok((config, layers, Some(held)))
 }
 
-/// A commit: the image the sandbox stands on, with what it has written as one more layer, and
-/// that image's config, tagged `reference`; see [`Sandbox::commit`].
-async fn image_commit(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
-    let args: ImageCommitArgs = body(&request)?;
-    let reference = reference(&args.reference)?;
-    let sandbox = home.sandboxes.get(&args.sandbox)?;
-    image_job(
-        &home,
-        ImageJobKind::Commit,
-        args.reference,
-        move |mut report| async move { Ok(sandbox.commit(&reference, &mut *report).await?) },
-    )
-}
-
 async fn image_job_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -824,46 +804,6 @@ async fn sandbox_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     home.sandboxes.delete(&id).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-/// Port `port` opened: `201` and where it is reached, or `200` and where, for one open
-/// already.
-async fn sandbox_port_open(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-    request: Bytes,
-) -> Answer {
-    let asked = port_args(&request)?;
-    let sandbox = home.sandboxes.get(&id)?;
-    match sandbox.open_port(port, asked.label, asked.protocol).await? {
-        (open, true) => Ok(created(format!("/sandboxes/{id}/ports/{port}"), &open)),
-        (open, false) => Ok(json(&open)),
-    }
-}
-
-/// What a port's opening asks: none, `null` or `{}` for TCP, named nothing. Inbound rules are
-/// refused: virtx cloud's.
-fn port_args(request: &Bytes) -> Result<SandboxPortOpenArgs, Refused> {
-    let asked = match request.iter().all(u8::is_ascii_whitespace) {
-        true => SandboxPortOpenArgs::default(),
-        false => serde_json::from_slice::<Option<SandboxPortOpenArgs>>(request)
-            .map_err(invalid)?
-            .unwrap_or_default(),
-    };
-    match asked.inbound {
-        Some(_) => Err(invalid(
-            "inbound: a port's inbound rules are virtx cloud's; this server keeps none",
-        )),
-        None => Ok(asked),
-    }
-}
-
-async fn sandbox_port_close(
-    Extension(home): Extension<Arc<Home>>,
-    Segments((id, port)): Segments<(String, u16)>,
-) -> Answer {
-    home.sandboxes.get(&id)?.close_port(port)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

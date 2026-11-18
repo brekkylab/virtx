@@ -6,9 +6,8 @@ use ::http::header;
 use futures_util::StreamExt as _;
 
 use super::{
-    InboundRule, PortInbound, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJob, SandboxJobEntry, SandboxPort, SandboxPortOpenArgs, SandboxSignalArgs,
-    SandboxStdinArgs,
+    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
+    SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -73,46 +72,6 @@ pub(crate) async fn get(client: &TransportClient, id: &str) -> Result<Sandbox, E
 /// its volumes.
 pub(crate) async fn remove(client: &TransportClient, id: &str) -> Result<(), Error> {
     http::delete(client, &sandbox(id)).await
-}
-
-/// Close the port `port` in the sandbox `id`: its URL reaches it no more.
-pub(crate) async fn close_port(client: &TransportClient, id: &str, port: u16) -> Result<(), Error> {
-    http::delete(client, &format!("{}/ports/{port}", sandbox(id))).await
-}
-
-/// Open the TCP port `port` in the sandbox `id`, as those it was made with are: where it is
-/// reached from.
-pub(crate) async fn open_port(
-    client: &TransportClient,
-    id: &str,
-    port: u16,
-    args: &SandboxPortOpenArgs,
-) -> Result<SandboxPort, Error> {
-    http::put(client, &format!("{}/ports/{port}", sandbox(id)), args).await
-}
-
-/// The inbound rules of the port `port` in the sandbox `id`: virtx cloud's.
-pub(crate) async fn port_inbound(
-    client: &TransportClient,
-    id: &str,
-    port: u16,
-) -> Result<PortInbound, Error> {
-    http::get(client, &format!("{}/ports/{port}/inbound", sandbox(id))).await
-}
-
-/// The inbound rules of the port `port` in the sandbox `id` made `rules`, all of them.
-pub(crate) async fn set_port_inbound(
-    client: &TransportClient,
-    id: &str,
-    port: u16,
-    rules: &[InboundRule],
-) -> Result<PortInbound, Error> {
-    #[derive(serde::Serialize)]
-    struct Rules<'a> {
-        rules: &'a [InboundRule],
-    }
-    let path = format!("{}/ports/{port}/inbound", sandbox(id));
-    http::put(client, &path, &Rules { rules }).await
 }
 
 /// Every job in the sandbox `id`.

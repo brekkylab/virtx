@@ -430,15 +430,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         devices.add(gpu::device(machine.spec.gpu_memory_mib)?);
     }
 
-    // The whole of what having neither is: no device -- see `net`. And so no port published
-    // later either: a guest with no device has nothing a listen could be carried over.
-    let publisher = if machine.spec.network != Network::None || !published.is_empty() {
-        let (device, publisher) = net::attach(machine.spec.network, published)?;
-        devices.add(device);
-        Some(publisher)
-    } else {
-        None
-    };
+    // The whole of what having neither is: no device -- see `net`.
+    if machine.spec.network != Network::None || !published.is_empty() {
+        devices.add(net::attach(machine.spec.network, published)?);
+    }
 
     // In this order, and the order is the whole of what names them -- see the module
     // doc.
@@ -495,16 +490,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                     continue;
                 }
                 _ => {}
-            }
-            if let CtrlReq::Publish { port } = message {
-                let published = match &publisher {
-                    Some(publisher) => publisher.publish(port),
-                    None => Err(format!(
-                        "guest port {port} cannot be published: the machine was started with no network and no ports"
-                    )),
-                };
-                let _ = send(&CtrlResp::Published(published));
-                continue;
             }
             let _ = wire::send(&mut for_guest, &message);
         }

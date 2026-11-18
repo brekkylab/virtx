@@ -10,7 +10,7 @@ Requests take and answer the types of ``virtx.image``, ``virtx.volume``, ``virtx
 ``virtx.sandbox`` and ``virtx.files``, and plain values elsewhere: what the wire calls a map is
 a ``dict``.
 
-A build, pull, push or commit of an image, and a process in a sandbox, is a job the server runs apart from
+A build, pull or push of an image, and a process in a sandbox, is a job the server runs apart from
 the request that started it. The method that starts one answers a ``StartedJob``, sent when first
 awaited or iterated: awaited, it is the job, an ``ImageJob`` or a ``SandboxJob``; iterated, it
 yields the job's log, as ``ImageJob.log`` or ``SandboxJob.log`` does, each a ``LogEntry``
@@ -28,8 +28,8 @@ A project is answered as a ``Project``, carrying its client the same way: its me
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
 A sandbox's port is reached through a ``PortForwarder``, opened over a client with the port
-``create_sandbox``, ``Sandbox.start`` or ``Sandbox.open_port`` answered, or its ``url``: an
-address on this machine's loopback. What the library warns of, such as a forwarded connection
+``create_sandbox`` or ``Sandbox.start`` answered, or its ``url``: an address on this machine's
+loopback. What the library warns of, such as a forwarded connection
 that reached nothing, the ``virtx`` logger logs.
 """
 
@@ -60,7 +60,6 @@ from .portforward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
     InboundRule,
-    PortInbound,
     PortProtocol,
     PortSpec,
     Sandbox,
@@ -117,7 +116,6 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
-    "PortInbound",
     "PortProtocol",
     "PortSpec",
     "Progress",

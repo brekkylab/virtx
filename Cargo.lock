@@ -4525,7 +4525,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "uds_windows",
  "unicode-normalization",
  "url",
  "uuid",

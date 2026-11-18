@@ -1,6 +1,6 @@
 ---
 title: "Keeping sandboxes"
-description: "Keep a sandbox's disk across stops, find it again by name, start it where it left off, and make an image of it."
+description: "Keep a sandbox's disk across stops, find it again by name, and start it where it left off."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -188,62 +188,10 @@ A sandbox started again has its files as it left them, with anything it installe
 Its processes are not kept: nothing that ran in it runs again until something starts it.
 Its volumes are mounted again and its ports opened again, at the same URLs where the server can and at others where it cannot; `start` answers where they are now.
 
-## Make an image of it
-
-`commit` makes an image of a sandbox, its image with what it wrote as one more layer, and tags it.
-Any number of sandboxes then boot that image, each with a disk of its own, while the sandbox it came from goes on as it was.
-A commit of a running sandbox is of its files as they are when the commit starts; of a stopped one, of its disk as it was left, without starting it.
-What its volumes hold is not in the image.
-
-A commit is an image job, as a [build](/docs/guides/images/#after-a-build) is: read its log through `end`, and check its `error` before booting from the tag.
-
-<Tabs syncKey="lang">
-<TabItem label="Python">
-
-```python
-async for entry in sandbox.commit("task-42:done"):
-    # Log(line) ..., then ImageJobEnd(digest=...) or ImageJobEnd(error=...)
-    print(entry.entry)
-
-review = await client.create_sandbox("task-42:done")
-```
-
-</TabItem>
-<TabItem label="Node.js">
-
-```js
-for await (const entry of sandbox.commit('task-42:done')) {
-  // { id, log } ..., then { id, end } with a digest or an error
-  console.log(entry)
-}
-
-const review = await client.createSandbox('task-42:done')
-```
-
-</TabItem>
-<TabItem label="Rust">
-
-```rust
-let mut log = sandbox.commit("task-42:done").log();
-while let Some(entry) = log.next().await {
-    // Log(line) ..., then End(ImageJobEnd { digest, error })
-    println!("{:?}", entry?.entry);
-}
-
-let review = client
-    .create_sandbox(&SandboxCreateArgs::new("task-42:done"))
-    .await?;
-```
-
-</TabItem>
-</Tabs>
-
-`commit_image` does the same given a sandbox's id.
-
 ## Remove it
 
 A sandbox is deleted by `remove`, when it stops if it is `ephemeral`, and after `auto_delete_days` stopped and unused, and in no other way.
-Deleting one stops it first if it runs, and removes its disk with everything it wrote; its volumes, and the images committed of it, stay.
+Deleting one stops it first if it runs, and removes its disk with everything it wrote; its volumes stay.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

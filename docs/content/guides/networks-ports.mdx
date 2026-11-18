@@ -137,8 +137,7 @@ An HTTP port's rules limit who reaches its `url`, and it has no `address`.
 A connection from an address no rule holds is not let in, so a port with no rules is reached there by no one.
 
 Each rule is a `source`, an IPv4 or IPv6 CIDR such as `203.0.113.0/24` or one address such as `203.0.113.7`, and an optional `description`.
-Set them as the port opens, with `inbound` in its spec or in `open_port`, or later with `set_inbound`, which replaces them all.
-`inbound` reads them back, each source as a CIDR.
+Set them as the sandbox is created, with `inbound` in the port's spec.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -150,8 +149,6 @@ sandbox = await client.create_sandbox(
     "alpine:latest",
     ports=[PortSpec(22, inbound=[InboundRule("203.0.113.7", "office")])],
 )
-await sandbox.set_inbound(22, [InboundRule("10.0.0.0/8")])
-print((await sandbox.inbound(22)).rules)
 ```
 
 </TabItem>
@@ -161,8 +158,6 @@ print((await sandbox.inbound(22)).rules)
 const sandbox = await client.createSandbox('alpine:latest', {
   ports: [{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }],
 })
-await sandbox.setInbound(22, [{ source: '10.0.0.0/8' }])
-console.log((await sandbox.inbound(22)).rules)
 ```
 
 </TabItem>
@@ -174,8 +169,6 @@ ssh.inbound = Some(vec![InboundRule::new("203.0.113.7").description("office")]);
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(ssh))
     .await?;
-sandbox.set_inbound(22, &[InboundRule::new("10.0.0.0/8")]).await?;
-println!("{:?}", sandbox.inbound(22).await?.rules);
 ```
 
 </TabItem>

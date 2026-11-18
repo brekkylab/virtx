@@ -15,7 +15,7 @@ pub enum Error {
     #[error("{0}")]
     Unsupported(String),
 
-    /// A name, an id or a port another has already.
+    /// A name or an id another has already.
     #[error("{0}")]
     Exists(String),
 

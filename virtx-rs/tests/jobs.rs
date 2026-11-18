@@ -408,7 +408,7 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
 }
 
 #[test]
-fn a_sandbox_stops_starts_again_and_is_committed_to_an_image() {
+fn a_sandbox_stops_and_starts_again() {
     let client = common::client();
     common::alpine(&client);
     let name = common::unique("lifecycle");
@@ -441,38 +441,6 @@ fn a_sandbox_stops_starts_again_and_is_committed_to_an_image() {
     assert_eq!(got.info().state, SandboxState::Running);
     let started = client.start_sandbox(made.id()).wait().unwrap();
     assert_eq!(started.info().state, SandboxState::Running);
-
-    // Committed, by its handle and by its id: each an image its disk is in.
-    common::run(&made, &["sh", "-c", "echo committed > /root/mark"]);
-    let reference = format!("{}:v1", common::unique("committed"));
-    let mut log = made.commit(&reference).log();
-    let mut last = None;
-    while let Some(entry) = log.wait_next() {
-        last = Some(entry.unwrap().entry);
-    }
-    let digest = match last {
-        Some(ImageJobEntry::End(ImageJobEnd {
-            digest: Some(digest),
-            ..
-        })) => digest,
-        other => panic!("committing ended with {other:?}"),
-    };
-    assert_eq!(common::tagged(&client, &reference), Some(digest));
-    let again = format!("{}:v2", common::unique("committed"));
-    let job = client.commit_image(made.id(), &again).wait().unwrap();
-    assert_eq!(job.info().kind, ImageJobKind::Commit);
-    common::entries(job.log(None));
-    let from = client
-        .create_sandbox(&SandboxCreateArgs::new(reference.as_str()))
-        .wait()
-        .unwrap();
-    assert_eq!(
-        common::run(&from, &["cat", "/root/mark"]),
-        (vec!["committed".to_owned()], 0)
-    );
-    from.remove().wait().unwrap();
-    client.remove_image(&reference).wait().unwrap();
-    client.remove_image(&again).wait().unwrap();
 
     made.remove().wait().unwrap();
     let gone = client.get_sandbox(made.id()).wait().unwrap_err();

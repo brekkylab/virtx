@@ -34,8 +34,7 @@ use std::time::UNIX_EPOCH;
 mod wire;
 
 use wire::{
-    CtrlReq, CtrlResp, DIAL_PORT, DIALED, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA,
-    NOT_DIALED, PORT_NAME,
+    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
@@ -294,12 +293,6 @@ fn serve() -> io::Result<()> {
         }
     });
 
-    // The host's way to a port a program listened on before it was published: see `dial`.
-    thread::spawn(|| {
-        if let Err(e) = vsock_serve(DIAL_PORT, dialed) {
-            eprintln!("{}: dialing guest ports: {e}", env!("CARGO_BIN_NAME"));
-        }
-    });
     send(&out, &CtrlResp::Ready(Vec::new()));
     let terminals = Terminals::default();
     let stdins = Stdins::default();
@@ -348,7 +341,7 @@ fn serve() -> io::Result<()> {
                 libc::reboot(libc::RB_AUTOBOOT);
             },
             // The machine's process answers it, and never passes it on.
-            CtrlReq::Publish { .. } | CtrlReq::Mark { .. } | CtrlReq::Rebase { .. } => {}
+            CtrlReq::Mark { .. } | CtrlReq::Rebase { .. } => {}
             // Its terminal's foreground group not its own -- it leads its session, so its
             // group is its pid -- is another it started: a command a shell runs.
             CtrlReq::Foreground { id } => {
@@ -366,134 +359,6 @@ fn serve() -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Listen on vsock `port` for good, each connection -- the host's -- answered by `each` on a
-/// thread of its own.
-fn vsock_serve(port: u32, each: fn(File)) -> io::Result<()> {
-    // SAFETY: plain values in; the descriptor is checked before it is owned.
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a socket just made, owned here alone.
-    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: a zeroed `sockaddr_vm` is a valid one, filled in after.
-    let mut at: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
-    at.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-    at.svm_port = port;
-    at.svm_cid = libc::VMADDR_CID_ANY;
-    // SAFETY: a valid address of the size given, on our socket.
-    let bound = unsafe {
-        libc::bind(
-            listener.as_raw_fd(),
-            (&at as *const libc::sockaddr_vm).cast(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        )
-    };
-    // SAFETY: our socket.
-    if bound < 0 || unsafe { libc::listen(listener.as_raw_fd(), 64) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    loop {
-        // SAFETY: our listening socket; the address is not asked for.
-        let fd = unsafe {
-            libc::accept4(
-                listener.as_raw_fd(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        // SAFETY: a connection just accepted, owned by the thread it goes to alone.
-        let host = unsafe { File::from_raw_fd(fd) };
-        thread::spawn(move || each(host));
-    }
-}
-
-/// The host's connection `host` to [`DIAL_PORT`], joined to the port it names on the guest's
-/// own loopback: it says the port as two big-endian bytes, and is answered [`DIALED`] first --
-/// or [`NOT_DIALED`] and closed if nothing listens there.
-///
-/// For a program that listened before its port was published: its `listen` stayed the guest's,
-/// as libkrun was not asked to take it, so the host has nothing of its own to connect to. This
-/// is the guest's loopback, where it is. A connection to it tries the guest's own stack first,
-/// so it reaches that listener -- and is refused, not carried back to the host, where there is
-/// none, the port being published.
-fn dialed(mut host: File) {
-    let mut port = [0u8; 2];
-    if host.read_exact(&mut port).is_err() {
-        return;
-    }
-    let port = u16::from_be_bytes(port);
-    let guest = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-        .or_else(|_| std::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)));
-    let Ok(guest) = guest else {
-        let _ = host.write_all(&[NOT_DIALED]);
-        return;
-    };
-    if host.write_all(&[DIALED]).is_err() {
-        return;
-    }
-    let _ = guest.set_nodelay(true);
-    splice(&host, &guest);
-}
-
-/// Carry what each of `host` and `guest` says to the other until both are done, on this one
-/// thread: a socket here is libkrun's (TSI) as much as the kernel's, and one thread blocked
-/// reading it holds it from another writing -- so a program that waits to be spoken to before it
-/// answers would wait for ever.
-fn splice(host: &File, guest: &std::net::TcpStream) {
-    let ends = [host.as_raw_fd(), guest.as_raw_fd()];
-    // Whether each is still read from: once it is done, the other is told so.
-    let mut reading = [true, true];
-    let mut buffer = vec![0u8; 64 * 1024];
-    while reading.iter().any(|r| *r) {
-        let mut polled = [0, 1].map(|i| libc::pollfd {
-            fd: if reading[i] { ends[i] } else { -1 },
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        // SAFETY: two `pollfd`s of ours, as many as said.
-        if unsafe { libc::poll(polled.as_mut_ptr(), 2, -1) } < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return;
-        }
-        for i in [0, 1] {
-            if polled[i].revents == 0 {
-                continue;
-            }
-            let read = match i {
-                0 => (&*host).read(&mut buffer),
-                _ => (&*guest).read(&mut buffer),
-            };
-            let n = match read {
-                Ok(0) | Err(_) => {
-                    reading[i] = false;
-                    // SAFETY: our descriptor; its writing half alone ends.
-                    unsafe { libc::shutdown(ends[1 - i], libc::SHUT_WR) };
-                    continue;
-                }
-                Ok(n) => n,
-            };
-            let wrote = match i {
-                0 => (&*guest).write_all(&buffer[..n]),
-                _ => (&*host).write_all(&buffer[..n]),
-            };
-            if wrote.is_err() {
-                return;
-            }
-        }
-    }
 }
 
 /// The virtio-console port named `name`.

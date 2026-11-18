@@ -112,7 +112,6 @@ const SIGNATURES = {
   virtx_client_download_image: WITH_ARGS,
   virtx_client_upload_image: WITH_ARGS,
   virtx_client_prune_image: PLAIN,
-  virtx_client_commit_image: WITH_ARGS,
   virtx_client_list_project: PLAIN,
   virtx_client_create_project: WITH_ARGS,
   virtx_client_get_project: WITH_ARGS,
@@ -146,10 +145,6 @@ const SIGNATURES = {
   virtx_client_find_sandbox: WITH_ARGS,
   virtx_client_start_sandbox: WITH_ARGS,
   virtx_client_stop_sandbox: WITH_ARGS,
-  virtx_client_open_sandbox_port: WITH_ARGS,
-  virtx_client_close_sandbox_port: WITH_ARGS,
-  virtx_client_get_sandbox_port_inbound: WITH_ARGS,
-  virtx_client_set_sandbox_port_inbound: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -678,13 +673,6 @@ class Client {
     return this._imageJob('virtx_client_pull_image', { reference, auth })
   }
 
-  // Starts making an image of `sandbox`, a handle or its id: the job, and its log as the job's
-  // `log`.
-  commitImage(sandbox, reference) {
-    const id = sandbox instanceof Sandbox ? sandbox.id : sandbox
-    return this._imageJob('virtx_client_commit_image', { sandbox: id, reference })
-  }
-
   pushImage(reference, auth) {
     return this._imageJob('virtx_client_push_image', { reference, auth })
   }
@@ -1132,57 +1120,6 @@ class Sandbox extends Files {
   // Stops it if it runs, its disk kept -- or, for an ephemeral one, deleted with it.
   stop() {
     return this.client.stopSandbox(this.id)
-  }
-
-  // Opens the port `port` in it, as those it was made with are, TCP unless `protocol` says
-  // `'http'`, with `inbound` its inbound rules: where it is reached from, kept in `ports` in
-  // place of one for the same port. Opened already, it is answered as it is, `label` renaming it.
-  async openPort(port, { label, protocol, inbound } = {}) {
-    const opened = await this.client._call('virtx_client_open_sandbox_port', {
-      id: this.id,
-      port,
-      label,
-      protocol,
-      inbound,
-    })
-    this.ports = (this.ports ?? []).filter((known) => known.port !== port).concat([opened])
-    return opened
-  }
-
-  // Closes the port `port` in it: its URL reaches it no more, and it is not opened again as it
-  // starts; dropped from `ports`.
-  async closePort(port) {
-    await this.client._call('virtx_client_close_sandbox_port', { id: this.id, port })
-    if (this.ports) this.ports = this.ports.filter((known) => known.port !== port)
-  }
-
-  // The inbound rules of its port `port`, and its public address if it has one: virtx cloud's.
-  inbound(port) {
-    return this.client._call('virtx_client_get_sandbox_port_inbound', { id: this.id, port })
-  }
-
-  // Makes the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one --
-  // answered as the server keeps them: its public `address` kept on the port in `ports` too.
-  async setInbound(port, rules) {
-    const inbound = await this.client._call('virtx_client_set_sandbox_port_inbound', {
-      id: this.id,
-      port,
-      rules,
-    })
-    if (this.ports) {
-      this.ports = this.ports.map((known) => {
-        if (known.port !== port) return known
-        const { address: _, ...rest } = known
-        return inbound.address == null ? rest : { ...rest, address: inbound.address }
-      })
-    }
-    return inbound
-  }
-
-  // Starts making an image of it, to point `reference` at: the job, and its log as the job's
-  // `log`.
-  commit(reference) {
-    return this.client.commitImage(this.id, reference)
   }
 
   // Deletes it: stopped first if it runs, and its disk removed. Its volumes stay.

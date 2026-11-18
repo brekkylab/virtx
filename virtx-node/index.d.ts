@@ -89,7 +89,7 @@ export interface Progress<C> {
 /** Each of a request's notifications, then what it answered. */
 export type Event<T, C> = { progress: Progress<C> } | { output: T }
 
-export type ImageJobKind = 'pull' | 'push' | 'build' | 'commit'
+export type ImageJobKind = 'pull' | 'push' | 'build'
 
 /** What the server answers about a build, pull or push it runs. */
 export interface ImageJobInfo {
@@ -349,7 +349,7 @@ export interface SandboxInfo {
   autoDeleteDays?: number
   /** When it was last used, as RFC 3339. */
   usedAt: string
-  /** Only as `createSandbox` and `startSandbox` answer it, if it has some, each `openPort` adding one and `closePort` dropping it. */
+  /** Only as `createSandbox` and `startSandbox` answer it, if it has some. */
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
@@ -387,16 +387,6 @@ export class Sandbox extends Files implements SandboxInfo {
   start(): Promise<Sandbox>
   /** Stop it if it runs: its jobs end, and its disk is kept -- or, for an ephemeral one, deleted with it. */
   stop(): Promise<Sandbox>
-  /** Open the port `port` in it, as those it was made with are, TCP unless `protocol` says `'http'`; where it is reached from, kept in `ports` in place of one for the same port. Opened already, it is answered as it is, `label` renaming it. */
-  openPort(port: number, options?: SandboxPortOpenOptions): Promise<SandboxPort>
-  /** Start making an image of it, as `Client.commitImage` does, to point `reference` at. */
-  commit(reference: string): StartedJob<ImageJob, ImageJobEntry>
-  /** Close the port `port` in it: its `url` reaches it no more, and it is not opened again as it starts; dropped from `ports`. One not open is refused `404`. */
-  closePort(port: number): Promise<void>
-  /** The inbound rules of its port `port`, and its public address if it has one: virtx cloud's, which a self-hosted server does not answer. Its desktop's port is refused `409`, `not_public`; one not open, `404`. */
-  inbound(port: number): Promise<PortInbound>
-  /** Make the inbound rules of its port `port` `rules`, all of them -- `[]` lets in no one -- answered as the server keeps them, its public `address` kept on the port in `ports` too. A source that is not an address or a CIDR is refused `400`, `invalid`. */
-  setInbound(port: number, rules: InboundRule[]): Promise<PortInbound>
   /** Delete it: stopped first if it runs, and its disk removed. Its volumes stay. */
   remove(): Promise<void>
   /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */
@@ -423,30 +413,12 @@ export type PortSpec =
   | number
   | { port: number; label?: string; protocol?: PortProtocol; inbound?: InboundRule[] }
 
-/** What opening a port in a sandbox already made asks for; TCP if not said. */
-export interface SandboxPortOpenOptions {
-  /** What it is for; given for one open already, its label from then on. */
-  label?: string
-  protocol?: PortProtocol
-  /** Its inbound rules, set once it is open: virtx cloud's. Absent leaves them to the server; `[]` lets in no one. */
-  inbound?: InboundRule[]
-}
-
 /** One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they are. */
 export interface InboundRule {
   /** An IPv4 or IPv6 CIDR, as `203.0.113.0/24`, or one address, as `203.0.113.7`. */
   source: string
   /** What it is for: whose they are. */
   description?: string
-}
-
-/** A port's inbound rules, as virtx cloud answers them: whom a TCP port lets in at its public `address`, and an HTTP one at its `url`. A connection from an address no rule's source holds is not let in there, so a port with none is reached there by no one. */
-export interface PortInbound {
-  port: number
-  /** Each source a CIDR, as the server keeps it. */
-  rules: InboundRule[]
-  /** Its public `host:port`, once a rule has given it one. */
-  address?: string
 }
 
 /** Whatever is left out the server picks. */
@@ -631,11 +603,6 @@ export class Client {
   pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
   /** Start pushing the image `reference` points at to the registry `reference` names; without `auth` the server pushes anonymously. */
   pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
-  /**
-   * Start making an image of `sandbox`, a handle or its id -- its image, with what it has written
-   * as one more layer -- to point `reference` at: how a sandbox is kept to start others from.
-   */
-  commitImage(sandbox: string | Sandbox, reference: string): StartedJob<ImageJob, ImageJobEntry>
   /** Every image job the server holds. */
   listImageJob(): Promise<ImageJob[]>
   /** The image job `id`. */

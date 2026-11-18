@@ -20,7 +20,6 @@ from virtx import (
     InboundRule,
     Output,
     PortForwarder,
-    PortInbound,
     PortProtocol,
     PortSpec,
     Recipe,
@@ -72,16 +71,6 @@ async def test_a_sandbox_stops_starts_again_and_is_found_by_its_name(client: Cli
         await client.get_sandbox(gone.id)
     assert refused.value.status == 404
 
-    first, second = f"{unique('mine')}:v1", f"{unique('mine')}:v2"
-    job = await made.commit(first)
-    assert job.kind == ImageJobKind.COMMIT and job.reference == first
-    end = [entry.entry async for entry in job.log()][-1]
-    assert end == ImageJobEnd((await tags(client))[first])
-    job = await client.commit_image(made, second)
-    assert job.reference == second
-    [entry async for entry in job.log()]
-    await client.remove_image(first)
-    await client.remove_image(second)
     await made.remove()
     with pytest.raises(VirtxError) as refused:
         await client.get_sandbox(made.id)
@@ -119,36 +108,6 @@ async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(client: Clie
         await removed.remove()
 
 
-async def test_a_port_opened_after_is_kept_in_the_sandbox_s_ports(client: Client) -> None:
-    await alpine(client)
-    sandbox = await client.create_sandbox(ALPINE, ports=[8000])
-    opened = await sandbox.open_port(8080)
-    assert opened == SandboxPort(8080, opened.url)
-    assert [port.port for port in sandbox.ports] == [8000, 8080]
-    assert await sandbox.open_port(8080) == opened
-    assert [p.port for p in (await client.start_sandbox(sandbox.id)).ports] == [8000, 8080]
-
-    got = await client.get_sandbox(sandbox.id)
-    assert await got.open_port(8000) == sandbox.ports[0]
-    assert got.ports == [sandbox.ports[0]]
-    await sandbox.remove()
-
-
-async def test_a_port_closed_is_dropped_from_the_sandbox_s_ports(client: Client) -> None:
-    await alpine(client)
-    sandbox = await client.create_sandbox(ALPINE, ports=[8000, 8080])
-    kept = sandbox.ports[1]
-    await sandbox.close_port(8000)
-    assert sandbox.ports == [kept]
-    await client.close_sandbox_port(sandbox.id, 8080)
-    assert (await client.start_sandbox(sandbox.id)).ports == []
-    with pytest.raises(VirtxError) as refused:
-        await sandbox.close_port(8080)
-    assert (refused.value.status, refused.value.code) == (404, "not_found")
-    assert sandbox.ports == [kept]
-    await sandbox.remove()
-
-
 async def test_a_port_says_what_it_is_for_and_whether_it_is_http(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(
@@ -163,14 +122,6 @@ async def test_a_port_says_what_it_is_for_and_whether_it_is_http(client: Client)
     assert (vnc.port, vnc.label, vnc.protocol) == (5900, None, PortProtocol.TCP)
     assert (dev.port, dev.label, dev.protocol) == (5173, "dev server", PortProtocol.HTTP)
     assert (api.port, api.label, api.protocol) == (3000, "api", PortProtocol.TCP)
-
-    web = await sandbox.open_port(8080, label="docs", protocol="http")
-    assert web == SandboxPort(8080, web.url, "docs", PortProtocol.HTTP)
-    assert sandbox.ports[-1] == web
-    renamed = await client.open_sandbox_port(sandbox.id, 8080, label="manual")
-    assert (renamed.label, renamed.protocol) == ("manual", PortProtocol.HTTP)
-    plain = await client.open_sandbox_port(sandbox.id, 9000)
-    assert (plain.label, plain.protocol) == (None, PortProtocol.TCP)
     await sandbox.remove()
 
 
@@ -220,11 +171,6 @@ def test_a_port_s_inbound_rules_read_and_write_as_the_wire_has_them() -> None:
     assert office.to_dict() == {"source": "203.0.113.7", "description": "office"}
     assert InboundRule("10.0.0.0/8").to_dict() == {"source": "10.0.0.0/8"}
     assert InboundRule.from_dict(office.to_dict()) == office
-    answered = {"port": 22, "rules": [{"source": "10.0.0.0/8"}], "address": "tcp.example:1"}
-    assert PortInbound.from_dict(answered) == PortInbound(
-        22, [InboundRule("10.0.0.0/8")], "tcp.example:1"
-    )
-    assert PortInbound.from_dict({"port": 22, "rules": []}) == PortInbound(22, [])
 
 
 def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:

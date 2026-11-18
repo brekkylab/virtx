@@ -10,9 +10,9 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use virtx_core::{
-    Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, PortProtocol,
-    Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry,
-    SandboxPortOpenArgs, SandboxState, SandboxVolume, Step,
+    Auth, Client, DirEntry, Error, FileRoot, ImageJobEnd, ImageJobEntry, ImageName, Recipe,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry,
+    SandboxState, SandboxVolume, Step,
 };
 use virtx_uvm::{Entry, FsTree, ImageStore, RegistryClient};
 
@@ -304,32 +304,9 @@ async fn a_sandbox_runs_jobs_on_its_disk_and_volumes() {
         SandboxState::Running
     );
 
-    // Committed: an image another sandbox begins as this one is.
-    let job = server.client.commit_image(&id, "kept:v1").await.unwrap();
-    let ended: Vec<_> = server.client.image_job_log(&job.id, None).collect().await;
-    assert!(
-        server
-            .client
-            .get_image_job(&job.id)
-            .await
-            .unwrap()
-            .digest
-            .is_some(),
-        "{ended:?}"
-    );
-    let other = server
-        .client
-        .create_sandbox(&SandboxCreateArgs::new("kept:v1"))
-        .await
-        .unwrap()
-        .id;
-    let (lines, ended) = server.exec(&other, &["cat", "/root/kept"], None).await;
-    assert_eq!((lines, ended.unwrap()), (vec!["kept".into()], 0));
-
     server.client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(server.client.remove_sandbox(&id).await), 404);
     assert!(!server.disk(&id).exists());
-    server.client.remove_sandbox(&other).await.unwrap();
 }
 
 /// Boots VMs, as the one above does.
@@ -515,96 +492,6 @@ async fn a_sandbox_stopped_while_it_stops_unused_answers_once_it_has_synced() {
         assert_eq!(size, 64 << 20, "stopped after {delay} ms");
         server.client.remove_sandbox(&id).await.unwrap();
     }
-}
-
-/// Boots VMs, as the one above does.
-#[tokio::test]
-#[ignore]
-async fn a_port_is_opened_and_closed_as_the_sandbox_runs() {
-    let server = Server::spawn("port-opened");
-    server.pull_image("alpine:3.20").await;
-    let id = server
-        .client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap()
-        .id;
-    let mut serve = SandboxExecArgs::new([
-        "sh",
-        "-c",
-        "while true; do echo hello | nc -l -p 8000; done",
-    ]);
-    serve.timeout_ms = Some(30_000);
-    server.client.exec_sandbox(&id, &serve).await.unwrap();
-
-    let args = SandboxPortOpenArgs {
-        label: Some("hello".into()),
-        protocol: Some(PortProtocol::Http),
-        inbound: None,
-    };
-    let open = server
-        .client
-        .open_sandbox_port_with(&id, 8000, &args)
-        .await
-        .unwrap();
-    assert_eq!(open.label.as_deref(), Some("hello"));
-    let at = address(&open.url).to_owned();
-    assert_eq!(said(&at).await, b"hello\n");
-    // Opened again: where it is, its protocol kept.
-    let tcp = SandboxPortOpenArgs {
-        label: None,
-        protocol: Some(PortProtocol::Tcp),
-        inbound: None,
-    };
-    let again = server.client.open_sandbox_port_with(&id, 8000, &tcp).await;
-    assert_eq!(status(again), 409);
-    let again = SandboxPortOpenArgs {
-        label: Some("hi".into()),
-        protocol: None,
-        inbound: None,
-    };
-    let again = server
-        .client
-        .open_sandbox_port_with(&id, 8000, &again)
-        .await
-        .unwrap();
-    assert_eq!(
-        (again.url.as_str(), again.label.as_deref()),
-        (open.url.as_str(), Some("hi"))
-    );
-    let started = server.client.start_sandbox(&id).await.unwrap();
-    assert_eq!(started.ports, [again]);
-
-    // Closed: reached no more, and not opened again as it starts.
-    server.client.close_sandbox_port(&id, 8000).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    assert!(TcpStream::connect(&at).await.is_err());
-    assert!(server.client.close_sandbox_port(&id, 8000).await.is_err());
-    server.client.stop_sandbox(&id).await.unwrap();
-    assert_eq!(server.client.start_sandbox(&id).await.unwrap().ports, []);
-    server.client.remove_sandbox(&id).await.unwrap();
-}
-
-/// What a listener at `at` says, once something listens behind it.
-async fn said(at: &str) -> Vec<u8> {
-    let reading = async {
-        loop {
-            if let Ok(mut stream) = TcpStream::connect(at).await {
-                let mut said = Vec::new();
-                let mut chunk = [0u8; 64];
-                while let Ok(n @ 1..) = stream.read(&mut chunk).await {
-                    said.extend_from_slice(&chunk[..n]);
-                    if said.ends_with(b"hello\n") {
-                        return said;
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(30), reading)
-        .await
-        .expect("nothing answered")
 }
 
 /// Boots VMs, as the one above does.

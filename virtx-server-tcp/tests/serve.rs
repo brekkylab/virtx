@@ -13,8 +13,7 @@ use tokio::process::{Child, Command};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::{self, Message};
 use virtx_core::{
-    Auth, Client, PortProtocol, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry,
-    SandboxPortOpenArgs, SandboxState, Step,
+    Auth, Client, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxJobEntry, SandboxState, Step,
 };
 use virtx_uvm::{ImageStore, RegistryClient};
 
@@ -370,185 +369,11 @@ async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
     client.remove_sandbox(&created.id).await.unwrap();
 }
 
-/// Boots a VM, as the one above does. A program listening before its port is opened listened in
-/// the guest alone -- the host was not asked to take it -- and is reached all the same, through
-/// the agent, without listening again.
-#[tokio::test]
-#[ignore]
-async fn a_port_reaches_a_program_that_listened_before_it_was_opened() {
-    let served = Served::spawn("port-listened-before").await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let created = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap();
-    // One connection, and then it would listen again: the first must come through as it is.
-    // It answers what it is told, so both ways are carried: to it, and back.
-    let mut serve = SandboxExecArgs::new([
-        "sh",
-        "-c",
-        "mkfifo /tmp/back; nc -l -p 8000 < /tmp/back | (read line; echo \"before $line\") > /tmp/back",
-    ]);
-    serve.timeout_ms = Some(30_000);
-    client.exec_sandbox(&created.id, &serve).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let opened = client.open_sandbox_port(&created.id, 8000).await.unwrap();
-    let url = served.port_url(&opened.url);
-    let said = async {
-        let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
-        socket
-            .send(Message::binary(b"hi\n".to_vec()))
-            .await
-            .unwrap();
-        let mut said = Vec::new();
-        while let Some(Ok(Message::Binary(bytes))) = socket.next().await {
-            said.extend_from_slice(&bytes);
-            if said.ends_with(b"\n") {
-                break;
-            }
-        }
-        said
-    };
-    let said = tokio::time::timeout(std::time::Duration::from_secs(20), said)
-        .await
-        .expect("what listened before the port was opened answered");
-    assert_eq!(said, b"before hi\n");
-    client.remove_sandbox(&created.id).await.unwrap();
-}
-
-/// Boots VMs, as the one above does.
-#[tokio::test]
-#[ignore]
-async fn a_port_opened_after_the_sandbox_reaches_what_listens_on_it() {
-    let served = Served::spawn("port-opened").await;
-    served.pull_image("alpine:3.20").await;
-    let client = served.connect("tester");
-    let created = client
-        .create_sandbox(&SandboxCreateArgs::new("alpine:3.20"))
-        .await
-        .unwrap();
-    assert_eq!(created.ports, []);
-
-    let opened = client.open_sandbox_port(&created.id, 8000).await.unwrap();
-    assert_eq!(opened.port, 8000);
-    // Opened again: the same port, at the same URL.
-    assert_eq!(
-        client.open_sandbox_port(&created.id, 8000).await.unwrap(),
-        opened
-    );
-    assert_eq!(status(client.open_sandbox_port(&created.id, 0).await), 400);
-    assert_eq!(status(client.open_sandbox_port("nobody", 8000).await), 404);
-    assert_eq!(
-        (opened.label.as_deref(), opened.protocol),
-        (None, PortProtocol::Tcp)
-    );
-
-    // One for a browser, named: behind a capability a host name's label holds.
-    let web = |label: &str, protocol| SandboxPortOpenArgs {
-        label: Some(label.into()),
-        protocol,
-        inbound: None,
-    };
-    let http = client
-        .open_sandbox_port_with(
-            &created.id,
-            5173,
-            &web("dev server", Some(PortProtocol::Http)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        (http.label.as_deref(), http.protocol),
-        (Some("dev server"), PortProtocol::Http)
-    );
-    let capability = http.url.strip_prefix("ports/").unwrap();
-    assert_eq!(capability.len(), 32, "{capability}");
-    // Named again: its label now; another protocol refused.
-    let renamed = client
-        .open_sandbox_port_with(&created.id, 5173, &web("vite", None))
-        .await
-        .unwrap();
-    assert_eq!(
-        (renamed.label.as_deref(), &renamed.url),
-        (Some("vite"), &http.url)
-    );
-    assert_eq!(
-        status(
-            client
-                .open_sandbox_port_with(&created.id, 5173, &web("vite", Some(PortProtocol::Tcp)))
-                .await
-        ),
-        409
-    );
-    let long = "x".repeat(129);
-    assert_eq!(
-        status(
-            client
-                .open_sandbox_port_with(&created.id, 9000, &web(&long, None))
-                .await
-        ),
-        400
-    );
-    // Kept with it: answered so as it starts again.
-    let started = client.start_sandbox(&created.id).await.unwrap();
-    assert!(started.ports.contains(&renamed), "{:?}", started.ports);
-
-    // Closed: its URL reaches it no more, nor is it opened again; closed again, not found.
-    client.close_sandbox_port(&created.id, 5173).await.unwrap();
-    let mut gone = served.port_url(&renamed.url);
-    gone.set_scheme("ws").unwrap();
-    assert_eq!(
-        Served::open(&gone, Some("virtx.tcp")).await.err(),
-        Some(404)
-    );
-    let started = client.start_sandbox(&created.id).await.unwrap();
-    assert!(
-        started.ports.iter().all(|p| p.port != 5173),
-        "{:?}",
-        started.ports
-    );
-    assert_eq!(
-        status(client.close_sandbox_port(&created.id, 5173).await),
-        404
-    );
-
-    let url = served.port_url(&opened.url);
-    let mut serve = SandboxExecArgs::new([
-        "sh",
-        "-c",
-        "while true; do echo hello | nc -l -p 8000; done",
-    ]);
-    serve.timeout_ms = Some(30_000);
-    client.exec_sandbox(&created.id, &serve).await.unwrap();
-    let said = async {
-        loop {
-            let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
-            socket.send(Message::binary(b"hi".to_vec())).await.unwrap();
-            let mut said = Vec::new();
-            while let Some(Ok(Message::Binary(bytes))) = socket.next().await {
-                said.extend_from_slice(&bytes);
-                if said.ends_with(b"hello\n") {
-                    return said;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-    };
-    let said = tokio::time::timeout(std::time::Duration::from_secs(60), said)
-        .await
-        .expect("port 8000 says hello within a minute");
-    assert_eq!(said, b"hello\n");
-    client.remove_sandbox(&created.id).await.unwrap();
-}
-
 /// Boots VMs, as the one above does. A built image keeps the recipe it was built from in its
-/// config, under its label, and each step in its history, as `docker history` reads them; a
-/// sandbox of it committed keeps the commit in its history, and no recipe.
+/// config, under its label, and each step in its history, as `docker history` reads them.
 #[tokio::test]
 #[ignore]
-async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
+async fn a_built_image_keeps_its_recipe_and_its_steps_in_its_history() {
     let served = Served::spawn("recipe").await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
@@ -629,47 +454,6 @@ async fn a_built_image_keeps_its_recipe_and_a_commit_of_it_does_not() {
         told(&built),
         ["RUN echo built > /root/built", "ENV GREETING=hello (empty)"]
     );
-
-    // A sandbox of it committed: its recipe not kept, the commit told after its steps.
-    let id = client
-        .create_sandbox(&SandboxCreateArgs::new("built:v1"))
-        .await
-        .unwrap()
-        .id;
-    let job = client
-        .exec_sandbox(
-            &id,
-            &SandboxExecArgs::new(["sh", "-c", "echo more > /root/more"]),
-        )
-        .await
-        .unwrap();
-    let _: Vec<_> = client
-        .sandbox_job_log(&id, &job.id, None)
-        .try_collect()
-        .await
-        .unwrap();
-    let job = client.commit_image(&id, "committed:v1").await.unwrap();
-    let _: Vec<_> = client
-        .image_job_log(&job.id, None)
-        .try_collect()
-        .await
-        .unwrap();
-    let committed = config_of("committed", "v1").await;
-    assert!(
-        committed["config"]["Labels"]
-            .get(virtx_uvm::RECIPE_LABEL)
-            .is_none(),
-        "{committed}"
-    );
-    assert_eq!(
-        told(&committed),
-        [
-            "RUN echo built > /root/built".to_string(),
-            "ENV GREETING=hello (empty)".to_string(),
-            format!("virtx commit {id}"),
-        ]
-    );
-    client.remove_sandbox(&id).await.unwrap();
 }
 
 /// Boots VMs, as the one above does. A stopped sandbox resized: its machine booted with the
@@ -1005,26 +789,10 @@ async fn a_sandbox_stops_with_its_disk_kept_and_starts_again_as_it_was_left() {
         SandboxState::Running
     );
 
-    // Committed to an image: another sandbox of it begins with what this one wrote.
-    let job = client.commit_image(&id, "mine:v1").await.unwrap();
-    let log: Vec<_> = client
-        .image_job_log(&job.id, None)
-        .try_collect()
-        .await
-        .unwrap();
-    let digest = client.get_image_job(&job.id).await.unwrap().digest;
-    assert!(digest.is_some(), "{log:?}");
-    let other = client
-        .create_sandbox(&SandboxCreateArgs::new("mine:v1"))
-        .await
-        .unwrap();
-    assert_eq!(ran(&other.id, "cat /root/note").await, ["kept"]);
-
     // Deleted: gone, its disk with it.
     client.remove_sandbox(&id).await.unwrap();
     assert_eq!(status(client.get_sandbox(&id).await), 404);
     assert!(!served.demo.join(format!("sandbox/{id}.ext4")).exists());
-    client.remove_sandbox(&other.id).await.unwrap();
 
     // Ephemeral: deleted when it stops.
     let mut args = SandboxCreateArgs::new("alpine:3.20");

@@ -496,8 +496,8 @@ class Client:
     ) -> Sandbox:
         """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
         ``SandboxVolume``. It is kept, with what it wrote, until ``Sandbox.remove``: the server
-        may stop its VM while nothing uses it, and boots it again for the next job or request to
-        its files. ``name`` finds it again with ``find_sandbox``. ``ports`` are ports in it to
+        may stop its VM while nothing uses it, and boots it again for the next job or write to
+        its files; its files are read from its disk meanwhile. ``name`` finds it again with ``find_sandbox``. ``ports`` are ports in it to
         open -- a number for TCP, or a ``PortSpec`` (or its ``{port, label?, protocol?,
         inbound?}``) to say what it is for, whether it is HTTP and whom it lets in -- each
         answered here only with the ``url`` it is reached by. ``abins`` names virtx's programs it

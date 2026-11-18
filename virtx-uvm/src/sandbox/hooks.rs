@@ -102,9 +102,18 @@ pub trait Hooks: Send + Sync + 'static {
         Ok(())
     }
 
-    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, where the
-    /// server's disks fetch it as it is read ([`Disks::open`](crate::disks::Disks::open)): a
-    /// socket, and what answers on it until it drops. `None` for a disk that is all here.
+    /// Sandbox `id`'s disk about to be read in this process while its machine is parked,
+    /// before its disk is held: what it holds while it is read. Its machine is not booted for
+    /// it, and nothing the disk is read for is a use of the sandbox.
+    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Held>, Error>> {
+        let _ = id;
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, or while it
+    /// is read in this process ([`reading`](Hooks::reading)), where the server's disks fetch it
+    /// as it is read ([`Disks::open`](crate::disks::Disks::open)): a socket, and what answers
+    /// on it until it drops. `None` for a disk that is all here.
     fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, Error> {
         let _ = (id, disk);
         Ok(None)

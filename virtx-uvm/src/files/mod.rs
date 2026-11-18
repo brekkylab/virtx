@@ -3,7 +3,9 @@
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their
 //! paths. A sandbox's are its machine's root as its processes see it, asked of the agent there
-//! ([`Machine::io`]).
+//! ([`Machine::io`]); while its machine is parked, a read of them -- `GET`, `HEAD`, `PROPFIND`,
+//! `OPTIONS` -- is answered from its disk as it was left and its image, read on this host
+//! ([`parked`]), the machine not booted for it and the sandbox not used by it.
 //!
 //! A `PUT` to a volume or a sandbox lands whole: its body is written beside its path and moved
 //! over it once all of it has arrived, as `dav-server` flushes the file. One with `If-Match` or
@@ -21,6 +23,7 @@
 //! a path the volume's files do not answer for, through a link, by a name they refuse, or in a
 //! mount of the volume's own.
 
+mod parked;
 mod sandbox;
 mod volume;
 
@@ -41,8 +44,7 @@ use futures_util::future::BoxFuture;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 
-use crate::machine::Machine;
-use crate::sandbox::Activity;
+use crate::sandbox::{Error as SandboxError, Sandbox};
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
 
 /// The files endpoints over one home's volumes, and its sandboxes' as each is asked of.
@@ -52,6 +54,8 @@ pub struct Files {
     /// its [lock file](writing) too, through its own files or a sandbox that mounts it. A
     /// sandbox's are held by the sandbox's own first.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Parked sandboxes' disks, as they were last read.
+    parked: parked::Views,
 }
 
 impl Files {
@@ -60,6 +64,7 @@ impl Files {
         Files {
             volumes,
             serial: Mutex::default(),
+            parked: parked::Views::new(),
         }
     }
 
@@ -102,21 +107,43 @@ impl Files {
         landed(landing.as_deref(), response.map(Body::new))
     }
 
-    /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from the guest
-    /// of `machine`, the sandbox's, keeping `activity` until the answer's body has been sent or
-    /// dropped: a file read is sent as it is read from the guest.
+    /// Answer `request`, one to `/sandboxes/{id}/files` and what is under it, from `sandbox`.
+    /// A read of one whose machine is parked is answered from its disk ([`parked`]): its
+    /// machine left parked, and the sandbox not used by it. Anything else is asked of its
+    /// machine's guest, booted first if it is parked, the sandbox in use until the answer's body
+    /// has been sent or dropped: a file read is sent as it is read from the guest. Refused as
+    /// its machine is: [`Ended`](SandboxError::Ended) once it has exited.
     pub async fn sandbox(
         &self,
-        id: &str,
-        machine: Arc<Machine>,
-        activity: Activity,
+        sandbox: &Arc<Sandbox>,
         request: Request<Body>,
-    ) -> Response {
+    ) -> Result<Response, SandboxError> {
+        let id = sandbox.id();
         let handler = match handler(format!("/sandboxes/{id}/files"), &request) {
             Ok(handler) => handler,
-            Err(refusal) => return refusal.into_response(),
+            Err(refusal) => return Ok(refusal.into_response()),
         };
-        let sandbox = activity.sandbox();
+        if reads(&request)
+            && let Some((era, view)) = self.parked.view(sandbox).await?
+        {
+            let showing = Arc::clone(sandbox);
+            let shown = tokio::task::spawn_blocking(move || showing.shown()).await??;
+            let fs = parked::Fs::new(view, shown, Some((Arc::clone(sandbox), era)));
+            let handler = handler.filesystem(Box::new(fs)).build_handler();
+            let response = lingering(request, |request| handler.handle(request)).await;
+            return Ok(response.map(Body::new));
+        }
+        // In use from here until the answer has been sent -- taken first, so that it is not
+        // parked unused in between. Refused, it is not used: an exited sandbox is not kept
+        // longer for it.
+        let activity = sandbox.activity();
+        let machine = match sandbox.machine().await {
+            Ok(machine) => machine,
+            Err(e) => {
+                activity.unused();
+                return Err(e);
+            }
+        };
         let mounts: Arc<[(String, PathBuf)]> = sandbox.mounts().into();
         let hold = || -> Hold {
             let writing = Arc::clone(sandbox.writing());
@@ -144,7 +171,7 @@ impl Files {
         };
         let (request, landing, _held) = match conditioned(request, hold).await {
             Ok(conditioned) => conditioned,
-            Err(refusal) => return refusal.into_response(),
+            Err(refusal) => return Ok(refusal.into_response()),
         };
         let fs = sandbox::Fs {
             machine,
@@ -153,12 +180,14 @@ impl Files {
         };
         let handler = handler.filesystem(Box::new(fs)).build_handler();
         let response = lingering(request, |request| handler.handle(request)).await;
-        landed(landing.as_deref(), response.map(Body::new)).map(|body| {
-            Body::new(body.map_frame(move |frame| {
-                let _ = &activity;
-                frame
-            }))
-        })
+        Ok(
+            landed(landing.as_deref(), response.map(Body::new)).map(|body| {
+                Body::new(body.map_frame(move |frame| {
+                    let _ = &activity;
+                    frame
+                }))
+            }),
+        )
     }
 
     /// What holds the requests under `key` one at a time.
@@ -324,12 +353,15 @@ fn destination(request: &Request<Body>) -> Option<String> {
 /// `If-Match` or `If-None-Match`. A read with either is not: `If-None-Match` on a `GET` is a
 /// cache asking whether it is current.
 fn conditional<B>(request: &Request<B>) -> bool {
-    let method = request.method();
-    let reads = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-        || method.as_str() == "PROPFIND";
     let headers = request.headers();
-    !reads
+    !reads(request)
         && (headers.contains_key(header::IF_MATCH) || headers.contains_key(header::IF_NONE_MATCH))
+}
+
+/// Whether `request` only reads: a `GET`, `HEAD`, `OPTIONS` or `PROPFIND`.
+fn reads<B>(request: &Request<B>) -> bool {
+    let method = request.method();
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || method.as_str() == "PROPFIND"
 }
 
 /// What holds a volume or a sandbox for a conditional write, let go of when it drops.

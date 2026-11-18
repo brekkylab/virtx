@@ -352,7 +352,8 @@ export interface SandboxInfo {
  * it, to run processes in it and read and write its files, its root as its processes see it, as
  * `etc/hostname`. Its disk -- what it writes over its image -- lasts until it is deleted: the
  * server may stop its VM while nothing uses it, and boots it again, over that disk, for the next
- * job or request to its files. Dropping it leaves the sandbox; `remove` removes it.
+ * job or write to its files; its files are read from that disk meanwhile. Dropping it leaves the
+ * sandbox; `remove` removes it.
  */
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()

@@ -627,6 +627,11 @@ fn utf8(path: &Path) -> Result<&str> {
     })
 }
 
+/// The directory a machine booted now shows at `/alib`, if it shows one.
+pub(crate) fn alib() -> Option<std::path::PathBuf> {
+    beside(ALIB_HOST)
+}
+
 /// The directory `name` beside this executable, such as `alib/`, if there is one, with its
 /// programs made executable in the guest.
 fn beside(name: &str) -> Option<std::path::PathBuf> {

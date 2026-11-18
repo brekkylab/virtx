@@ -8,7 +8,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 A sandbox's root filesystem is its image below, read-only, and a disk of its own above, where everything it writes goes.
 That disk lasts until the sandbox is deleted.
 While nothing uses the sandbox, the server **parks** it: its VM is stopped, and its disk is kept.
-The next command or request to its files boots the VM again, under the same id, with its files as it left them.
+The next command, or write to its files, boots the VM again, under the same id, with its files as it left them; reading its files does not.
 
 The example on this page follows an AI agent's task, with two directories in the sandbox:
 
@@ -96,13 +96,14 @@ while let Some(entry) = log.next().await {
 
 ### What keeps its VM up
 
-A sandbox is used while a job runs in it, while a connection through one of its [ports](/docs/guides/networks-ports/) is open, and while a request to its [files](/docs/guides/reading-writing-files/) is answered; starting a job uses it too.
+A sandbox is used while a job runs in it, while a connection through one of its [ports](/docs/guides/networks-ports/) is open, and while its VM answers a request to its [files](/docs/guides/reading-writing-files/); starting a job uses it too.
 The server parks it once it has gone unused for a while: on `virtx-server-tcp` and the stdio server, at once, unless `VIRTX_PARK_AFTER_MS` says otherwise.
 Getting or listing it does not use it.
 
 A parked sandbox has no VM: what is kept of it is its disk.
 Everything it wrote is on that disk, but what was left running in it apart from a job, such as a server started in the background, is not.
-The next job or request to its files boots its VM again, and so takes as long as booting does.
+The next job, or write to its files, boots its VM again, and so takes as long as booting does.
+Reading its files does not: listing a directory and reading a file are answered from its disk as it was left, and do not use it.
 A connection to one of its ports while it is parked is closed, as one to a port nothing listens on is, and does not boot it.
 
 A sandbox's `running` stays `true` while it is parked.

@@ -674,10 +674,10 @@ async fn a_sandbox_s_disk_is_grown_as_it_next_boots() {
 
 /// Boots a VM, as the one above does. A sandbox's files, read over WebDAV through its agent:
 /// its image's and what it wrote alike, a directory listed, a file read whole and in part, and
-/// written; its machine booted for them once it is parked.
+/// written; once it is parked, read from its disk, and its machine booted to write them.
 #[tokio::test]
 #[ignore]
-async fn a_sandbox_s_files_are_read_and_written_its_machine_booted_for_them() {
+async fn a_sandbox_s_files_are_read_and_written_its_machine_booted_to_write_them() {
     let served = Served::spawn_with("files", json!({}), &[("VIRTX_PARK_AFTER_MS", "1000")]).await;
     served.pull_image("alpine:3.20").await;
     let client = served.connect("tester");
@@ -757,13 +757,289 @@ async fn a_sandbox_s_files_are_read_and_written_its_machine_booted_for_them() {
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("put".into()));
 
-    // Parked: booted for a request to its files, which finds them as they were.
+    // Parked: read as they were, its machine left parked; booted for a write.
     served.parked(&id).await;
     let r = asked("GET", "/root/d/b.txt").send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(r.text().await.unwrap(), "put\n");
+    assert!(!served.up(&id).await);
+    let r = asked("PUT", "/root/d/c.txt")
+        .body("c\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
     assert!(served.up(&id).await);
     client.remove_sandbox(&id).await.unwrap();
+}
+
+/// The responses of a `PROPFIND` multistatus, each as it is written, in order: what two
+/// answers listing the same tree agree on whatever order each listed it in.
+fn responses(multistatus: &str) -> Vec<String> {
+    let mut responses: Vec<String> = multistatus
+        .split("<D:response>")
+        .skip(1)
+        .map(|response| response.split("</D:response>").next().unwrap().to_owned())
+        .collect();
+    responses.sort();
+    responses
+}
+
+/// Boots a VM, as the one above does. A parked sandbox's files, read from its disk with its
+/// machine left parked, are what they were with it up: each directory listed alike -- each
+/// entry's length, time and tag -- each file the same bytes, and what is not there not there;
+/// what it wrote over its image, what it took away from it, and its volume's files at their
+/// path among them. A write boots it.
+#[tokio::test]
+#[ignore]
+async fn a_parked_sandbox_s_files_are_read_from_its_disk_as_they_were_up() {
+    let served = Served::spawn_with("parked-files", json!({}), &[KEPT_UP]).await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    client.create_volume(Some("shared")).await.unwrap();
+    let mut args = small("alpine:3.20");
+    args.volumes = vec![virtx_core::SandboxVolume {
+        volume: "shared".into(),
+        path: "/data".into(),
+        readonly: false,
+    }];
+    let id = client.create_sandbox(&args).await.unwrap().id;
+    let wrote = "mkdir -p /root/d /root/many && cd /root/d && echo hello > a.txt \
+        && head -c 3000000 /dev/urandom > big && ln a.txt hard && ln -s a.txt soft \
+        && mkfifo pipe && rm /etc/motd && echo replaced > /etc/alpine-release \
+        && echo volume > /data/v.txt && cd /root/many \
+        && for i in $(seq 1 3000); do echo $i > file-$i; done && sync";
+    let job = client
+        .exec_sandbox(&id, &SandboxExecArgs::new(["sh", "-c", wrote]))
+        .await
+        .unwrap();
+    let log: Vec<_> = client
+        .sandbox_job_log(&id, &job.id, None)
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            log.last().unwrap().entry,
+            SandboxJobEntry::End(SandboxJobEnd { code: 0, .. })
+        ),
+        "{log:?}"
+    );
+
+    let asked = |method: &str, path: &str| {
+        reqwest::Client::new()
+            .request(
+                Method::from_bytes(method.as_bytes()).unwrap(),
+                format!(
+                    "{}/sandboxes/{id}/files{path}",
+                    served.url.trim_end_matches('/')
+                ),
+            )
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+    };
+    let listed = async |path: &str| {
+        let r = asked("PROPFIND", path)
+            .header("Depth", "1")
+            .send()
+            .await
+            .unwrap();
+        let status = r.status().as_u16();
+        let listed = r.text().await.unwrap();
+        (status, responses(&listed))
+    };
+    let got = async |path: &str, range: Option<&str>| {
+        let mut asking = asked("GET", path);
+        if let Some(range) = range {
+            asking = asking.header("Range", range);
+        }
+        let r = asking.send().await.unwrap();
+        let etag = r
+            .headers()
+            .get("etag")
+            .map(|tag| tag.to_str().unwrap().to_owned());
+        (r.status().as_u16(), etag, r.bytes().await.unwrap())
+    };
+    let dirs = [
+        "/",
+        "/root/d/",
+        "/etc/",
+        "/data/",
+        "/root/many/",
+        "/bin/",
+        "/proc/",
+    ];
+    let files = [
+        ("/root/d/a.txt", None),
+        ("/root/d/hard", None),
+        ("/root/d/big", None),
+        ("/root/d/big", Some("bytes=1000000-1999999")),
+        ("/root/d/soft", None),
+        ("/root/d/pipe", None),
+        ("/etc/alpine-release", None),
+        ("/etc/motd", None),
+        ("/etc/os-release", None),
+        ("/bin/busybox", None),
+        ("/bin/sh", None),
+        ("/data/v.txt", None),
+        ("/root/many/file-2999", None),
+        ("/proc/version", None),
+        ("/nothing/here", None),
+    ];
+    let mut up = Vec::new();
+    for dir in dirs {
+        let listing = std::time::Instant::now();
+        up.push(listed(dir).await);
+        if dir == "/root/many/" {
+            let took = listing.elapsed().as_millis();
+            eprintln!("/root/many/, 3000 files, listed up: {took} ms");
+        }
+    }
+    let mut read_up = Vec::new();
+    for (file, range) in files {
+        read_up.push(got(file, range).await);
+    }
+    // What the guest showed, as its writes and its image make it.
+    assert_eq!(up[1].0, 207);
+    assert_eq!(
+        up[1].1.len(),
+        4,
+        "the directory, a.txt, hard and big: {:?}",
+        up[1].1
+    );
+    assert!(
+        !up[2]
+            .1
+            .iter()
+            .any(|response| response.contains("/etc/motd<"))
+    );
+    assert_eq!(up[4].1.len(), 3001);
+    assert_eq!(read_up[0].0, 200);
+    assert_eq!(&read_up[6].2[..], b"replaced\n");
+    assert_eq!(read_up[7].0, 404);
+    assert_eq!(&read_up[11].2[..], b"volume\n");
+
+    // Parked: the same, its machine left parked.
+    let parked: Value = reqwest::Client::new()
+        .put(format!(
+            "{}/sandboxes/{id}/resources",
+            served.url.trim_end_matches('/')
+        ))
+        .bearer_auth(token("tester"))
+        .header("virtx-project", "demo")
+        .json(&json!({ "memory_mib": 1100 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(parked["up"], json!(false), "{parked}");
+    let listing = std::time::Instant::now();
+    let many = listed("/root/many/").await;
+    let first = listing.elapsed();
+    let listing = std::time::Instant::now();
+    assert_eq!(listed("/root/many/").await, many);
+    let again = listing.elapsed();
+    eprintln!(
+        "/root/many/, 3000 files, listed parked: {} ms first, {} ms again",
+        first.as_millis(),
+        again.as_millis()
+    );
+    for (dir, up) in dirs.iter().zip(&up) {
+        assert_eq!(&listed(dir).await, up, "{dir}");
+    }
+    for ((file, range), up) in files.iter().zip(&read_up) {
+        assert_eq!(&got(file, *range).await, up, "{file} {range:?}");
+    }
+    assert!(!served.up(&id).await);
+
+    // Written: booted, and what it wrote read through its machine.
+    let booting = std::time::Instant::now();
+    let r = asked("PUT", "/root/d/new.txt")
+        .body("new\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    eprintln!(
+        "a PUT to it parked, booting it: {} ms",
+        booting.elapsed().as_millis()
+    );
+    assert!(served.up(&id).await);
+    let (status, _, read) = got("/root/d/new.txt", None).await;
+    assert_eq!((status, &read[..]), (200, &b"new\n"[..]));
+    client.remove_sandbox(&id).await.unwrap();
+}
+
+/// Boots a VM, as the one above does. Reading a parked sandbox's files is no use of it: read
+/// over and over, it is reclaimed once it has been unused for as long as its server keeps one
+/// unused, never booted by a read meanwhile -- which would use it.
+#[tokio::test]
+#[ignore]
+async fn reading_a_parked_sandbox_s_files_is_no_use_of_it() {
+    let served = Served::spawn_with(
+        "parked-unused",
+        json!({}),
+        &[("VIRTX_RECLAIM_AFTER_MS", "8000")],
+    )
+    .await;
+    served.pull_image("alpine:3.20").await;
+    let client = served.connect("tester");
+    let id = client
+        .create_sandbox(&small("alpine:3.20"))
+        .await
+        .unwrap()
+        .id;
+    let job = client
+        .exec_sandbox(
+            &id,
+            &SandboxExecArgs::new(["sh", "-c", "echo kept > /root/note"]),
+        )
+        .await
+        .unwrap();
+    let _: Vec<_> = client
+        .sandbox_job_log(&id, &job.id, None)
+        .try_collect()
+        .await
+        .unwrap();
+    served.parked(&id).await;
+
+    let asked = |method: &str, path: &str| {
+        reqwest::Client::new()
+            .request(
+                Method::from_bytes(method.as_bytes()).unwrap(),
+                format!(
+                    "{}/sandboxes/{id}/files{path}",
+                    served.url.trim_end_matches('/')
+                ),
+            )
+            .bearer_auth(token("tester"))
+            .header("virtx-project", "demo")
+    };
+    let reading = std::time::Instant::now();
+    loop {
+        let r = asked("PROPFIND", "/root/")
+            .header("Depth", "1")
+            .send()
+            .await
+            .unwrap();
+        if r.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        assert_eq!(r.status().as_u16(), 207);
+        let r = asked("GET", "/root/note").send().await.unwrap();
+        if r.status() == StatusCode::NOT_FOUND {
+            break;
+        }
+        assert_eq!(r.text().await.unwrap(), "kept\n");
+        assert!(
+            reading.elapsed() < std::time::Duration::from_secs(60),
+            "never reclaimed: the reads used it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert_eq!(status(client.get_sandbox(&id).await), 404);
 }
 
 /// Boots VMs, as the one above does.

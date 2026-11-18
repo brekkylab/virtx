@@ -2,7 +2,7 @@
 //!
 //! A sandbox has a disk of its own, what its processes write over its image, which lasts until
 //! it is deleted: a server may stop its VM while nothing uses it, and boots it again, over that
-//! disk, for the next job or request to its files.
+//! disk, for the next job or write to its files; its files are read from that disk meanwhile.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

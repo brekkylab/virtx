@@ -1037,7 +1037,8 @@ class Project {
 // `running`, `ports`), and the client that reaches it, to run processes in it and read and write
 // its files, its root as its processes see it. Its disk -- what it writes over its image -- lasts
 // until it is deleted: the server may stop its VM while nothing uses it, and boots it again for
-// the next job or request to its files. Dropping it leaves the sandbox; `remove` removes it.
+// the next job or write to its files; its files are read from that disk meanwhile. Dropping it
+// leaves the sandbox; `remove` removes it.
 class Sandbox extends Files {
   constructor(client, info) {
     super()

@@ -226,7 +226,7 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
     let (lines, _) = run(&sandbox, &still, None).await.unwrap();
     assert_eq!(lines, ["kept", "0"]);
 
-    // Parked again, a request to its files boots it too.
+    // Parked again, its machine asked for, as a write to its files asks for it, boots it too.
     assert!(until(async || !sandbox.up()).await, "not parked");
     let _asking = sandbox.activity();
     sandbox.machine().await.unwrap();

@@ -61,7 +61,7 @@ pub const LABEL_MOST: usize = 128;
 
 /// How long a sandbox booting waits for its disk to be let go of: by what keeps it, as it was
 /// parked, or by a process spawned as it was held.
-const DISK_WAIT: Duration = Duration::from_secs(10);
+pub(super) const DISK_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a sandbox is unused before its machine is parked, where `VIRTX_PARK_AFTER_MS` does
 /// not say: not at all, its machine parked as nothing uses it any more.
@@ -125,7 +125,7 @@ pub fn signal_number(name: &str) -> Option<i32> {
 
 /// The directory beside the program machines run as that virtx's own programs for `/abin` are
 /// in, and where each one's `SKILL.md` is in that.
-const ABIN_HOST: &str = "abin";
+pub(super) const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
 
@@ -226,7 +226,7 @@ impl Run {
 /// A sandbox: a machine booted from an image over a disk of its own, with volumes mounted
 /// into it, and the processes run in it as [jobs](Job), each with its log. It lasts from its
 /// making until it is deleted. Its machine is parked once it has been unused for a while, and
-/// booted again for the next job or request to its files: what it wrote is on its
+/// booted again for the next job or write to its files: what it wrote is on its
 /// disk across that, and what ran in it is not.
 pub struct Sandbox {
     pub(super) record: Record,
@@ -247,6 +247,9 @@ pub struct Sandbox {
     /// What a conditional write to its files holds first as it lands (see
     /// [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
+    /// Its disk's boot, as its [era](super::parked::Era) tells it: new as it is made here, and
+    /// as its machine boots.
+    pub(super) era: std::sync::atomic::AtomicU64,
 }
 
 impl Sandbox {
@@ -265,6 +268,7 @@ impl Sandbox {
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
+            era: super::parked::next_era().into(),
         })
     }
 
@@ -355,6 +359,11 @@ impl Sandbox {
         matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, run))
     }
 
+    /// Whether its machine is parked: not up, nor exited, nor it deleted.
+    pub(super) fn is_parked(&self) -> bool {
+        matches!(*self.state.lock().unwrap(), State::Parked)
+    }
+
     fn is_deleted(&self) -> bool {
         matches!(*self.state.lock().unwrap(), State::Deleted)
     }
@@ -369,7 +378,7 @@ impl Sandbox {
     }
 
     /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files.
+    /// its ports, a request to its files its machine answered.
     pub fn last_used(&self) -> SystemTime {
         *self.record.used.lock().unwrap()
     }
@@ -436,6 +445,8 @@ impl Sandbox {
             State::Exited => return Err(Error::Ended),
             State::Up(_) | State::Parked => {}
         }
+        // Whatever this boot comes to, its disk may be written from here on.
+        self.era.store(super::parked::next_era(), Ordering::Relaxed);
         let shared = &self.shared;
         let id = self.record.id.clone();
         let spec = spec_of(&self.record.args_now())?;
@@ -1312,7 +1323,7 @@ pub(super) fn abins_refused(abins: &[String], programs: &Path) -> Result<(), Err
 /// for and kept: every machine shows it read-only, so the sandboxes made with the same share
 /// it, and a boot after the first links and copies nothing. Programs replaced since are another
 /// set, of their sizes and times.
-fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
+pub(super) fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
     let io = |context: String| move |source| SnapshotError::Io { context, source };
     let mut sorted: Vec<&String> = names.iter().collect();
     sorted.sort();

@@ -415,8 +415,8 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote() {
         .await;
     assert_eq!((lines, ended.unwrap()), (vec!["1".into()], 0));
 
-    // Unused, it is parked, running still; a request to its files boots it, over what it
-    // wrote.
+    // Unused, it is parked, running still; its files read as it wrote them, and a job boots
+    // it over them.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(server.client.get_sandbox(&id).await.unwrap().running);
     assert_eq!(
@@ -426,7 +426,7 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote() {
     let (lines, _) = server.exec(&id, &still, None).await;
     assert_eq!(lines, ["kept", "0"]);
 
-    // What a request to its files wrote is there after it is parked again, and a job boots it.
+    // What a write to its files wrote is there after it is parked again, and a job boots it.
     server
         .client
         .write_file(&root, "root/written", "written\n", None)

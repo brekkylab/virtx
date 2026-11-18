@@ -718,26 +718,16 @@ async fn volume_files(
     home.files.volume(&segments["name"], request).await
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine: booted first if it
-/// is parked. One whose machine has exited answers `409`, `ended`.
+/// A request to the files of a sandbox, over WebDAV: a read of one whose machine is parked
+/// answered from its disk, its machine left parked; anything else asked of its machine, booted
+/// first if it is parked. One whose machine has exited answers `409`, `ended`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> Answer {
-    let id = &segments["id"];
-    let sandbox = home.sandboxes.get(id)?;
-    // In use from here until the answer has been sent -- taken first, so that it is not parked
-    // unused in between. Refused, it is not used.
-    let activity = sandbox.activity();
-    let machine = match sandbox.machine().await {
-        Ok(machine) => machine,
-        Err(e) => {
-            activity.unused();
-            return Err(e.into());
-        }
-    };
-    Ok(home.files.sandbox(id, machine, activity, request).await)
+    let sandbox = home.sandboxes.get(&segments["id"])?;
+    Ok(home.files.sandbox(&sandbox, request).await?)
 }
 
 /// Every sandbox; `?name=` those named so, one at most.

@@ -305,8 +305,8 @@ So the server keeps that image while the sandbox exists, as [Images](#images) sa
 
 #### Use
 
-A sandbox is used while a [job](#sandbox-jobs) runs in it, a connection through one of its [ports](#ports) is open, or a request to its [files](#a-sandboxs-files) is answered, and when a job is started in it.
-A `GET`, a listing, and a request it refuses do not use it.
+A sandbox is used while a [job](#sandbox-jobs) runs in it, a connection through one of its [ports](#ports) is open, or a request to its [files](#a-sandboxs-files) is answered by its VM, and when a job is started in it.
+A `GET`, a listing, a request it refuses, and a read of its files while it is parked do not use it.
 
 #### Parking
 
@@ -315,13 +315,13 @@ The server MAY park a sandbox once it has been unused for a while of its choosin
 - Every job in it ends as a cancellation does, and every connection through its ports is closed.
 - What its processes had written is put on its disk, and its VM is stopped. Its disk is kept with all of it.
 
-A parked sandbox is booted again for the next job started in it or request to its files, which then takes as long as booting does:
+A parked sandbox is booted again for the next job started in it or write to its files, which then takes as long as booting does:
 
 - Its VM boots again, from the image it stands on, over its disk as it was left.
 - Its files are as they were when it was parked. Its processes are not: nothing that ran in it before runs, until something starts it anew.
 - Its volumes are mounted again, and its ports opened again, at the same `url`s where the server can.
 
-A `GET`, a listing, and a connection to one of its ports do not boot it: a connection to a port of a parked sandbox is closed, as one nothing listens on is.
+A `GET`, a listing, a read of its files, and a connection to one of its ports do not boot it: its files are read from its disk as it was left, as [A sandbox's files](#a-sandboxs-files) says, and a connection to a port of a parked sandbox is closed, as one nothing listens on is.
 A server that ends parks its sandboxes, and one started again over what it kept MAY know each, parked.
 
 #### Deleting
@@ -473,6 +473,6 @@ A sandbox's files are its root filesystem as its processes see it, the volumes m
 - The server MAY leave out what is not a file to read or write, such as `/proc`, `/sys` and `/dev`, and what is neither a file nor a directory, such as a link or a device: it is not listed, and a request naming it is answered as if nothing were there.
 - A file a `PUT` makes is owned as one a process in the sandbox makes is; one it replaces keeps its mode and owner.
 - A write to a volume mounted `readonly` is refused with `403 Forbidden`.
-- A request to a sandbox whose VM is [parked](#parking) boots it first. One to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
+- A read of a sandbox whose VM is [parked](#parking) -- `PROPFIND`, `GET`, `HEAD` or `OPTIONS` -- is answered from its disk as it was left, and its image, without booting it: as its VM would answer it, with the same listings, the same `getcontentlength`, `getlastmodified` and `getetag`, the same bytes and the same `404`s, and its volumes at their paths as they are now. A file's `getetag` is its length and modification time either way, so a park or a boot that leaves a file as it was leaves its tag as it was. Any other request boots it first, and is answered by its VM. A sandbox whose VM has never booted reads as its image, with its volumes. A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.

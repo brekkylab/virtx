@@ -570,9 +570,9 @@ export class Client {
   static spawn(program?: string | null, args?: string[]): Client
   /**
    * Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its project:
-   * with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token for
-   * that project `virtx token --json --project <VIRTX_PROJECT>` prints, again as it runs out.
-   * `VIRTX_PROJECT` names the project of every request. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
+   * with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token
+   * `virtx token --json` prints, again as it runs out. `VIRTX_PROJECT`, a project's id, names the
+   * project of every request. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
    * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
    * nearest this machine.
    */

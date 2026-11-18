@@ -13,10 +13,10 @@
 //! ```
 //!
 //! Each command is of a provider when one is named -- `url`, or `--issuer` (`VIRTX_OIDC_ISSUER`)
-//! and `--client-id` (`VIRTX_OIDC_CLIENT_ID`) -- and of virtx cloud when it is named:
-//! `--domain` (`VIRTX_DOMAIN`), or a project's token, `token --project` (`VIRTX_PROJECT`), as the
-//! SDKs' `from_env` runs it. Named neither, it is of what was signed in to last, and of virtx
-//! cloud where nothing was. virtx cloud's are `virtx_core::cli`'s, the commands the Python and
+//! and `--client-id` (`VIRTX_OIDC_CLIENT_ID`) -- and of virtx cloud when it is named, by
+//! `--domain` (`VIRTX_DOMAIN`). Named neither, it is of what was signed in to last, and of virtx
+//! cloud where nothing was. virtx cloud is an OpenID Connect provider too: `virtx login
+//! https://run.virtx.sh` signs in to it as to any, and `virtx login` alone as virtx cloud's. virtx cloud's are `virtx_core::cli`'s, the commands the Python and
 //! Node packages' `virtx` runs in `libvirtx_core`, which signs in to virtx cloud alone.
 //!
 //! Signing in to a provider is RFC 8628's device flow against the provider the server at `url`
@@ -82,14 +82,11 @@ enum Command {
         #[arg(long, default_value = "openid email profile offline_access")]
         scope: String,
     },
-    /// Print a token, refreshed: a provider's ID token, or virtx cloud's access token.
+    /// Print an ID token, refreshed.
     Token {
         /// Print `{"token": ..., "expires_in": <seconds>}`, as the SDKs read it.
         #[arg(long)]
         json: bool,
-        /// virtx cloud's token for the project of this UUID, which its cells take.
-        #[arg(long, env = "VIRTX_PROJECT")]
-        project: Option<String>,
     },
     /// Say who is signed in.
     Whoami,
@@ -121,7 +118,7 @@ fn main() -> std::process::ExitCode {
         let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
         match &cli.command {
             Command::Login { scope, .. } => login(&dir, &sign_in, scope, true, announce),
-            Command::Token { json, .. } => {
+            Command::Token { json } => {
                 let kept = token(&dir, &sign_in, refused, true)?;
                 match json {
                     true => {
@@ -163,8 +160,7 @@ fn sign_in(cli: &Cli, dir: &Path) -> anyhow::Result<Option<SignIn>> {
         Command::Login { url, .. } => url.as_deref(),
         _ => None,
     };
-    let cloud = cli.domain.is_some()
-        || matches!(&cli.command, Command::Token { project: Some(project), .. } if !project.is_empty());
+    let cloud = cli.domain.is_some();
     let (issuer, client_id) = match (&cli.issuer, &cli.client_id, server) {
         (Some(issuer), Some(client_id), _) => (issuer.clone(), client_id.clone()),
         (None, None, Some(server)) => provider::advertised(server)?
@@ -445,9 +441,6 @@ mod tests {
             of(&named, Some(cloud)).as_deref(),
             Some("https://other.invalid")
         );
-        // A project's token, as the SDKs' `from_env` asks for one, is virtx cloud's.
-        let project = ["virtx", "token", "--json", "--project", "0193-project"];
-        assert_eq!(of(&project, Some(provider)), None);
         assert_eq!(
             of(
                 &["virtx", "whoami", "--domain", "x.invalid"],

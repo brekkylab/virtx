@@ -1108,6 +1108,39 @@ mod tests {
         assert_eq!(error["code"], "invalid", "{error}");
     }
 
+    /// A query that does not read is refused `400` `invalid` in the envelope, naming the
+    /// parameter, what it takes and what was sent.
+    #[tokio::test]
+    async fn a_query_that_does_not_read_is_refused_naming_what_it_takes() {
+        let served = Served::spawn("query").await;
+        for (query, said) in [
+            (
+                "limit=abc",
+                r#"limit: a whole number up to 4294967295, not "abc""#,
+            ),
+            (
+                "limit=-1",
+                r#"limit: a whole number up to 4294967295, not "-1""#,
+            ),
+            (
+                "lmit=3",
+                "lmit: not a parameter; the parameters are after, limit",
+            ),
+            ("limit=1&limit=2", "limit: given twice"),
+        ] {
+            let path = format!("volumes/?{query}");
+            let (status, body) = served.send("GET", &path, Some("demo"), "").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["error"]["code"], "invalid", "{query}");
+            assert_eq!(body["error"]["message"], said, "{query}");
+        }
+        let (status, _) = served
+            .send("GET", "volumes/?after=a&limit=2", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
     /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
     /// `too_large`, one at the limit is not, each in the envelope. The body is refused before
     /// the handler looks anything up, so no sandbox, volume or job has to be there.

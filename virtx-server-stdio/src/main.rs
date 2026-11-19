@@ -1436,13 +1436,13 @@ mod tests {
                 "POST",
                 "/sandboxes/nobody/jobs/exec/",
                 "not json",
-                r#"the body: JSON, not "not json""#,
+                "the body: JSON, which it stops being at line 1, column 2",
             ),
             (
                 "POST",
                 "/sandboxes/nobody/jobs/exec/",
                 "[]",
-                "the body: an object, not []",
+                "the body: an object, not a list",
             ),
             (
                 "POST",
@@ -1466,7 +1466,7 @@ mod tests {
                 "POST",
                 "/images/jobs/pull/",
                 "x",
-                r#"the body: JSON, not "x""#,
+                "the body: JSON, which it stops being at line 1, column 1",
             ),
             (
                 "POST",

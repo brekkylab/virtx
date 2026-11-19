@@ -25,23 +25,41 @@ class PortProtocol(str, Enum):
     """How a sandbox's port is reached from outside it."""
 
     TCP = "tcp"
-    """TCP, through a ``PortForwarder`` opened with its ``url``."""
+    """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
 
     HTTP = "http"
     """HTTP served in the sandbox, reached at its ``url`` as HTTP by a browser as by any client,
-    WebSockets included."""
+    WebSockets included. A server that cannot reach a port so refuses it."""
+
+
+@dataclass(frozen=True)
+class InboundError:
+    """Why a port's inbound rules were not set, in the shape of a refusal."""
+
+    code: str
+    """As a refusal's, such as ``quota`` or ``unavailable``."""
+
+    message: str
+    """For a person to read."""
+
+    reason: str | None = None
+    """What a ``quota`` is past, as a refusal's ``reason``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InboundError:
+        return cls(value["code"], value["message"], value.get("reason"))
 
 
 @dataclass(frozen=True)
 class SandboxPort:
-    """A port opened in a sandbox, and the ``url`` it is reached by: a ``PortForwarder``'s for
-    TCP, a browser's for HTTP."""
+    """A port opened in a sandbox as it was made, and the ``url`` it is reached by: a
+    ``PortForwarder``'s for TCP, a browser's for HTTP."""
 
     port: int
     url: str
 
     label: str | None = None
-    """What it is for, in words of whoever opened it."""
+    """What it is for, as it was opened with."""
 
     protocol: PortProtocol = PortProtocol.TCP
 
@@ -50,8 +68,8 @@ class SandboxPort:
     one. Not secret, as ``url`` is: what listens there answers whoever connects."""
 
     inbound_error: InboundError | None = None
-    """Why its inbound rules were not set, from virtx cloud, which made the port all the same: it
-    lets no one in and is reached at no public address until they are."""
+    """Why its inbound rules were not set, from a server that made the port all the same: it lets
+    no one in, and is reached at no ``address``, until they are."""
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
@@ -67,27 +85,8 @@ class SandboxPort:
 
 
 @dataclass(frozen=True)
-class InboundError:
-    """Why a port's inbound rules were not set, in the shape of a refusal."""
-
-    code: str
-    """As a refusal's: ``quota``, past the organization's public ports, or ``unavailable``."""
-
-    message: str
-    """For a person to read."""
-
-    reason: str | None = None
-    """What a ``quota`` is past, as ``public_ports``."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> InboundError:
-        return cls(value["code"], value["message"], value.get("reason"))
-
-
-@dataclass(frozen=True)
 class InboundRule:
-    """One of a port's inbound rules, virtx cloud's: the addresses it lets in, and whose they
-    are."""
+    """One of a port's inbound rules: the addresses it lets in, and whose they are."""
 
     source: str
     """An IPv4 or IPv6 CIDR, as ``203.0.113.0/24``, or one address, as ``203.0.113.7``."""
@@ -107,25 +106,23 @@ class InboundRule:
         return cls(value["source"], value.get("description"))
 
 
-def inbound_rules(rules: Iterable[InboundRule | Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """``rules``, each an ``InboundRule`` or its ``{source, description?}``, as the wire has
-    them."""
-    return [r.to_dict() if isinstance(r, InboundRule) else dict(r) for r in rules]
-
-
 @dataclass(frozen=True)
 class PortSpec:
     """A port to open in a sandbox as ``create_sandbox`` makes it: its number, what it is for,
-    how it is reached, and whom it lets in. ``ports`` takes a plain ``int`` for TCP that says
-    nothing more."""
+    how it is reached, and whom it lets in. ``ports`` takes a plain ``int`` for a TCP port that
+    says nothing more."""
 
     port: int
+
     label: str | None = None
+    """What it is for, up to 128 characters, answered with it."""
+
     protocol: PortProtocol | str = PortProtocol.TCP
 
     inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None
-    """Its inbound rules: virtx cloud's. ``None`` leaves them to the server, and ``[]`` lets in
-    no one."""
+    """Its inbound rules, each an ``InboundRule`` or its ``{source, description?}``. ``None``
+    leaves whom it lets in to the server, and ``[]`` lets in no one. A server that keeps no rules
+    refuses them."""
 
     def to_dict(self) -> int | dict[str, Any]:
         """As the wire has it: the number alone when it says no more."""
@@ -138,7 +135,9 @@ class PortSpec:
         if protocol != PortProtocol.TCP:
             spec["protocol"] = protocol.value
         if self.inbound is not None:
-            spec["inbound"] = inbound_rules(self.inbound)
+            spec["inbound"] = [
+                r.to_dict() if isinstance(r, InboundRule) else dict(r) for r in self.inbound
+            ]
         return spec
 
 

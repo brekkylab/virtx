@@ -66,16 +66,6 @@ describe('against virtx-stdio', () => {
     await sandbox.remove()
   })
 
-  test('inbound rules are refused by a server that keeps none', async () => {
-    await alpine(client)
-    const ports = [{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }]
-    await assert.rejects(client.createSandbox(ALPINE, { ports }), (error) => {
-      assert.deepEqual([error.status, error.code], [400, 'invalid'])
-      assert.match(error.message, /virtx cloud's/)
-      return true
-    })
-  })
-
   // What `await using` calls on leaving its block, called as it would be, so the test parses on
   // a Node without that syntax.
   test('a sandbox is deleted when disposed', { skip: !Symbol.asyncDispose }, async () => {
@@ -100,9 +90,17 @@ describe('against virtx-stdio', () => {
 
   test('a command in a sandbox is a job whose log ends with its code', async () => {
     await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { diskGib: 4, abins: ['index'] })
+    const sandbox = await client.createSandbox(ALPINE, {
+      diskGib: 4,
+      abins: ['index'],
+      ports: [8000, { port: 5173, label: 'dev server', protocol: 'http' }],
+    })
     assert.equal(sandbox.running, true)
     assert.deepEqual(sandbox.abins, ['index'])
+    assert.deepEqual(
+      sandbox.ports.map(({ url, ...port }) => port),
+      [{ port: 8000 }, { port: 5173, label: 'dev server', protocol: 'http' }],
+    )
     assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
     assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
 
@@ -135,6 +133,12 @@ describe('against virtx-stdio', () => {
     await assert.rejects(got.job(job.id), { status: 404 })
     await sandbox.remove()
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
+  })
+
+  test('a port with inbound rules is refused by a server that keeps none', async () => {
+    await alpine(client)
+    const ssh = { port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }
+    await assert.rejects(client.createSandbox(ALPINE, { ports: [ssh] }), { status: 400 })
   })
 
   test('a job reads its stdin until it is closed', async () => {

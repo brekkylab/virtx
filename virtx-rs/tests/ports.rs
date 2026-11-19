@@ -48,13 +48,11 @@ fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
     said
 }
 
-/// Serve `hello` on 8000 in a sandbox of `client`'s that opens it, and answer the sandbox.
-fn serving(client: &virtx::Client) -> virtx::Sandbox {
+/// Serve `hello` on 8000 in a sandbox of `client`'s that opens it as `port` says, and answer
+/// the sandbox.
+fn serving(client: &virtx::Client, port: PortSpec) -> virtx::Sandbox {
     common::alpine(client);
-    let args = SandboxCreateArgs {
-        ports: vec![8000.into()],
-        ..SandboxCreateArgs::new(ALPINE)
-    };
+    let args = SandboxCreateArgs::new(ALPINE).port(port);
     let sandbox = client.create_sandbox(&args).wait().unwrap();
     let serve = SandboxExecArgs {
         timeout_ms: Some(30_000),
@@ -71,8 +69,17 @@ fn serving(client: &virtx::Client) -> virtx::Sandbox {
 #[test]
 fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let client = common::client();
-    let sandbox = serving(&client);
-    let url = &sandbox.info().ports[0].url;
+    // Over HTTP, which the loopback carries as it carries any TCP, and saying what it is for.
+    let port = PortSpec::new(8000)
+        .label("greeting")
+        .protocol(PortProtocol::Http);
+    let sandbox = serving(&client, port);
+    let opened = &sandbox.info().ports[0];
+    assert_eq!(
+        (opened.label.as_deref(), opened.protocol, &opened.address),
+        (Some("greeting"), PortProtocol::Http, &None)
+    );
+    let url = &opened.url;
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
     // Answered only on its making: the URLs are as secret as what reaches them.
@@ -89,7 +96,8 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 #[test]
 fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() {
     let client = common::tcp_client();
-    let sandbox = serving(&client);
+    let sandbox = serving(&client, PortSpec::new(8000).label("greeting"));
+    assert_eq!(sandbox.info().ports[0].label.as_deref(), Some("greeting"));
     let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url).unwrap();
     let at = forwarder.address();
     assert!(at.ip().is_loopback());

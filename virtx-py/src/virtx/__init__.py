@@ -27,10 +27,10 @@ them; one known by its id or name is had with ``get_sandbox``, ``find_sandbox``,
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
-A sandbox's port is reached through a ``PortForwarder``, opened over a client with the port
-``create_sandbox`` or ``Sandbox.start`` answered, or its ``url``: an address on this machine's
-loopback. What the library warns of, such as a forwarded connection
-that reached nothing, the ``virtx`` logger logs.
+A sandbox's port, a number or a ``PortSpec``, is reached at the ``url`` ``create_sandbox``
+answered for it: a TCP one through a ``PortForwarder`` opened over a client with it, an address
+on this machine's loopback; an HTTP one by a browser. What the library warns of, such as a
+forwarded connection that reached nothing, the ``virtx`` logger logs.
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load

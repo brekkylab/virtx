@@ -28,11 +28,7 @@ from .image import (
 )
 from .job import StartedJob
 from .project import Project
-from .sandbox import (
-    PortSpec,
-    Sandbox,
-    SandboxVolume,
-)
+from .sandbox import PortSpec, Sandbox, SandboxVolume
 from .volume import Volume
 
 T = TypeVar("T")
@@ -487,7 +483,7 @@ class Client:
         *,
         name: str | None = None,
         network: bool = True,
-        ports: Iterable[int | PortSpec | Mapping[str, Any]] = (),
+        ports: Iterable[int | PortSpec] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
         disk_gib: int | None = None,
@@ -500,8 +496,8 @@ class Client:
         ``SandboxVolume``. It is kept, with what it wrote, until ``Sandbox.remove``: the server
         may stop its VM while nothing uses it, and boots it again for the next job or write to
         its files; its files are read from its disk meanwhile. ``name`` finds it again with ``find_sandbox``. ``ports`` are ports in it to
-        open -- a number for TCP, or a ``PortSpec`` (or its ``{port, label?, protocol?,
-        inbound?}``) to say what it is for, whether it is HTTP and whom it lets in -- each
+        open -- a number for TCP, or a ``PortSpec`` to say what it is for, whether it is HTTP and
+        whom it lets in -- each
         answered here only with the ``url`` it is reached by. ``abins`` names virtx's programs it
         gets at ``/abin``, each with its ``SKILL.md`` at ``/abin/skills/{name}/``. Whatever is
         left out the server picks.

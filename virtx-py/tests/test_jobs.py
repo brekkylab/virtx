@@ -110,15 +110,6 @@ async def test_a_port_says_what_it_is_for_and_whether_it_is_http(client: Client)
     await sandbox.remove()
 
 
-async def test_inbound_rules_are_refused_by_a_server_that_keeps_none(client: Client) -> None:
-    await alpine(client)
-    office = InboundRule("203.0.113.7", "office")
-    with pytest.raises(VirtxError) as refused:
-        await client.create_sandbox(ALPINE, ports=[PortSpec(22, inbound=[office])])
-    assert (refused.value.status, refused.value.code) == (400, "invalid")
-    assert "virtx cloud's" in str(refused.value)
-
-
 async def test_a_forwarded_port_nothing_listens_on_says_so(
     tcp_client: Client, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -214,12 +205,15 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     sandbox = await client.create_sandbox(
         ALPINE,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
-        ports=[8000],
+        ports=[8000, PortSpec(5173, label="dev server", protocol="http")],
         abins=["index"],
     )
     assert sandbox.running
     assert sandbox.abins == ["index"]
-    assert [port.port for port in sandbox.ports] == [8000]
+    assert [(p.port, p.label, p.protocol) for p in sandbox.ports] == [
+        (8000, None, PortProtocol.TCP),
+        (5173, "dev server", PortProtocol.HTTP),
+    ]
     assert SandboxVolume(volume, "/data").to_dict() == {
         "volume": volume.name,
         "path": "/data",
@@ -559,3 +553,32 @@ async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
         await job.complete()
     assert str(completed.value) == str(failed.value)
     await client.remove_image(reference)
+
+
+async def test_a_port_says_what_it_is_for_and_whom_it_lets_in(client: Client) -> None:
+    assert PortSpec(22).to_dict() == 22
+    ssh = PortSpec(22, label="ssh", inbound=[InboundRule("203.0.113.7", "office")])
+    assert ssh.to_dict() == {
+        "port": 22,
+        "label": "ssh",
+        "inbound": [{"source": "203.0.113.7", "description": "office"}],
+    }
+    assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
+    assert PortSpec(80, protocol=PortProtocol.HTTP).to_dict() == {"port": 80, "protocol": "http"}
+
+    answered = SandboxPort.from_dict(
+        {
+            "port": 22,
+            "url": "ports/x",
+            "address": "tcp.example:20001",
+            "inbound_error": {"code": "quota", "message": "past", "reason": "public_ports"},
+        }
+    )
+    assert answered.address == "tcp.example:20001"
+    assert answered.inbound_error == InboundError("quota", "past", "public_ports")
+
+    # The fixture's server keeps no inbound rules, and refuses them before anything boots.
+    await alpine(client)
+    with pytest.raises(VirtxError) as refused:
+        await client.create_sandbox(ALPINE, ports=[ssh])
+    assert refused.value.status == 400

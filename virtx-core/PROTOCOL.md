@@ -349,8 +349,8 @@ It stops the VM of each it keeps, and, started again, knows each as one whose VM
 `ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?, inbound?}` to say what it is for, how it is reached and whom it lets in: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
 
 - `label` is what it is for, free text of up to 128 characters, answered with it.
-- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP refuses `http` with `400`, `invalid`.
-- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: virtx cloud's, beside the protocol. A server that keeps none refuses `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out.
+- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP MUST refuse `http` with `400`, `invalid`.
+- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: whom it lets in. A server MAY keep them; one that keeps none MUST refuse `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out. Whom a port given none lets in is the server's to say; `[]` lets in no one.
 
 They are reserved when the sandbox is made, and kept through every park until it is deleted. `0` and a port given twice are refused.
 
@@ -362,7 +362,7 @@ The `POST` answers each with where it is reached from, as `{port, url, label?, p
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
 - A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; an `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.
-- A port whose `inbound` rules could not be set, past a quota or with what keeps them not answering, is opened all the same, with `inbound_error`, `{code, message, reason?}` in a refusal's shape -- `reason` naming what a `quota` is past -- beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
+- A server that keeps inbound rules MAY open a port whose rules it could not set, such as past a quota, with `inbound_error`, `{code, message, reason?}` in a refusal's shape, beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
 
 ### Sandbox jobs
 

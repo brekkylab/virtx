@@ -129,15 +129,65 @@ Closing a forwarder stops forwarding on this machine; the port in the sandbox st
 A server on this machine answers each port with a loopback address already, which a TCP client can also reach as it is.
 A server over HTTP answers a URL that only a `PortForwarder` opens, so use one either way.
 
+## What a port is for
+
+A port in `ports` is a number for plain TCP, or a spec that says more: a `label` of up to 128 characters saying what it is for, and a `protocol`, `tcp` or `http`.
+Each comes back in `sandbox.ports` with its `label` and `protocol` as given.
+
+An `http` port is HTTP served in the sandbox, reached at its `url` by a browser as by any client, WebSockets included, with no forwarder.
+A server on this machine answers it a loopback address that a browser opens as it is.
+A server that cannot serve a port over HTTP refuses `http` with `400`, `invalid`: `virtx-server-tcp`'s URLs are a forwarder's alone, so it does.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import PortSpec
+
+sandbox = await client.create_sandbox(
+    "node:22",
+    ports=[PortSpec(5173, label="dev server", protocol="http")],
+)
+print(sandbox.ports[0].url)  # open it in a browser
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('node:22', {
+  ports: [{ port: 5173, label: 'dev server', protocol: 'http' }],
+})
+console.log(sandbox.ports[0].url) // open it in a browser
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let web = PortSpec::new(5173)
+    .label("dev server")
+    .protocol(PortProtocol::Http);
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("node:22").port(web))
+    .await?;
+println!("{}", sandbox.info().ports[0].url); // open it in a browser
+```
+
+</TabItem>
+</Tabs>
+
+A server reachable from other machines may also answer a `tcp` port with an `address`, `host:port`, where any TCP client reaches it directly, with no forwarder.
+Unlike the `url`, it is not secret: what listens on the port answers whoever connects, and has to authenticate them itself.
+
 ## Who a port lets in
 
-On virtx cloud, each open port has inbound rules, as a security group does: the addresses it lets in.
-A TCP port's rules limit who reaches its public `address`, which it is given with its first rule; its `url`, through a `PortForwarder`, is not limited by them.
-An HTTP port's rules limit who reaches its `url`, and it has no `address`.
-A connection from an address no rule holds is not let in, so a port with no rules is reached there by no one.
-
+A server may keep inbound rules for a port, as a security group does: the addresses it lets in.
 Each rule is a `source`, an IPv4 or IPv6 CIDR such as `203.0.113.0/24` or one address such as `203.0.113.7`, and an optional `description`.
-Set them as the sandbox is created, with `inbound` in the port's spec.
+Give them as the sandbox is made, with `inbound` in the port's spec; an empty list lets in no one.
+
+On virtx cloud, every open port has them. A TCP port's rules limit who reaches its public `address`, which it is given with its first rule; its `url`, through a `PortForwarder`, is not limited by them.
+An HTTP port's rules limit who reaches its `url`, and it has no `address`.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -164,8 +214,7 @@ const sandbox = await client.createSandbox('alpine:latest', {
 <TabItem label="Rust">
 
 ```rust
-let mut ssh = PortSpec::new(22);
-ssh.inbound = Some(vec![InboundRule::new("203.0.113.7").description("office")]);
+let ssh = PortSpec::new(22).inbound([InboundRule::new("203.0.113.7").description("office")]);
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(ssh))
     .await?;
@@ -174,6 +223,6 @@ let sandbox = client
 </TabItem>
 </Tabs>
 
-A source that is not an address or a CIDR is refused with `400`, `invalid`.
-A port whose rules could not be set, past the organization's public ports or with what keeps them not answering, is opened all the same and says why in its `inbound_error` (`inboundError` in Node.js): a `code`, a `message`, and for a quota a `reason`. It lets no one in, and has no `address`, until its rules are set.
-Inbound rules are virtx cloud's alone: a self-hosted server, `virtx-stdio` or `virtx-server-tcp`, keeps none and refuses a port opened with `inbound`.
+A server that keeps no rules refuses a port given `inbound` with `400`, `invalid`, rather than open it to whoever the rules were meant to keep out: `virtx-stdio` and `virtx-server-tcp` keep none.
+A server that keeps them may open a port whose rules it could not set, such as past a quota, and say why in its `inbound_error` (`inboundError` in Node.js): a `code`, a `message`, and for a quota a `reason`.
+Such a port lets no one in, and has no `address`, until its rules are set.

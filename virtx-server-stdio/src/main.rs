@@ -489,6 +489,15 @@ mod tests {
             args.ports = ports.into_iter().map(Into::into).collect();
             assert_eq!(refused(args).await, 400);
         }
+        // Inbound rules are kept by no server here, and a label is at most 128 characters.
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        assert_eq!(refused(here().port(ssh)).await, 400);
+        assert_eq!(
+            refused(here().port(PortSpec::new(22).inbound([]))).await,
+            400
+        );
+        let long = PortSpec::new(80).label("x".repeat(129));
+        assert_eq!(refused(here().port(long)).await, 400);
         let mut args = here();
         args.vcpus = Some(0);
         assert_eq!(refused(args).await, 400);

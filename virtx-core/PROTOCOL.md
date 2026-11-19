@@ -334,13 +334,15 @@ A parked sandbox is booted again for the next job started in it or write to its 
 - Its volumes are mounted again, and its ports opened again, at the same `url`s where the server can.
 
 A `GET`, a listing, a read of its files, and a connection to one of its ports do not boot it: its files are read from its disk as it was left, as [A sandbox's files](#a-sandboxs-files) says, and a connection to a port of a parked sandbox is closed, as one nothing listens on is.
-A server that ends parks its sandboxes, and one started again over what it kept MAY know each, parked.
 
 #### Deleting
 
 A sandbox is deleted by its `DELETE`, or by the server, which MAY reclaim one unused for a while of its choosing.
 Either stops its VM if it is up, ends every job in it as a cancellation does, and closes its ports; its disk goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
+
+A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
+It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
 
 #### Ports
 
@@ -405,6 +407,8 @@ A server MAY say which, in its end and in its job, with `reason`:
 
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed: a sandbox parked ends its jobs and keeps them.
+A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
+A sandbox [kept](#sandboxes) across its server's end has none of its jobs once the server is started again.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

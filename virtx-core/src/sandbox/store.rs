@@ -31,6 +31,11 @@ pub struct Sandbox {
     /// virtx's own programs it has at `/abin`, as it was made with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abins: Vec<String>,
+
+    /// Why it takes nothing but its `DELETE`, for one a server could not know again after it
+    /// restarted: not `running`, and every other request about it refused `409`, `ended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.

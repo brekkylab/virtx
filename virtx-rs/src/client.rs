@@ -366,7 +366,8 @@ impl Client {
         self.call(self.api.virtx_client_tag_image, args)
     }
 
-    /// Remove the tag `reference` (`name:tag`), leaving the image it points at.
+    /// Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of
+    /// an image a sandbox or a build uses is refused `409`, and kept.
     pub fn untag_image(&self, reference: impl Into<String>) -> Call<()> {
         let args = ImageUntagArgs {
             reference: reference.into(),
@@ -375,7 +376,7 @@ impl Client {
     }
 
     /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
-    /// it in that name.
+    /// it in that name. An image a sandbox or a build uses is refused `409`, with nothing removed.
     pub fn remove_image(&self, reference: impl Into<String>) -> Call<()> {
         let args = ImageRemoveArgs {
             reference: reference.into(),

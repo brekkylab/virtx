@@ -81,6 +81,13 @@ impl Files {
                 return refused(status, e).into_response();
             }
         };
+        if request.method() == Method::PATCH {
+            let fs = volume::Fs {
+                volume,
+                landing: None,
+            };
+            return not_allowed(handler.filesystem(Box::new(fs)).build_handler(), request).await;
+        }
         let hold = || -> Hold {
             let serial = self.serial(format!("volume:{name}"));
             let dir = volume.path().to_owned();
@@ -118,6 +125,14 @@ impl Files {
         };
         let sandbox = activity.sandbox();
         let mounts: Arc<[(String, PathBuf)]> = sandbox.mounts().into();
+        if request.method() == Method::PATCH {
+            let fs = sandbox::Fs {
+                machine,
+                landing: None,
+                mounts,
+            };
+            return not_allowed(handler.filesystem(Box::new(fs)).build_handler(), request).await;
+        }
         let hold = || -> Hold {
             let writing = Arc::clone(sandbox.writing());
             let mut dirs: Vec<PathBuf> = mounts.iter().map(|(_, dir)| dir.clone()).collect();
@@ -214,13 +229,11 @@ impl http_body::Body for Shared {
     }
 }
 
-/// What answers a WebDAV request under `prefix`, but its filesystem: refused for a write of part
-/// of a file -- a `PATCH`, or a `PUT` with `Content-Range` -- since a file is written whole, and
-/// for one that [takes the root](takes_root).
+/// What answers a WebDAV request under `prefix`, but its filesystem: refused for a `PUT` of part
+/// of a file, with `Content-Range`, since a file is written whole, and for one that
+/// [takes the root](takes_root). A `PATCH` is [not allowed](not_allowed).
 fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavConfig, Refusal> {
-    let partial = request.method() == Method::PATCH
-        || request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE);
-    if partial {
+    if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE) {
         return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
     }
     if takes_root(&prefix, request)? {
@@ -237,6 +250,32 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
         .strip_prefix(prefix)
         .hide_symlinks(true)
         .read_buf_size(volume::READ))
+}
+
+/// `request`, a `PATCH`, refused `405 method_not_allowed` once its body is read, with the `Allow`
+/// that `handler` answers an `OPTIONS` of its path with: a file is written whole, by `PUT`.
+async fn not_allowed(handler: DavHandler, request: Request<Body>) -> Response {
+    let (parts, mut body) = request.into_parts();
+    while let Some(Ok(_)) = body.frame().await {}
+    let mut options = Request::new(Body::empty());
+    *options.method_mut() = Method::OPTIONS;
+    *options.uri_mut() = parts.uri;
+    let allow = handler
+        .handle(options)
+        .await
+        .headers()
+        .get(header::ALLOW)
+        .cloned();
+    let error = serde_json::json!({"error": {
+        "code": "method_not_allowed",
+        "message": "a file is written whole, by PUT",
+    }});
+    let json = [(header::CONTENT_TYPE, "application/json")];
+    let mut response = (StatusCode::METHOD_NOT_ALLOWED, json, error.to_string()).into_response();
+    if let Some(allow) = allow {
+        response.headers_mut().insert(header::ALLOW, allow);
+    }
+    response
 }
 
 /// Whether `request` would take the root at `prefix` away or write over it: a `DELETE` or `MOVE`
@@ -827,8 +866,14 @@ mod tests {
             if let Some(etag) = if_match {
                 request = request.header(header::IF_MATCH, etag);
             }
-            let response = files.volume("v", request.body(Body::from("YY")).unwrap());
-            assert_eq!(response.await.status(), StatusCode::BAD_REQUEST, "{what}");
+            let response = files
+                .volume("v", request.body(Body::from("YY")).unwrap())
+                .await;
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{what}");
+            assert_eq!(response.headers()[header::ALLOW], allow, "{what}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "method_not_allowed", "{what}");
         }
         let ranged = Request::put(path)
             .header(header::CONTENT_RANGE, "bytes 0-0/10")

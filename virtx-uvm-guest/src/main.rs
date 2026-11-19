@@ -384,19 +384,16 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     }
     send(out, &CtrlResp::Started(Ok(id)));
 
-    let ended = Arc::new(Mutex::new(false));
     let (read, all_read) = std::sync::mpsc::channel();
     let stdout = Piped::start(
         out,
         child.stdout.take().map(OwnedFd::from),
-        &ended,
         read.clone(),
         move |line| CtrlResp::Stdout { id, line },
     );
     let stderr = Piped::start(
         out,
         child.stderr.take().map(OwnedFd::from),
-        &ended,
         read,
         move |line| CtrlResp::Stderr { id, line },
     );
@@ -416,15 +413,13 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
                 break;
             }
         }
-        let mut ended = ended.lock().unwrap();
-        *ended = true;
         send(&out, &CtrlResp::Exited { id, code });
     });
 }
 
-/// One of a process's pipes, read on a thread of its own: each line sent until its process has
-/// ended and what it wrote by then is read, and what comes after -- a background program's --
-/// read and dropped, so that a program writing to it is never held up by a full pipe.
+/// One of a process's pipes, read on a thread of its own: each line sent up to what it held as
+/// its process ended, and what comes after -- a background program's -- read and dropped, so
+/// that a program writing to it is never held up by a full pipe.
 struct Piped {
     fd: Option<i32>,
     /// What has been read, and once its process has ended, what it had written by then:
@@ -442,7 +437,6 @@ impl Piped {
     fn start(
         out: &Out,
         pipe: Option<OwnedFd>,
-        ended: &Arc<Mutex<bool>>,
         read: std::sync::mpsc::Sender<()>,
         wrapped: impl Fn(String) -> CtrlResp + Send + 'static,
     ) -> Self {
@@ -452,7 +446,7 @@ impl Piped {
             return Self { fd: None, count };
         };
         let fd = pipe.as_raw_fd();
-        let (out, ended, counted) = (Arc::clone(out), Arc::clone(ended), Arc::clone(&count));
+        let (out, counted) = (Arc::clone(out), Arc::clone(&count));
         thread::spawn(move || {
             let pipe = File::from(pipe);
             // Each read's lines said at once, one write for them all: each write costs the
@@ -461,15 +455,11 @@ impl Piped {
                 if lines.is_empty() {
                     return;
                 }
-                // Under `ended`, so nothing is said of a process after its end.
-                let ended = ended.lock().unwrap();
-                if !*ended {
-                    let messages: Vec<CtrlResp> = lines
-                        .iter()
-                        .map(|line| wrapped(String::from_utf8_lossy(line).into_owned()))
-                        .collect();
-                    let _ = wire::send_all(&mut *out.lock().unwrap(), &messages);
-                }
+                let messages: Vec<CtrlResp> = lines
+                    .iter()
+                    .map(|line| wrapped(String::from_utf8_lossy(line).into_owned()))
+                    .collect();
+                let _ = wire::send_all(&mut *out.lock().unwrap(), &messages);
                 lines.clear();
             };
             let mut said: Vec<Vec<u8>> = Vec::new();
@@ -492,27 +482,36 @@ impl Piped {
                 if !readable(fd, 100) {
                     continue;
                 }
-                let n = {
+                // How much was read, and how much of it its process wrote before it ended.
+                let (n, own) = {
                     let mut count = counted.lock().unwrap();
                     match (&pipe).read(&mut chunk) {
-                        Ok(0) | Err(_) => 0,
+                        Ok(0) | Err(_) => (0, 0),
                         Ok(n) => {
+                            let before = count.read;
                             count.read += n as u64;
-                            n
+                            let own = count.until.map_or(n as u64, |until| {
+                                until.saturating_sub(before).min(n as u64)
+                            });
+                            (n, own as usize)
                         }
                     }
                 };
                 if n == 0 {
-                    if !line.is_empty() {
-                        said.push(std::mem::take(&mut line));
-                    }
-                    say(&mut said);
                     if let Some(told) = told {
+                        if !line.is_empty() {
+                            said.push(std::mem::take(&mut line));
+                        }
+                        say(&mut said);
                         let _ = told.send(());
                     }
                     return;
                 }
-                let mut rest = &chunk[..n];
+                // Past its process's end, it is a background program's: dropped.
+                if told.is_none() {
+                    continue;
+                }
+                let mut rest = &chunk[..own];
                 while let Some(at) = rest.iter().position(|b| *b == b'\n') {
                     line.extend_from_slice(&rest[..at]);
                     said.push(std::mem::take(&mut line));

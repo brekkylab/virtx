@@ -19,7 +19,7 @@ use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, VolumeHold, VolumeMount, VolumeStore,
+    Ports, Reference, Room, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -106,7 +106,8 @@ type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
-    Up(Arc<Machine>),
+    /// Up, with the room it was given ([`Admission`](crate::Admission)), held until it is down.
+    Up(Arc<Machine>, Option<Room>),
     /// Stopped while the sandbox was in use by nothing, and booted again for what next needs
     /// it.
     Parked,
@@ -504,7 +505,7 @@ impl Sandbox {
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
         // finds the sandbox closed.
         let _turn = self.turn.blocking_lock();
-        if let State::Up(machine) = state {
+        if let State::Up(machine, _room) = state {
             machine.stop();
         }
         self.volume_holds.lock().unwrap().clear();
@@ -520,10 +521,12 @@ impl Sandbox {
     async fn wake(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
         let _turn = self.turn.lock().await;
         match &*self.state.lock().unwrap() {
-            State::Up(machine) => return Ok(Arc::clone(machine)),
+            State::Up(machine, _) => return Ok(Arc::clone(machine)),
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
+        // Room for it first, so a machine there is none for is never started.
+        let mut room = crate::admit(&self.config.spec)?;
         // Booting is blocking work, until the guest takes commands.
         let (config, vm) = (self.config.clone(), self.vm.clone());
         let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
@@ -532,13 +535,14 @@ impl Sandbox {
             let mut state = self.state.lock().unwrap();
             let closed = matches!(*state, State::Exited);
             if !closed {
-                *state = State::Up(Arc::clone(&machine));
+                *state = State::Up(Arc::clone(&machine), room.take());
             }
             closed
         };
-        // Closed while it booted: what booted goes with it.
+        // Closed while it booted: what booted goes with it, and then its room.
         if closed {
             tokio::task::spawn_blocking(move || machine.stop()).await?;
+            drop(room);
             return Err(Error::Ended);
         }
         let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
@@ -553,29 +557,32 @@ impl Sandbox {
         if self.idle().is_none_or(|idle| idle < after) {
             return;
         }
-        let machine = {
+        let (machine, room) = {
             let mut state = self.state.lock().unwrap();
-            let State::Up(machine) = &*state else {
-                return;
-            };
-            let machine = Arc::clone(machine);
-            *state = State::Parked;
-            machine
+            match std::mem::replace(&mut *state, State::Parked) {
+                State::Up(machine, room) => (machine, room),
+                other => {
+                    *state = other;
+                    return;
+                }
+            }
         };
+        // Its room is given back once it is down.
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+        drop(room);
     }
 
     /// Its machine while one runs.
     fn up(&self) -> Option<Arc<Machine>> {
         match &*self.state.lock().unwrap() {
-            State::Up(machine) => Some(Arc::clone(machine)),
+            State::Up(machine, _) => Some(Arc::clone(machine)),
             _ => None,
         }
     }
 
     /// Whether `machine` is its machine now.
     fn is(&self, machine: &Arc<Machine>) -> bool {
-        matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, machine))
+        matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
     }
 
     /// Kill `job` if it runs.
@@ -639,7 +646,8 @@ impl Sandbox {
         let mut starting = self.starting.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
-            if matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine)) {
+            // Its room with it, since it is down.
+            if matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine)) {
                 *state = State::Exited;
             }
         }

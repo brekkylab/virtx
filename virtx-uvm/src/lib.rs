@@ -1,8 +1,9 @@
 //! Images, the machines provisioned from them, and the registries around them, and the
 //! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
 //! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
-//! belongs to.
+//! belongs to. How many machines may run at once is the embedder's to say ([`Admission`]).
 
+mod admission;
 mod files;
 mod fstree;
 mod image;
@@ -11,6 +12,7 @@ mod project;
 mod sandbox;
 mod volume;
 
+pub use admission::{Admission, NoRoom, Room, admit, set_admission};
 pub use files::Files;
 pub use fstree::*;
 pub use image::{

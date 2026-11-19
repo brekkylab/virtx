@@ -30,13 +30,13 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem,
+    SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
+    MachineSpec, Network, NoRoom, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
     RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after,
     signal_number,
 };
@@ -606,6 +606,15 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     )
 }
 
+/// What a build's `RUN` steps each boot a machine of.
+const BUILD_MACHINE: MachineSpec = MachineSpec {
+    vcpus: DEFAULT_VCPUS,
+    ram_mib: DEFAULT_MEMORY_MIB,
+    gpu: false,
+    gpu_memory_mib: None,
+    network: Network::Public,
+};
+
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImageBuildArgs = body(&request)?;
     let reference = reference(&args.reference)?;
@@ -615,11 +624,20 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let registries = Arc::clone(&home.registries);
     let recipe = args.recipe;
+    // Room for one machine as the build is asked for, if a step of it boots one -- its steps
+    // boot one at a time -- so a build there is none for is refused as a sandbox is.
+    let boots = recipe.steps.iter().any(|step| matches!(step, Step::Run(_)));
+    let room = match boots {
+        true => virtx_uvm::admit(&BUILD_MACHINE)?,
+        false => None,
+    };
     image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
         move |mut report| async move {
+            // Held until the build ends, or is cancelled: its future dropped.
+            let _room = room;
             let (mut image, mut layers, _base) =
                 base(&images, &*registries, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
@@ -631,13 +649,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                     &mut layers,
                     step,
                     &vm,
-                    &MachineSpec {
-                        vcpus: DEFAULT_VCPUS,
-                        ram_mib: DEFAULT_MEMORY_MIB,
-                        gpu: false,
-                        gpu_memory_mib: None,
-                        network: Network::Public,
-                    },
+                    &BUILD_MACHINE,
                     &mut report,
                 )
                 .await?;
@@ -1150,11 +1162,19 @@ fn internal(message: impl Display) -> Refused {
     refused(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
 }
 
+/// How long a client is told to wait before it asks again for what found no room.
+const CAPACITY_RETRY_AFTER: &str = "5";
+
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
         let Refused(status, code, message) = self;
         let body = serde_json::json!({"error": {"code": code, "message": message}});
-        (status, json(&body)).into_response()
+        let mut response = (status, json(&body)).into_response();
+        if code == "capacity" {
+            let wait = http::HeaderValue::from_static(CAPACITY_RETRY_AFTER);
+            response.headers_mut().insert(header::RETRY_AFTER, wait);
+        }
+        response
     }
 }
 
@@ -1257,7 +1277,16 @@ impl From<SandboxError> for Refused {
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            SandboxError::NoRoom(e) => e.into(),
         }
+    }
+}
+
+/// No room for a machine, as the embedder's admission says: the protocol's `503` `capacity`,
+/// nothing having been made.
+impl From<NoRoom> for Refused {
+    fn from(e: NoRoom) -> Refused {
+        refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e)
     }
 }
 

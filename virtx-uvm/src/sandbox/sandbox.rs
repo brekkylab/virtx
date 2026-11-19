@@ -429,7 +429,11 @@ impl Sandbox {
             .get_image(&self.record.image)?
             .ok_or_else(|| Error::NotFound(format!("no image here is {}", self.record.image)))?;
         let began = Instant::now();
+        // Room for it first, as the embedder's admission says, held while it runs: a machine
+        // there is none for is never started.
+        let room = crate::admit(&spec)?;
         let mut held = shared.hooks.booting(self, &spec).await?;
+        held.extend(room);
 
         let disk = shared.snapshots.open(&id)?;
         // Held from here until its machine has ended, against every other machine, removal

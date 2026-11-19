@@ -43,15 +43,15 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec, ProjectCreateArgs,
     ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
-    SandboxCreateArgs, SandboxExecArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, described_type,
-    from_body,
+    SandboxCreateArgs, SandboxExecArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    described_type, from_body,
 };
 use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted, Written};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, ImageConfiguration,
-    ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os,
-    PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
+    ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, NoRoom,
+    Os, PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
     RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError,
     VolumeStore, build_step, signal_number,
 };
@@ -64,9 +64,9 @@ use crate::project::Project;
 
 pub use virtx_uvm::sandbox::cloned;
 
-/// What decides whether a machine may boot now, every project's together, as an embedder sets
-/// it ([`set_admission`]): virtx cloud's nodes hold their machines to the room their host has.
-/// Without one, every machine boots.
+/// What decides whether a machine may boot now, answered in this crate's [`Refused`]: an
+/// embedder's [`virtx_uvm::Admission`] written against this crate. [`set_admission`] sets it
+/// as `virtx-uvm`'s, the seam every sandbox's and build's boot asks.
 pub trait Admission: Send + Sync {
     /// Room for a machine of `spec` -- a sandbox's, or a build's `RUN` step's -- held until
     /// what this answers drops: refused, as the request that asked for it is answered, where
@@ -74,20 +74,21 @@ pub trait Admission: Send + Sync {
     fn admit(&self, spec: &MachineSpec) -> Result<Held, Refused>;
 }
 
-static ADMISSION: OnceLock<Arc<dyn Admission>> = OnceLock::new();
+/// An [`Admission`] as `virtx-uvm` asks one: what it refuses, no room.
+struct Admitting(Arc<dyn Admission>);
 
-/// Ask `admission` for room for every machine this server boots, from now on.
-pub fn set_admission(admission: Arc<dyn Admission>) {
-    let _ = ADMISSION.set(admission);
+impl virtx_uvm::Admission for Admitting {
+    fn admit(&self, spec: &MachineSpec) -> Result<virtx_uvm::Room, NoRoom> {
+        self.0
+            .admit(spec)
+            .map_err(|Refused(_, _, message)| NoRoom(message))
+    }
 }
 
-/// Room for a machine of `spec`, as `admission` says, else as the one set says: none asked
-/// for, where neither is.
-fn admit(admission: Option<&dyn Admission>, spec: &MachineSpec) -> Result<Option<Held>, Refused> {
-    match admission.or_else(|| ADMISSION.get().map(|set| set.as_ref())) {
-        Some(admission) => admission.admit(spec).map(Some),
-        None => Ok(None),
-    }
+/// Ask `admission` for room for every machine this process boots, from now on, as
+/// [`virtx_uvm::set_admission`] does.
+pub fn set_admission(admission: Arc<dyn Admission>) {
+    virtx_uvm::set_admission(Arc::new(Admitting(admission)));
 }
 
 /// Docker Hub's mirror for a home whose access names none
@@ -679,16 +680,15 @@ impl Hooks for HomeHooks {
         }
     }
 
-    /// Room for its machine, held until it stops; its disk held here and brought up to what is
-    /// kept -- lazily, if the keeping can -- and each volume it writes held, each it only reads
-    /// brought up: refused while another node holds either. A fill ahead of its start, stopped.
+    /// Its disk held here and brought up to what is kept -- lazily, if the keeping can -- and
+    /// each volume it writes held, each it only reads brought up: refused while another node
+    /// holds either. A fill ahead of its start, stopped. Its room is `virtx-uvm`'s to ask.
     fn booting<'a>(
         &'a self,
         sandbox: &'a Sandbox,
-        spec: &'a MachineSpec,
+        _spec: &'a MachineSpec,
     ) -> BoxFuture<'a, Result<Vec<Held>, SandboxError>> {
         Box::pin(async move {
-            let taken = admit(None, spec).map_err(hooked)?;
             let home = self.home()?;
             let id = sandbox.id();
             home.take_to_boot(Kind::Snapshot, id)
@@ -704,7 +704,7 @@ impl Hooks for HomeHooks {
             if let Some(keeping) = &self.keeping {
                 keeping.settle(id).await;
             }
-            Ok(taken.into_iter().collect())
+            Ok(Vec::new())
         })
     }
 
@@ -1218,24 +1218,6 @@ const BUILD_MACHINE: MachineSpec = MachineSpec {
     network: Network::Public,
 };
 
-/// The room a build of `recipe` takes, asked of `admission` (else the one set) as the build is
-/// asked for (issue #151): one [`BUILD_MACHINE`]'s, if a step of it boots one -- its steps boot
-/// one at a time -- refused as a sandbox's boot is where there is none; none for a recipe that
-/// boots nothing. So a build's machine counts in what this server's machines take.
-fn build_room(
-    admission: Option<&dyn Admission>,
-    recipe: &virtx_core::Recipe,
-) -> Result<Option<Held>, Refused> {
-    let boots = recipe
-        .steps
-        .iter()
-        .any(|step| matches!(step, virtx_core::Step::Run(_)));
-    match boots {
-        true => admit(admission, &BUILD_MACHINE),
-        false => Ok(None),
-    }
-}
-
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImageBuildArgs = body(&request)?;
     let reference = reference(&args.reference)?;
@@ -1246,7 +1228,13 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     let registries = home.registries();
     let mirror = home.mirror();
     let recipe = args.recipe;
-    let room = build_room(None, &recipe)?;
+    // Room for one machine as the build is asked for, if a step of it boots one -- its steps
+    // boot one at a time -- so a build there is none for is refused as a sandbox is.
+    let boots = recipe.steps.iter().any(|step| matches!(step, Step::Run(_)));
+    let room = match boots {
+        true => virtx_uvm::admit(&BUILD_MACHINE)?,
+        false => None,
+    };
     image_job(
         &home,
         ImageJobKind::Build,
@@ -2075,11 +2063,19 @@ impl Refused {
     }
 }
 
+/// How long a client is told to wait before it asks again for what found no room.
+const CAPACITY_RETRY_AFTER: &str = "5";
+
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
         let Refused(status, code, message) = self;
         let body = serde_json::json!({"error": {"code": code, "message": message}});
-        (status, json(&body)).into_response()
+        let mut response = (status, json(&body)).into_response();
+        if code == "capacity" {
+            let wait = http::HeaderValue::from_static(CAPACITY_RETRY_AFTER);
+            response.headers_mut().insert(header::RETRY_AFTER, wait);
+        }
+        response
     }
 }
 
@@ -2224,77 +2220,22 @@ impl From<SandboxError> for Refused {
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            SandboxError::NoRoom(e) => e.into(),
         }
+    }
+}
+
+/// No room for a machine, as the embedder's admission says: the protocol's `503` `capacity`,
+/// nothing having been made.
+impl From<NoRoom> for Refused {
+    fn from(e: NoRoom) -> Refused {
+        refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Room for so many machines, each asked for counted.
-    struct Room {
-        left: Mutex<u32>,
-        asked: Mutex<Vec<MachineSpec>>,
-    }
-
-    impl Admission for Room {
-        fn admit(&self, spec: &MachineSpec) -> Result<Held, Refused> {
-            self.asked.lock().unwrap().push(spec.clone());
-            let mut left = self.left.lock().unwrap();
-            if *left == 0 {
-                return Err(refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "capacity",
-                    "no room",
-                ));
-            }
-            *left -= 1;
-            Ok(Box::new(()))
-        }
-    }
-
-    /// A build that boots a machine asks room for it as it is asked for, refused as there is
-    /// none; one that boots nothing asks none (issue #151).
-    #[test]
-    fn a_build_asks_room_for_its_machine_and_is_refused_where_there_is_none() {
-        let room = Room {
-            left: Mutex::new(1),
-            asked: Mutex::default(),
-        };
-        let recipe = |steps: Vec<virtx_core::Step>| {
-            let mut recipe = virtx_core::Recipe::new("scratch");
-            recipe.steps = steps;
-            recipe
-        };
-        let runs = recipe(vec![
-            virtx_core::Step::Env {
-                key: "A".into(),
-                value: "1".into(),
-            },
-            virtx_core::Step::Run("true".into()),
-        ]);
-        let sets = recipe(vec![virtx_core::Step::Workdir("/w".into())]);
-        assert!(
-            matches!(build_room(Some(&room), &sets), Ok(None)),
-            "one booting nothing"
-        );
-        assert!(room.asked.lock().unwrap().is_empty());
-        assert!(matches!(build_room(Some(&room), &runs), Ok(Some(_))));
-        let refused = build_room(Some(&room), &runs)
-            .err()
-            .expect("no room for a second");
-        assert_eq!(
-            (refused.0, refused.1),
-            (StatusCode::SERVICE_UNAVAILABLE, "capacity")
-        );
-        let asked = room.asked.lock().unwrap();
-        assert_eq!(asked.len(), 2);
-        assert_eq!(
-            (asked[0].vcpus, asked[0].ram_mib),
-            (DEFAULT_VCPUS, DEFAULT_MEMORY_MIB)
-        );
-    }
 
     #[test]
     fn a_volume_written_is_neither_let_go_nor_kept_until_the_write_ends() {

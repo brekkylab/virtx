@@ -102,7 +102,8 @@ Each sandbox makes an upper disk of its own, named by the sandbox's id and gone 
 parked -- stopped, its disk kept -- once nothing uses the sandbox (`VIRTX_PARK_AFTER_MS` for a while after,
 `0` for never) and booted again over the same upper disk when something does: see
 [`sandbox`](src/sandbox/sandbox.rs). Each machine's coming up and going down, with when, is told in order to
-whoever embeds it ([`sandbox::runs`](src/sandbox/runs.rs)). The devices a machine has, and why each, are in
+whoever embeds it ([`sandbox::runs`](src/sandbox/runs.rs)). Each boot asks whoever embeds the crate for room first, if it set
+an [`Admission`](src/admission.rs), and holds it until the machine is down. The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
 
 A parked sandbox's files are read without booting it ([`files/parked.rs`](src/files/parked.rs)): its upper

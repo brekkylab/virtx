@@ -1,7 +1,9 @@
 //! Images, the machines provisioned from them, and the snapshots and registries around
 //! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client.
+//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client. How many machines may run at once is the embedder's to say
+//! ([`Admission`]).
 
+mod admission;
 pub mod disks;
 mod files;
 mod fstree;
@@ -12,6 +14,7 @@ pub mod sandbox;
 mod snapshot;
 mod volume;
 
+pub use admission::{Admission, NoRoom, Room, admit, set_admission};
 pub use files::Files;
 pub use fstree::*;
 pub use image::{

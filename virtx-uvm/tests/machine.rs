@@ -23,8 +23,8 @@ use virtx_core::{
 };
 use virtx_uvm::sandbox::{NoHooks, Sandboxes};
 use virtx_uvm::{
-    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SandboxJob, SnapshotStore,
-    VolumeError, VolumeStore,
+    Admission, FsTree, ImageStore, MachineSpec, NoRoom, RegistryClient, Room, Sandbox,
+    SandboxError, SandboxJob, SnapshotStore, VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -168,6 +168,52 @@ async fn until(mut holds: impl AsyncFnMut() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     false
+}
+
+/// Room for as many machines as a test says ([`Limit::to`]), and for every one otherwise: this
+/// process's [`Admission`].
+struct Limit;
+
+/// How many machines may be up at once, if a test holds them to some; and how many are.
+static LIMIT: std::sync::Mutex<(Option<usize>, usize)> = std::sync::Mutex::new((None, 0));
+
+/// A machine's room, given back as it drops.
+struct Taken;
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        LIMIT.lock().unwrap().1 -= 1;
+    }
+}
+
+impl Admission for Limit {
+    fn admit(&self, _spec: &MachineSpec) -> Result<Room, NoRoom> {
+        let mut limit = LIMIT.lock().unwrap();
+        if limit.0.is_some_and(|most| limit.1 >= most) {
+            return Err(NoRoom(format!("{} machines are up", limit.1)));
+        }
+        limit.1 += 1;
+        Ok(Box::new(Taken))
+    }
+}
+
+impl Limit {
+    /// Machines held to `most` at once, until what this answers drops.
+    fn to(most: usize) -> impl Drop {
+        struct Lifted;
+        impl Drop for Lifted {
+            fn drop(&mut self) {
+                LIMIT.lock().unwrap().0 = None;
+            }
+        }
+        LIMIT.lock().unwrap().0 = Some(most);
+        Lifted
+    }
+
+    /// How many machines are up, each holding its room.
+    fn taken() -> usize {
+        LIMIT.lock().unwrap().1
+    }
 }
 
 async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Home) {
@@ -503,6 +549,48 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
     // Deleted, its disk goes with it.
     home.sandboxes.delete(sandbox.id()).await.unwrap();
     assert_eq!(home.kept(), 0);
+}
+
+async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
+    let _limit = Limit::to(1);
+    let home = home.parking();
+    let disks = || {
+        let dir = std::fs::read_dir(home.root.join("sandbox")).unwrap();
+        let names = dir.map(|entry| entry.unwrap().file_name().into_string().unwrap());
+        names.filter(|name| name.ends_with(".ext4")).count()
+    };
+    let first = home.sandbox(&small()).await;
+    assert_eq!(Limit::taken(), 1);
+
+    // No room for a second's machine: it is refused, and leaves no disk.
+    let second = home.sandboxes.create(small(), None, true).await;
+    match second {
+        Err(SandboxError::NoRoom(NoRoom(why))) => assert_eq!(why, "1 machines are up"),
+        other => panic!("expected no room, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(disks(), 1);
+
+    // Parked, the first gives its room back, which a second boots in.
+    assert!(
+        until(async || Limit::taken() == 0).await,
+        "the first was not parked"
+    );
+    let second = home.sandbox(&small()).await;
+    assert_eq!(Limit::taken(), 1);
+
+    // The first's next job finds no room to boot it again in, until the second is deleted.
+    let refused = run(&first, &["true"], None).await;
+    assert!(
+        matches!(refused, Err(SandboxError::NoRoom(_))),
+        "{refused:?}"
+    );
+    home.sandboxes.delete(second.id()).await.unwrap();
+    assert_eq!(Limit::taken(), 0);
+    let (lines, _) = run(&first, &["echo", "up"], None).await.unwrap();
+    assert_eq!(lines, ["up"]);
+    assert_eq!(Limit::taken(), 1);
+    home.sandboxes.delete(first.id()).await.unwrap();
+    assert_eq!(Limit::taken(), 0);
 }
 
 async fn a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good(home: Home) {
@@ -950,6 +1038,7 @@ fn main() -> ExitCode {
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    virtx_uvm::set_admission(Arc::new(Limit));
     let images = ImageStore::new(scratch.join("images")).unwrap();
     // Only where `VIRTX_TEST_GPU=1` says the host has a GPU with a Vulkan driver: a `gpu` build
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
@@ -992,6 +1081,7 @@ fn main() -> ExitCode {
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,
+        a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
         a_running_sandbox_s_disk_is_held_against_another_server,
         a_sandbox_parked_as_it_is_parked_unused_has_synced,

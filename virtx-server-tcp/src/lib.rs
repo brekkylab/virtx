@@ -11,6 +11,9 @@
 //! - [`keeping::Keeping`]: where a home's disks, volumes and images are kept past it.
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in,
 //!   and serve the projects themselves ([`endpoints::projects`]).
+//! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
+//!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
+//!   sets none, and every machine boots.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

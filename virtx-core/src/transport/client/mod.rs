@@ -251,6 +251,12 @@ impl TransportClient {
         Ok(response)
     }
 
+    /// Whether a connection that breaks is made anew by the next request: over TCP. Over stdio,
+    /// the one connection is the server's process, and gone with it.
+    pub(crate) fn reconnects(&self) -> bool {
+        matches!(self.connection, Connection::Tcp(_))
+    }
+
     /// Whether a token refused is printed anew: an [`Auth::Command`]'s.
     fn renews(&self) -> bool {
         match &self.connection {

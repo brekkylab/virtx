@@ -552,4 +552,93 @@ mod tests {
         assert!(matches!(error, Error::Status(503, _)), "{error:?}");
         assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
+
+    /// A log at `/log` whose connection breaks after its first two entries, then is answered by a
+    /// proxy's own `502` page for the moment its server is gone, then is answered after the
+    /// `Last-Event-ID` it is sent: each request's `Last-Event-ID` kept in `asked`.
+    fn breaking_log(asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) -> Router {
+        use axum::response::IntoResponse as _;
+        use futures_util::StreamExt as _;
+        let events = |lines: &[(u64, &str)]| -> String {
+            lines
+                .iter()
+                .map(|(id, data)| format!("id: {id}\ndata: {data}\n\n"))
+                .collect()
+        };
+        let log = move |headers: HeaderMap| async move {
+            let after = headers
+                .get("last-event-id")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let n = {
+                let mut asked = asked.lock().unwrap();
+                asked.push(after);
+                asked.len()
+            };
+            let sse = [(::http::header::CONTENT_TYPE, "text/event-stream")];
+            match n {
+                1 => {
+                    let sent = bytes::Bytes::from(events(&[
+                        (1, r#"{"stdout":"a"}"#),
+                        (2, r#"{"stdout":"b"}"#),
+                    ]));
+                    // Cut a moment after what was sent, once that has reached the client.
+                    let cut = futures_util::stream::once(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        Err(std::io::Error::other("cut"))
+                    });
+                    let body = futures_util::stream::iter([Ok(sent)]).chain(cut);
+                    (sse, axum::body::Body::from_stream(body)).into_response()
+                }
+                2 => (
+                    StatusCode::BAD_GATEWAY,
+                    [(::http::header::CONTENT_TYPE, "text/html")],
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                )
+                    .into_response(),
+                _ => (
+                    sse,
+                    events(&[(3, r#"{"stdout":"c"}"#), (4, r#"{"end":{"code":0}}"#)]),
+                )
+                    .into_response(),
+            }
+        };
+        Router::new().route("/log", get(log))
+    }
+
+    /// A log whose connection breaks is read on after its last entry, past a proxy's page for
+    /// the moment its server is gone: over TCP, where a connection is made anew. Over stdio, the
+    /// break is the caller's at once, as the server's process is gone with it.
+    #[tokio::test]
+    async fn a_log_whose_connection_breaks_is_read_on_after_its_last_entry() {
+        use futures_util::StreamExt as _;
+        use std::sync::{Arc, Mutex};
+        let read = |client: TransportClient| async move {
+            super::sse::client::log::<crate::SandboxJobEntry>(&client, "/log".into(), None)
+                .map(|entry| entry.map(|entry| entry.id))
+                .collect::<Vec<_>>()
+                .await
+        };
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let url = serve(breaking_log(asked.clone())).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        let ids: Vec<u64> = read(client)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, [1, 2, 3, 4]);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [None, Some("2".to_owned()), Some("2".to_owned())]
+        );
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let read = read(piped(breaking_log(asked.clone()))).await;
+        assert!(
+            matches!(read[..], [Ok(1), Ok(2), Err(Error::Transport(_))]),
+            "{read:?}"
+        );
+        assert_eq!(*asked.lock().unwrap(), [None]);
+    }
 }

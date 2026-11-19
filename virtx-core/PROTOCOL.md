@@ -189,6 +189,7 @@ data: {"end": {"code": 0}}
 
 Every reader gets the whole log, from its first entry, as the job writes it.
 A client that sends `Last-Event-ID: n` gets the entries after the `n`th only, so a client whose stream dropped picks up where it left off.
+virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row.
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.

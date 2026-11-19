@@ -1324,9 +1324,10 @@ mod tests {
     }
 
     /// A sandbox a server before this one kept that this one cannot know again -- its record
-    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
-    /// request about it is refused `409` `ended`, and it keeps its project from being removed
-    /// until its `DELETE` removes it, its disk and record with it.
+    /// not read, or its image gone -- is listed, not running, with why in `error`: a record
+    /// that does not read is told by the failure's kind, not by its path. Every other request
+    /// about it is refused `409` `ended`, saying why the same way, and it keeps its project from
+    /// being removed until its `DELETE` removes it, its disk and record with it.
     #[tokio::test]
     async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
         let served = Served::spawn("unknown").await;
@@ -1356,13 +1357,16 @@ mod tests {
                 json!({ "id": "unread", "image": "", "running": false }),
             ]
         );
-        for error in errors {
-            let error = error.expect("an error says why");
-            assert!(
-                error.as_str().unwrap().starts_with("not known again"),
-                "{error}"
-            );
-        }
+        let said = |why: &str| {
+            Some(json!(format!(
+                "not known again since its server restarted: {why}"
+            )))
+        };
+        let unread = "the server's files: invalid data";
+        assert_eq!(
+            errors,
+            [said(&format!("no image here is {gone}")), said(unread)]
+        );
         let (status, got) = served
             .send("GET", "sandboxes/unread", Some("demo"), "")
             .await;
@@ -1383,6 +1387,8 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
             let refused: Value = serde_json::from_str(&refused).unwrap();
             assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+            let message = refused["error"]["message"].as_str().unwrap();
+            assert!(message.ends_with(&format!(": {unread}")), "{message}");
         }
         let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
         assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");

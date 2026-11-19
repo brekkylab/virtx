@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use virtx_core::{SandboxCreateArgs, SandboxJob};
 
+use super::Error;
+
 /// A sandbox as it is kept on disk.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Record {
@@ -44,10 +46,14 @@ impl Record {
     }
 
     /// Sandbox `id`'s record under `dir`.
-    pub(super) fn read(dir: &Path, id: &str) -> Result<Record, String> {
+    pub(super) fn read(dir: &Path, id: &str) -> Result<Record, Error> {
         let path = Record::path(dir, id);
-        let json = fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        serde_json::from_slice(&json).map_err(|e| format!("reading {}: {e}", path.display()))
+        let failed = |source| Error::Io {
+            context: format!("reading {}", path.display()),
+            source,
+        };
+        let json = fs::read(&path).map_err(failed)?;
+        serde_json::from_slice(&json).map_err(|e| failed(e.into()))
     }
 
     /// Write it as sandbox `id`'s record under `dir`, whole or not at all.

@@ -1031,29 +1031,27 @@ impl Sandbox {
                 });
             let known = read.and_then(|record| {
                 let ImageName::Digest { digest } = &record.args.image else {
-                    return Err("its record names its image by no digest".into());
+                    return Err(Error::Invalid(
+                        "its record names its image by no digest".into(),
+                    ));
                 };
                 let digest = digest
                     .parse::<Digest>()
-                    .map_err(|e| format!("{digest}: {e}"))?;
+                    .map_err(|e| Error::Invalid(format!("{digest}: {e}")))?;
                 let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
                 let vm = vm.clone();
                 Sandbox::build(images, root, volumes, &args, digest, vm, park_after, kept)
-                    .map_err(|e| e.to_string())
             });
             match known {
                 Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
-                Err(why) => {
-                    eprintln!(
-                        "sandbox {id} under {} not known again: {why}",
-                        dir.display()
-                    );
+                Err(e) => {
+                    eprintln!("sandbox {id} under {} not known again: {e}", dir.display());
                     // Let go as the sandbox not made was dropped, kept; held again here.
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
                             image,
-                            why,
+                            why: e.told(),
                             upper,
                         });
                     }
@@ -1099,7 +1097,9 @@ impl Unknown {
         &self.id
     }
 
-    /// Why it could not be known again.
+    /// Why it could not be known again, without this host's paths: a failure on this host's
+    /// files by its kind. The whole account, which can name them, went to this process's stderr
+    /// as [`Sandbox::kept`] found it.
     pub fn why(&self) -> &str {
         &self.why
     }

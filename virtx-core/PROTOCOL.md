@@ -282,9 +282,9 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
 | `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -306,6 +306,7 @@ A connection to one of its ports while its VM is stopped is closed, as one to a 
 
 A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
 It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
+One it kept and cannot know again, such as one whose image is gone, it MAY still list until its `DELETE`, with `running` `false` and an `error`, a string saying why: every other request about it is refused `409`, `ended`, and its `DELETE` removes what it kept of it.
 
 #### Ports
 

@@ -96,7 +96,7 @@ impl Home {
 
     /// The sandboxes kept here, as a server started again over this home knows them.
     fn kept(&self) -> Vec<Arc<Sandbox>> {
-        Sandbox::kept(&self.images, &self.root, &self.volumes, vm(), None)
+        Sandbox::kept(&self.images, &self.root, &self.volumes, vm(), None).known
     }
 
     /// The names under `sandbox/` of what sandboxes keep there.

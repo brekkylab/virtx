@@ -467,6 +467,7 @@ impl Sandbox {
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
             abins: self.abins.clone(),
+            error: None,
         }
     }
 
@@ -984,21 +985,29 @@ impl Sandbox {
     /// on its own, with none of its jobs, and booted again as [`create`](Sandbox::create) says
     /// for the next that needs it. What sandboxes not kept left is deleted first, as
     /// [`sweep`](Sandbox::sweep) deletes it. One that cannot be known again -- its record not
-    /// read, or its image or a volume of it gone -- is said and left where it is. Blocking
-    /// work, as making one is.
+    /// read, or its image, a volume or an abin of it gone -- is [`Unknown`], its disk and
+    /// record held where they are until it is removed. Blocking work, as making one is.
     pub fn kept(
         images: &ImageStore,
         root: &Path,
         volumes: &VolumeStore,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
-    ) -> Vec<Arc<Sandbox>> {
+    ) -> Kept {
         let dir = root.join(SANDBOX);
         Upper::sweep(&dir);
-        let mut kept = Vec::new();
+        let mut kept = Kept::default();
         for upper in Upper::kept(&dir) {
             let id = upper.id.clone();
-            let known = Record::read(&dir, &id).and_then(|record| {
+            let read = Record::read(&dir, &id);
+            let image = read
+                .as_ref()
+                .ok()
+                .and_then(|record| match &record.args.image {
+                    ImageName::Digest { digest } => Some(digest.clone()),
+                    ImageName::Tag { .. } => None,
+                });
+            let known = read.and_then(|record| {
                 let ImageName::Digest { digest } = &record.args.image else {
                     return Err("its record names its image by no digest".into());
                 };
@@ -1011,8 +1020,22 @@ impl Sandbox {
                     .map_err(|e| e.to_string())
             });
             match known {
-                Ok(sandbox) => kept.push(Arc::new(sandbox)),
-                Err(e) => eprintln!("sandbox {id} under {} not known again: {e}", dir.display()),
+                Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
+                Err(why) => {
+                    eprintln!(
+                        "sandbox {id} under {} not known again: {why}",
+                        dir.display()
+                    );
+                    // Let go as the sandbox not made was dropped, kept; held again here.
+                    if let Some(upper) = Upper::kept_one(&dir, &id) {
+                        kept.unknown.push(Unknown {
+                            id,
+                            image,
+                            why,
+                            upper,
+                        });
+                    }
+                }
             }
         }
         Abin::sweep(&Abin::dir(root));
@@ -1024,6 +1047,60 @@ impl Sandbox {
     /// process lives there until it is closed.
     pub fn lives_under(root: &Path) -> bool {
         Upper::lives(&root.join(SANDBOX))
+    }
+}
+
+/// What a server started again over a root knows of the sandboxes kept there
+/// ([`Sandbox::kept`]).
+#[derive(Default)]
+pub struct Kept {
+    /// Each known again, parked or exited.
+    pub known: Vec<Arc<Sandbox>>,
+    /// Each that could not be.
+    pub unknown: Vec<Unknown>,
+}
+
+/// A sandbox kept under a root that a server started again over it could not know again: its
+/// record not read, or its image, a volume or an abin of it gone. Its disk and record stay
+/// held, and its root counted as lived in ([`Sandbox::lives_under`]), until it is
+/// [removed](Unknown::remove); dropped, they are let go and kept for the next server.
+#[derive(Debug)]
+pub struct Unknown {
+    id: String,
+    image: Option<String>,
+    why: String,
+    upper: Upper,
+}
+
+impl Unknown {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Why it could not be known again.
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// It as a sandbox is answered: its image as its record names it, empty where that is not
+    /// read, not `running`, and why in `error`.
+    pub fn answer(&self) -> virtx_core::Sandbox {
+        virtx_core::Sandbox {
+            id: self.id.clone(),
+            image: self.image.clone().unwrap_or_default(),
+            running: false,
+            ports: Vec::new(),
+            abins: Vec::new(),
+            error: Some(format!(
+                "not known again since its server restarted: {}",
+                self.why
+            )),
+        }
+    }
+
+    /// Delete its disk and record. Blocking work.
+    pub fn remove(mut self) {
+        self.upper.kept = false;
     }
 }
 

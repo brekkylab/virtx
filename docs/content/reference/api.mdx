@@ -87,6 +87,8 @@ Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
 
+A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
+
 ## Jobs
 
 A job is a sandbox's process, from `exec`, or an image's build, pull or push.

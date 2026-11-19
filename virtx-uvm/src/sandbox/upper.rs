@@ -61,26 +61,29 @@ impl Upper {
     /// The disk of each sandbox kept under `dir` that no process holds, held now. A record whose
     /// disk is gone is deleted.
     pub(super) fn kept(dir: &Path) -> Vec<Upper> {
-        let mut kept = Vec::new();
-        for id in ids(dir) {
-            if !Record::path(dir, &id).exists() {
-                continue;
-            }
-            let path = dir.join(format!("{id}.ext4"));
-            let Ok(Some(lock)) = hold(&path) else {
-                continue;
-            };
-            let upper = Upper {
-                kept: path.is_file(),
-                id,
-                path,
-                _lock: lock,
-            };
-            if upper.kept {
-                kept.push(upper);
-            }
+        ids(dir)
+            .into_iter()
+            .filter_map(|id| Upper::kept_one(dir, &id))
+            .collect()
+    }
+
+    /// The disk of sandbox `id`, kept under `dir` with its record, if no process holds it, held
+    /// now.
+    pub(super) fn kept_one(dir: &Path, id: &str) -> Option<Upper> {
+        if !Record::path(dir, id).exists() {
+            return None;
         }
-        kept
+        let path = dir.join(format!("{id}.ext4"));
+        let Ok(Some(lock)) = hold(&path) else {
+            return None;
+        };
+        let upper = Upper {
+            kept: path.is_file(),
+            id: id.to_owned(),
+            path,
+            _lock: lock,
+        };
+        upper.kept.then_some(upper)
     }
 
     /// Delete what sandboxes whose process ended without deleting them left under `dir`, that

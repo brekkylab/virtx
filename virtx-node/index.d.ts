@@ -335,6 +335,8 @@ export interface SandboxInfo {
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
+  /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
+  error?: string
 }
 
 /**
@@ -349,6 +351,7 @@ export class Sandbox extends Files implements SandboxInfo {
   running: boolean
   ports?: SandboxPort[]
   abins?: string[]
+  error?: string
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */

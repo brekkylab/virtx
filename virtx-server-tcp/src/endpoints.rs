@@ -37,8 +37,8 @@ use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
-    RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after,
-    signal_number,
+    RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore, build_step,
+    park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -73,6 +73,9 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
+    /// with why, and refused all but its `DELETE`.
+    unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
@@ -98,7 +101,13 @@ impl Home {
             crate::serve::MACHINE_SUBCOMMAND.into(),
         ];
         let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after());
+        let unknown = kept
+            .unknown
+            .into_iter()
+            .map(|unknown| (unknown.id().to_owned(), unknown))
+            .collect();
         let sandboxes = kept
+            .known
             .into_iter()
             .map(|sandbox| {
                 let capabilities = sandbox.keys();
@@ -121,6 +130,7 @@ impl Home {
             volumes,
             vm,
             sandboxes: Mutex::new(sandboxes),
+            unknown: Mutex::new(unknown),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -208,12 +218,25 @@ impl Home {
         });
     }
 
+    /// The sandbox `id`: refused `409`, `ended`, for one not known again, which takes only its
+    /// `DELETE`.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .get(id)
-            .map(|held| Arc::clone(&held.sandbox))
-            .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
+        if let Some(held) = sandboxes.get(id) {
+            return Ok(Arc::clone(&held.sandbox));
+        }
+        if let Some(unknown) = self.unknown.lock().unwrap().get(id) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "ended",
+                format!(
+                    "sandbox {id} was not known again since its server restarted, and takes only \
+                     its DELETE: {}",
+                    unknown.why()
+                ),
+            ));
+        }
+        Err(not_found(format!("no sandbox here has the id {id}")))
     }
 }
 
@@ -890,10 +913,12 @@ async fn sandbox_files(
 
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
-    let listed: Vec<_> = sandboxes
+    let mut listed: Vec<_> = sandboxes
         .values()
         .map(|held| held.sandbox.answer())
         .collect();
+    let unknown = home.unknown.lock().unwrap();
+    listed.extend(unknown.values().map(UnknownSandbox::answer));
     Ok(json(&listed))
 }
 
@@ -957,6 +982,9 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    if let Some(unknown) = home.unknown.lock().unwrap().get(&id) {
+        return Ok(json(&unknown.answer()));
+    }
     Ok(json(&home.sandbox(&id)?.answer()))
 }
 
@@ -964,6 +992,11 @@ async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    let unknown = home.unknown.lock().unwrap().remove(&id);
+    if let Some(unknown) = unknown {
+        tokio::task::spawn_blocking(move || unknown.remove()).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     let removed = home.sandboxes.lock().unwrap().remove(&id);
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
     tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;

@@ -104,7 +104,8 @@ unless it says otherwise, `0` for never) and booted again over the same upper di
 does: see [`sandbox`](src/sandbox/sandbox.rs). A sandbox made with keys, as `virtx-server-tcp`
 makes each, is kept past its process too: a record beside its upper disk, `<id>.json`, says what
 it boots as, and the next server over the same root knows it again, parked
-(`Sandbox::kept`); `virtx-stdio`'s go with it. The devices a machine has, and why each, are in
+(`Sandbox::kept`), or, where it cannot be -- its record not read, its image gone -- holds what it
+kept as `Unknown` until it is removed; `virtx-stdio`'s go with it. The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem

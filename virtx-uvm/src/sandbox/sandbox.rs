@@ -489,23 +489,12 @@ impl Sandbox {
         let ports = (self.record.opened.lock().unwrap().iter())
             .map(|open| open.port)
             .collect();
-        // What its disk is fetched from while its machine runs, if the server's hooks or the
-        // embedder's disks say: what serves it held until the machine is down.
-        let (chunks, served) = match shared.hooks.chunks(&id, &disk.path)? {
-            Some((socket, serving)) => {
-                held.push(serving);
-                (Some(socket), None)
-            }
-            None => match crate::disks::disks().serve(&disk.path) {
-                Ok(Some((source, serving))) => (Some(source), Some(serving)),
-                Ok(None) => (None, None),
-                Err(e) => {
-                    return Err(Error::Failed(format!(
-                        "serving the disk of sandbox {id}: {e}"
-                    )));
-                }
-            },
-        };
+        // What its disk is fetched from while its machine runs, if the embedder's disks say:
+        // what serves it held until the machine's process has ended.
+        let (chunks, served) = crate::disks::disks()
+            .serve(&disk.path)
+            .map_err(|e| Error::Failed(format!("serving the disk of sandbox {id}: {e}")))?
+            .unzip();
         let lazily = chunks.is_some();
         // The programs it was made with, as `/abin`: the same directory for every sandbox here
         // made with the same, which none writes to.

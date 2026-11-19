@@ -22,9 +22,9 @@ pub type Held = Box<dyn Send + Sync>;
 pub trait Disks: Send + Sync {
     /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`:
     /// what the machine fetches the disk's data from while it runs -- a path it is given, such
-    /// as a socket -- and what answers there, held until the machine is down. `None` for a disk
-    /// all in its file, or one a server's [`Hooks::chunks`](crate::sandbox::Hooks::chunks)
-    /// serves.
+    /// as a socket -- and what answers there, held until the machine is down. Asked too as one
+    /// no machine runs on is read in this process ([`read`](Disks::read)). `None` for a disk all
+    /// in its file.
     fn serve(&self, disk: &Path) -> io::Result<Option<(PathBuf, Held)>> {
         let _ = disk;
         Ok(None)
@@ -52,16 +52,16 @@ pub trait Disks: Send + Sync {
     }
 
     /// In the machine's process: the disk at `disk` opened as its block device is to read and
-    /// write it, `source` being what [`serve`](Disks::serve), or the server's
-    /// [`Hooks::chunks`](crate::sandbox::Hooks::chunks), answered. `None` for its file as it is.
+    /// write it, `source` being what [`serve`](Disks::serve) answered. `None` for its file as it
+    /// is.
     fn open(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Arc<dyn MachineDisk>>> {
         let _ = (disk, source);
         Ok(None)
     }
 
     /// The disk at `disk`, a snapshot's that no machine runs on, opened in the server's process
-    /// to be read there, held meanwhile: `None` for its file as it is. `source` is what the
-    /// server fetches it from, as [`open`](Disks::open) takes it. Only read: what it fetches it
+    /// to be read there, held meanwhile: `None` for its file as it is. `source` is what
+    /// [`serve`](Disks::serve) answered, as [`open`](Disks::open) takes it. Only read: what it fetches it
     /// keeps, as a machine's reads do, and nothing it reads is said to be its machine's boot.
     fn read(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Box<dyn DiskRead>>> {
         let _ = (disk, source);

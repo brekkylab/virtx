@@ -2,12 +2,11 @@
 //! [`Keeping`] given to its [`Home`] as it is made. A server on its own has none, and each hook
 //! is then nothing. virtx cloud's node keeps them in each organization's storage home.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use virtx_uvm::sandbox::Held;
 use virtx_uvm::{Digest, Reference, SnapshotStore, VolumeStore};
 
 use crate::endpoints::Home;
@@ -96,20 +95,6 @@ pub trait Keeping: Send + Sync {
         name: &'a str,
     ) -> BoxFuture<'a, Result<(), Refusal>> {
         self.take(home, kind, name)
-    }
-
-    /// What the machine on `kind` `name`'s disk, at `path`, fetches the disk from while it
-    /// runs, where it was [taken to boot](Self::take_to_boot) lazily: a socket, and what answers
-    /// on it until it drops ([`Hooks::chunks`](virtx_uvm::sandbox::Hooks::chunks)). `None`
-    /// for a disk all here.
-    fn chunks(
-        &self,
-        kind: Kind,
-        name: &str,
-        path: &Path,
-    ) -> Result<Option<(PathBuf, Held)>, Refusal> {
-        let _ = (kind, name, path);
-        Ok(None)
     }
 
     /// Snapshot `name`, a sandbox's disk made ready here ahead of its start

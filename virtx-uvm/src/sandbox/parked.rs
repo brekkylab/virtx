@@ -80,8 +80,8 @@ impl Sandbox {
     ///
     /// Held while `read` runs: its turn, its disk's lock, and what the hooks hold for it
     /// ([`Hooks::reading`](super::Hooks::reading)). Its disk is read through the server's disks
-    /// ([`Disks::read`](crate::disks::Disks::read)), from where the hooks fetch it
-    /// ([`Hooks::chunks`](super::Hooks::chunks)).
+    /// ([`Disks::read`](crate::disks::Disks::read)), from where they serve it
+    /// ([`Disks::serve`](crate::disks::Disks::serve)).
     pub(crate) async fn read_parked<T: Send + 'static>(
         &self,
         era: Era,
@@ -102,7 +102,11 @@ impl Sandbox {
         let hooked = self.shared.hooks.reading(&id).await?;
         let locking = disk.clone();
         let lock = tokio::task::spawn_blocking(move || locking.lock_within(DISK_WAIT)).await??;
-        let (source, serving) = self.shared.hooks.chunks(&id, &disk.path)?.unzip();
+        // What its disk is fetched from while it is read, if the embedder's disks say.
+        let (source, serving) = crate::disks::disks()
+            .serve(&disk.path)
+            .map_err(|e| Error::Failed(format!("serving {}: {e}", disk.path.display())))?
+            .unzip();
         let read = tokio::task::spawn_blocking(move || {
             let mut image = Image::open(&disk.path, source.as_deref()).map_err(|e| {
                 Error::Failed(format!("opening {} to read: {e}", disk.path.display()))

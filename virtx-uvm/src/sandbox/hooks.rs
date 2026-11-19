@@ -5,7 +5,7 @@
 //! A hook runs while its sandbox's machine boots or is parked, or it is deleted, one of those
 //! at a time: it must not boot, park or delete a sandbox itself, which would wait on it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,17 +110,8 @@ pub trait Hooks: Send + Sync + 'static {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    /// What sandbox `id`'s disk, at `disk`, is fetched from while its machine runs, or while it
-    /// is read in this process ([`reading`](Hooks::reading)), where the server's disks fetch it
-    /// as it is read ([`Disks::open`](crate::disks::Disks::open)): a socket, and what answers
-    /// on it until it drops. `None` for a disk that is all here.
-    fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, Error> {
-        let _ = (id, disk);
-        Ok(None)
-    }
-
     /// Sandbox `id`'s machine booted, in `took`, its disk fetched as it is read if `lazily`
-    /// ([`chunks`](Hooks::chunks)).
+    /// ([`Disks::serve`](crate::disks::Disks::serve)).
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
         let _ = (id, took, lazily);
     }

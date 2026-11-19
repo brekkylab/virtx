@@ -696,13 +696,6 @@ impl Hooks for HomeHooks {
         })
     }
 
-    fn chunks(&self, id: &str, disk: &Path) -> Result<Option<(PathBuf, Held)>, SandboxError> {
-        match &self.keeping {
-            Some(keeping) => keeping.chunks(Kind::Snapshot, id, disk).map_err(hooked),
-            None => Ok(None),
-        }
-    }
-
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
         eprintln!(
             "booted {id} in {} ms{}",

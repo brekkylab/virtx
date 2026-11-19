@@ -39,7 +39,7 @@ impl Tcp {
         if !matches!(base.scheme(), "http" | "https") {
             return Err(Error::Client(format!("not an http or https URL: {base}")));
         }
-        not_in_the_clear(&base, &auth)?;
+        not_in_the_clear(&base, sends_a_token(&auth) || carry_a_token(&headers))?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
@@ -53,14 +53,16 @@ impl Tcp {
 
     /// Send `auth` with every request from now on, in place of what was sent until now.
     pub(super) fn set_auth(&self, auth: Auth) -> Result<(), Error> {
-        not_in_the_clear(&self.base, &auth)?;
+        not_in_the_clear(&self.base, sends_a_token(&auth))?;
         self.credentials.set(auth);
         Ok(())
     }
 
     /// Send `headers` with every request from now on, in place of those sent until now.
-    pub(super) fn set_headers(&self, headers: HeaderMap) {
+    pub(super) fn set_headers(&self, headers: HeaderMap) -> Result<(), Error> {
+        not_in_the_clear(&self.base, carry_a_token(&headers))?;
         *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
+        Ok(())
     }
 
     /// Send `request`, whose URI is a path under the base.
@@ -108,10 +110,21 @@ pub(super) fn authorized(
     }
 }
 
-/// Refuses `auth` to `base` when its token would go in the clear: over `http` to any host but
+/// Whether `auth` has a token sent with each request.
+fn sends_a_token(auth: &Auth) -> bool {
+    !matches!(auth, Auth::None)
+}
+
+/// Whether `headers` have a token among them: an `Authorization`, which goes as given while no
+/// auth's token takes its place ([`authorized`]).
+fn carry_a_token(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::AUTHORIZATION)
+}
+
+/// Refuses a `token` to `base` where it would go in the clear: over `http` to any host but
 /// this machine's loopback, where a local server is (`PROTOCOL.md`) and no wire.
-fn not_in_the_clear(base: &Url, auth: &Auth) -> Result<(), Error> {
-    if matches!(auth, Auth::None) || base.scheme() == "https" {
+fn not_in_the_clear(base: &Url, token: bool) -> Result<(), Error> {
+    if !token || base.scheme() == "https" {
         return Ok(());
     }
     let loopback = base.host_str().is_some_and(|host| {
@@ -160,5 +173,55 @@ mod tests {
     fn without_a_token_the_headers_go_as_given() {
         let headers = sent(&[("authorization", "Bearer mine")], None);
         assert_eq!(headers[header::AUTHORIZATION], "Bearer mine");
+    }
+
+    fn headers(name: &'static str, value: &'static str) -> HeaderMap {
+        HeaderMap::from_iter([(
+            header::HeaderName::from_static(name),
+            header::HeaderValue::from_static(value),
+        )])
+    }
+
+    #[test]
+    fn a_token_in_a_header_goes_over_http_to_the_loopback_alone() {
+        // 192.0.2.1 is an address for documentation (RFC 5737): nothing is sent to it here.
+        let elsewhere = "http://192.0.2.1:9/";
+        let connect = |url| Tcp::connect(url, Auth::None, headers("authorization", "Bearer t"));
+        let refused = connect(elsewhere).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "a token would go in the clear to http://192.0.2.1:9/: reach the server over https"
+        );
+        assert!(connect("https://192.0.2.1:9/").is_ok());
+        assert!(connect("http://127.0.0.1:9/").is_ok());
+        assert!(connect("http://[::1]:9/").is_ok());
+        assert!(connect("http://localhost:9/").is_ok());
+
+        // A header that is no token goes anywhere.
+        let named = Tcp::connect(elsewhere, Auth::None, headers("virtx-project", "p"));
+        assert!(named.is_ok());
+    }
+
+    #[test]
+    fn headers_set_later_are_refused_a_token_as_at_connect_and_left_as_they_were() {
+        let url = "http://192.0.2.1:9/";
+        let tcp = Tcp::connect(url, Auth::None, headers("virtx-project", "p")).unwrap();
+        let refused = tcp
+            .set_headers(headers("authorization", "Bearer t"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("in the clear"), "{refused}");
+        assert_eq!(current(&tcp.headers), headers("virtx-project", "p"));
+
+        tcp.set_headers(headers("virtx-project", "q")).unwrap();
+        assert_eq!(current(&tcp.headers), headers("virtx-project", "q"));
+
+        let local = Tcp::connect("http://127.0.0.1:9/", Auth::None, HeaderMap::new()).unwrap();
+        local
+            .set_headers(headers("authorization", "Bearer t"))
+            .unwrap();
+        assert_eq!(
+            current(&local.headers),
+            headers("authorization", "Bearer t")
+        );
     }
 }

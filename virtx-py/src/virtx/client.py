@@ -164,8 +164,8 @@ class Client:
         credentials it wants, ``project``, the project every request is in (the user's own
         without one), and ``headers``, whatever else it asks of each request, with
         every request. ``Authorization`` is ``auth``'s, and ``virtx-project`` names ``project``,
-        over one given as a header. Refused when a token would go in the clear: over ``http`` to
-        any host but this machine."""
+        over one given as a header. Refused when a token, ``auth``'s or an ``Authorization``
+        header, would go in the clear: over ``http`` to any host but this machine."""
         lib = library()
         auth_json = _auth_bytes(auth)
         array = _header_array(headers)
@@ -204,8 +204,8 @@ class Client:
     def set_headers(self, headers: Mapping[str, str]) -> None:
         """Send ``headers`` with every request from now on, in place of those given at
         ``connect``. A forwarder already open sends them with its next connection. Over stdio,
-        where none are sent, nothing changes. A header that cannot be sent raises, the headers
-        unchanged."""
+        where none are sent, nothing changes. A header that cannot be sent, or a token refused as
+        at ``connect``, raises, the headers unchanged."""
         array = _header_array(headers)
         error = _Bytes()
         status = self._lib.virtx_client_set_headers(

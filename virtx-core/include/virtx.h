@@ -108,8 +108,8 @@ struct VirtxFuture *virtx_ensure_virtx(void);
 // the `headers_len` headers in `headers` -- each its name
 // then its value, so `2 * headers_len` strings -- with every request, and write the
 // client, held once, to `client`. The headers are whatever else the server asks of each
-// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
-// `http` to any host but this machine.
+// request; `Authorization` is `auth`'s. Refused when a token, `auth`'s or an
+// `Authorization` header, would go in the clear: over `http` to any host but this machine.
 //
 // # Safety
 //
@@ -142,8 +142,9 @@ int virtx_client_set_auth(struct VirtxClient *client,
 // Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
 // every request from now on, in place of those sent until now. A forwarder already open
 // sends them with its next connection. Over stdio, where none are sent, nothing changes.
-// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why a header cannot be sent written to
-// `error`, the headers unchanged.
+// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why they are refused written to `error`, the
+// headers unchanged: a header that cannot be sent, or a token refused as at
+// `virtx_client_connect`.
 //
 // # Safety
 //

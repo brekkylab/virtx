@@ -391,6 +391,18 @@ export interface SandboxPort {
   protocol?: PortProtocol
   /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
   address?: string
+  /** Why its inbound rules were not set, from virtx cloud, which made the port all the same: it lets no one in and is reached at no public address until they are. */
+  inboundError?: InboundError
+}
+
+/** Why a port's inbound rules were not set, in the shape of a refusal. */
+export interface InboundError {
+  /** As a refusal's: `'quota'`, past the organization's public ports, or `'unavailable'`. */
+  code: string
+  /** For a person to read. */
+  message: string
+  /** What a `'quota'` is past, as `'public_ports'`. */
+  reason?: string
 }
 
 /** A port to open as a sandbox is made: a number for TCP that says nothing more, or one that says more. */

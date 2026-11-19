@@ -229,6 +229,23 @@ pub struct SandboxPort {
     /// one. Not secret, as `url` is: what listens there answers whoever connects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+
+    /// Why its inbound rules were not set, from virtx cloud, which made the port all the same:
+    /// it lets no one in and is reached at no public address until they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_error: Option<InboundError>,
+}
+
+/// Why a port's inbound rules were not set, in the shape of a refusal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundError {
+    /// As a refusal's `code`: `quota`, past the organization's public ports, or `unavailable`.
+    pub code: String,
+    /// For a person to read.
+    pub message: String,
+    /// What a `quota` is past, as `public_ports`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// How a port is reached from outside its sandbox.
@@ -395,6 +412,7 @@ mod tests {
                 label: None,
                 protocol: PortProtocol::default(),
                 address: None,
+                inbound_error: None,
             }]
         );
     }
@@ -406,6 +424,38 @@ mod tests {
             refused.to_string(),
             r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
+    }
+
+    #[test]
+    fn a_port_whose_inbound_rules_are_not_set_says_why() {
+        let value = json!({
+            "port": 8000,
+            "url": "https://p.example/",
+            "inbound_error": {
+                "code": "quota",
+                "message": "past the organization's public ports",
+                "reason": "public_ports",
+            },
+        });
+        let port: SandboxPort = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            port.inbound_error,
+            Some(InboundError {
+                code: "quota".into(),
+                message: "past the organization's public ports".into(),
+                reason: Some("public_ports".into()),
+            })
+        );
+        assert_eq!(serde_json::to_value(&port).unwrap(), value);
+
+        let value = json!({
+            "port": 3000,
+            "url": "https://p.example/",
+            "inbound_error": {"code": "unavailable", "message": "the registry did not answer"},
+        });
+        let port: SandboxPort = serde_json::from_value(value).unwrap();
+        let why = port.inbound_error.unwrap();
+        assert_eq!((why.code.as_str(), why.reason), ("unavailable", None));
     }
 
     #[test]

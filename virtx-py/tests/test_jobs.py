@@ -17,6 +17,7 @@ from virtx import (
     ImageJobEnd,
     ImageJobKind,
     ImageUploadOutput,
+    InboundError,
     InboundRule,
     Output,
     PortForwarder,
@@ -167,6 +168,27 @@ def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:
     }
     assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
     assert SandboxPort.from_dict({"port": 1, "url": "u"}) == SandboxPort(1, "u")
+
+
+def test_a_port_whose_inbound_rules_were_not_set_says_why() -> None:
+    port = SandboxPort.from_dict(
+        {
+            "port": 8000,
+            "url": "u",
+            "inbound_error": {
+                "code": "quota",
+                "message": "past the organization's public ports",
+                "reason": "public_ports",
+            },
+        }
+    )
+    assert port.inbound_error == InboundError(
+        "quota", "past the organization's public ports", "public_ports"
+    )
+    why = {"code": "unavailable", "message": "the registry did not answer"}
+    port = SandboxPort.from_dict({"port": 3000, "url": "u", "inbound_error": why})
+    assert port.inbound_error == InboundError("unavailable", "the registry did not answer")
+    assert SandboxPort.from_dict({"port": 1, "url": "u"}).inbound_error is None
 
 
 def test_a_tcp_port_answered_with_an_address_has_it() -> None:

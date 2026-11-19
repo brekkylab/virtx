@@ -57,6 +57,8 @@ env:
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
   TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  # The twine `verify` checks the wheels with and `pypi` uploads them with.
+  TWINE: twine~=7.0
 
 jobs:
   verify:
@@ -72,11 +74,11 @@ jobs:
           [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false ] || {
             echo "::error::$TAG's release is a draft; publish it first"; exit 1; }
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ env.TAG }}
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
@@ -88,7 +90,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - if: inputs.artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ${{ inputs.artifact }}
           path: dist
@@ -148,7 +150,7 @@ jobs:
             got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta")"
             [ "$(pep440 <<< "$got")" = "$name $version" ] || { echo "::error::$whl's metadata says $got"; exit 1; }
           done
-          pipx run twine check --strict dist/*.whl
+          pipx run --spec "$TWINE" twine check --strict dist/*.whl
 
       # Both crates are the tag's version, and package: `cargo package` builds each from what
       # it packed, `virtx` against the `virtx-core` packed beside it.
@@ -167,7 +169,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -215,7 +217,7 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: pipx run twine upload --non-interactive --skip-existing dist/*.whl
+        run: pipx run --spec "$TWINE" twine upload --non-interactive --skip-existing dist/*.whl
 
   crates:
     needs: verify
@@ -223,7 +225,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ env.TAG }}
 

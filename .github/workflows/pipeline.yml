@@ -61,10 +61,15 @@
 #
 # Every job is on GitHub's runners but one: `tests (windows-x86_64)`, which boots machines on the
 # Windows hypervisor platform (WHP), which no GitHub runner has -- they have no nested
-# virtualization. It runs on brekkylab's own (brekkylab/aws-ci-runners): a spot EC2 instance in
-# ap-northeast-2 with nested virtualization, new for the job, asked for by its labels
-# `[self-hosted, windows, x64, m8i-2xlarge]` and gone after it. Its image has what the job
-# would install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache.
+# virtualization. It asks for `[self-hosted, windows, x64, whp]`, which two kinds of brekkylab's
+# own runners answer, whichever is free first:
+#
+# - a spot EC2 instance in ap-northeast-2 with nested virtualization (brekkylab/aws-ci-runners'
+#   m8i-2xlarge), launched for the job and gone after it, its image with what the job would
+#   install otherwise: the MSVC build tools, LLVM, Git's bash, rustup, sccache;
+# - brekkylab0-windows, a machine of brekkylab's with a GPU (also labelled `gpu`), in a runner
+#   group of virtx's alone, its tools under C:\ci. The job finds the GPU there itself and runs
+#   the GPU's tests too.
 #
 # A fork's pull request has no Windows tests: ours hold brekkylab's caches, and that a fork's
 # own workflow cannot ask for them is the repository's setting's to say -- a maintainer approves
@@ -119,7 +124,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - id: resolve
         name: Every manifest is one version
@@ -158,7 +163,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -177,7 +182,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: check
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -186,10 +191,9 @@ jobs:
         run: cargo xtask init
 
       # The bindings' lint: ruff through uv, biome and tsc through npm.
-      # A full version: setup-uv publishes no major tag to follow since v8.
       - uses: astral-sh/setup-uv@v10.3.3
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
@@ -216,7 +220,7 @@ jobs:
     runs-on: ${{ matrix.hosted }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -287,7 +291,7 @@ jobs:
           tar -cf guest-${{ matrix.arch }}.tar guest
 
       # To the jobs that use them, as an artifact of the run.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: guest-${{ matrix.arch }}
           path: guest-${{ matrix.arch }}.tar
@@ -310,7 +314,7 @@ jobs:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -328,7 +332,7 @@ jobs:
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: lint-windows
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -356,7 +360,7 @@ jobs:
     runs-on: ${{ matrix.hosted }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -376,7 +380,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: lint-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -425,7 +429,7 @@ jobs:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -438,7 +442,7 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.target }}
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: native-${{ matrix.release }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -564,7 +568,7 @@ jobs:
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -604,7 +608,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -627,14 +631,14 @@ jobs:
         run: |
           dnf -y -q install clang clang-devel llvm lld vulkan-headers vulkan-loader-devel zstd
           py=/opt/python/cp312-cp312/bin
-          "$py/pip" install -q --root-user-action=ignore meson ninja pyyaml mako
+          "$py/pip" install -q --root-user-action=ignore meson~=1.12 ninja~=1.13 pyyaml~=6.0 mako~=1.4
           echo "$py" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
       - name: Add the guest's musl target
         run: cargo xtask init
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: guest-${{ matrix.arch }}
 
@@ -675,7 +679,7 @@ jobs:
             target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz built/dist/release/
           cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: linux-${{ matrix.platform }}
           path: built/
@@ -700,9 +704,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: linux-${{ matrix.platform }}
 
@@ -712,7 +716,7 @@ jobs:
           platform: ${{ matrix.platform }}
 
       - if: inputs.release
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -736,7 +740,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -755,7 +759,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libclang-dev meson ninja-build pkg-config python3-venv libvulkan-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: tests-linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -794,26 +798,28 @@ jobs:
           cp -R guest/abin target/release/abin
           echo XTASK_ABIN_BUILT=1 >> "$GITHUB_ENV"
 
-      # A full version: setup-uv publishes no major tag to follow since v8.
       - uses: astral-sh/setup-uv@v10.3.3
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
 
       - run: cargo xtask test
 
-  # The machine-booting crates' tests on Windows, over WHP, on our runner: the one job not on
-  # GitHub's, whose Windows runners have no hypervisor (see Runners). Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested,
-  # the faults a guest takes as it first touches its memory are most of a boot.
+  # The machine-booting crates' tests on Windows, over WHP, on a runner of our own: GitHub's
+  # Windows runners have no hypervisor (see Runners). Any runner labelled `whp` takes it -- a
+  # spot instance of aws-ci-runners, launched for the job, or brekkylab's own machine with a
+  # GPU, whichever is free first. Where the job finds a GPU (see `This runner`), the GPU's tests
+  # run too: the GPU libraries built, and `virtx-uvm` tested with its `gpu` feature. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the
+  # faults a guest takes as it first touches its memory are most of a boot.
   #
   # It starts with the run rather than after `guest`, and takes the kernel from it once it has
-  # compiled its tests and `guest` has ended: a Windows runner's boot (about four minutes) and the compile happen
-  # while the kernel is built, not after.
+  # compiled its tests and `guest` has ended: a new runner's boot (about four minutes) and the
+  # compile happen while the kernel is built, not after.
   tests-windows:
     name: tests (windows-x86_64)
     if: ${{ !github.event.pull_request.head.repo.fork }}
-    runs-on: [self-hosted, windows, x64, m8i-2xlarge]
+    runs-on: [self-hosted, windows, x64, whp]
     timeout-minutes: 60
     defaults:
       run:
@@ -823,13 +829,11 @@ jobs:
       actions: read
     env:
       VIRTX_PREFAULT_MEMORY: "1"
-      # sccache's, in S3 beside the runner; a release compiles from nothing.
-      RUSTC_WRAPPER: ${{ !inputs.release && 'sccache' || '' }}
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           submodules: true
 
@@ -841,14 +845,49 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
 
+      # What this runner is: sccache's where it has its bucket (aws-ci-runners'), but for a
+      # release, which compiles from nothing; and the GPU's tests where it has a GPU -- a
+      # display controller on its PCI bus that is not Windows' own basic one, and Vulkan's
+      # loader to reach it with. Found here rather than told: a job cannot read its runner's
+      # labels, and a runner that is told can be told wrong.
+      - id: runner
+        name: This runner
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          if [ -n "${SCCACHE_BUCKET:-}" ] && [ "$RELEASE" != true ]; then
+            echo RUSTC_WRAPPER=sccache >> "$GITHUB_ENV"
+          fi
+          cat > "$RUNNER_TEMP/gpu.ps1" <<'PS'
+          $found = Get-CimInstance Win32_VideoController |
+            Where-Object { $_.PNPDeviceID -like 'PCI\*' -and $_.Name -notmatch 'Microsoft Basic' } |
+            ForEach-Object { $_.Name }
+          if ($found -and (Test-Path "$env:SystemRoot\System32\vulkan-1.dll")) { $found -join ', ' }
+          PS
+          gpu=$(powershell -NoProfile -ExecutionPolicy Bypass -File "$RUNNER_TEMP/gpu.ps1" | tr -d '\r')
+          if [ -n "$gpu" ]; then
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+            echo "VIRTX_TEST_GPU=1" >> "$GITHUB_ENV"
+            echo "TEST_FEATURES=--features virtx-uvm/gpu" >> "$GITHUB_ENV"
+          fi
+          echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${gpu:-none}"
+
       - uses: ./.github/actions/cargo-deps
+
+      # The GPU libraries `virtx-uvm`'s `gpu` feature links, on a runner with a GPU.
+      - if: steps.runner.outputs.gpu
+        uses: ./.github/actions/gpu-deps
+
+      - name: GPU libraries
+        if: steps.runner.outputs.gpu
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File xtask/scripts/build-deps.ps1
 
       - name: Add the guest's musl target
         run: cargo xtask init
 
       # What `cargo xtask test` below builds first, which needs no kernel.
       - name: Compile the tests
-        run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio
+        run: cargo test --no-run --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES
 
       # `guest (x86_64)`'s, once it has ended; this job ends with it if it fails.
       - uses: ./.github/actions/guest
@@ -870,4 +909,4 @@ jobs:
           threads=$(powershell -NoProfile -Command '[math]::Max(1, [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 8GB))' | tr -d '\r')
           echo "RUST_TEST_THREADS=$threads" | tee -a "$GITHUB_ENV"
 
-      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio -- --include-ignored
+      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored

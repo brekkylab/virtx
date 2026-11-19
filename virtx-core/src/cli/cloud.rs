@@ -78,14 +78,9 @@ pub(crate) async fn run(domain: &str, command: CloudCommand) -> anyhow::Result<(
     let config = std::env::home_dir()
         .context("no home directory to keep the session under")?
         .join(".config/virtx");
-    let cloud = Cloud {
-        api: format!("https://api.{domain}"),
-        domain: domain.to_owned(),
-        config,
-        http: http()?,
-    };
+    let cloud = Cloud::at(domain, config)?;
     match command {
-        CloudCommand::Login => cloud.login().await,
+        CloudCommand::Login => cloud.login(open).await,
         CloudCommand::Token { json } => {
             let tokens = cloud.token().await?;
             if json {
@@ -142,9 +137,53 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// Where virtx cloud is, as `--domain` or `VIRTX_DOMAIN` names it: a host's name -- labels of
+/// letters, digits and hyphens, joined by dots -- with a port or without. The control plane's
+/// URL and the session's files are both made of it: with a path in it, the URL would name one
+/// host and the files another domain's session.
+#[derive(Debug)]
+struct Domain(String);
+
+impl Domain {
+    fn named(domain: &str) -> anyhow::Result<Domain> {
+        let (host, port) = match domain.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (domain, None),
+        };
+        let label = |label: &str| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        let numbered =
+            |port: &str| port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok();
+        if !host.split('.').all(label) || !port.is_none_or(numbered) {
+            bail!(
+                "{domain:?} is not a domain: --domain and VIRTX_DOMAIN take a host's name, \
+                 with a port or without"
+            );
+        }
+        Ok(Domain(domain.to_owned()))
+    }
+
+    /// Whether `page` is an `https` page of this domain's: at its host, or at a name under it.
+    fn serves(&self, page: &str) -> bool {
+        let host = self.0.split(':').next().unwrap_or_default();
+        let host = host.to_ascii_lowercase();
+        reqwest::Url::parse(page).is_ok_and(|page| {
+            page.scheme() == "https"
+                && page.host_str().is_some_and(|at| {
+                    at.strip_suffix(&host)
+                        .is_some_and(|under| under.is_empty() || under.ends_with('.'))
+                })
+        })
+    }
+}
+
 struct Cloud {
     api: String,
-    domain: String,
+    domain: Domain,
     /// Where the session is kept: `~/.config/virtx`.
     config: PathBuf,
     http: reqwest::Client,
@@ -182,6 +221,17 @@ async fn json_of<T: serde::de::DeserializeOwned>(answer: reqwest::Response) -> a
 }
 
 impl Cloud {
+    /// virtx cloud at `domain`, its session kept under `config`.
+    fn at(domain: &str, config: PathBuf) -> anyhow::Result<Cloud> {
+        let domain = Domain::named(domain)?;
+        Ok(Cloud {
+            api: format!("https://api.{}", domain.0),
+            domain,
+            config,
+            http: http()?,
+        })
+    }
+
     /// `POST <api><path>` of the form `fields`, with who the client is.
     async fn post(&self, path: &str, fields: &[(&str, &str)]) -> anyhow::Result<reqwest::Response> {
         let mut form = fields.to_vec();
@@ -194,17 +244,29 @@ impl Cloud {
             .await?)
     }
 
-    async fn login(&self) -> anyhow::Result<()> {
+    /// Sign in. The page to approve the code on is shown, and given to `open` where it is the
+    /// domain's ([`Domain::serves`]): virtx cloud's answer names it, and the system opens a
+    /// file or a program as readily as a page.
+    async fn login(&self, open: impl FnOnce(&str)) -> anyhow::Result<()> {
         let asked = self.post("/oauth/device", &[("scope", "openid email")]);
         let codes: Codes = json_of(checked(asked.await?)?).await?;
+        let page = &codes.verification_uri_complete;
         eprintln!(
             "To sign in, open this page and approve the code {}:",
             codes.user_code
         );
         eprintln!();
-        eprintln!("    {}", codes.verification_uri_complete);
+        eprintln!("    {page}");
         eprintln!();
-        open(&codes.verification_uri_complete);
+        if self.domain.serves(page) {
+            open(page);
+        } else {
+            eprintln!(
+                "virtx did not open it: it is not an https page of {}.",
+                self.domain.0
+            );
+            eprintln!();
+        }
 
         let mut interval = Duration::from_secs(codes.interval.max(1));
         let deadline = Instant::now() + Duration::from_secs(codes.expires_in);
@@ -337,7 +399,7 @@ impl Cloud {
 
     /// `~/.config/virtx/<domain>.<extension>`.
     fn config(&self, extension: &str) -> PathBuf {
-        self.config.join(format!("{}.{extension}", self.domain))
+        self.config.join(format!("{}.{extension}", self.domain.0))
     }
 
     /// Held until dropped: no other run of `virtx token` reads or replaces the session meanwhile.
@@ -395,7 +457,7 @@ impl Cloud {
     /// server's OpenID Connect provider too, keeps a provider's, and takes a command that names
     /// neither to be of the one there.
     fn keep_signed_in(&self) -> anyhow::Result<()> {
-        let signed_in = json!({ "domain": self.domain });
+        let signed_in = json!({ "domain": self.domain.0 });
         write_private(
             &self.config.join("signed-in.json"),
             &serde_json::to_vec(&signed_in)?,
@@ -471,7 +533,7 @@ mod tests {
     fn cloud(api: &str, config: PathBuf) -> Cloud {
         Cloud {
             api: api.to_owned(),
-            domain: "qa.invalid".into(),
+            domain: Domain::named("qa.invalid").unwrap(),
             config,
             http: http().unwrap(),
         }
@@ -500,6 +562,118 @@ mod tests {
             stream.write_all(answer.as_bytes()).unwrap();
             line
         })
+    }
+
+    #[test]
+    fn a_domain_is_a_host_s_name_with_a_port_or_without() {
+        for taken in ["virtx.sh", "staging-2.virtx.sh", "localhost:8443"] {
+            assert!(Domain::named(taken).is_ok(), "{taken}");
+        }
+        for refused in [
+            "",
+            "virtx.sh.",
+            "qa.invalid/../../virtx/virtx.sh",
+            "qa.invalid\\virtx.sh",
+            "someone@virtx.sh",
+            "virtx.sh?to=elsewhere",
+            " virtx.sh",
+            "virtx.sh:",
+            "virtx.sh:https",
+            "virtx.sh:+443",
+            "virtx.sh:65536",
+            "virtx.sh:443:443",
+        ] {
+            let refusal = Domain::named(refused).unwrap_err().to_string();
+            assert!(
+                refusal.contains("--domain") && refusal.contains("VIRTX_DOMAIN"),
+                "{refused:?}: {refusal}"
+            );
+        }
+    }
+
+    /// The control plane's URL and the session's files are made of the one name, and of
+    /// nothing a domain is not: one with a path in it would name `api.qa.invalid` in the URL
+    /// and `virtx.sh`'s session on disk.
+    #[test]
+    fn virtx_cloud_is_reached_and_its_session_kept_under_the_one_domain() {
+        let dir = scratch("domain");
+        let cloud = Cloud::at("dev.virtx.sh", dir.clone()).unwrap();
+        assert_eq!(cloud.api, "https://api.dev.virtx.sh");
+        assert_eq!(cloud.config("token"), dir.join("dev.virtx.sh.token"));
+        assert!(Cloud::at("qa.invalid/../../virtx/virtx.sh", dir.clone()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_page_is_a_domain_s_over_https_at_its_host_or_at_a_name_under_it() {
+        for (domain, page, serves) in [
+            (
+                "virtx.sh",
+                "https://app.virtx.sh/device?code=ABCD-EFGH",
+                true,
+            ),
+            ("virtx.sh", "https://virtx.sh/device", true),
+            ("localhost:8443", "https://app.localhost:5173/device", true),
+            ("Virtx.SH", "https://app.virtx.sh/device", true),
+            ("virtx.sh", "http://app.virtx.sh/device", false),
+            ("virtx.sh", "https://notvirtx.sh/device", false),
+            (
+                "virtx.sh",
+                "https://app.virtx.sh.elsewhere.example/device",
+                false,
+            ),
+            (
+                "virtx.sh",
+                "https://virtx.sh@elsewhere.example/device",
+                false,
+            ),
+            ("dev.virtx.sh", "https://app.virtx.sh/device", false),
+            ("virtx.sh", "file:///etc/hosts", false),
+            ("virtx.sh", "/etc/hosts", false),
+            ("virtx.sh", "", false),
+        ] {
+            let domain = Domain::named(domain).unwrap();
+            assert_eq!(domain.serves(page), serves, "{domain:?} {page:?}");
+        }
+    }
+
+    /// `virtx login`, against virtx cloud answering the page to approve the code on, opens the
+    /// one that is its domain's and not the other. The code answered has run out, so signing
+    /// in ends there.
+    #[tokio::test]
+    async fn signing_in_opens_the_page_to_approve_on_only_where_it_is_the_domain_s() {
+        let dir = scratch("login");
+        for (page, opens) in [
+            ("https://app.qa.invalid/device?code=ABCD-EFGH", true),
+            ("file:///etc/hosts", false),
+        ] {
+            let api = TcpListener::bind("127.0.0.1:0").unwrap();
+            let at = format!("http://{}", api.local_addr().unwrap());
+            let body = json!({
+                "device_code": "made-up-device-code",
+                "user_code": "ABCD-EFGH",
+                "verification_uri_complete": page,
+                "expires_in": 0,
+                "interval": 1,
+            })
+            .to_string();
+            let asked = answer_once(
+                api,
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+            let mut opened = None;
+            let signed_in = cloud(&at, dir.clone())
+                .login(|page| opened = Some(page.to_owned()))
+                .await;
+            assert!(signed_in.is_err(), "the code had run out");
+            assert!(asked.join().unwrap().starts_with("POST /oauth/device "));
+            assert_eq!(opened.as_deref(), opens.then_some(page), "{page}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A token file left readable by others is its owner's alone once written again (issue #170).

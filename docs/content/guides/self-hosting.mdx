@@ -42,6 +42,7 @@ virtx-server-tcp serve --config server.json
 | `oidc` | The OpenID Connect provider users sign in with; see [Sign users in](#sign-users-in). |
 | `origins` | The web pages allowed to call the server from a browser, such as `["https://app.example"]`. Without it, browsers are refused; programs are not affected. |
 | `private_registries` | Registries on the server's machine or its private network that image jobs may reach, such as `["registry.internal:5000"]`; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, jobs reach only registries on public addresses. |
+| `registry_mirror` | A mirror of Docker Hub, such as `"mirror.gcr.io"`, that pulls of Docker Hub's images without credentials try first, a build's base among them; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, they go to Docker Hub. |
 
 `listen` and `oidc` are required, and the server does not start with a field it does not know.
 

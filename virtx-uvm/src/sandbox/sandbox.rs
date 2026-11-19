@@ -223,9 +223,6 @@ pub struct Sandbox {
     /// What a conditional write to its files holds first as it lands (see
     /// [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
-    /// Its disk's boot, as its [era](super::parked::Era) tells it: new as it is made here, and
-    /// as its machine boots.
-    pub(super) era: std::sync::atomic::AtomicU64,
 }
 
 impl Sandbox {
@@ -247,7 +244,6 @@ impl Sandbox {
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
-            era: super::parked::next_era().into(),
         })
     }
 
@@ -338,11 +334,6 @@ impl Sandbox {
         matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, run))
     }
 
-    /// Whether its machine is parked: not up, nor exited, nor it deleted.
-    pub(super) fn is_parked(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), State::Parked)
-    }
-
     fn is_deleted(&self) -> bool {
         matches!(*self.state.lock().unwrap(), State::Deleted)
     }
@@ -427,8 +418,6 @@ impl Sandbox {
             State::Exited => return Err(Error::Ended),
             State::Up(_) | State::Parked => {}
         }
-        // Whatever this boot comes to, its disk may be written from here on.
-        self.era.store(super::parked::next_era(), Ordering::Relaxed);
         let shared = &self.shared;
         let id = self.record.id.clone();
         let spec = spec_of(&self.record.args_now())?;

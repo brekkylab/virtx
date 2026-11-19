@@ -615,7 +615,7 @@ fn place(tree: &FsTree) -> Result<Vec<Node<'_>>> {
     };
     let mut dirs: HashMap<&[u8], u32> = HashMap::new();
     // Each directory's entries, by its inode number, and its parent's.
-    let mut entries: HashMap<u32, Vec<DirEntry<'_>>> = HashMap::new();
+    let mut entries: HashMap<u32, Vec<DirEntry>> = HashMap::new();
     let mut parents: HashMap<u32, u32> = HashMap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut at: HashMap<u32, usize> = HashMap::new();

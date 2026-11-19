@@ -93,7 +93,7 @@ pub type Entries<'a, D = Vec<u8>> = Vec<(&'a [u8], &'a Entry<D>)>;
 pub struct Inode(u32);
 
 /// One path: the inode it names, and the paths under it if it is a directory.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Node {
     inode: Inode,
     /// Sorted by name, which is the order EROFS wants dirents in -- and what makes an
@@ -175,38 +175,6 @@ impl Node {
 }
 
 impl<D> Entry<D> {
-    /// The same entry, a file's contents `f` of what they are here.
-    fn map<E>(&self, f: impl FnOnce(&D) -> E) -> Entry<E> {
-        match self {
-            Entry::File { meta, data } => Entry::File {
-                meta: meta.clone(),
-                data: f(data),
-            },
-            Entry::Directory { meta, opaque } => Entry::Directory {
-                meta: meta.clone(),
-                opaque: *opaque,
-            },
-            Entry::Symlink { meta, target } => Entry::Symlink {
-                meta: meta.clone(),
-                target: target.clone(),
-            },
-            Entry::Device {
-                meta,
-                block,
-                major,
-                minor,
-            } => Entry::Device {
-                meta: meta.clone(),
-                block: *block,
-                major: *major,
-                minor: *minor,
-            },
-            Entry::Fifo(meta) => Entry::Fifo(meta.clone()),
-            Entry::Socket(meta) => Entry::Socket(meta.clone()),
-            Entry::Whiteout => Entry::Whiteout,
-        }
-    }
-
     /// What a directory gets that the archive never named, because archives may leave them
     /// out.
     const IMPLIED_DIR: Entry<D> = Entry::Directory {
@@ -229,7 +197,7 @@ impl<D> Entry<D> {
 /// Paths and inodes are held apart, as a filesystem holds them: the paths name inodes,
 /// and an inode's entry is held once however many paths name it. An inode no path names
 /// any more -- one a later entry replaced -- is kept, and never walked.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FsTree<D = Vec<u8>> {
     root: Node,
     /// Indexed by [`Inode`]. The root is inode 0.
@@ -447,15 +415,6 @@ impl<D> FsTree<D> {
         let base = self.inodes.len() as u32;
         self.inodes.extend(upper.inodes);
         self.root.stack(upper.root, base, &mut self.inodes);
-    }
-
-    /// The same tree, each file's contents `f` of what they are here: what lets trees whose
-    /// files are held in two ways be [stacked](Self::stack).
-    pub fn map<E>(&self, mut f: impl FnMut(&D) -> E) -> FsTree<E> {
-        FsTree {
-            root: self.root.clone(),
-            inodes: self.inodes.iter().map(|entry| entry.map(&mut f)).collect(),
-        }
     }
 
     /// What is at `path`, if anything.

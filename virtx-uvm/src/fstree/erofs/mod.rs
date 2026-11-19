@@ -33,13 +33,6 @@ impl FsTree {
     }
 }
 
-impl Span {
-    /// Where its bytes start in its image.
-    pub fn offset(&self) -> u64 {
-        u64::from(self.block) * BLOCK_SIZE
-    }
-}
-
 impl FsTree<Span> {
     /// The tree in the EROFS image at `path` -- a layer, as [`FsTree::to_erofs`] writes one
     /// -- read for its metadata only: each file a [`Span`] of the image, the bytes left

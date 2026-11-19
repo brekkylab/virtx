@@ -7,8 +7,7 @@
 //!
 //! A build's own disk, made and thrown away with its step, is a file whatever is set.
 
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -22,9 +21,8 @@ pub type Held = Box<dyn Send + Sync>;
 pub trait Disks: Send + Sync {
     /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`:
     /// what the machine fetches the disk's data from while it runs -- a path it is given, such
-    /// as a socket -- and what answers there, held until the machine is down. Asked too as one
-    /// no machine runs on is read in this process ([`read`](Disks::read)). `None` for a disk all
-    /// in its file.
+    /// as a socket -- and what answers there, held until the machine is down. `None` for a disk
+    /// all in its file.
     fn serve(&self, disk: &Path) -> io::Result<Option<(PathBuf, Held)>> {
         let _ = disk;
         Ok(None)
@@ -57,86 +55,6 @@ pub trait Disks: Send + Sync {
     fn open(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Arc<dyn MachineDisk>>> {
         let _ = (disk, source);
         Ok(None)
-    }
-
-    /// The disk at `disk`, a snapshot's that no machine runs on, opened in the server's process
-    /// to be read there, held meanwhile: `None` for its file as it is. `source` is what
-    /// [`serve`](Disks::serve) answered, as [`open`](Disks::open) takes it. Only read: what it fetches it
-    /// keeps, as a machine's reads do, and nothing it reads is said to be its machine's boot.
-    fn read(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Box<dyn DiskRead>>> {
-        let _ = (disk, source);
-        Ok(None)
-    }
-}
-
-/// A snapshot's disk opened to be read in the server's process ([`Disks::read`]).
-pub trait DiskRead: Send {
-    /// `buf.len()` bytes of it from `offset`, all of them within it.
-    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
-}
-
-/// A disk's file, read as it is.
-struct Plain(File);
-
-impl DiskRead for Plain {
-    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::read_exact_at(&self.0, buf, offset);
-        #[cfg(windows)]
-        {
-            let (mut buf, mut offset) = (buf, offset);
-            while !buf.is_empty() {
-                match std::os::windows::fs::FileExt::seek_read(&self.0, buf, offset)? {
-                    0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-                    n => {
-                        buf = &mut std::mem::take(&mut buf)[n..];
-                        offset += n as u64;
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-/// A snapshot's disk as the server's process reads it, through what its disks read it with
-/// ([`Disks::read`]), read and sought as a file is.
-pub(crate) struct Image {
-    disk: Box<dyn DiskRead>,
-    at: u64,
-    len: u64,
-}
-
-impl Image {
-    /// The disk at `disk`, fetched from `source` where it is fetched as it is read.
-    pub(crate) fn open(disk: &Path, source: Option<&Path>) -> io::Result<Image> {
-        let len = std::fs::metadata(disk)?.len();
-        let disk = match disks().read(disk, source)? {
-            Some(read) => read,
-            None => Box::new(Plain(File::open(disk)?)),
-        };
-        Ok(Image { disk, at: 0, len })
-    }
-}
-
-impl Read for Image {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = buf.len().min(self.len.saturating_sub(self.at) as usize);
-        self.disk.read_exact_at(&mut buf[..n], self.at)?;
-        self.at += n as u64;
-        Ok(n)
-    }
-}
-
-impl Seek for Image {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let at = match pos {
-            SeekFrom::Start(at) => Some(at),
-            SeekFrom::End(by) => self.len.checked_add_signed(by),
-            SeekFrom::Current(by) => self.at.checked_add_signed(by),
-        };
-        self.at = at.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-        Ok(self.at)
     }
 }
 

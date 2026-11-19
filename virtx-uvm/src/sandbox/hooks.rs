@@ -102,14 +102,6 @@ pub trait Hooks: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Sandbox `id`'s disk about to be read in this process while its machine is parked,
-    /// before its disk is held: what it holds while it is read. Its machine is not booted for
-    /// it, and nothing the disk is read for is a use of the sandbox.
-    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Held>, Error>> {
-        let _ = id;
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
     /// Sandbox `id`'s machine booted, in `took`, its disk fetched as it is read if `lazily`
     /// ([`Disks::serve`](crate::disks::Disks::serve)).
     fn booted(&self, id: &str, took: Duration, lazily: bool) {

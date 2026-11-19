@@ -685,17 +685,6 @@ impl Hooks for HomeHooks {
         Ok(())
     }
 
-    /// A fill ahead of its start, stopped: what it fetched is kept, and the read fetches what
-    /// it reads of the rest.
-    fn reading<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Held>, SandboxError>> {
-        Box::pin(async move {
-            if let Some(keeping) = &self.keeping {
-                keeping.settle(id).await;
-            }
-            Ok(Vec::new())
-        })
-    }
-
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
         eprintln!(
             "booted {id} in {} ms{}",
@@ -1519,16 +1508,26 @@ async fn sandbox_resources(
     Ok(json(&resized))
 }
 
-/// A request to the files of a sandbox, over WebDAV: a read of one whose machine is parked
-/// answered from its disk, its machine left parked; anything else asked of its machine, booted
-/// first if it is parked. One whose machine has exited answers `409`, `ended`.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted first if it is
+/// parked. One whose machine has exited answers `409`, `ended`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> Answer {
-    let sandbox = home.sandbox(&segments["id"])?;
-    Ok(home.files.sandbox(&sandbox, request).await?)
+    let id = &segments["id"];
+    let sandbox = home.sandbox(id)?;
+    // In use from here until the answer has been sent -- taken first, so that it is not parked
+    // unused in between. Refused, it is not used: an exited sandbox is not kept longer for it.
+    let activity = sandbox.activity();
+    let machine = match sandbox.machine().await {
+        Ok(machine) => machine,
+        Err(e) => {
+            activity.unused();
+            return Err(e.into());
+        }
+    };
+    Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
 #[derive(Deserialize)]

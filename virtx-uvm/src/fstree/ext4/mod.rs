@@ -15,64 +15,12 @@
 mod reader;
 mod writer;
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Read, Seek, Write};
 
-use self::reader::{Reader, walk};
+use self::reader::{ROOT, Reader, Walk};
 use self::writer::Plan;
 use super::{Error, FsTree, Result};
-
-/// A file's contents left where they are in an ext4 image: those of inode `ino`, `len` bytes.
-/// What a tree read for its metadata alone ([`Ext4::meta`]) holds in place of the bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ext4File {
-    pub ino: u32,
-    pub len: u64,
-}
-
-/// An ext4 image as it is read in parts: where its inodes are, and the blocks its journal
-/// committed, read once ([`Ext4::open`]) and over again for each part. Each read is of the
-/// image it was opened over, as it was then.
-pub struct Ext4(Reader<()>);
-
-impl Ext4 {
-    /// `image`, an ext4 image from its byte zero, as [`FsTree::from_ext4`] reads one: what a
-    /// guest killed midway left committed in its journal read over it, and refused where that
-    /// refuses it.
-    pub fn open(image: impl Read + Seek) -> Result<Ext4> {
-        Ok(Ext4(Reader::open(image)?.with(())))
-    }
-
-    /// The tree in `image`, read for its metadata alone: each file an [`Ext4File`], its
-    /// bytes left in the image. Symlinks' targets are read, being metadata.
-    pub fn meta(&self, image: impl Read + Seek) -> Result<FsTree<Ext4File>> {
-        walk(&mut self.0.with(image), |_, ino, inode| {
-            Ok(Ext4File {
-                ino,
-                len: inode.size,
-            })
-        })
-    }
-
-    /// Up to `len` bytes of `file`'s contents from `offset`, read from `image`: fewer where they
-    /// run past its end, none from past it. Refused if its inode is no longer a regular file.
-    pub fn read(
-        &self,
-        image: impl Read + Seek,
-        file: &Ext4File,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>> {
-        let mut reader = self.0.with(image);
-        let inode = reader.inode(file.ino)?;
-        if inode.mode & 0o170000 != 0o100000 {
-            return Err(Error::Malformed(format!(
-                "ext4 image: inode {} is mode {:o}, which is not a file",
-                file.ino, inode.mode
-            )));
-        }
-        reader.range(file.ino, &inode, offset, len)
-    }
-}
 
 impl FsTree {
     /// The tree in `image`, an ext4 image from its byte zero, file contents and all.
@@ -85,9 +33,22 @@ impl FsTree {
     /// Refused if it has no journal and was not unmounted, since nothing then says what a
     /// guest left half done, and if its kernel found it inconsistent.
     pub fn from_ext4(image: impl Read + Seek) -> Result<FsTree> {
-        walk(&mut Reader::open(image)?, |reader, ino, inode| {
-            reader.contents(ino, inode)
-        })
+        let mut reader = Reader::open(image)?;
+        let root = reader.inode(ROOT)?;
+        if root.mode & 0o170000 != 0o040000 {
+            return Err(Error::Malformed(format!(
+                "ext4 image: the root inode is mode {:o}, which is not a directory",
+                root.mode
+            )));
+        }
+
+        let mut walk = Walk {
+            tree: FsTree::new(),
+            files: HashMap::new(),
+            open: HashSet::new(),
+        };
+        walk.directory(&mut reader, ROOT, root, Vec::new(), 0)?;
+        Ok(walk.tree)
     }
 
     /// Write the tree onto `out` as a new ext4 image of `size` bytes, from its byte zero.
@@ -216,81 +177,6 @@ mod tests {
         assert_eq!(image.read().unwrap().digest(), tree.digest());
     }
 
-    /// Read for its metadata alone, an image is the tree it is read whole as, each file its
-    /// inode and length; and each file's bytes are read from there, in any part.
-    #[test]
-    fn metadata_alone_is_the_tree_and_each_file_is_read_from_its_inode() {
-        let mut tree = FsTree::new();
-        tree.insert(b"lost+found", dir(0o700)).unwrap();
-        tree.insert(b"etc", dir(0o755)).unwrap();
-        tree.insert(b"etc/hostname", file(b"guest\n".to_vec()))
-            .unwrap();
-        tree.insert(b"empty", file(Vec::new())).unwrap();
-        let big: Vec<u8> = (0..5 * BLOCK as usize + 123)
-            .map(|i| (i % 251) as u8)
-            .collect();
-        tree.insert(b"big", file(big.clone())).unwrap();
-        tree.link(b"etc/also-big", b"big").unwrap();
-        let link = Entry::Symlink {
-            meta: Meta::default(),
-            target: b"etc/hostname".to_vec(),
-        };
-        tree.insert(b"link", link).unwrap();
-        tree.insert(b"gone", Entry::Whiteout).unwrap();
-        let opaque = Entry::Directory {
-            meta: Meta {
-                mode: 0o755,
-                ..Meta::default()
-            },
-            opaque: true,
-        };
-        tree.insert(b"hidden", opaque).unwrap();
-        let image = Image::write("meta", &tree, 64 << 20);
-
-        let ext4 = Ext4::open(File::open(&image.0).unwrap()).unwrap();
-        let meta = ext4.meta(File::open(&image.0).unwrap()).unwrap();
-        let whole = image.read().unwrap();
-        let lens = |tree: &FsTree<Vec<u8>>| tree.map(|data| data.len() as u64);
-        assert_eq!(
-            meta.map(|file| file.len).walk(),
-            lens(&whole).walk(),
-            "the same paths, entries and metadata"
-        );
-        assert!(matches!(
-            meta.entry(b"link").unwrap(),
-            Some(Entry::Symlink { target, .. }) if target == b"etc/hostname"
-        ));
-        assert_eq!(meta.entry(b"gone").unwrap(), Some(&Entry::Whiteout));
-        assert!(matches!(
-            meta.entry(b"hidden").unwrap(),
-            Some(Entry::Directory { opaque: true, .. })
-        ));
-
-        let at = |path: &[u8]| match meta.entry(path).unwrap() {
-            Some(Entry::File { data, .. }) => *data,
-            other => panic!("{other:?}"),
-        };
-        // Two names of one file are one inode.
-        assert_eq!(at(b"big"), at(b"etc/also-big"));
-        let read = |path: &[u8], offset: u64, len: u64| {
-            ext4.read(File::open(&image.0).unwrap(), &at(path), offset, len)
-                .unwrap()
-        };
-        assert_eq!(read(b"etc/hostname", 0, 1 << 20), b"guest\n");
-        assert_eq!(read(b"big", 0, u64::MAX), big);
-        let (from, to) = (BLOCK as usize - 7, 3 * BLOCK as usize + 9);
-        assert_eq!(read(b"big", from as u64, (to - from) as u64), big[from..to]);
-        assert_eq!(read(b"big", big.len() as u64 - 3, 10), big[big.len() - 3..]);
-        assert!(read(b"big", big.len() as u64, 10).is_empty());
-        assert!(read(b"empty", 0, 10).is_empty());
-        // An inode that is not a file is refused.
-        let root = Ext4File { ino: 2, len: 0 };
-        assert!(
-            ext4.read(File::open(&image.0).unwrap(), &root, 0, 1)
-                .is_err()
-        );
-    }
-
     #[test]
     fn what_the_journal_committed_is_read_and_nothing_else() {
         let block = |byte: u8| vec![byte; BLOCK as usize];
@@ -369,17 +255,6 @@ mod tests {
         assert_eq!(data(&read, "a"), block(4));
         assert_eq!(data(&read, "b"), block(2));
         assert_eq!(data(&read, "c"), c_new);
-
-        // Read in parts, the same.
-        let ext4 = Ext4::open(File::open(&image.0).unwrap()).unwrap();
-        let meta = ext4.meta(File::open(&image.0).unwrap()).unwrap();
-        for (name, whole) in [("a", block(4)), ("b", block(2)), ("c", c_new)] {
-            let Some(Entry::File { data, .. }) = meta.entry(name.as_bytes()).unwrap() else {
-                panic!("{name}");
-            };
-            let read = ext4.read(File::open(&image.0).unwrap(), data, 0, BLOCK);
-            assert_eq!(read.unwrap(), whole, "{name}");
-        }
     }
 
     #[test]

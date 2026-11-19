@@ -1367,7 +1367,10 @@ async fn a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it(home: Home) {
             .uri(format!("/sandboxes/{id}/files/{path}"))
             .body(Body::from(body))
             .unwrap();
-        let response = files.sandbox(&sandbox, request).await.unwrap();
+        let machine = sandbox.machine().await.unwrap();
+        let response = files
+            .sandbox(&id, machine, sandbox.activity(), request)
+            .await;
         let (status, allow) = (
             response.status(),
             response.headers().get(header::ALLOW).cloned(),
@@ -1381,17 +1384,11 @@ async fn a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it(home: Home) {
     let (_, allow, _) = sent(Method::OPTIONS, "tmp/a.txt", "").await;
     let allow = allow.expect("OPTIONS answers Allow");
     assert!(!allow.to_str().unwrap().contains("PATCH"), "{allow:?}");
-    for parked in [false, true] {
-        if parked {
-            sandbox.park().await.unwrap();
-        }
-        let (status, refused, body) = sent(Method::PATCH, "tmp/a.txt", "YY").await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "parked: {parked}");
-        assert_eq!(refused.as_ref(), Some(&allow), "parked: {parked}");
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["error"]["code"], "method_not_allowed", "{body}");
-        assert_eq!(sandbox.is_up(), !parked, "a PATCH does not boot it");
-    }
+    let (status, refused, body) = sent(Method::PATCH, "tmp/a.txt", "YY").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(refused, Some(allow));
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "method_not_allowed", "{body}");
     let (_, _, read) = sent(Method::GET, "tmp/a.txt", "").await;
     assert_eq!(read, "0123456789");
     let (status, _, _) = sent(Method::GET, "", "").await;

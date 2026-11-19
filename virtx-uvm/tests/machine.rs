@@ -36,6 +36,10 @@ const ALPINE: &str = "alpine:3.20";
 /// test.
 const GPU_IMAGE: &str = "alpine:edge";
 
+/// How long a test waits on what should come before it fails, rather than holding the suite:
+/// a guard against a hang, not a time anything is held to.
+const HANG: Duration = Duration::from_secs(60);
+
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
 /// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
@@ -97,7 +101,7 @@ async fn run(
     timeout: Option<Duration>,
 ) -> Result<(Vec<String>, i32), SandboxError> {
     let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
-    let job = sandbox.exec(cmd, timeout).await?;
+    let job = sandbox.exec(cmd, false, timeout).await?;
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let mut lines = Vec::new();
     while let Some(Ok(event)) = events.next().await {
@@ -148,7 +152,7 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
-    let job = sandbox.exec(cmd, None).await.unwrap();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -158,6 +162,85 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
         .await
         .unwrap();
     assert_eq!(lines, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_job_s_stdin_is_written_until_it_is_closed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let cmd = ["sh", "-c", "tr a-z A-Z; echo done"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = job.get().id;
+    sandbox
+        .write_stdin(&id, "hello\n".into(), false)
+        .await
+        .unwrap();
+    sandbox
+        .write_stdin(&id, "world\n".into(), true)
+        .await
+        .unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let mut lines = Vec::new();
+    while let Some(Ok(event)) = events.next().await {
+        let event = String::from_utf8(event.to_vec()).unwrap();
+        let data = event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        if let SandboxJobEntry::Stdout(line) = serde_json::from_str(data).unwrap() {
+            lines.push(line);
+        }
+    }
+    assert_eq!(lines, ["HELLO", "WORLD", "done"]);
+    // Closed, and ended: refused.
+    let refused = sandbox.write_stdin(&id, "x".into(), false).await;
+    assert!(
+        matches!(refused, Err(SandboxError::JobEnded(_))),
+        "{refused:?}"
+    );
+
+    // Started without one: its stdin is empty, and a write is refused.
+    let cmd = ["sh", "-c", "sleep 1; cat; echo eof"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    let refused = sandbox.write_stdin(&job.get().id, "x".into(), false).await;
+    assert!(
+        matches!(refused, Err(SandboxError::JobEnded(_))),
+        "{refused:?}"
+    );
+    let (lines, code) = run(&sandbox, &["sh", "-c", "cat; echo eof"], None)
+        .await
+        .unwrap();
+    assert_eq!((lines, code), (vec!["eof".into()], 0));
+    close(sandbox).await;
+}
+
+async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "600"].map(String::from).to_vec();
+    let sleeper = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = sleeper.get().id;
+    // Far past what its pipe holds: not written while nothing reads it.
+    let writing = {
+        let (sandbox, id) = (Arc::clone(&sandbox), id.clone());
+        tokio::spawn(async move { sandbox.write_stdin(&id, "x".repeat(1 << 20), false).await })
+    };
+    // A command beside it is answered meanwhile.
+    let beside = tokio::time::timeout(HANG, run(&sandbox, &["echo", "beside"], None));
+    let (lines, _) = beside.await.expect("answered beside").unwrap();
+    assert_eq!(lines, ["beside"]);
+    assert!(
+        !writing.is_finished(),
+        "written to a process that does not read"
+    );
+    // Once it ends, so does the write, as ended.
+    sandbox.remove_job(&id).unwrap();
+    let written = tokio::time::timeout(HANG, writing)
+        .await
+        .expect("the write ends");
+    assert!(matches!(written.unwrap(), Err(SandboxError::JobEnded(_))));
     close(sandbox).await;
 }
 
@@ -259,7 +342,7 @@ async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
 async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
-    let job = sandbox.exec(cmd, None).await.unwrap();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
     tokio::join!(close(Arc::clone(&sandbox)), close(Arc::clone(&sandbox)));
     assert!(!sandbox.answer().running);
     assert!(!job.get().running);
@@ -915,6 +998,8 @@ fn main() -> ExitCode {
     let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_s_stdin_is_written_until_it_is_closed,
+        stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,

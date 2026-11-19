@@ -40,7 +40,12 @@ pub enum CtrlReq {
     /// Run `cmd` in the guest, beside whatever else runs there. Answered with
     /// [`Started`](CtrlResp::Started) before the next `Exec` is, so the host that waits for
     /// it before sending another knows which it answers.
-    Exec { cmd: Vec<String> },
+    Exec {
+        cmd: Vec<String>,
+        /// Its stdin a pipe, written with [`Stdin`](CtrlReq::Stdin): empty if not.
+        #[serde(default)]
+        stdin: bool,
+    },
     /// Send `signal` to the process `id` and everything it started. Numbered as the guest's
     /// Linux numbers it, which is not every host's: `SIGUSR1` is 10 there and 30 on macOS. Not
     /// answered: what the process does with it, its [`Exited`](CtrlResp::Exited) says.
@@ -48,6 +53,16 @@ pub enum CtrlReq {
     /// Put what the guest has written on its disks, and end the machine. Not answered: its
     /// process ends.
     Shutdown,
+    /// Write `data` to the stdin of the process `id`, one [`Exec`](CtrlReq::Exec) started with
+    /// it, closed after if `eof`. Answered with [`Written`](CtrlResp::Written) once it is
+    /// written, each in turn: a process that does not read it holds up none but whoever writes
+    /// to it.
+    Stdin {
+        id: u32,
+        data: String,
+        #[serde(default)]
+        eof: bool,
+    },
 }
 
 /// What the machine's process tells the host.
@@ -72,6 +87,9 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
+    /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: whether
+    /// what it asked was written, or never will be, the process or its stdin gone.
+    Written { id: u32, written: bool },
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a

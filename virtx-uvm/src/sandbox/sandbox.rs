@@ -101,8 +101,9 @@ pub fn signal_number(name: &str) -> Option<i32> {
     Some(index as i32 + 1)
 }
 
-/// A command sent to the machine and not yet answered, and who waits for its job.
-type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
+/// A command sent to the machine and not yet answered, whether it was started with a stdin,
+/// and who waits for its job.
+type Starting = (Vec<String>, bool, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
@@ -377,10 +378,12 @@ impl Sandbox {
         }
     }
 
-    /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
+    /// Start `cmd` in it, beside whatever else runs there, with a stdin to
+    /// [write](Sandbox::write_stdin) if `stdin`, and kill it after `timeout`.
     pub async fn exec(
         self: &Arc<Self>,
         cmd: Vec<String>,
+        stdin: bool,
         timeout: Option<Duration>,
     ) -> Result<Arc<Job>, Error> {
         // In use until the job runs, which keeps it in use from there.
@@ -392,8 +395,8 @@ impl Sandbox {
             if !self.is(&machine) {
                 return Err(Error::Ended);
             }
-            machine.exec(cmd.clone())?;
-            starting.push_back((cmd, waiter));
+            machine.exec(cmd.clone(), stdin)?;
+            starting.push_back((cmd, stdin, waiter));
         }
         let job = started
             .await
@@ -443,10 +446,23 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Refused for every job: none is started with a stdin to write to.
-    pub fn stdin(&self, id: &str) -> Result<(), Error> {
-        self.job(id)?;
-        Err(Error::JobEnded("the job was started without stdin"))
+    /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
+    /// answered once it is written, so a job that does not read holds the writer back.
+    pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
+        let ended = || {
+            Error::JobEnded(
+                "the job has ended, or its stdin is closed, or it was started without one",
+            )
+        };
+        let job = self.job(id)?;
+        let (pid, running) = job.pid();
+        // A job that runs keeps the machine it runs in up.
+        let machine = self.up().filter(|_| running).ok_or_else(ended)?;
+        let send = || Ok(machine.write_stdin(pid, data, eof)?);
+        match job.write_stdin(eof, send).await? {
+            true => Ok(()),
+            false => Err(ended()),
+        }
     }
 
     /// Its machine, booted again if it was parked, to ask of its files. The caller holds an
@@ -595,20 +611,24 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some((cmd, waiter)) = self.starting.lock().unwrap().pop_front() else {
+                    let Some((cmd, stdin, waiter)) = self.starting.lock().unwrap().pop_front()
+                    else {
                         continue;
                     };
                     let started = started.map(|pid| {
                         let mut jobs = self.jobs.lock().unwrap();
                         let id = pick(|id| jobs.contains_key(id));
-                        let job = Job::new(SandboxJob {
-                            id: id.clone(),
-                            kind: SandboxJobKind::Exec,
-                            pid,
-                            cmd,
-                            running: true,
-                            code: None,
-                        });
+                        let job = Job::new(
+                            SandboxJob {
+                                id: id.clone(),
+                                kind: SandboxJobKind::Exec,
+                                pid,
+                                cmd,
+                                running: true,
+                                code: None,
+                            },
+                            stdin,
+                        );
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
                         job
@@ -629,6 +649,11 @@ impl Sandbox {
                     if let Some(job) = running.remove(&id) {
                         job.end(code);
                         *self.used.lock().unwrap() = Instant::now();
+                    }
+                }
+                CtrlResp::Written { id, written } => {
+                    if let Some(job) = running.get(&id) {
+                        job.written(written);
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}

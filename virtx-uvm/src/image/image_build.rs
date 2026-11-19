@@ -140,7 +140,7 @@ pub async fn build_step(
     let cmd = cmd.map(str::to_owned).to_vec();
     let (lines, mut said) = tokio::sync::mpsc::unbounded_channel();
     let ran = tokio::task::spawn_blocking(move || {
-        machine.exec(cmd)?;
+        machine.exec(cmd, false)?;
         let id = loop {
             match machine.recv() {
                 Some(CtrlResp::Started(started)) => {

@@ -30,8 +30,8 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem,
+    SandboxPort, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
@@ -946,16 +946,9 @@ async fn sandbox_exec(
     if args.cmd.is_empty() {
         return Err(invalid("cmd: an exec names a command"));
     }
-    if args.stdin {
-        return Err(refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "not_started",
-            "stdin: this server gives a process none to write to",
-        ));
-    }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
+    let job = sandbox.exec(args.cmd, args.stdin, timeout).await?.get();
     Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
 }
 
@@ -987,12 +980,19 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Refused for every job: none is started with a stdin to write to.
+/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is
+/// written, so a job that does not read holds the answer back. Refused `409`, `ended`, for one
+/// started without, one whose stdin is closed, and one that has ended.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
+    Whole(request): Whole,
 ) -> Answer {
-    home.sandbox(&id)?.stdin(&job)?;
+    let args: SandboxStdinArgs = body(&request)?;
+    let sandbox = home.sandbox(&id)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

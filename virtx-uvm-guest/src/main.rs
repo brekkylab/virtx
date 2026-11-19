@@ -17,6 +17,7 @@
 //! Before any of it, it adds to its own environment, which every command inherits, what
 //! `/alib` holds for this image ([`alib_env`]): only from in here is the image's root seen.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
 use std::os::fd::AsRawFd as _;
@@ -38,6 +39,69 @@ use wire::{
 /// The port's writing half, shared by everything that says something on it, so two messages
 /// never interleave.
 type Out = Arc<Mutex<File>>;
+
+/// The stdin of each process started with one, by pid.
+type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
+
+/// How many writes to one process's stdin are queued at most. The host sends the next only once
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is dropped
+/// and said not written, rather than the loop waiting.
+const INPUT_QUEUED: usize = 4;
+
+/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`.
+struct Queued {
+    data: String,
+    eof: bool,
+}
+
+/// A process's stdin, written on a thread of its own, each write answered
+/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the host's requests never
+/// waits on a process's reading, and what a process has not read is never more than
+/// [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its stdin closed.
+struct Input(std::sync::mpsc::SyncSender<Queued>);
+
+impl Input {
+    /// The stdin of process `id`, written to `to`.
+    fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
+        let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
+        let out = Arc::clone(out);
+        thread::spawn(move || {
+            let mut to = Some(to);
+            while let Ok(Queued { data, eof }) = taken.recv() {
+                let written = match &mut to {
+                    Some(writer) => data.is_empty() || writer.write_all(data.as_bytes()).is_ok(),
+                    None => false,
+                };
+                // Its reader gone, or its stdin closed: nothing more is written.
+                if !written || eof {
+                    to = None;
+                }
+                send(&out, &CtrlResp::Written { id, written });
+            }
+        });
+        Input(queued)
+    }
+
+    /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
+    /// or the writer is gone.
+    fn put(&self, out: &Out, id: u32, queued: Queued) {
+        if let Err(e) = self.0.try_send(queued) {
+            if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
+                eprintln!(
+                    "{}: process {id}'s stdin past {INPUT_QUEUED} writes: one dropped",
+                    env!("CARGO_BIN_NAME")
+                );
+            }
+            send(
+                out,
+                &CtrlResp::Written {
+                    id,
+                    written: false,
+                },
+            );
+        }
+    }
+}
 
 /// The most of a line one message carries: escaped as JSON, a byte is at most six, well within
 /// a frame.
@@ -127,9 +191,28 @@ fn serve() -> io::Result<()> {
     });
 
     send(&out, &CtrlResp::Ready(Vec::new()));
+    let stdins = Stdins::default();
     while let Some(message) = wire::recv(&mut input)? {
         match message {
-            CtrlReq::Exec { cmd } => exec(&out, cmd),
+            CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
+            // Handed to its writer, never written here: a process not reading holds up no other.
+            // Answered not `Written` at once for a process with no stdin here.
+            CtrlReq::Stdin { id, data, eof } => {
+                let mut stdins = stdins.lock().unwrap();
+                match stdins.get(&id) {
+                    Some(input) => input.put(&out, id, Queued { data, eof }),
+                    None => send(
+                        &out,
+                        &CtrlResp::Written {
+                            id,
+                            written: false,
+                        },
+                    ),
+                }
+                if eof {
+                    stdins.remove(&id);
+                }
+            }
             // SAFETY: `kill` takes plain values; a group that is gone is an error it returns.
             CtrlReq::Signal { id, signal } => unsafe {
                 libc::kill(-(id as libc::pid_t), signal);
@@ -163,12 +246,12 @@ fn find(name: &str) -> io::Result<PathBuf> {
     ))
 }
 
-/// Start `cmd` in a process group of its own, answer the host with its pid -- before anything
-/// it writes, which goes after -- and send how it ended once it has.
-fn exec(out: &Out, cmd: Vec<String>) {
+/// Start `cmd` in a process group of its own, its stdin a pipe if `stdin`, answer the host with
+/// its pid -- before anything it writes, which goes after -- and send how it ended once it has.
+fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     let started = Command::new(&cmd[0])
         .args(&cmd[1..])
-        .stdin(Stdio::null())
+        .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -181,6 +264,13 @@ fn exec(out: &Out, cmd: Vec<String>) {
         }
     };
     let id = child.id();
+    // Its stdin taken before its start is said, so that a write the host sends at once finds it.
+    if let Some(pipe) = child.stdin.take() {
+        stdins
+            .lock()
+            .unwrap()
+            .insert(id, Input::start(out, id, pipe));
+    }
     send(out, &CtrlResp::Started(Ok(id)));
 
     let stdout = lines(out, child.stdout.take(), move |line| CtrlResp::Stdout {
@@ -191,17 +281,14 @@ fn exec(out: &Out, cmd: Vec<String>) {
         id,
         line,
     });
-    let out = Arc::clone(out);
+    let (out, stdins) = (Arc::clone(out), Arc::clone(stdins));
     thread::spawn(move || {
         // Everything it wrote first, so its end is the last thing said of it.
         let _ = (stdout.join(), stderr.join());
-        send(
-            &out,
-            &CtrlResp::Exited {
-                id,
-                code: code(&mut child),
-            },
-        );
+        let code = code(&mut child);
+        // Its stdin, if still open, closed once what is queued is: no process reads it.
+        drop(stdins.lock().unwrap().remove(&id));
+        send(&out, &CtrlResp::Exited { id, code });
     });
 }
 

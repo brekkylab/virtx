@@ -69,9 +69,7 @@ describe('against virtx-stdio', () => {
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
   })
 
-  test('a job reads its stdin until it is closed', {
-    skip: 'no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused',
-  }, async () => {
+  test('a job reads its stdin until it is closed', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
     try {

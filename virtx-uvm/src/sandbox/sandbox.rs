@@ -789,17 +789,17 @@ impl Sandbox {
             }
             exited
         };
-        starting.clear();
-        for job in running.into_values() {
-            job.end(128 + SIGKILL);
-        }
-        drop(starting);
-        // Kept so, past its process: a server started again knows it exited.
+        // Kept so, past its process, before any job is seen to end: a server started again
+        // knows it exited.
         if exited && let Some(record) = &mut *self.record.lock().unwrap() {
             record.exited = true;
             if let Err(e) = record.write(&self.dir, &self.id) {
                 eprintln!("sandbox {}'s exit not kept: {e}", self.id);
             }
+        }
+        starting.clear();
+        for job in running.into_values() {
+            job.end(128 + SIGKILL);
         }
     }
 }

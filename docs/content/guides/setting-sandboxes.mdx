@@ -62,6 +62,8 @@ let sandbox = client.create_sandbox(&args).await?;
 
 `list_sandbox` lists every sandbox on the server, and `get_sandbox` finds one by its id. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `image`, and whether it is `running`. This is how to find one a program left behind.
 
+A [server you run](/docs/guides/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
+
 <Tabs syncKey="lang">
 <TabItem label="Python">
 

@@ -108,6 +108,21 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The code of a refusal the server answered as `PROTOCOL.md`'s Resources do
+    /// (`{"error": {"code", "message"}}`): `not_found`, `in_use`, `quota` and the like. What a
+    /// client branches on, rather than the message.
+    pub fn code(&self) -> Option<&str> {
+        let Error::Status(_, said) = self else {
+            return None;
+        };
+        let (code, _) = said.split_once(": ")?;
+        let protocol = !code.is_empty()
+            && code
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        protocol.then_some(code)
+    }
 }
 
 #[cfg(all(test, feature = "client"))]
@@ -147,6 +162,34 @@ mod tests {
         );
         assert_eq!(Error::Transport("connection reset".into()).status(), None);
         assert_eq!(Error::Client("bad json".into()).status(), None);
+    }
+
+    #[test]
+    fn a_refusal_in_the_protocol_s_shape_gives_its_code() {
+        assert_eq!(
+            Error::Status(409, "in_use: volume `dev` is mounted".into()).code(),
+            Some("in_use")
+        );
+        assert_eq!(
+            Error::Status(404, "not_found: no sandbox s1".into()).code(),
+            Some("not_found")
+        );
+        // A refusal not in the protocol's shape, or none: no code.
+        assert_eq!(
+            Error::Status(500, "Internal Server Error".into()).code(),
+            None
+        );
+        assert_eq!(
+            Error::Status(503, "no room for it yet: try again".into()).code(),
+            None
+        );
+        assert_eq!(
+            Error::Status(404, "MANIFEST_UNKNOWN: no such tag".into()).code(),
+            None
+        );
+        assert_eq!(Error::Status(404, String::new()).code(), None);
+        assert_eq!(Error::Status(404, "/work/a.txt".into()).code(), None);
+        assert_eq!(Error::Transport("refused: x".into()).code(), None);
     }
 
     #[test]

@@ -30,6 +30,7 @@ use virtx_core::{
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxSignalArgs, SandboxStdinArgs,
     VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    described_type, from_body,
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
@@ -713,6 +714,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         &args,
         home.vm.clone(),
         park_after(),
+        None,
     )
     .await?;
     let mut listening = JoinSet::new();
@@ -911,7 +913,7 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
 }
 
 /// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope rather than as text.
+/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -928,14 +930,43 @@ where
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(segments)) => Ok(Segments(segments)),
             Err(e) if e.status().is_server_error() => Err(internal(e.body_text())),
-            Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
+            Err(e) => Err(invalid(unread_path(&e))),
         }
     }
 }
 
-/// `request` read as a `T`.
+/// Why a path's segments did not read, naming the segment and what it takes.
+fn unread_path(rejection: &axum::extract::rejection::PathRejection) -> String {
+    use axum::extract::path::ErrorKind;
+    use axum::extract::rejection::PathRejection;
+    let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
+        return "the path does not read".to_owned();
+    };
+    match failed.kind() {
+        ErrorKind::ParseErrorAtKey {
+            key,
+            value,
+            expected_type,
+        } => format!("{key}: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::ParseErrorAtIndex {
+            value,
+            expected_type,
+            ..
+        }
+        | ErrorKind::ParseError {
+            value,
+            expected_type,
+        } => format!("the path: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::InvalidUtf8InPathParam { key } => {
+            format!("{key}: UTF-8 once its escapes are read, and it is not")
+        }
+        _ => "the path does not read".to_owned(),
+    }
+}
+
+/// `request` read as a `T`; refused naming the member that does not read and what it takes.
 fn body<T: DeserializeOwned>(request: &Bytes) -> Result<T, Refused> {
-    serde_json::from_slice(request).map_err(invalid)
+    from_body(request).map_err(invalid)
 }
 
 /// `value` as a JSON body.

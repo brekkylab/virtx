@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -244,8 +244,12 @@ impl Sandbox {
             return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
         }
         for name in &args.abins {
-            if name.starts_with('.') || name.contains(['/', '\\']) || !programs.join(name).is_file()
-            {
+            let mut parts = Path::new(name).components();
+            let plain = matches!(
+                (parts.next(), parts.next()),
+                (Some(Component::Normal(part)), None) if part == name.as_str()
+            );
+            if name.starts_with('.') || !plain || !programs.join(name).is_file() {
                 return Err(Error::Invalid(format!(
                     "abins: this server has no program called `{name}`"
                 )));

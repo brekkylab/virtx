@@ -631,7 +631,7 @@ impl Sandbox {
                         *self.used.lock().unwrap() = Instant::now();
                     }
                 }
-                CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}
+                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
         // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,

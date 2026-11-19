@@ -124,19 +124,18 @@ impl Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Where `reference`, an image of Docker Hub, is in the mirror at `mirror`: none for another
-/// registry's.
+/// registry's. `mirror` is taken as a host, one named with no `.` or port too.
 fn mirrored(reference: &Reference, mirror: &str) -> Option<Reference> {
     if reference.registry() != "docker.io" {
         return None;
     }
-    let at = match (reference.digest(), reference.tag()) {
-        (Some(digest), _) => format!("@{digest}"),
-        (None, Some(tag)) => format!(":{tag}"),
-        (None, None) => ":latest".to_owned(),
-    };
-    format!("{mirror}/{}{at}", reference.repository())
-        .parse()
-        .ok()
+    let (registry, repository) = (mirror.to_owned(), reference.repository().to_owned());
+    Some(match (reference.digest(), reference.tag()) {
+        (Some(digest), _) => Reference::with_digest(registry, repository, digest.to_owned()),
+        (None, tag) => {
+            Reference::with_tag(registry, repository, tag.unwrap_or("latest").to_owned())
+        }
+    })
 }
 
 /// An HTTP CONNECT proxy a client's every connection goes through ([`RegistryClient::through`]),
@@ -919,6 +918,15 @@ mod tests {
             Some(format!("mirror.gcr.io/library/alpine@{digest}"))
         );
         assert_eq!(at("ghcr.io/team/app:v1"), None);
+
+        for mirror in ["registry-mirror", "localhost:5000", "mirror.gcr.io"] {
+            let found = mirrored(&"alpine:3.21".parse().unwrap(), mirror).unwrap();
+            assert_eq!(
+                (found.registry(), found.repository(), found.tag()),
+                (mirror, "library/alpine", Some("3.21")),
+                "{mirror}"
+            );
+        }
     }
 
     /// The hosts `registry`, through a proxy that refuses every `CONNECT`, asks it for as it

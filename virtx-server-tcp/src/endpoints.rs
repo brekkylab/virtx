@@ -34,7 +34,7 @@ use virtx_core::{
     VolumeMountListOutputItem, described_type, from_body,
 };
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, HostPaths,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
     RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore, build_step,
@@ -1280,11 +1280,10 @@ impl IntoResponse for Refused {
 }
 
 /// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
-/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
-/// refusal is answered even when stderr cannot take it, as on a disk that is full.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead
+/// ([`HostPaths::Hidden`]).
 fn io_failure(e: &std::io::Error, message: impl Display) -> String {
-    let _ = writeln!(io::stderr(), "{message}");
-    format!("the server's files: {}", e.kind())
+    HostPaths::Hidden.told(e.kind(), message)
 }
 
 /// The refusal an operation on the host's files that failed with `e` is.

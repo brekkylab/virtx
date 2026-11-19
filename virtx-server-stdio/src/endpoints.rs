@@ -33,10 +33,10 @@ use virtx_core::{
     from_body,
 };
 use virtx_uvm::{
-    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
-    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
+    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
+    ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError,
+    VolumeStore, build_step, park_after, signal_number,
 };
 
 use crate::Host;
@@ -81,7 +81,7 @@ impl Home {
         Ok(Home {
             images,
             registry,
-            files: Files::new(volumes.clone()),
+            files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
             root: root.to_owned(),
             volumes,
             vm: vec![

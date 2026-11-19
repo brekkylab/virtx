@@ -17,6 +17,8 @@
 //! - [`access::Access::mirroring`]: Docker Hub's mirror, which its anonymous pulls of Docker
 //!   Hub's images go to first. The binary's is its config's `registry_mirror`; without one,
 //!   none.
+//! - [`endpoints::Home::sharing`]: where a home's anonymous pulls are shared with other homes',
+//!   as its [`access::Homes`] makes it. The binary's share nothing.
 
 pub mod access;
 pub mod config;

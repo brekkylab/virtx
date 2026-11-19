@@ -164,14 +164,13 @@ pub struct ProxyRefusal {
 }
 
 /// Where an embedder shares what anonymous pulls bring, between stores that would each pull it
-/// from its registry: virtx cloud's nodes, between organizations (virtx-cloud's
-/// docs/public-image-cache.md). Only an anonymous pull asks it or tells it anything
-/// ([`RegistryClient::with_public`]): what one fetches anyone may, and what a pull with
-/// credentials fetches is private.
+/// from its registry: virtx cloud's nodes, between projects. Only an anonymous pull asks it or
+/// tells it anything ([`RegistryClient::with_public`]): what one fetches anyone may, and what a
+/// pull with credentials fetches is private.
 pub trait PublicImages: Send + Sync {
     /// The image registry manifest `origin` became, filed in `store` from where it is shared,
-    /// with its origin recorded there: none, where it is not shared. An error is said, and the
-    /// image pulled from its registry as for none.
+    /// with its origin recorded there: none, where it is not shared. An error is said in the
+    /// pull's log, and the image pulled from its registry as for none.
     fn fetch<'a>(
         &'a self,
         store: &'a Store,
@@ -202,7 +201,7 @@ pub struct RegistryClient {
     /// Its way through the proxy every connection goes through, if one does
     /// ([`RegistryClient::through`]).
     pass: Option<Box<dyn ProxyPass>>,
-    /// Where anonymous pulls are shared ([`RegistryClient::with_public`]).
+    /// Where its anonymous pulls are shared ([`RegistryClient::with_public`]).
     public: Option<Arc<dyn PublicImages>>,
 }
 
@@ -278,6 +277,15 @@ impl RegistryClient {
         self
     }
 
+    /// As [`RegistryClient::new`], its anonymous pulls shared through `public`: an image it has
+    /// is fetched from there and not pulled, and one pulled is told it. None, or credentials --
+    /// whose images are private -- is nothing shared, as a client has by default.
+    pub fn with_public(mut self, public: Option<Arc<dyn PublicImages>>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.public = public.filter(|_| anonymous);
+        self
+    }
+
     /// `source`, as an error at `reference`: what the proxy refused this client, if it did,
     /// and else as [`Error::registry`] tells it.
     fn failed(&self, reference: &Reference, source: OciDistributionError) -> Error {
@@ -289,15 +297,6 @@ impl RegistryClient {
             },
             None => Error::registry(reference, source),
         }
-    }
-
-    /// As [`RegistryClient::new`], its anonymous pulls shared through `public`: an image it has
-    /// is fetched from there and not pulled, and one pulled is told it. None, or credentials --
-    /// whose images are private -- is nothing shared: as a client is by default.
-    pub fn with_public(mut self, public: Option<Arc<dyn PublicImages>>) -> Self {
-        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
-        self.public = public.filter(|_| anonymous);
-        self
     }
 
     /// As [`failed`](Self::failed), in a read: a 401 without credentials is
@@ -1241,8 +1240,8 @@ mod tests {
         assert_eq!(said, vec![format!("pulling {reference}")]);
     }
 
-    /// Shares what pulls told it from `from`, as an embedder's cache would: each image copied
-    /// into the store asking, layer by layer.
+    /// Shares what pulls told it from `from`, as an embedder's cache would: each image's layers
+    /// linked into the store asking.
     struct Shared {
         from: Store,
         told: std::sync::Mutex<Vec<Digest>>,
@@ -1260,8 +1259,7 @@ mod tests {
                 }
                 let image = self.from.get_image_origin(origin)?.unwrap();
                 for layer in self.from.get_image(&image)?.unwrap().1 {
-                    let file = fs::File::open(self.from.layer_path(&layer))?;
-                    store.insert_layer(&FsTree::from_erofs(std::io::BufReader::new(file))?)?;
+                    store.link_layer(&self.from.layer_path(&layer), &layer)?;
                 }
                 let (manifest, config) = self.from.get_image_manifest(&image)?.unwrap();
                 assert_eq!(store.insert_image_manifest(&manifest, &config)?, image);
@@ -1286,7 +1284,7 @@ mod tests {
         let anonymous =
             RegistryClient::new(scratch.0.clone(), None).with_public(Some(shared.clone()));
         assert!(anonymous.public.is_some());
-        let auth = virtx_core::RegistryAuth::Bearer { token: "t".into() };
+        let auth = RegistryAuth::Bearer { token: "t".into() };
         let with = RegistryClient::new(scratch.0.clone(), Some(auth)).with_public(Some(shared));
         assert!(with.public.is_none());
     }

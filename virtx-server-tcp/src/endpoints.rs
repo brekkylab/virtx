@@ -155,6 +155,8 @@ pub struct HomeInner {
     /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first, as the
     /// [`Access`] it is made for says ([`Home::through`]).
     mirror: OnceLock<Arc<str>>,
+    /// Where its anonymous pulls are shared with other homes', if anywhere ([`Home::sharing`]).
+    public: OnceLock<Arc<dyn PublicImages>>,
     pub root: PathBuf,
     /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
     files: Files,
@@ -216,6 +218,7 @@ impl Home {
             images,
             registries: OnceLock::new(),
             mirror: OnceLock::new(),
+            public: OnceLock::new(),
             files: Files::new(volumes.clone()),
             writing: Arc::default(),
             snapshots,
@@ -251,10 +254,13 @@ impl Home {
         }
     }
 
-    /// Where the project's anonymous pulls are shared, if its keeping shares them
-    /// ([`Keeping::public`]).
+    /// Where the project's anonymous pulls are shared: as it was made to share them
+    /// ([`Home::sharing`]), or else where its keeping shares them ([`Keeping::public`]).
     fn public(&self) -> Option<Arc<dyn PublicImages>> {
-        self.keeping.as_ref().and_then(|keeping| keeping.public())
+        self.public
+            .get()
+            .cloned()
+            .or_else(|| self.keeping.as_ref().and_then(|keeping| keeping.public()))
     }
 
     /// Tag `reference` brought up to its storage home's index before it is used, if the image
@@ -322,7 +328,18 @@ impl Home {
         self
     }
 
-    /// What its image jobs connect to registries through.
+    /// This, its anonymous pulls -- a pull, a build's base -- shared through `public`: an image
+    /// it has is fetched from there and not pulled, and one pulled is told it. None is nothing
+    /// shared, as a home has by default. A [`Homes`](crate::access::Homes) that makes homes for
+    /// many projects shares public images between them so. See
+    /// [`RegistryClient::with_public`].
+    pub fn sharing(self, public: Option<Arc<dyn PublicImages>>) -> Home {
+        if let Some(public) = public {
+            let _ = self.public.set(public);
+        }
+        self
+    }
+
     /// Docker Hub's mirror its anonymous pulls go to first: its access's, or else the one
     /// [`set_registry_mirror`] set.
     fn mirror(&self) -> Option<Arc<str>> {
@@ -332,6 +349,7 @@ impl Home {
             .or_else(|| REGISTRY_MIRROR.get().map(|m| Arc::from(m.as_str())))
     }
 
+    /// What its image jobs connect to registries through.
     fn registries(&self) -> Arc<dyn RegistryProxy> {
         match self.registries.get() {
             Some(registries) => Arc::clone(registries),
@@ -1238,9 +1256,9 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             let _room = room;
             let (mut image, mut layers, _base) = base(
                 &images,
-                public,
                 &*registries,
                 mirror.as_deref(),
+                public,
                 &recipe.base,
                 &mut report,
             )
@@ -1276,13 +1294,14 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, through `registries` and from `mirror` first if it
-/// is Docker Hub's, and left untagged: a build tags only what it builds.
+/// pulled into the store now, anonymously, through `registries`, from `mirror` first if it is
+/// Docker Hub's and shared through `public`, and left untagged: a build tags only what it
+/// builds.
 async fn base(
     images: &ImageStore,
-    public: Option<Arc<dyn PublicImages>>,
     registries: &dyn RegistryProxy,
     mirror: Option<&str>,
+    public: Option<Arc<dyn PublicImages>>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {

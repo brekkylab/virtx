@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use virtx_server_tcp::config::Config;
-use virtx_server_tcp::{endpoints, serve};
+use virtx_server_tcp::serve;
 
 #[derive(Parser)]
 enum Command {

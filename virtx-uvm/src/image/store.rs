@@ -977,7 +977,6 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
     Ok(part)
 }
 
-/// Make what is filed at `path` young again, or answer `false` when nothing is.
 /// Whether `path` and `from` are two files, not two links to one: never said so where links
 /// cannot be told apart.
 fn other_file(path: &Path, from: &Path) -> bool {
@@ -996,6 +995,7 @@ fn other_file(path: &Path, from: &Path) -> bool {
     }
 }
 
+/// Make what is filed at `path` young again, or answer `false` when nothing is.
 fn renew(path: &Path) -> io::Result<bool> {
     match File::options().write(true).open(path) {
         Ok(file) => file.set_modified(SystemTime::now()).map(|()| true),

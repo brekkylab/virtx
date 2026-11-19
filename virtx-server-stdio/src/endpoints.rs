@@ -173,7 +173,7 @@ impl Hooks for Loopback {
                                 let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached)
                                     .await;
                             }
-                            Err(_) if !activity.sandbox().up() => activity.unused(),
+                            Err(_) if !activity.sandbox().is_up() => activity.unused(),
                             Err(_) => {}
                         }
                     });

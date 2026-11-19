@@ -130,7 +130,7 @@ impl Sandboxes {
     fn up(&self) -> Vec<Arc<Sandbox>> {
         let all = self.0.all.lock().unwrap();
         all.values()
-            .filter(|sandbox| sandbox.up())
+            .filter(|sandbox| sandbox.is_up())
             .cloned()
             .collect()
     }
@@ -399,7 +399,7 @@ impl Sandboxes {
 
     /// The sandbox whose disk is `id`, with its machine up.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
-        self.get(id).ok().filter(|sandbox| sandbox.up())
+        self.get(id).ok().filter(|sandbox| sandbox.is_up())
     }
 
     /// How many sandboxes have their machines up, and how many jobs run in them now.
@@ -421,9 +421,7 @@ impl Sandboxes {
     /// it does, and its disk is kept as its machine stopped.
     pub async fn park_all(&self) {
         let parked = self.up().into_iter().map(|sandbox| async move {
-            if let Err(e) = sandbox.park_anyway().await {
-                eprintln!("sandbox {} not parked: {e}", sandbox.id());
-            }
+            sandbox.park_anyway().await;
         });
         futures_util::future::join_all(parked).await;
     }
@@ -757,7 +755,7 @@ mod tests {
             .port(8000);
         let made = here.create(args.clone(), None, false).await.unwrap();
         assert!(made.running, "parked, it is running still");
-        assert!(!here.get(&made.id).unwrap().up());
+        assert!(!here.get(&made.id).unwrap().is_up());
         assert!(made.image.starts_with("sha256:"));
         assert!(root.join(format!("sandbox/{}.ext4", made.id)).is_file());
         // One name to one sandbox, and one id.
@@ -781,7 +779,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let kept = next.get(&made.id).unwrap();
         assert_eq!(
-            (kept.id(), kept.name(), kept.up()),
+            (kept.id(), kept.name(), kept.is_up()),
             (made.id.as_str(), Some("work"), false)
         );
         assert!(listed[0].running);

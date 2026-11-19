@@ -584,16 +584,16 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
     );
 
     // Unused, it is parked, and running still; a job boots it again, over what it wrote.
-    assert!(until(async || !sandbox.up()).await, "not parked");
+    assert!(until(async || !sandbox.is_up()).await, "not parked");
     assert!(sandbox.answer(false).running);
     let (lines, _) = run(&sandbox, &still, None).await.unwrap();
     assert_eq!(lines, ["kept", "0"]);
 
     // Parked again, its machine asked for, as a write to its files asks for it, boots it too.
-    assert!(until(async || !sandbox.up()).await, "not parked");
+    assert!(until(async || !sandbox.is_up()).await, "not parked");
     let _asking = sandbox.activity();
     sandbox.machine().await.unwrap();
-    assert!(sandbox.up());
+    assert!(sandbox.is_up());
     drop(_asking);
 
     // In use, it is not parked when asked to; parking every sandbox parks it all the same,
@@ -605,9 +605,9 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
         matches!(refused, Err(SandboxError::InUse(_))),
         "{refused:?}"
     );
-    assert!(sandbox.up());
+    assert!(sandbox.is_up());
     home.sandboxes.park_all().await;
-    assert!(!sandbox.up());
+    assert!(!sandbox.is_up());
     let ended = job.get();
     assert_eq!(
         (ended.code, ended.reason),
@@ -672,22 +672,22 @@ async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Hom
     assert!(used <= std::time::SystemTime::now());
 
     // Unused, it is parked; parked, asked again, nothing is done.
-    assert!(sandbox.up());
+    assert!(sandbox.is_up());
     sandbox.park().await.unwrap();
-    assert!(!sandbox.up());
+    assert!(!sandbox.is_up());
     sandbox.park().await.unwrap();
 
     // A job boots it again, over what it wrote; while one runs, it is refused.
     let cmd = ["sleep", "30"].map(String::from).to_vec();
     let job = sandbox.exec(cmd, false, None).await.unwrap();
-    assert!(sandbox.up());
+    assert!(sandbox.is_up());
     assert!(matches!(sandbox.park().await, Err(SandboxError::InUse(_))));
-    assert!(sandbox.up());
+    assert!(sandbox.is_up());
     assert!(job.get().running);
 
     // Parked anyway, what ran in it ends, killed.
-    sandbox.park_anyway().await.unwrap();
-    assert!(!sandbox.up());
+    sandbox.park_anyway().await;
+    assert!(!sandbox.is_up());
     // Its end is read off its log, which the machine's going down ends.
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let ended = tokio::time::timeout(Duration::from_secs(60), async {
@@ -824,7 +824,7 @@ async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
     // is this machine's.
     let other = sandboxes(home.sandboxes.images(), &home.root, None);
     let there = other.get(sandbox.id()).unwrap();
-    assert!(!there.up());
+    assert!(!there.is_up());
     let refused = there.start().await;
     assert!(
         matches!(refused, Err(SandboxError::Snapshot(_))),
@@ -950,7 +950,7 @@ async fn a_sandbox_deleted_twice_at_once_ends_once(home: Home) {
             "{deleted:?}"
         );
     }
-    assert!(!sandbox.up());
+    assert!(!sandbox.is_up());
     assert!(!job.get().running);
     assert!(sandbox.jobs().is_empty());
     let after = run(&sandbox, &["true"], None).await;
@@ -1177,7 +1177,7 @@ async fn a_parked_gpu_sandbox_boots_again_with_its_gpu(home: Home) {
             .iter()
             .any(|name| is_gpu(name))
     );
-    assert!(until(async || !sandbox.up()).await, "not parked");
+    assert!(until(async || !sandbox.is_up()).await, "not parked");
     let devices = vulkan_devices(&sandbox).await;
     assert!(
         devices.iter().any(|name| is_gpu(name)),

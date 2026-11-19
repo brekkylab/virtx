@@ -308,7 +308,7 @@ impl Sandbox {
     }
 
     /// Whether its machine is up now: not parked, nor exited.
-    pub fn up(&self) -> bool {
+    pub fn is_up(&self) -> bool {
         self.run().is_some()
     }
 
@@ -589,7 +589,7 @@ impl Sandbox {
         if self.is_deleted() {
             return Err(self.gone());
         }
-        if !self.up() {
+        if !self.is_up() {
             return Ok(());
         }
         if self.busy() {
@@ -602,10 +602,13 @@ impl Sandbox {
     }
 
     /// Its machine parked now, whatever uses it: its jobs ended, as cancelling each does -- what an
-    /// embedder does for a sandbox whose owner may use it no more.
-    pub async fn park_anyway(self: &Arc<Self>) -> Result<(), Error> {
+    /// embedder does for a sandbox whose owner may use it no more. Nothing is done to one whose
+    /// machine is not up, or that is deleted.
+    pub async fn park_anyway(self: &Arc<Self>) {
         let _turn = self.turn.lock().await;
-        self.halt_turned().await
+        if let Err(e) = self.halt_turned().await {
+            eprintln!("sandbox {} not parked: {e}", self.record.id);
+        }
     }
 
     /// Its machine parked if it has been unused for `after`, while `run` is its run.
@@ -886,7 +889,7 @@ impl Sandbox {
         }
         *self.record.disk_gib.lock().unwrap() = Some(gib);
         self.keep();
-        Ok(self.up())
+        Ok(self.is_up())
     }
 
     /// The bytes its disk is, or is to be as it next boots.
@@ -937,7 +940,7 @@ impl Sandbox {
                 self.disk_now().div_ceil(1 << 30)
             )));
         }
-        if machine_changes && self.up() {
+        if machine_changes && self.is_up() {
             if self.busy() {
                 return Err(Error::InUse(format!(
                     "sandbox {} is in use: its vCPUs and memory change once nothing uses it",
@@ -956,7 +959,7 @@ impl Sandbox {
             vcpus: now.vcpus.unwrap_or(DEFAULT_VCPUS),
             memory_mib: now.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             disk_gib: self.record.disk_size().div_ceil(1 << 30) as u32,
-            up: self.up(),
+            up: self.is_up(),
         })
     }
 

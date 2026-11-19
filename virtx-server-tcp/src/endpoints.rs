@@ -545,7 +545,7 @@ impl Tunnel {
     /// Ended as nothing done, where its sandbox's machine is not up: not a use of it
     /// ([`Activity::unused`]).
     pub fn refused(self) {
-        if !self.activity.sandbox().up() {
+        if !self.activity.sandbox().is_up() {
             self.activity.unused();
         }
     }

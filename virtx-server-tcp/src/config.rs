@@ -10,7 +10,9 @@
 //! ```
 //!
 //! A project's volumes, images and its sandboxes' upper disks are under its own root,
-//! `<home>/project/<id>/` (see [`virtx_uvm::ProjectStore`]).
+//! `<home>/project/<id>/` (see [`virtx_uvm::ProjectStore`]). Its sandboxes are kept there across
+//! the server's restart, each with a record beside its disk: parked as the server ends, and
+//! known again, parked, as it starts (see [`virtx_uvm::Sandboxes`]).
 //! Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! A request's token is a token `oidc`'s issuer signed for `client_id`, and the user is its

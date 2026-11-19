@@ -46,6 +46,28 @@ const SKILL: &str = "SKILL.md";
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
 
+/// How many ended jobs a sandbox keeps, each with its log, for a client to read: past them, the
+/// one that ended first is removed as another starts, as if its client had removed it. One that
+/// runs is never removed so.
+pub const KEEP_ENDED: usize = 100;
+
+/// Remove from `jobs` the ones that ended first, leaving room for one more under `keep` ended.
+fn keep_ended(jobs: &mut BTreeMap<String, Arc<Job>>, keep: usize) {
+    let mut ended: Vec<(Instant, String)> = jobs
+        .iter()
+        .filter_map(|(id, job)| job.ended_at().map(|at| (at, id.clone())))
+        .collect();
+    if ended.len() < keep {
+        return;
+    }
+    ended.sort();
+    for (_, id) in &ended[..ended.len() + 1 - keep] {
+        if let Some(job) = jobs.remove(id) {
+            job.remove();
+        }
+    }
+}
+
 /// How long a sandbox is in use by nothing before its machine is stopped, where
 /// `VIRTX_PARK_AFTER_MS` does not say: in milliseconds, `0` for never.
 const PARK_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -721,6 +743,7 @@ impl Sandbox {
                     };
                     let started = started.map(|pid| {
                         let mut jobs = self.jobs.lock().unwrap();
+                        keep_ended(&mut jobs, KEEP_ENDED);
                         let id = pick(|id| jobs.contains_key(id));
                         let job = Job::new(SandboxJob {
                             id: id.clone(),
@@ -1017,6 +1040,38 @@ fn pick(taken: impl Fn(&str) -> bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ended_jobs_past_the_limit_go_the_first_ended_first_and_none_that_runs() {
+        let job = |id: &str, ended: bool| {
+            let job = Job::new(SandboxJob {
+                id: id.into(),
+                kind: SandboxJobKind::Exec,
+                pid: 1,
+                cmd: vec!["true".into()],
+                running: true,
+                code: None,
+            });
+            if ended {
+                job.end(0);
+            }
+            (id.to_owned(), job)
+        };
+        let mut jobs = BTreeMap::new();
+        // Ended in the reverse of their ids' order, so that the order kept is the ends'.
+        for i in (0..5).rev() {
+            let (id, job) = job(&format!("e{i}"), true);
+            jobs.insert(id, job);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (id, running) = job("r", false);
+        jobs.insert(id, running);
+        // Room for one more under three ended: the three that ended first go.
+        keep_ended(&mut jobs, 3);
+        assert_eq!(jobs.keys().collect::<Vec<_>>(), ["e0", "e1", "r"]);
+        keep_ended(&mut jobs, 10);
+        assert_eq!(jobs.len(), 3, "under the limit, none goes");
+    }
 
     #[test]
     fn an_abin_holds_the_programs_named_with_their_skills_shared_until_swept() {

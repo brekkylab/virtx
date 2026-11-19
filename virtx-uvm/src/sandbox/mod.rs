@@ -17,6 +17,6 @@ mod upper;
 pub use error::Error;
 pub use job::Job;
 pub use sandbox::{
-    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LOG_LIMIT, Sandbox, park_after,
-    signal_number,
+    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, KEEP_ENDED, LOG_LIMIT, Sandbox,
+    park_after, signal_number,
 };

@@ -36,7 +36,7 @@ pub use project::{
 };
 pub use sandbox::{
     Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
-    Job as SandboxJob, LOG_LIMIT, Sandbox, park_after, signal_number,
+    Job as SandboxJob, KEEP_ENDED, LOG_LIMIT, Sandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,

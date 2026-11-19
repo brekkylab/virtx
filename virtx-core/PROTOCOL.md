@@ -353,6 +353,7 @@ Lines of one stream are in the order the process wrote them; lines of the two, i
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
+A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
 A sandbox [kept](#sandboxes) across its server's end has none of its jobs once the server is started again.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.

@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEntry};
 
@@ -8,6 +9,9 @@ use super::sandbox::LOG_LIMIT;
 pub struct Job {
     job: Mutex<SandboxJob>,
     log: Arc<Log<SandboxJobEntry>>,
+    /// When it ended, once it has: of the ended jobs a sandbox keeps, the one that ended first
+    /// goes first.
+    ended_at: Mutex<Option<Instant>>,
 }
 
 impl Job {
@@ -15,6 +19,7 @@ impl Job {
         Arc::new(Job {
             job: Mutex::new(job),
             log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
+            ended_at: Mutex::new(None),
         })
     }
 
@@ -38,7 +43,13 @@ impl Job {
             .end(SandboxJobEntry::End(SandboxJobEnd { code }), || {
                 let mut job = self.job.lock().unwrap();
                 (job.running, job.code) = (false, Some(code));
+                *self.ended_at.lock().unwrap() = Some(Instant::now());
             });
+    }
+
+    /// When it ended, once it has.
+    pub(super) fn ended_at(&self) -> Option<Instant> {
+        *self.ended_at.lock().unwrap()
     }
 
     pub(super) fn remove(&self) {

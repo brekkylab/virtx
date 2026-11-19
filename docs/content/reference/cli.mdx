@@ -17,7 +17,7 @@ cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
 | `virtx images` | Lists images. |
 | `virtx inspect IMAGE…` | Prints images as JSON, each by a ref (`name:tag`), image ID or digest. |
 | `virtx tag SOURCE TARGET[:TAG]` | Points a ref at an image, moving the ref if it is in use. |
-| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. |
+| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. An image a sandbox uses keeps its last ref. |
 | `virtx pull NAME[:TAG]` | Pulls an image from a registry, tagged as it is named. |
 | `virtx push NAME[:TAG]` | Pushes an image to the registry its ref names. |
 | `virtx save -o FILE IMAGE` | Writes an image to an OCI archive. |

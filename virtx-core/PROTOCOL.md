@@ -388,6 +388,8 @@ Images are listed, tagged and removed with the specification's requests:
 | Export an image | `GET` its manifest, and each blob it names |
 | Import an image | Push each blob, then `PUT` its manifest by tag |
 
+A sandbox stands on the image it was made from, from its `POST` until its `DELETE`, its VM parked or not.
+A `DELETE` that would leave an image a sandbox stands on with no tag -- the image's removal, or the untagging of its last tag -- is refused with `409 Conflict` and the code `DENIED`, and removes nothing.
 A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 

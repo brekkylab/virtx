@@ -65,17 +65,6 @@ use crate::project::Project;
 
 pub use virtx_uvm::sandbox::cloned;
 
-/// Docker Hub's mirror for a home whose access names none
-/// ([`Access::mirroring`](crate::access::Access::mirroring)): what an embedder that sets no
-/// mirror on its access sets here instead. None, unless set.
-static REGISTRY_MIRROR: OnceLock<String> = OnceLock::new();
-
-/// Pull Docker Hub's images from its mirror at `mirror` first, from now on, in every home whose
-/// access names no mirror of its own.
-pub fn set_registry_mirror(mirror: &str) {
-    let _ = REGISTRY_MIRROR.set(mirror.to_owned());
-}
-
 /// A registry client for this server's pulls and pushes: anonymous pulls of Docker Hub's images
 /// from its mirror at `mirror` first, given one, and shared through `public`, given one;
 /// through `registries`.
@@ -315,13 +304,9 @@ impl Home {
         self
     }
 
-    /// Docker Hub's mirror its anonymous pulls go to first: its access's, or else the one
-    /// [`set_registry_mirror`] set.
+    /// Docker Hub's mirror its anonymous pulls go to first, as its access says.
     fn mirror(&self) -> Option<Arc<str>> {
-        self.mirror
-            .get()
-            .cloned()
-            .or_else(|| REGISTRY_MIRROR.get().map(|m| Arc::from(m.as_str())))
+        self.mirror.get().cloned()
     }
 
     /// What its image jobs connect to registries through.

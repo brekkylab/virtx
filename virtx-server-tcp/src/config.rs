@@ -25,6 +25,10 @@
 //! addresses, and to one on this host or a private network only if `private_registries` names
 //! it, as a reference names its registry: `"private_registries": ["registry.internal:5000"]`.
 //! See [`virtx_uvm::PublicRegistries`].
+//!
+//! Its anonymous pulls of Docker Hub's images -- a pull, a build's base -- go to the mirror
+//! `registry_mirror` names first, as a reference names its registry: `"registry_mirror":
+//! "mirror.gcr.io"`. None, unless set. See [`virtx_uvm::RegistryClient::with_mirror`].
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -44,16 +48,15 @@ pub struct Config {
     #[serde(default)]
     pub origins: Vec<String>,
     pub oidc: crate::oidc::Config,
-    /// Docker Hub's mirror, which anonymous pulls of its images go to first (`mirror.gcr.io`,
-    /// say): Docker Hub refuses anonymous pulls past a few an hour from one address, which a
-    /// server pulling for many reaches. None, unless set.
-    #[serde(default)]
-    pub registry_mirror: Option<String>,
     /// The registries image jobs reach on this host or a private network: each `host`, at any
     /// port, or `host:port`. A host a registry sends a job on to, for a token or a layer, is
     /// reached on a private address only if it is listed too.
     #[serde(default)]
     pub private_registries: Vec<String>,
+    /// Docker Hub's mirror, which anonymous pulls of its images go to first: `host` or
+    /// `host:port`. None, unless set.
+    #[serde(default)]
+    pub registry_mirror: Option<String>,
 }
 
 impl Config {
@@ -68,6 +71,9 @@ impl Config {
     pub fn parse(value: serde_json::Value) -> anyhow::Result<Config> {
         let config: Config = serde_json::from_value(value)?;
         config.registries()?;
+        if let Some(mirror) = &config.registry_mirror {
+            PublicRegistries::new([mirror]).map_err(|e| anyhow!("registry_mirror: {e}"))?;
+        }
         Ok(config)
     }
 
@@ -103,6 +109,26 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "private_registries: \"https://registry.internal\": \
+             a registry is named `host` or `host:port`"
+        );
+    }
+
+    #[test]
+    fn a_registry_mirror_is_named_by_its_host_or_its_host_and_port() {
+        let config = |mirror: &str| {
+            Config::parse(json!({
+                "listen": "127.0.0.1:0",
+                "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+                "registry_mirror": mirror,
+            }))
+        };
+        let read = config("mirror.gcr.io").unwrap();
+        assert_eq!(read.registry_mirror.as_deref(), Some("mirror.gcr.io"));
+        assert!(config("registry.internal:5000").is_ok());
+        let refused = config("https://mirror.gcr.io").err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "registry_mirror: \"https://mirror.gcr.io\": \
              a registry is named `host` or `host:port`"
         );
     }

@@ -31,13 +31,6 @@ fn main() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn run(config: Config) -> anyhow::Result<()> {
-    if let Some(mirror) = config
-        .registry_mirror
-        .as_deref()
-        .filter(|m| !m.trim().is_empty())
-    {
-        endpoints::set_registry_mirror(mirror);
-    }
     let (access, router) = serve::configured(&config).await?;
     serve::spawn_loops(&access);
     let listener = serve::bind(config.listen).await?;

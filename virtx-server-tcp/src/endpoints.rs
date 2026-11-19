@@ -90,25 +90,29 @@ fn admit(admission: Option<&dyn Admission>, spec: &MachineSpec) -> Result<Option
     }
 }
 
-/// Docker Hub's mirror, which this server's anonymous pulls of its images go to first, as its
-/// config's `registry_mirror` says: none, unless set. See [`RegistryClient::with_mirror`].
+/// Docker Hub's mirror for a home whose access names none
+/// ([`Access::mirroring`](crate::access::Access::mirroring)): what an embedder that sets no
+/// mirror on its access sets here instead. None, unless set.
 static REGISTRY_MIRROR: OnceLock<String> = OnceLock::new();
 
-/// Pull Docker Hub's images from its mirror at `mirror` first, from now on.
+/// Pull Docker Hub's images from its mirror at `mirror` first, from now on, in every home whose
+/// access names no mirror of its own.
 pub fn set_registry_mirror(mirror: &str) {
     let _ = REGISTRY_MIRROR.set(mirror.to_owned());
 }
 
-/// A registry client for this server's pulls and pushes: anonymous pulls from Docker Hub's
-/// mirror, if one was set, and shared through `public`, given one; through `registries`.
+/// A registry client for this server's pulls and pushes: anonymous pulls of Docker Hub's images
+/// from its mirror at `mirror` first, given one, and shared through `public`, given one;
+/// through `registries`.
 fn registry(
     images: ImageStore,
     auth: Option<virtx_core::RegistryAuth>,
+    mirror: Option<&str>,
     public: Option<Arc<dyn PublicImages>>,
     registries: &dyn RegistryProxy,
 ) -> Result<RegistryClient, RegistryError> {
     RegistryClient::new(images, auth)
-        .with_mirror(REGISTRY_MIRROR.get().map(String::as_str))
+        .with_mirror(mirror)
         .with_public(public)
         .through(Some(registries))
 }
@@ -148,6 +152,9 @@ pub struct HomeInner {
     /// the [`Access`] it is made for says ([`Home::through`]); [`PublicRegistries`] with none
     /// named until it does.
     registries: OnceLock<Arc<dyn RegistryProxy>>,
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first, as the
+    /// [`Access`] it is made for says ([`Home::through`]).
+    mirror: OnceLock<Arc<str>>,
     pub root: PathBuf,
     /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
     files: Files,
@@ -208,6 +215,7 @@ impl Home {
             registry: Arc::new(registry),
             images,
             registries: OnceLock::new(),
+            mirror: OnceLock::new(),
             files: Files::new(volumes.clone()),
             writing: Arc::default(),
             snapshots,
@@ -300,14 +308,30 @@ impl Home {
         Arc::clone(&self.registry)
     }
 
-    /// This, its image jobs connecting to registries through `registries`: said once, as it is
-    /// made.
-    pub(crate) fn through(self, registries: Arc<dyn RegistryProxy>) -> Home {
+    /// This, its image jobs connecting to registries through `registries`, and its anonymous
+    /// pulls of Docker Hub's images going to `mirror` first: said once, as it is made.
+    pub(crate) fn through(
+        self,
+        registries: Arc<dyn RegistryProxy>,
+        mirror: Option<Arc<str>>,
+    ) -> Home {
         let _ = self.registries.set(registries);
+        if let Some(mirror) = mirror {
+            let _ = self.mirror.set(mirror);
+        }
         self
     }
 
     /// What its image jobs connect to registries through.
+    /// Docker Hub's mirror its anonymous pulls go to first: its access's, or else the one
+    /// [`set_registry_mirror`] set.
+    fn mirror(&self) -> Option<Arc<str>> {
+        self.mirror
+            .get()
+            .cloned()
+            .or_else(|| REGISTRY_MIRROR.get().map(|m| Arc::from(m.as_str())))
+    }
+
     fn registries(&self) -> Arc<dyn RegistryProxy> {
         match self.registries.get() {
             Some(registries) => Arc::clone(registries),
@@ -1131,12 +1155,19 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let (images, public, registries) = (home.images.clone(), home.public(), home.registries());
+    let mirror = home.mirror();
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry = registry(images.clone(), args.auth, public, &*registries)?;
+            let registry = registry(
+                images.clone(),
+                args.auth,
+                mirror.as_deref(),
+                public,
+                &*registries,
+            )?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -1154,7 +1185,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         ImageJobKind::Push,
         args.reference,
         move |report| async move {
-            let registry = registry(images, args.auth, None, &*registries)?;
+            let registry = registry(images, args.auth, None, None, &*registries)?;
             Ok(registry.push(&reference, report).await?)
         },
     )
@@ -1195,6 +1226,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm, public) = (home.images.clone(), home.vm.clone(), home.public());
     let registries = home.registries();
+    let mirror = home.mirror();
     let recipe = args.recipe;
     let room = build_room(None, &recipe)?;
     image_job(
@@ -1204,8 +1236,15 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         move |mut report| async move {
             // Held until the build ends, or is cancelled: its future dropped.
             let _room = room;
-            let (mut image, mut layers, _base) =
-                base(&images, public, &*registries, &recipe.base, &mut report).await?;
+            let (mut image, mut layers, _base) = base(
+                &images,
+                public,
+                &*registries,
+                mirror.as_deref(),
+                &recipe.base,
+                &mut report,
+            )
+            .await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -1237,12 +1276,13 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, through `registries`, and left untagged: a build
-/// tags only what it builds.
+/// pulled into the store now, anonymously, through `registries` and from `mirror` first if it
+/// is Docker Hub's, and left untagged: a build tags only what it builds.
 async fn base(
     images: &ImageStore,
     public: Option<Arc<dyn PublicImages>>,
     registries: &dyn RegistryProxy,
+    mirror: Option<&str>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -1255,7 +1295,7 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            registry(images.clone(), None, public, registries)?
+            registry(images.clone(), None, mirror, public, registries)?
                 .pull(&reference, report)
                 .await?
                 .1

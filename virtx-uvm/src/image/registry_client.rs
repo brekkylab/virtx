@@ -196,7 +196,8 @@ pub struct RegistryClient {
     store: Store,
     client: Client,
     auth: oci_client::secrets::RegistryAuth,
-    /// Docker Hub's mirror, for anonymous pulls ([`RegistryClient::with_mirror`]).
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first
+    /// ([`RegistryClient::with_mirror`]).
     mirror: Option<String>,
     /// Its way through the proxy every connection goes through, if one does
     /// ([`RegistryClient::through`]).
@@ -261,6 +262,22 @@ impl RegistryClient {
         Ok(self)
     }
 
+    /// As [`RegistryClient::new`], Docker Hub's images pulled anonymously from its mirror at
+    /// `mirror` first (`mirror.gcr.io`, say): Docker Hub refuses anonymous pulls past a few an
+    /// hour from one address, which a server pulling for many reaches. What the mirror does not
+    /// have, or will not answer, comes from Docker Hub after all: a digest names the same image
+    /// in either, and a tag is as the mirror last copied it. None, or credentials -- which are Docker Hub's own, and go
+    /// there -- is no mirror, as a client has by default. Its connections to the mirror go
+    /// through its proxy ([`RegistryClient::through`]) as any other.
+    pub fn with_mirror(mut self, mirror: Option<&str>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.mirror = mirror
+            .map(|m| m.trim().trim_end_matches('/'))
+            .filter(|m| anonymous && !m.is_empty())
+            .map(str::to_owned);
+        self
+    }
+
     /// `source`, as an error at `reference`: what the proxy refused this client, if it did,
     /// and else as [`Error::registry`] tells it.
     fn failed(&self, reference: &Reference, source: OciDistributionError) -> Error {
@@ -272,21 +289,6 @@ impl RegistryClient {
             },
             None => Error::registry(reference, source),
         }
-    }
-
-    /// As [`RegistryClient::new`], Docker Hub's images pulled anonymously from its mirror at
-    /// `mirror` first (`mirror.gcr.io`, say): Docker Hub refuses anonymous pulls past a few an
-    /// hour from one address, which a server pulling for many reaches. What the mirror does not
-    /// have, or will not answer, comes from Docker Hub after all; either way the image is the
-    /// one the reference names. None, or credentials -- which are Docker Hub's own, and go
-    /// there -- is no mirror: as a client is by default.
-    pub fn with_mirror(mut self, mirror: Option<&str>) -> Self {
-        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
-        self.mirror = mirror
-            .map(|m| m.trim().trim_end_matches('/'))
-            .filter(|m| anonymous && !m.is_empty())
-            .map(str::to_owned);
-        self
     }
 
     /// As [`RegistryClient::new`], its anonymous pulls shared through `public`: an image it has
@@ -920,6 +922,89 @@ mod tests {
         assert_eq!(at("ghcr.io/team/app:v1"), None);
     }
 
+    /// The hosts `registry`, through a proxy that refuses every `CONNECT`, asks it for as it
+    /// pulls `reference`, in order.
+    async fn connects(registry: RegistryClient, reference: &str) -> Vec<String> {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        let (proxy_listener, proxy_port) = listener();
+        let proxy_listener = tokio::net::TcpListener::from_std(proxy_listener).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&asked);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = proxy_listener.accept().await {
+                let mut stream = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                let _ = stream.read_line(&mut line).await;
+                if let Some(host) = line.strip_prefix("CONNECT ") {
+                    let host = host.split(' ').next().unwrap_or_default().to_owned();
+                    recorded.lock().unwrap().push(host);
+                }
+                let _ = stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let proxy = StandIn {
+            url: format!("http://127.0.0.1:{proxy_port}"),
+            refusal: None,
+        };
+        let registry = registry.through(Some(&proxy)).unwrap();
+        let reference: Reference = reference.parse().unwrap();
+        // A guard against a hang, not a measure of anything.
+        let pull = registry.pull(&reference, |_| {});
+        tokio::time::timeout(std::time::Duration::from_secs(60), pull)
+            .await
+            .expect("the pull went on")
+            .unwrap_err();
+        asked.lock().unwrap().clone()
+    }
+
+    /// An anonymous pull of Docker Hub's image asks its mirror first, and Docker Hub once the
+    /// mirror does not answer.
+    #[tokio::test]
+    async fn docker_hub_s_image_is_asked_of_its_mirror_first() {
+        let scratch = Scratch::new("mirror-first");
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "alpine:3.21").await;
+        let mirror = asked
+            .iter()
+            .take_while(|host| *host == "mirror.example:5000")
+            .count();
+        assert!(mirror > 0, "{asked:?}");
+        assert!(asked.len() > mirror, "{asked:?}");
+        assert!(
+            asked[mirror..]
+                .iter()
+                .all(|host| host.ends_with("docker.io:443")),
+            "{asked:?}"
+        );
+    }
+
+    /// A pull with credentials, and a pull of another registry's image, ask no mirror.
+    #[tokio::test]
+    async fn a_pull_with_credentials_or_of_another_registry_asks_no_mirror() {
+        let scratch = Scratch::new("mirror-not");
+        let auth = RegistryAuth::Bearer {
+            token: "token".into(),
+        };
+        let registry = RegistryClient::new(scratch.0.clone(), Some(auth))
+            .with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "alpine:3.21").await;
+        assert!(!asked.is_empty(), "{asked:?}");
+        assert!(
+            asked.iter().all(|host| host.ends_with("docker.io:443")),
+            "{asked:?}"
+        );
+
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "ghcr.io/team/app:1").await;
+        assert!(!asked.is_empty(), "{asked:?}");
+        assert!(asked.iter().all(|host| host == "ghcr.io:443"), "{asked:?}");
+    }
+
     /// A listener on the loopback, standing in for a registry there, that answers nothing.
     fn listener() -> (std::net::TcpListener, u16) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1077,9 +1162,6 @@ mod tests {
         let direct = RegistryClient::new(scratch.0.clone(), None);
         let mirrored: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
         assert_eq!(direct.pull_manifest(&mirrored).await.unwrap().0, digest);
-        // One the mirror has not: from Docker Hub after all -- here, a name no one has, refused.
-        let none: Reference = "virtx-no-such-image-anywhere:0".parse().unwrap();
-        assert!(registry.pull(&none, |_| {}).await.is_err());
     }
 
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.
@@ -1089,7 +1171,7 @@ mod tests {
         let scratch = Scratch::new("public");
         let registry = RegistryClient::new(scratch.0.clone(), None);
         // Docker Hub's alpine from Google's mirror of it: Docker Hub refuses anonymous pulls
-        // past a few an hour, and AWS's mirror past one a second, which says nothing of the pull.
+        // past a few an hour.
         let reference: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
         let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
         let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();

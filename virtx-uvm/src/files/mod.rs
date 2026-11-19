@@ -229,7 +229,11 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
             "the root is removed through its resource",
         ));
     }
+    // Without `PATCH`, an `OPTIONS` answer's `Allow` does not offer what is refused above.
+    let mut methods = dav_server::DavMethodSet::all();
+    methods.remove(dav_server::DavMethod::Patch);
     Ok(DavHandler::builder()
+        .methods(methods)
         .strip_prefix(prefix)
         .hide_symlinks(true)
         .read_buf_size(volume::READ))
@@ -802,6 +806,12 @@ mod tests {
             let got = files.volume("v", Request::get(path).body(Body::empty()).unwrap());
             got.await.headers()[header::ETAG].clone()
         };
+
+        let options = Request::options(path).body(Body::empty()).unwrap();
+        let allow = files.volume("v", options).await.headers()[header::ALLOW].clone();
+        let allow = allow.to_str().unwrap();
+        assert!(allow.contains("PUT"), "{allow}");
+        assert!(!allow.contains("PATCH"), "OPTIONS offers a PATCH: {allow}");
 
         let partial = [
             ("a PATCH", Method::PATCH, None),

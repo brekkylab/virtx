@@ -149,11 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 [自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
 
-`pipx`または`npx`でインストールせずに実行できる`virtx`コマンドで一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
+`uvx`または`npx`でインストールせずに実行できる`virtx`コマンドで一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
 それ以外はローカルの例と同じです。
 
 ```sh
-pipx run virtx login https://virtx.example            # uvxでも動きます
+uvx virtx login https://virtx.example                 # uvがなければ pipx run virtx
 
 # または
 
@@ -170,7 +170,7 @@ from virtx import Client, CommandAuth
 
 client = Client.connect(
     "https://virtx.example",
-    CommandAuth("pipx", ("run", "virtx", "token", "--json")),
+    CommandAuth("uvx", ("virtx", "token", "--json")),
 )
 ```
 
@@ -192,9 +192,11 @@ const client = Client.connect(
 <summary><b>Rust</b></summary>
 
 ```rust
+use virtx::Auth;
+
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "pipx".into(), args: vec!["run".into(), "virtx".into(), "token".into(), "--json".into()] },
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;

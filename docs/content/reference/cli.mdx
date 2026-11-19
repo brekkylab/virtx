@@ -10,7 +10,7 @@ The `virtx` command does two things from a shell: it does to a server's images w
 The Python and Node.js packages carry it, so their package managers run it without installing anything:
 
 ```sh
-pipx run virtx images            # uvx also works
+uvx virtx images                 # pipx run virtx, without uv
 npx -y @brekkylab/virtx images
 ```
 
@@ -18,8 +18,8 @@ To have `virtx` on `PATH`, install it with one of:
 
 | With | Command |
 | --- | --- |
-| pipx | `pipx install virtx` |
 | uv | `uv tool install virtx` |
+| pipx | `pipx install virtx` |
 | npm | `npm install -g @brekkylab/virtx` |
 | Rust, from a clone of the [virtx repository](https://github.com/brekkylab/virtx) | `cargo install --path virtx-cli` |
 
@@ -56,7 +56,7 @@ Without options, the command starts `virtx-stdio` of its own version, fetched in
 
 ## Signing in
 
-These commands are for connecting to a `virtx-server-tcp` that you or your team run, or to [virtx cloud](#virtx-cloud): they sign you in, and a client sends the session's token with each request.
+These commands are for connecting to a `virtx-server-tcp` that you or your team run: they sign you in to the server's OpenID Connect provider, and a client sends the session's token with each request.
 For a server of your own, see [Connecting to a server](/docs/guides/self-hosting/#connecting-to-a-server).
 A local server, which `Client.spawn()` starts, needs no signing in.
 
@@ -67,7 +67,7 @@ A local server, which `Client.spawn()` starts, needs no signing in.
 | `virtx whoami` | Says who is signed in. |
 | `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
 
-A client given a command for its token runs it each time it needs one: `pipx run virtx token --json` (or `uvx virtx token --json`) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.
+A client given a command for its token runs it each time it needs one: `uvx virtx token --json` (or `pipx run virtx token --json`, without uv) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.
 
 A command is of the provider it names with `--issuer` and `--client-id`, or the one the server `login` is given names, and otherwise of what was signed in to last.
 
@@ -78,18 +78,3 @@ A command is of the provider it names with `--issuer` and `--client-id`, or the 
 `virtx token` prints the ID token, which the server checks against the provider's keys. `virtx logout` asks the provider to end the session, where the provider takes that.
 
 The session is kept under `~/.config/virtx/`. The refresh token is in the OS's keychain, or in a file where the keychain cannot be used, and the ID token last issued is in a file. The files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of the server in [Running your own server](/docs/guides/self-hosting/#configure). On Linux and macOS the directory is set to `0700`, the files are written `0600`, readable by their owner alone, and a file there that the directory's owner does not own is not read.
-
-### virtx cloud
-
-The page `virtx login` shows is the console's. `--domain` (`$VIRTX_DOMAIN`) names where virtx cloud is, `virtx.sh` by default.
-
-`virtx token` prints the session's ID token, which lasts at most 15 minutes. The token names no project: virtx cloud takes it with the project each request names by its ID. `virtx logout` forgets the session on this machine whatever virtx cloud answers; if virtx cloud could not be told, the command says so and exits with an error, and the session ends there as it expires.
-
-The session is kept in `~/.config/virtx/<domain>.token` and `<domain>.access`. On Linux and macOS they are readable by their owner alone.
-
-A client made by [`Client.from_env()`](/docs/reference/api/#client) authenticates with `$VIRTX_API_KEY` if it is set. Without one and with `$VIRTX_PROJECT` set to a project's ID, it authenticates as the person signed in, with every request in that project. It runs `virtx token --json` for each token, so the `virtx` the package installs serves it with no other program. The console shows a project's ID on the project's API keys page.
-
-```sh
-virtx login
-export VIRTX_PROJECT=<the project's ID>
-```

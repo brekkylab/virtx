@@ -22,11 +22,11 @@ If you cannot sign in or connect, or the server refuses a request, ask whoever r
 They choose who may sign in, and add you to projects.
 </Aside>
 
-Sign in to it once with the `virtx` command, which `pipx` or `npx` runs without installing; to install it instead, see [Installing](/docs/reference/cli/#installing).
+Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing; to install it instead, see [Installing](/docs/reference/cli/#installing).\
 It asks the server which provider to use, and shows a code to approve in the browser:
 
 ```sh
-pipx run virtx login https://virtx.example            # uvx also works
+uvx virtx login https://virtx.example                 # pipx run virtx, without uv
 
 # or
 
@@ -41,7 +41,7 @@ Then a program connects with the token `virtx token` prints, which the client as
 ```python
 from virtx import Client, CommandAuth
 
-client = Client.connect("https://virtx.example", CommandAuth("pipx", ("run", "virtx", "token", "--json")))
+client = Client.connect("https://virtx.example", CommandAuth("uvx", ("virtx", "token", "--json")))
 ```
 
 </TabItem>
@@ -63,7 +63,7 @@ use virtx::{Auth, Client};
 
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "pipx".into(), args: vec!["run".into(), "virtx".into(), "token".into(), "--json".into()] },
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;
@@ -75,8 +75,8 @@ let client = Client::connect(
 For a provider that gives its public clients a secret, pass it to `virtx login` with `--client-secret`.
 A program that gets its token some other way passes it as it is, with `BearerAuth` in Python, `{ type: 'bearer', token }` in Node.js, or `Auth::Bearer` in Rust.
 
-`virtx whoami` shows who is signed in, and `virtx logout` signs out; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
-Signed in to more than one provider, name the server's to `virtx token`: `virtx token --json --issuer https://idp.example --client-id virtx`.
+`uvx virtx whoami` shows who is signed in, and `uvx virtx logout` signs out; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
+Signed in to more than one provider, name the server's to `virtx token`: `uvx virtx token --json --issuer https://idp.example --client-id virtx`.
 
 ## Running the server
 

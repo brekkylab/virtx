@@ -1070,6 +1070,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
         }
     }
 }

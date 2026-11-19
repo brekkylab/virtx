@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest as _, Sha256};
 
@@ -546,11 +546,41 @@ impl Sandbox {
         Ok(machine)
     }
 
-    /// Stop its machine if it has been in use by nothing for `after`, to boot again when it
-    /// is next needed.
-    async fn park(&self, after: Duration) {
+    /// Its machine parked now, unless it is in use: refused [`InUse`](Error::InUse) then. Its
+    /// machine stopped with what the guest wrote on its upper disk, to boot again for what next
+    /// needs it. Nothing is done to one whose machine is not up.
+    pub async fn park(&self) -> Result<(), Error> {
+        self.park_if(Some(Duration::ZERO)).await;
+        if self.is_up() && self.idle().is_none() {
+            return Err(Error::InUse(format!(
+                "sandbox {} is in use: a job runs in it, or it is reached",
+                self.id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Its machine parked now, whatever uses it: what runs in it ends, as cancelling each job
+    /// does, and what reaches it is cut off -- for a server whose sandbox may run no more.
+    pub async fn park_anyway(&self) {
+        self.park_if(None).await;
+    }
+
+    /// Whether its machine is up now.
+    pub fn is_up(&self) -> bool {
+        self.up().is_some()
+    }
+
+    /// When it was made, or a job in it or an [`Activity`] on it last ended.
+    pub fn last_used(&self) -> SystemTime {
+        SystemTime::now() - self.used.lock().unwrap().elapsed()
+    }
+
+    /// Stop its machine if it has been in use by nothing for `unused_for`, or at once,
+    /// whatever uses it, for `None`: to boot again when it is next needed.
+    async fn park_if(&self, unused_for: Option<Duration>) {
         let _turn = self.turn.lock().await;
-        if self.idle().is_none_or(|idle| idle < after) {
+        if unused_for.is_some_and(|after| self.idle().is_none_or(|idle| idle < after)) {
             return;
         }
         let machine = {
@@ -664,7 +694,7 @@ async fn park_when_idle(sandbox: std::sync::Weak<Sandbox>, after: Duration) {
         }
         wait = match sandbox.idle() {
             Some(idle) if idle >= after => {
-                sandbox.park(after).await;
+                sandbox.park_if(Some(after)).await;
                 after
             }
             Some(idle) => after - idle,

@@ -449,7 +449,15 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .vcpus(machine.spec.vcpus)
         .map_err(|e| Error::vmm(format!("{} vCPUs", machine.spec.vcpus), e))?
         .ram_mib(machine.spec.ram_mib)
-        .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?
+        .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?;
+    // A guest that powers off ends the machine: on x86_64 through the sleep register ACPI
+    // names, without which it halts and its process runs on; aarch64 through PSCI. The Windows
+    // guest kernel has no ACPI.
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    let vmm = vmm
+        .acpi(true)
+        .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
+    let vmm = vmm
         .payload(payload)
         .devices(devices)
         .prefault_memory(prefault_memory())

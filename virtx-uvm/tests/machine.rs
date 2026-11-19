@@ -273,7 +273,7 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
 
 async fn a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good(home: Home) {
     let sandbox = home.sandbox(&small()).await;
-    // Reset, which ends a machine on every arch: x86's has no power-off a guest reaches.
+    // Reset, which ends a machine on every arch and every guest kernel.
     let ended = tokio::time::timeout(HANG, run(&sandbox, &["sh", "-c", "sync; reboot -f"], None));
     let (_, code) = ended.await.expect("its machine ended").unwrap();
     assert_eq!(code, 137, "ended with its machine");
@@ -316,6 +316,21 @@ async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
     let (lines, _) = run(&there, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
     other.delete(sandbox.id()).await.unwrap();
+}
+
+async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    let off = ["sh", "-c", "sleep 1; poweroff -f"];
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &off, None));
+    // Its job never says it ended: it ends as killed, with the machine.
+    let (_, code) = ended.await.expect("its machine ended").unwrap();
+    assert_eq!(code, 137, "ended with its machine");
+    let reasons: Vec<_> = sandbox.jobs().iter().map(|job| job.reason).collect();
+    assert_eq!(reasons, [Some(SandboxJobEndReason::VmExited)]);
+    assert!(until(async || !sandbox.answer(false).running).await);
+    let refused = run(&sandbox, &["true"], None).await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
 async fn a_sandbox_parked_as_it_is_parked_unused_has_synced(home: Home) {
@@ -745,6 +760,12 @@ fn main() -> ExitCode {
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
     ]);
+    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off.
+    if cfg!(not(windows)) {
+        tests.extend(tests![
+            a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs
+        ]);
+    }
     if gpu {
         tests.extend(tests![
             a_gpu_sandbox_finds_the_host_s_gpu_through_venus,

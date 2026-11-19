@@ -340,6 +340,8 @@ export interface SandboxInfo {
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
+  /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
+  error?: string
 }
 
 /**
@@ -354,6 +356,7 @@ export class Sandbox extends Files implements SandboxInfo {
   running: boolean
   ports?: SandboxPort[]
   abins?: string[]
+  error?: string
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
@@ -394,6 +397,12 @@ export interface SandboxExecOptions {
   timeoutMs?: number
 }
 
+/**
+ * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
+ * `restarted`, its server restarted while it ran, keeping its sandbox.
+ */
+export type SandboxJobEndReason = 'restarted'
+
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {
   id: string
@@ -403,6 +412,8 @@ export interface SandboxJobInfo {
   running: boolean
   /** Its exit code, once it has ended. */
   code?: number
+  /** Why it ended, once it has, if it did not end by itself. */
+  reason?: SandboxJobEndReason
 }
 
 /**
@@ -422,6 +433,7 @@ export class SandboxJob implements SandboxJobInfo {
   cmd: string[]
   running: boolean
   code?: number
+  reason?: SandboxJobEndReason
   /** It as the server has it now. */
   get(): Promise<SandboxJob>
   /** Send `signal`, a name such as `'SIGTERM'`, to its process and every one it started. */
@@ -444,8 +456,14 @@ export type SandboxJobEntry = { id: number } & (
   | { stdout: string }
   | { stderr: string }
   | { truncated: Record<string, never> }
-  | { end: { code: number } }
+  | { end: SandboxJobEnd }
 )
+
+/** How a process ended, last in its log: its exit code, and why, if it did not end by itself. */
+export interface SandboxJobEnd {
+  code: number
+  reason?: SandboxJobEndReason
+}
 
 /** How a job's `complete` follows it. */
 export interface CompleteOptions {

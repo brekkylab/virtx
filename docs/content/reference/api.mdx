@@ -87,13 +87,15 @@ Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
 
+A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
+
 ## Jobs
 
 A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code`.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `restarted`, for one that ran when its server restarted, keeping its sandbox.
 
 | Call | Returns | What it does |
 | --- | --- | --- |

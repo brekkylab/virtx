@@ -1323,6 +1323,184 @@ mod tests {
         assert_eq!(status(client.create_sandbox(&args).await), 404);
     }
 
+    /// What a server before this one kept of a project's sandboxes is known again as the project
+    /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
+    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
+    /// is deleted. No machine boots for it.
+    #[tokio::test]
+    async fn a_project_s_sandboxes_are_kept_across_a_restart() {
+        let served = Served::spawn("kept").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let jobs = json!([
+            { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
+            { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+        ]);
+        let kept = [
+            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
+            ("ended", json!({}), true, json!([])),
+        ];
+        for (id, keys, exited, jobs) in kept {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let image = json!({ "type": "digest", "digest": digest });
+            let args = json!({ "image": image, "ports": [8080] });
+            let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        // What a making cut short before its record leaves, and a record whose disk is gone.
+        std::fs::write(dir.join("cut.ext4"), b"").unwrap();
+        std::fs::write(dir.join("gone.json"), b"{}").unwrap();
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "ended", "image": digest, "running": false }),
+                json!({ "id": "kept", "image": digest, "running": true }),
+            ]
+        );
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let kept_files =
+            |id: &str| [".ext4", ".ext4.lock", ".json"].map(|end| format!("{id}{end}"));
+        assert_eq!(left, [kept_files("ended"), kept_files("kept")].concat());
+
+        let (status, jobs) = served
+            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let jobs: Value = serde_json::from_str(&jobs).unwrap();
+        assert_eq!(
+            jobs,
+            json!([
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                {
+                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
+                    "running": false, "code": 137, "reason": "restarted",
+                },
+            ])
+        );
+        let (status, log) = served
+            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            log,
+            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
+        );
+
+        // Its port's URL reaches it as it did: parked, nothing listens there.
+        let port = served.port_url(&format!("ports/{capability}"));
+        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            kept_files("kept")
+                .iter()
+                .all(|file| !dir.join(file).exists())
+        );
+        let (status, _) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+    }
+
+    /// A sandbox a server before this one kept that this one cannot know again -- its record
+    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
+    /// request about it is refused `409` `ended`, and it keeps its project from being removed
+    /// until its `DELETE` removes it, its disk and record with it.
+    #[tokio::test]
+    async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
+        let served = Served::spawn("unknown").await;
+        let demo = served.project("demo").await;
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        let image = json!({ "type": "digest", "digest": gone });
+        let record = json!({ "args": { "image": image } }).to_string();
+        for (id, record) in [("unread", "not json".to_owned()), ("lost", record)] {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            std::fs::write(dir.join(format!("{id}.json")), record).unwrap();
+        }
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        let errors: Vec<_> = listed
+            .iter_mut()
+            .map(|sandbox| sandbox.as_object_mut().unwrap().remove("error"))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "lost", "image": gone, "running": false }),
+                json!({ "id": "unread", "image": "", "running": false }),
+            ]
+        );
+        for error in errors {
+            let error = error.expect("an error says why");
+            assert!(
+                error.as_str().unwrap().starts_with("not known again"),
+                "{error}"
+            );
+        }
+        let (status, got) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&got).unwrap()["running"],
+            false
+        );
+
+        let exec = r#"{"cmd": ["true"]}"#;
+        let used = [
+            ("POST", "sandboxes/unread/jobs/exec/", exec),
+            ("GET", "sandboxes/unread/jobs/", ""),
+            ("GET", "sandboxes/unread/files/", ""),
+        ];
+        for (method, path, body) in used {
+            let (status, refused) = served.send(method, path, Some("demo"), body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
+            let refused: Value = serde_json::from_str(&refused).unwrap();
+            assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+        }
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");
+
+        for id in ["unread", "lost"] {
+            let path = format!("sandboxes/{id}");
+            let (status, _) = served.send("DELETE", &path, Some("demo"), "").await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{id}");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        let (status, _) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
     #[tokio::test]
     async fn a_port_is_a_websocket_behind_its_capability() {

@@ -48,6 +48,7 @@ virtx-server-tcp serve --config server.json
 The server serves HTTP, and TLS is left to whatever you put in front of it, as with any HTTP service.
 Clients send a token over HTTPS to other machines, so serve it there over HTTPS, passing WebSocket connections through: [ports](/docs/guides/networks-ports/) are reached over them.
 With it on the same machine, listen on `127.0.0.1`; listen on another address only for a proxy on another machine.
+Started on an address that is not the machine's loopback, the server warns on its standard error that it speaks plain HTTP there.
 
 ## Sign users in
 

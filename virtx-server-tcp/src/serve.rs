@@ -155,8 +155,22 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("listening at {listen}"))?;
-    eprintln!("serving at http://{}/", listener.local_addr()?);
+    eprintln!("{}", serving(listener.local_addr()?));
     Ok(listener)
+}
+
+/// What a server listening at `at` says on its standard error: where it serves, and, where that
+/// is not this machine's loopback, that its HTTP is plain and wants HTTPS in front.
+fn serving(at: std::net::SocketAddr) -> String {
+    let mut said = format!("serving at http://{at}/");
+    if !at.ip().to_canonical().is_loopback() {
+        said.push_str(&format!(
+            "\n{at} is not this machine's loopback, and the server speaks plain HTTP: serve it \
+             to other machines over HTTPS from a proxy in front, or their tokens and files \
+             cross the network in the clear"
+        ));
+    }
+    said
 }
 
 /// `router` served on `listener` until this process is interrupted.
@@ -475,6 +489,27 @@ mod tests {
 
     fn names(entries: Vec<DirEntry>) -> Vec<String> {
         entries.into_iter().map(|entry| entry.name).collect()
+    }
+
+    #[test]
+    fn a_server_off_the_loopback_says_its_http_is_plain() {
+        let serving = |at: &str| super::serving(at.parse().unwrap());
+        assert_eq!(
+            serving("127.0.0.1:8470"),
+            "serving at http://127.0.0.1:8470/"
+        );
+        assert_eq!(serving("[::1]:8470"), "serving at http://[::1]:8470/");
+        assert_eq!(
+            serving("[::ffff:127.0.0.1]:8470"),
+            "serving at http://[::ffff:127.0.0.1]:8470/"
+        );
+        for at in ["0.0.0.0:8470", "192.0.2.1:8470", "[::]:8470"] {
+            let said = serving(at);
+            let (first, warning) = said.split_once('\n').unwrap();
+            assert_eq!(first, format!("serving at http://{at}/"));
+            assert!(warning.starts_with(at), "{warning}");
+            assert!(warning.contains("plain HTTP"), "{warning}");
+        }
     }
 
     #[tokio::test]

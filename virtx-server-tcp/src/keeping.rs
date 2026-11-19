@@ -49,10 +49,12 @@ pub struct Listed {
 /// Refused: held elsewhere, not there, there already, or failed.
 #[derive(Debug, thiserror::Error)]
 pub enum Refusal {
-    #[error("{kind} {name} is in use on node {node}, in {cell}")]
+    /// Told to a client with the cell that holds it, not the node.
+    #[error("{kind} {name} is in use in {cell}; ask again shortly")]
     Held {
         kind: &'static str,
         name: String,
+        /// The node that holds it, kept for the embedder and not told to a client.
         node: String,
         cell: String,
     },
@@ -236,3 +238,22 @@ pub trait Keeping: Send + Sync {
 /// What makes a home's [`Keeping`], given its snapshots and volumes.
 pub type MakeKeeping<'a> =
     &'a dyn Fn(&SnapshotStore, &VolumeStore) -> anyhow::Result<Arc<dyn Keeping>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hold_is_told_without_the_node_that_has_it() {
+        let held = Refusal::Held {
+            kind: "volume",
+            name: "data".to_owned(),
+            node: "i-0123456789abcdef0".to_owned(),
+            cell: "apne1".to_owned(),
+        };
+        assert_eq!(
+            held.to_string(),
+            "volume data is in use in apne1; ask again shortly"
+        );
+    }
+}

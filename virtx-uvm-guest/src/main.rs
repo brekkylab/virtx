@@ -19,8 +19,8 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
-use std::os::fd::AsRawFd as _;
+use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -273,50 +273,179 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     }
     send(out, &CtrlResp::Started(Ok(id)));
 
-    let stdout = lines(out, child.stdout.take(), move |line| CtrlResp::Stdout {
-        id,
-        line,
-    });
-    let stderr = lines(out, child.stderr.take(), move |line| CtrlResp::Stderr {
-        id,
-        line,
-    });
+    let (read, all_read) = std::sync::mpsc::channel();
+    let stdout = Piped::start(
+        out,
+        child.stdout.take().map(OwnedFd::from),
+        read.clone(),
+        move |line| CtrlResp::Stdout { id, line },
+    );
+    let stderr = Piped::start(
+        out,
+        child.stderr.take().map(OwnedFd::from),
+        read,
+        move |line| CtrlResp::Stderr { id, line },
+    );
     let (out, stdins) = (Arc::clone(out), Arc::clone(stdins));
     thread::spawn(move || {
-        // Everything it wrote first, so its end is the last thing said of it.
-        let _ = (stdout.join(), stderr.join());
+        // It ends when its process does -- not when its output does, which a program it left
+        // running in the background (`server &`) holds open for as long as that runs. What it
+        // wrote before it ended is said first, so its end is the last thing said of it: each
+        // pipe read up to what was in it as the process ended, or to its end if sooner.
         let code = code(&mut child);
         // Its stdin, if still open, closed once what is queued is: no process reads it.
         drop(stdins.lock().unwrap().remove(&id));
+        stdout.exited();
+        stderr.exited();
+        for _ in 0..2 {
+            if all_read.recv().is_err() {
+                break;
+            }
+        }
         send(&out, &CtrlResp::Exited { id, code });
     });
 }
 
-/// Each line `read` gives, as `wrapped` makes it a message, until it ends. One longer than
-/// [`LINE_LIMIT`] goes as several, so no frame is past what the host reads.
-fn lines(
-    out: &Out,
-    read: Option<impl Read + Send + 'static>,
-    wrapped: impl Fn(String) -> CtrlResp + Send + 'static,
-) -> thread::JoinHandle<()> {
-    let out = Arc::clone(out);
-    thread::spawn(move || {
-        let Some(read) = read else { return };
-        let mut read = BufReader::new(read);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match (&mut read).take(LINE_LIMIT).read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-            if line.last() == Some(&b'\n') {
-                line.pop();
-            }
-            send(&out, &wrapped(String::from_utf8_lossy(&line).into_owned()));
-        }
-    })
+/// One of a process's pipes, read on a thread of its own: each line sent up to what it held as
+/// its process ended, and what comes after -- a background program's -- read and dropped, so
+/// that a program writing to it is never held up by a full pipe.
+struct Piped {
+    fd: Option<i32>,
+    /// What has been read, and once its process has ended, what it had written by then:
+    /// read under the lock, so the two are counted alike.
+    count: Arc<Mutex<Count>>,
 }
+
+#[derive(Default)]
+struct Count {
+    read: u64,
+    until: Option<u64>,
+}
+
+impl Piped {
+    fn start(
+        out: &Out,
+        pipe: Option<OwnedFd>,
+        read: std::sync::mpsc::Sender<()>,
+        wrapped: impl Fn(String) -> CtrlResp + Send + 'static,
+    ) -> Self {
+        let count = Arc::new(Mutex::new(Count::default()));
+        let Some(pipe) = pipe else {
+            let _ = read.send(());
+            return Self { fd: None, count };
+        };
+        let fd = pipe.as_raw_fd();
+        let (out, counted) = (Arc::clone(out), Arc::clone(&count));
+        thread::spawn(move || {
+            let pipe = File::from(pipe);
+            // Each read's lines said at once, one write for them all: each write costs the
+            // machine an exit to its host, dear under nested virtualization.
+            let say = |lines: &mut Vec<Vec<u8>>| {
+                if lines.is_empty() {
+                    return;
+                }
+                let messages: Vec<CtrlResp> = lines
+                    .iter()
+                    .map(|line| wrapped(String::from_utf8_lossy(line).into_owned()))
+                    .collect();
+                let _ = wire::send_all(&mut *out.lock().unwrap(), &messages);
+                lines.clear();
+            };
+            let mut said: Vec<Vec<u8>> = Vec::new();
+            let mut line = Vec::new();
+            let mut chunk = vec![0u8; 64 << 10];
+            let mut told = Some(read);
+            loop {
+                let caught_up = {
+                    let count = counted.lock().unwrap();
+                    count.until.is_some_and(|until| count.read >= until)
+                };
+                if caught_up && let Some(told) = told.take() {
+                    if !line.is_empty() {
+                        said.push(std::mem::take(&mut line));
+                    }
+                    say(&mut said);
+                    let _ = told.send(());
+                }
+                // A while at most, so that its process ending is seen while nothing comes.
+                if !readable(fd, 100) {
+                    continue;
+                }
+                // How much was read, and how much of it its process wrote before it ended.
+                let (n, own) = {
+                    let mut count = counted.lock().unwrap();
+                    match (&pipe).read(&mut chunk) {
+                        Ok(0) | Err(_) => (0, 0),
+                        Ok(n) => {
+                            let before = count.read;
+                            count.read += n as u64;
+                            let own = count.until.map_or(n as u64, |until| {
+                                until.saturating_sub(before).min(n as u64)
+                            });
+                            (n, own as usize)
+                        }
+                    }
+                };
+                if n == 0 {
+                    if let Some(told) = told {
+                        if !line.is_empty() {
+                            said.push(std::mem::take(&mut line));
+                        }
+                        say(&mut said);
+                        let _ = told.send(());
+                    }
+                    return;
+                }
+                // Past its process's end, it is a background program's: dropped.
+                if told.is_none() {
+                    continue;
+                }
+                let mut rest = &chunk[..own];
+                while let Some(at) = rest.iter().position(|b| *b == b'\n') {
+                    line.extend_from_slice(&rest[..at]);
+                    said.push(std::mem::take(&mut line));
+                    rest = &rest[at + 1..];
+                }
+                line.extend_from_slice(rest);
+                // One longer than [`LINE_LIMIT`] goes as several.
+                while line.len() as u64 >= LINE_LIMIT {
+                    said.push(line.drain(..LINE_LIMIT as usize).collect());
+                }
+                say(&mut said);
+            }
+        });
+        Self {
+            fd: Some(fd),
+            count,
+        }
+    }
+
+    /// Its process has ended: what is in the pipe now is the last of what it wrote.
+    fn exited(&self) {
+        let mut count = self.count.lock().unwrap();
+        let waiting = self.fd.map_or(0, |fd| {
+            let mut n: libc::c_int = 0;
+            // SAFETY: a descriptor its thread holds open until the pipe ends, and an int.
+            match unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } {
+                0 => n.max(0) as u64,
+                _ => 0,
+            }
+        });
+        count.until = Some(count.read + waiting);
+    }
+}
+
+/// Whether `fd` has something to read, or has ended, within `ms` milliseconds.
+fn readable(fd: i32, ms: i32) -> bool {
+    let mut polled = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one `pollfd` of ours.
+    unsafe { libc::poll(&mut polled, 1, ms) > 0 }
+}
+
 
 /// How `child` ended: its exit code, `128 + signal` for one a signal ended.
 fn code(child: &mut Child) -> i32 {

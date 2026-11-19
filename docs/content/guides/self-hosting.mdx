@@ -108,7 +108,7 @@ virtx-server-tcp serve --config server.json
 | --- | --- |
 | `listen` | The address and port the server listens on. |
 | `home` | The directory where the server keeps everything its users create, sandboxes included: stopped and started again over it, the server has each sandbox it had, with what it wrote. Without it, the server uses `$VIRTX_HOME`, or a `virtx` directory in its user's cache directory. |
-| `oidc` | The OpenID Connect provider users sign in with; see [Sign users in](#sign-users-in). |
+| `oidc` | The OpenID Connect provider users sign in with; see [Add users](#add-users). |
 | `origins` | The web pages allowed to call the server from a browser, such as `["https://app.example"]`. Without it, browsers are refused; programs are not affected. |
 | `private_registries` | Registries on the server's machine or its private network that image jobs may reach, such as `["registry.internal:5000"]`; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, jobs reach only registries on public addresses. |
 | `registry_mirror` | A mirror of Docker Hub, such as `"mirror.gcr.io"`, that pulls of Docker Hub's images without credentials try first, a build's base among them; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, they go to Docker Hub. |
@@ -129,11 +129,11 @@ The server serves HTTP, and TLS is left to whatever you put in front of it, as w
 Clients send a token over HTTPS to other machines, so serve it there over HTTPS, passing WebSocket connections through: [ports](/docs/guides/networks-ports/) are reached over them.
 With it on the same machine, listen on `127.0.0.1`; listen on another address only for a proxy on another machine.
 
-### Sign users in
+### Add users
 
-The server lets nobody in by itself: every user signs in through an OpenID Connect provider you already use.
+The server keeps no list of users of its own: a user is whoever your OpenID Connect provider signs in to the client you name, and nobody else gets in.
+So you add a user, or take one away, in the provider, by letting them use that client or not; allow only your team.
 
-The server keeps no list of users: it takes everyone your provider signs in to the client you name, so allow only your team to use that client in the provider.
 In your provider, register a public client that allows the device flow, and put the provider and the client in `oidc`:
 
 | Field | What it sets |

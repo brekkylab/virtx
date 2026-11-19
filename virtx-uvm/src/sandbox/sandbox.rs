@@ -1215,15 +1215,18 @@ mod keeping_ended {
     use super::*;
 
     fn job(id: &str, ended: bool) -> (String, Arc<Job>) {
-        let job = Job::new(SandboxJob {
-            id: id.into(),
-            kind: SandboxJobKind::Exec,
-            pid: 1,
-            cmd: vec!["true".into()],
-            running: true,
-            code: None,
-            reason: None,
-        });
+        let job = Job::new(
+            SandboxJob {
+                id: id.into(),
+                kind: SandboxJobKind::Exec,
+                pid: 1,
+                cmd: vec!["true".into()],
+                running: true,
+                code: None,
+                reason: None,
+            },
+            false,
+        );
         if ended {
             job.end(0);
         }

@@ -128,10 +128,6 @@ impl Job {
         (job.pid, job.running)
     }
 
-    pub(super) fn id(&self) -> String {
-        self.job.lock().unwrap().id.clone()
-    }
-
     /// Send what `send` sends to its stdin, if it is open, closing it if `eof`: done once the
     /// guest says it is [written](Job::written), so a process that does not read holds back
     /// whoever writes to it and nothing else. One write at a time. `false` for a stdin closed,

@@ -264,7 +264,8 @@ fn members_share_a_project_and_no_one_else_reaches_it_with_the_fixture_s_provide
 }
 
 /// A user makes a project, owns it, and brings another in, who reaches what is in it while a
-/// member and no longer once they leave; the project goes with what is in it.
+/// member and no longer once they leave; the project goes with what is in it, once no sandbox
+/// lives in it.
 #[test]
 fn a_user_makes_a_project_brings_another_in_and_removes_it() {
     let served = Served::fixture();
@@ -304,15 +305,21 @@ fn a_user_makes_a_project_brings_another_in_and_removes_it() {
 
     theirs.remove_member("bob@example.com").wait().unwrap();
     assert_eq!(refused(bob.list_volume().wait()), Some(403));
-    // Not while a sandbox lives in it: refused, with what is in it kept.
+    // Not while a sandbox lives in it: refused, with what is in it kept. The new project has no
+    // image yet, so this pulls one. The sandbox goes before any of it is asserted: one left
+    // running would be found by the tests that look for the fixture's machines.
     common::alpine(&alice);
     let sandbox = alice
         .create_sandbox(&SandboxCreateArgs::new(ALPINE))
         .wait()
         .unwrap();
-    assert_eq!(refused(made.remove().wait()), Some(409));
-    assert!(alice.get_volume(volume.name()).wait().is_ok());
+    let removed = refused(made.remove().wait());
+    let kept = (
+        alice.get_sandbox(sandbox.id()).wait().is_ok(),
+        alice.get_volume(volume.name()).wait().is_ok(),
+    );
     sandbox.remove().wait().unwrap();
+    assert_eq!((removed, kept), (Some(409), (true, true)));
     made.remove().wait().unwrap();
     assert_eq!(refused(alice.get_project(made.id()).wait()), Some(403));
     assert_eq!(refused(alice.list_volume().wait()), Some(403));

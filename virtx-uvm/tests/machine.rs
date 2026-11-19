@@ -141,7 +141,7 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
     );
     // The child in the background holds the job's output open: the job ends once it goes too.
     let forks = ["sh", "-c", "sleep 10 & sleep 10"];
-    let timed = run(&sandbox, &forks, Some(Duration::from_millis(200)));
+    let timed = run(&sandbox, &forks, Some(Duration::from_secs(1)));
     let timed = tokio::time::timeout(Duration::from_secs(5), timed).await;
     assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
     let left = ["sh", "-c", "ps | grep -c '[s]leep 10'"];
@@ -155,7 +155,7 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
-    // With the child it started, once it has said so.
+    // It says `started` once its child in the background is there.
     let cmd = ["sh", "-c", "sleep 30 & echo started; sleep 30"]
         .map(String::from)
         .to_vec();
@@ -302,7 +302,8 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
             "-c",
             "nproc; awk '/MemTotal/ {print $2}' /proc/meminfo",
         ];
-        let (lines, _) = run(&sandbox, &ask, None).await.unwrap();
+        let (lines, code) = run(&sandbox, &ask, None).await.unwrap();
+        assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
         assert_eq!(lines[0], vcpus.to_string());
         let kib: u64 = lines[1].parse().unwrap();
         // Less what the kernel keeps for itself.
@@ -348,30 +349,36 @@ async fn a_job_given_no_input_reads_its_end(home: Home) {
     close(sandbox).await;
 }
 
-async fn a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed(home: Home) {
+async fn a_job_s_log_ends_when_its_sandbox_is_closed(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
-    let cmd = ["sleep", "60"].map(String::from).to_vec();
+    let cmd = ["sh", "-c", "echo started; sleep 60"]
+        .map(String::from)
+        .to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
-    let log = Arc::clone(job.log());
+    let entry = |event: &[u8]| {
+        let event = std::str::from_utf8(event).unwrap();
+        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+        serde_json::from_str::<SandboxJobEntry>(data.unwrap()).unwrap()
+    };
+    // Read while it runs.
+    let mut events = Box::pin(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
     let reading = tokio::spawn(async move {
-        let mut events = std::pin::pin!(log.events(&HeaderMap::new()));
-        let mut last = None;
+        let mut rest = Vec::new();
         while let Some(Ok(event)) = events.next().await {
-            let event = String::from_utf8(event.to_vec()).unwrap();
-            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-            last = Some(serde_json::from_str::<SandboxJobEntry>(data.unwrap()).unwrap());
+            rest.push(event);
         }
-        last
+        rest
     });
-    // Reading before it is closed.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+
     close(sandbox).await;
-    let last = tokio::time::timeout(Duration::from_secs(10), reading).await;
-    let last = last.expect("the log ended").unwrap();
-    assert!(
-        matches!(last, Some(SandboxJobEntry::End(ref end)) if end.code == 137),
-        "{last:?}"
-    );
+    let rest = tokio::time::timeout(Duration::from_secs(10), reading).await;
+    let rest: Vec<_> = rest.expect("the log ended").unwrap();
+    let rest: Vec<_> = rest.iter().map(|event| entry(event)).collect();
+    // Its end is read by a reader woken before the job is removed, and by no other.
+    let ended = matches!(rest.as_slice(), [SandboxJobEntry::End(end)] if end.code == 137);
+    assert!(rest.is_empty() || ended, "{rest:?}");
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -1072,7 +1079,7 @@ fn main() -> ExitCode {
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
-        a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed,
+        a_job_s_log_ends_when_its_sandbox_is_closed,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

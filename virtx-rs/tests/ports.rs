@@ -18,18 +18,18 @@ use common::ALPINE;
 /// seconds.
 fn answer(at: impl std::net::ToSocketAddrs + Copy) -> String {
     let until = Instant::now() + Duration::from_secs(30);
-    let mut answer = String::new();
+    let mut line = String::new();
     while Instant::now() < until {
         if let Ok(mut stream) = TcpStream::connect(at) {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            answer.clear();
+            line.clear();
             if stream.write_all(b"ping\n").is_ok() {
-                let _ = BufReader::new(stream).read_line(&mut answer);
+                let _ = BufReader::new(stream).read_line(&mut line);
             }
-            if !answer.is_empty() {
-                return answer;
+            if !line.is_empty() {
+                return line;
             }
         }
         thread::sleep(Duration::from_millis(200));

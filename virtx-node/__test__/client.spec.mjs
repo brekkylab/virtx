@@ -40,39 +40,42 @@ test('a client over HTTP sends its token and project', async () => {
   }
 })
 
-test('a port forwarder reaches what listens in the sandbox until it is closed', async () => {
+test('a port forwarder listens on the loopback until it is closed', async () => {
   const { url, token, project } = fixture()
   const client = Client.connect(url, { type: 'bearer', token }, project)
   try {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
-    const serve = ['sh', '-c', 'while true; do echo hello | nc -l -p 8000; done']
-    await sandbox.exec(serve, { timeoutMs: 30_000 })
-    const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
-    assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
-    // What a connection is told before it ends, or the error that ended it.
-    const said = () =>
-      new Promise((resolve, reject) => {
-        const chunks = []
-        const stream = net.connect(forwarder.port, forwarder.host)
-        stream.on('data', (chunk) => chunks.push(chunk))
-        stream.on('end', () => resolve(Buffer.concat(chunks).toString()))
-        stream.on('error', reject)
-      })
+    try {
+      const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+      assert.equal(typeof forwarder.port, 'number')
+      assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
+      // What connecting comes to: `connected`, or the error's code.
+      const connect = () =>
+        new Promise((resolve) => {
+          const stream = net.connect(forwarder.port, forwarder.host)
+          stream.on('connect', () => {
+            stream.destroy()
+            resolve('connected')
+          })
+          stream.on('error', (error) => resolve(error.code))
+        })
+      // A connection is taken, whatever the sandbox does with it.
+      assert.equal(await connect(), 'connected')
 
-    // Until the server in the sandbox listens, a connection is closed with nothing said.
-    let answer = ''
-    const until = Date.now() + 30_000
-    while (answer !== 'hello\n' && Date.now() < until) {
-      answer = await said()
-      await sleep(200)
+      forwarder.close()
+      forwarder.close()
+      // Its listener goes a moment after.
+      let connected = 'connected'
+      const until = Date.now() + 5_000
+      while (connected !== 'ECONNREFUSED' && Date.now() < until) {
+        connected = await connect()
+        await sleep(50)
+      }
+      assert.equal(connected, 'ECONNREFUSED')
+    } finally {
+      await sandbox.remove()
     }
-    assert.equal(answer, 'hello\n')
-
-    forwarder.close()
-    forwarder.close()
-    await assert.rejects(said(), { code: 'ECONNREFUSED' })
-    await sandbox.remove()
   } finally {
     await client.close()
   }

@@ -274,7 +274,10 @@ mod tests {
         }
         let config = image.config().clone().unwrap();
         assert_eq!(config.working_dir().as_deref(), Some("/app/src"));
-        assert_eq!(config.env().clone().unwrap(), ["MODE_X=kept", "MODE=prod"]);
+        // In no order it promises.
+        let mut env = config.env().clone().unwrap();
+        env.sort();
+        assert_eq!(env, ["MODE=prod", "MODE_X=kept"]);
         // Neither boots a machine nor makes a layer.
         assert!(layers.is_empty());
 

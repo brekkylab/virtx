@@ -1,13 +1,15 @@
 // The client where no request is sent, and over HTTP to the fixture's server.
 
 import assert from 'node:assert/strict'
+import net from 'node:net'
 import { test } from 'node:test'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import virtx from '../index.js'
 
-import { fixture, unique } from './fixture.mjs'
+import { ALPINE, alpine, fixture, unique } from './fixture.mjs'
 
-const { Client } = virtx
+const { Client, PortForwarder } = virtx
 
 test('a second library is refused', () => {
   assert.throws(() => virtx.load('/nonexistent/libvirtx_core'), /is open already/)
@@ -35,6 +37,44 @@ test('a client over HTTP sends its token and project', async () => {
     await assert.rejects(anonymous.listVolume(), { status: 401 })
   } finally {
     await anonymous.close()
+  }
+})
+
+test('a port forwarder reaches what listens in the sandbox until it is closed', async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
+    const serve = ['sh', '-c', 'while true; do echo hello | nc -l -p 8000; done']
+    await sandbox.exec(serve, { timeoutMs: 30_000 })
+    const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+    assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
+    // What a connection is told before it ends, or the error that ended it.
+    const said = () =>
+      new Promise((resolve, reject) => {
+        const chunks = []
+        const stream = net.connect(forwarder.port, forwarder.host)
+        stream.on('data', (chunk) => chunks.push(chunk))
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString()))
+        stream.on('error', reject)
+      })
+
+    // Until the server in the sandbox listens, a connection is closed with nothing said.
+    let answer = ''
+    const until = Date.now() + 30_000
+    while (answer !== 'hello\n' && Date.now() < until) {
+      answer = await said()
+      await sleep(200)
+    }
+    assert.equal(answer, 'hello\n')
+
+    forwarder.close()
+    forwarder.close()
+    await assert.rejects(said(), { code: 'ECONNREFUSED' })
+    await sandbox.remove()
+  } finally {
+    await client.close()
   }
 })
 

@@ -1,9 +1,20 @@
+import asyncio
 import json
+import socket
+import time
 
 import pytest
 import virtx
-from conftest import fixture, unique
-from virtx import BearerAuth, Client, Project, ProjectMemberListOutputItem, Role, VirtxError
+from conftest import ALPINE, alpine, fixture, unique
+from virtx import (
+    BearerAuth,
+    Client,
+    PortForwarder,
+    Project,
+    ProjectMemberListOutputItem,
+    Role,
+    VirtxError,
+)
 
 
 def test_a_second_library_is_refused() -> None:
@@ -48,6 +59,32 @@ async def test_a_client_over_http_sends_its_token_and_project(tcp_client: Client
         with pytest.raises(VirtxError) as refused:
             await anonymous.list_volume()
         assert refused.value.status == 401
+
+
+async def test_a_port_forwarder_reaches_what_listens_in_the_sandbox_until_closed(
+    tcp_client: Client,
+) -> None:
+    await alpine(tcp_client)
+    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[8000])
+    serve = ["sh", "-c", "while true; do echo hello | nc -l -p 8000; done"]
+    await sandbox.exec(serve, timeout_ms=30_000)
+    forwarder = PortForwarder.open(tcp_client, sandbox.ports[0].url)
+    assert forwarder.address == f"{forwarder.host}:{forwarder.port}"
+
+    # Until the server in the sandbox listens, a connection is closed with nothing said.
+    said = b""
+    until = time.monotonic() + 30
+    while said != b"hello\n" and time.monotonic() < until:
+        with socket.create_connection((forwarder.host, forwarder.port), timeout=5) as stream:
+            said = stream.makefile("rb").read()
+        await asyncio.sleep(0.2)
+    assert said == b"hello\n"
+
+    forwarder.close()
+    forwarder.close()
+    with pytest.raises(OSError):
+        socket.create_connection((forwarder.host, forwarder.port), timeout=5)
+    await sandbox.remove()
 
 
 async def test_a_project_is_made_its_members_set_and_removed() -> None:

@@ -244,9 +244,12 @@ impl http_body::Body for Shared {
 }
 
 /// What answers a WebDAV request under `prefix`, but its filesystem: refused for a write of part
-/// of a file, since a file is written whole, and for one that [takes the root](takes_root).
+/// of a file -- a `PATCH`, or a `PUT` with `Content-Range` -- since a file is written whole, and
+/// for one that [takes the root](takes_root).
 fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavConfig, Refusal> {
-    if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE) {
+    let partial = request.method() == Method::PATCH
+        || request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE);
+    if partial {
         return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
     }
     if takes_root(&prefix, request)? {
@@ -513,12 +516,8 @@ fn stale() -> Refusal {
 const GATHERED: usize = 64 << 10;
 
 /// `request`, a conditional write other than a `PUT`, with its body read to its end first, up to
-/// [`GATHERED`], so a sender that stalls holds up no other writer while its root is held. A
-/// conditional `PATCH`, a write of part of a file, is refused, as a `PUT` of part of one is.
+/// [`GATHERED`], so a sender that stalls holds up no other writer while its root is held.
 async fn gathered(request: Request<Body>) -> Result<Request<Body>, Refusal> {
-    if request.method() == Method::PATCH {
-        return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
-    }
     let (parts, body) = request.into_parts();
     match http_body_util::Limited::new(body, GATHERED).collect().await {
         Ok(body) => Ok(Request::from_parts(parts, Body::from(body.to_bytes()))),
@@ -820,6 +819,52 @@ mod tests {
         assert_eq!(got, again, "{path}");
         let (status, _) = sent(Method::PUT, path, Some(&put), "old").await;
         assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{path}");
+    }
+
+    #[tokio::test]
+    async fn a_write_of_part_of_a_file_is_refused_and_leaves_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let volumes = VolumeStore::new(scratch.path().join("volume")).unwrap();
+        volumes.create("v").unwrap();
+        let files = Files::new(volumes);
+        let path = "/volumes/v/files/a.txt";
+        let put = Request::put(path).body(Body::from("0123456789")).unwrap();
+        assert_eq!(files.volume("v", put).await.status(), StatusCode::CREATED);
+        let etag = {
+            let got = files.volume("v", Request::get(path).body(Body::empty()).unwrap());
+            got.await.headers()[header::ETAG].clone()
+        };
+
+        let partial = [
+            ("a PATCH", Method::PATCH, None),
+            ("a PATCH with If-Match", Method::PATCH, Some(etag)),
+        ];
+        for (what, method, if_match) in partial {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/x-sabredav-partialupdate")
+                .header("X-Update-Range", "bytes=2-3")
+                .header(header::CONTENT_LENGTH, 2);
+            if let Some(etag) = if_match {
+                request = request.header(header::IF_MATCH, etag);
+            }
+            let response = files.volume("v", request.body(Body::from("YY")).unwrap());
+            assert_eq!(response.await.status(), StatusCode::BAD_REQUEST, "{what}");
+        }
+        let ranged = Request::put(path)
+            .header(header::CONTENT_RANGE, "bytes 0-0/10")
+            .body(Body::from("Y"))
+            .unwrap();
+        assert_eq!(
+            files.volume("v", ranged).await.status(),
+            StatusCode::BAD_REQUEST,
+            "a PUT with Content-Range"
+        );
+
+        let got = files.volume("v", Request::get(path).body(Body::empty()).unwrap());
+        let body = got.await.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "0123456789");
     }
 
     #[test]

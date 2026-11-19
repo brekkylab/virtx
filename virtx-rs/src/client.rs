@@ -751,6 +751,14 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
+    /// The sandbox named `name`, without its ports, if one is.
+    pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<Option<SandboxInfo>> = self.call(self.api.virtx_client_find_sandbox, args);
+        call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
+    }
+
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {

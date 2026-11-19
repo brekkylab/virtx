@@ -13,6 +13,7 @@ The image has to be on the server already, pulled or built as [Images](/docs/gui
 
 | Option | Default | What it does |
 | --- | --- | --- |
+| `name` | none | A name to find it again by, with `find_sandbox`, rather than keeping its id. One another sandbox has is refused with `409`, `exists`, until that one is removed. |
 | `vcpus` | 4 | Its CPUs. |
 | `memory_mib` | 4096 | Its memory, in MiB. |
 | `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
@@ -60,7 +61,7 @@ let sandbox = client.create_sandbox(&args).await?;
 
 ## Find sandboxes
 
-`list_sandbox` lists every sandbox on the server, and `get_sandbox` finds one by its id. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `image`, and whether it is `running`. This is how to find one a program left behind.
+`list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` one by the `name` it was made with, answering none when no sandbox has it. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `name`, its `image`, and whether it is `running`. This is how to find one a program left behind.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -70,6 +71,7 @@ for sandbox in await client.list_sandbox():
     print(sandbox.id, sandbox.image, sandbox.running)
 
 sandbox = await client.get_sandbox("<sandbox id>")
+sandbox = await client.find_sandbox("task-42")  # None if no sandbox has the name
 ```
 
 </TabItem>
@@ -81,6 +83,7 @@ for (const sandbox of await client.listSandbox()) {
 }
 
 const sandbox = await client.getSandbox('<sandbox id>')
+const named = await client.findSandbox('task-42') // undefined if no sandbox has the name
 ```
 
 </TabItem>
@@ -92,6 +95,7 @@ for sandbox in client.list_sandbox().await? {
 }
 
 let sandbox = client.get_sandbox("<sandbox id>").await?;
+let named = client.find_sandbox("task-42").await?; // None if no sandbox has the name
 ```
 
 </TabItem>

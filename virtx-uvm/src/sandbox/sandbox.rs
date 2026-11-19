@@ -122,6 +122,8 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The name it was made with, which a server finds it again by.
+    name: Option<String>,
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
@@ -337,6 +339,7 @@ impl Sandbox {
         };
         let sandbox = Arc::new(Sandbox {
             id: upper.id.clone(),
+            name: args.name.clone(),
             image: digest,
             _held: held_image,
             abins: args.abins.clone(),
@@ -366,10 +369,16 @@ impl Sandbox {
         &self.id
     }
 
+    /// The name it was made with, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// The sandbox as the server answers it, with no ports: only its making answers those.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),

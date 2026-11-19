@@ -378,4 +378,41 @@ mod tests {
             assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
         }
     }
+
+    /// A sandbox is found by its name in `?name=`, encoded; of what a server answers, only one
+    /// named so is taken.
+    #[tokio::test]
+    async fn a_sandbox_is_found_by_its_name_encoded() {
+        use axum::extract::RawQuery;
+        use serde_json::json;
+
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let list = {
+            let asked = asked.clone();
+            move |RawQuery(query): RawQuery| async move {
+                asked.lock().unwrap().push(query);
+                // Every sandbox, as a server that reads no `name` answers.
+                Json(json!([
+                    {"id": "s1", "image": "sha256:00", "running": true},
+                    {"id": "s2", "name": "a b&c", "image": "sha256:00", "running": true},
+                ]))
+            }
+        };
+        let url = serve(Router::new().route("/sandboxes/", get(list))).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+
+        let found = crate::sandbox::client::find(&client, "a b&c")
+            .await
+            .unwrap();
+        assert_eq!(found.map(|s| s.id).as_deref(), Some("s2"));
+        let found = crate::sandbox::client::find(&client, "s1").await.unwrap();
+        assert_eq!(found, None);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                Some("name=a%20b%26c".to_owned()),
+                Some("name=s1".to_owned())
+            ]
+        );
+    }
 }

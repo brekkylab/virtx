@@ -4449,6 +4449,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body-util",
@@ -4467,6 +4468,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body-util",

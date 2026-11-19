@@ -638,7 +638,7 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "network": bool, "ports": [n],
+// `{"image": {...}, "name": "...", "network": bool, "ports": [n],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
@@ -662,6 +662,16 @@ struct VirtxFuture *virtx_client_create_sandbox(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_get_sandbox(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
+
+// Answers with the sandbox named `name`, given `{"name": "..."}`, as
+// `virtx_client_list_sandbox` answers each, or `null` if none is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_find_sandbox(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
 
 // Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
 // with `null`.

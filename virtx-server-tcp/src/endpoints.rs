@@ -3,7 +3,7 @@
 //! [`access`](crate::access) puts in its extensions; and those of the projects themselves
 //! ([`projects`]), answered from the [`Access`] there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
@@ -73,6 +73,8 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// The names sandboxes being made have taken, each until it is made or is not.
+    naming: Mutex<HashSet<String>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
@@ -104,6 +106,7 @@ impl Home {
                 crate::serve::MACHINE_SUBCOMMAND.into(),
             ],
             sandboxes: Mutex::default(),
+            naming: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -170,6 +173,27 @@ impl Home {
         });
     }
 
+    /// Take `name` for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here has it, or one being made has taken it.
+    fn naming(&self, name: Option<&str>) -> Result<Naming<'_>, Refused> {
+        let Some(name) = name else {
+            return Ok(Naming(self, None));
+        };
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut naming = self.naming.lock().unwrap();
+        let held = sandboxes
+            .values()
+            .any(|held| held.sandbox.name() == Some(name));
+        if held || !naming.insert(name.to_owned()) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here is named {name} already"),
+            ));
+        }
+        Ok(Naming(self, Some(name.to_owned())))
+    }
+
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
         sandboxes
@@ -190,6 +214,18 @@ impl Tunnel {
     /// The port, in the sandbox's machine while it runs.
     pub async fn connect(&self) -> io::Result<TcpStream> {
         self.activity.sandbox().connect(self.port).await
+    }
+}
+
+/// A name a sandbox being made has taken, given back as this drops: once the sandbox is among
+/// [`Home`]'s, which holds it from there, or once its making failed.
+struct Naming<'a>(&'a Home, Option<String>);
+
+impl Drop for Naming<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = &self.1 {
+            self.0.naming.lock().unwrap().remove(name);
+        }
     }
 }
 
@@ -850,10 +886,17 @@ async fn sandbox_files(
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+/// Every sandbox; with `?name=`, the one named so, if any.
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+    let name = query.as_deref().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "name")
+            .map(|(_, name)| name.into_owned())
+    });
     let sandboxes = home.sandboxes.lock().unwrap();
     let listed: Vec<_> = sandboxes
         .values()
+        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
         .map(|held| held.sandbox.answer())
         .collect();
     Ok(json(&listed))
@@ -861,6 +904,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    let _naming = home.naming(args.name.as_deref())?;
     let sandbox = Sandbox::create(
         &home.images,
         &home.root,

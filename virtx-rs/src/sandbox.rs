@@ -33,6 +33,11 @@ impl Sandbox {
         &self.info.id
     }
 
+    /// The name it was made with, which finds it again ([`Client::find_sandbox`]).
+    pub fn name(&self) -> Option<&str> {
+        self.info.name.as_deref()
+    }
+
     /// What the server answered about it: its image, whether it runs, and its ports, which
     /// only making it answers.
     pub fn info(&self) -> &SandboxInfo {

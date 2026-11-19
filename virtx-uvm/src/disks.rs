@@ -41,6 +41,14 @@ pub trait Disks: Send + Sync {
         let _ = disk;
         Ok(())
     }
+
+    /// In the server's process: the disk at `disk` was just copied to `to`
+    /// ([`Sandbox::copy_disk`](crate::Sandbox::copy_disk)), its machine paused, if it runs,
+    /// until this returns: whatever beside it says what it is copied as of now.
+    fn copied(&self, disk: &Path, to: &Path) -> io::Result<()> {
+        let _ = (disk, to);
+        Ok(())
+    }
 }
 
 /// A sandbox's upper disk as its machine has it open ([`Disks::open`]).
@@ -54,6 +62,13 @@ pub trait MachineDisk: Send + Sync {
 
     /// Its machine booted: the guest's agent is ready.
     fn booted(&self) {}
+
+    /// The guest has put what it had written on it, and its machine is about to be paused for
+    /// it to be copied ([`Sandbox::copy_disk`](crate::Sandbox::copy_disk)): a point to tell
+    /// what is written from now on apart from what the copy holds. What the guest says next
+    /// waits on it, so it is brief. Where the guest took longer to sync than `copy_disk`
+    /// waits, it comes after the copy.
+    fn synced(&self) {}
 }
 
 /// Disks that are files and nothing else.

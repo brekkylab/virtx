@@ -152,8 +152,10 @@ async fn run(
 }
 
 /// Sandboxes' disks as an embedder's: each read and written through storage of its own -- the
-/// file, opened as libkrun would -- what it is served from and when its machine booted noted in
-/// `marks/` beside the test's `sandbox/`, how many are served counted, and those removed noted.
+/// file, opened as libkrun would -- what it is served from, when its machine booted and when its
+/// guest synced for a copy noted in `marks/` beside the test's `sandbox/`, with where it was
+/// copied to and whether its copy was whole by then; how many are served counted, and those
+/// removed noted.
 struct Embedded;
 
 /// How many sandbox disks are served now, each while its machine is up.
@@ -192,6 +194,10 @@ impl MachineDisk for Opened {
     fn booted(&self) {
         std::fs::write(mark(&self.0, "booted"), "").unwrap();
     }
+
+    fn synced(&self) {
+        std::fs::write(mark(&self.0, "synced"), "").unwrap();
+    }
 }
 
 impl Disks for Embedded {
@@ -214,6 +220,11 @@ impl Disks for Embedded {
     fn forget(&self, disk: &Path) -> std::io::Result<()> {
         FORGOTTEN.lock().unwrap().push(disk.to_owned());
         Ok(())
+    }
+
+    fn copied(&self, disk: &Path, to: &Path) -> std::io::Result<()> {
+        let whole = std::fs::metadata(to)?.len() == std::fs::metadata(disk)?.len();
+        std::fs::write(mark(disk, "copied"), format!("{} {whole}", to.display()))
     }
 }
 
@@ -443,6 +454,133 @@ async fn a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs(home: 
     served_down().await;
     assert!(FORGOTTEN.lock().unwrap().contains(&disk));
     assert!(!disk.exists());
+}
+
+/// A running sandbox's disk copied while its guest writes all along is a whole filesystem, with
+/// what the guest wrote before the copy and had not yet put on the disk; the machine runs on. A
+/// parked one's is copied as its machine left it, and a closed one's is not.
+async fn a_sandbox_s_disk_copied_as_it_writes_or_parked_is_whole_with_what_was_written(home: Home) {
+    use std::sync::atomic::Ordering;
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let serving = SERVING.load(Ordering::SeqCst);
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    let writes =
+        "i=0; while :; do i=$((i+1)); head -c 65536 /dev/urandom > /root/w.$((i % 64)); done";
+    let writing = sandbox
+        .exec(vec!["sh".into(), "-c".into(), writes.into()], None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // In the guest's cache, not yet on its disk, as the copy is asked for.
+    let kept = ["sh", "-c", "echo kept > /root/kept"];
+    assert_eq!(run(&sandbox, &kept, None).await.unwrap().1, 0);
+    let copies = home.volumes.create("copies").unwrap();
+    let copy = |name: &str| copies.path().join("files").join(name);
+    sandbox.copy_disk(&copy("running.ext4")).await.unwrap();
+
+    // The embedder was told its guest had synced, and copied what is beside the disk once the
+    // disk itself was.
+    assert!(mark(&disk, "synced").is_file());
+    let copied = std::fs::read_to_string(mark(&disk, "copied")).unwrap();
+    assert_eq!(copied, format!("{} true", copy("running.ext4").display()));
+    // Its machine runs on, and what ran in it.
+    assert!(writing.get().running, "{:?}", writing.get());
+    let (lines, code) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!((lines, code), (vec!["kept".to_owned()], 0));
+
+    // Parked, its disk is copied with no machine to sync or pause.
+    let parked = ["sh", "-c", "echo parked > /root/parked"];
+    assert_eq!(run(&sandbox, &parked, None).await.unwrap().1, 0);
+    sandbox.remove_job(&writing.get().id).unwrap();
+    for _ in 0..100 {
+        if SERVING.load(Ordering::SeqCst) < serving {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        SERVING.load(Ordering::SeqCst) < serving,
+        "its machine parks"
+    );
+    std::fs::remove_file(mark(&disk, "synced")).unwrap();
+    sandbox.copy_disk(&copy("parked.ext4")).await.unwrap();
+    assert!(!mark(&disk, "synced").exists());
+    let copied = std::fs::read_to_string(mark(&disk, "copied")).unwrap();
+    assert_eq!(copied, format!("{} true", copy("parked.ext4").display()));
+    // Closed, it has no disk to copy.
+    let closed = Arc::clone(&sandbox);
+    close(closed).await;
+    let refused = sandbox.copy_disk(&copy("closed.ext4")).await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+
+    // Each copy, as another machine reads it: its journal replayed as a mount does, and then
+    // clean, with what was written before it.
+    let checking = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "copies".into(),
+            path: "/copies".into(),
+            readonly: false,
+        }],
+        ..small()
+    };
+    let checker = home.sandbox(&checking, None).await;
+    apk_add(&checker, &["e2fsprogs", "e2fsprogs-extra"]).await;
+    for (name, written) in [("running", "kept"), ("parked", "parked")] {
+        let copy = format!("/copies/{name}.ext4");
+        let replay = ["e2fsck", "-y", "-E", "journal_only", &copy];
+        let (lines, code) = run(&checker, &replay, None).await.unwrap();
+        assert!(code <= 1, "{name}: {code}: {lines:#?}");
+        let check = ["e2fsck", "-f", "-n", &copy];
+        let (lines, code) = run(&checker, &check, None).await.unwrap();
+        assert_eq!(code, 0, "{name}: {lines:#?}");
+        let cat = format!("cat /upper/root/{written}");
+        let (lines, _) = run(&checker, &["debugfs", "-R", &cat, &copy], None)
+            .await
+            .unwrap();
+        assert!(lines.contains(&written.to_owned()), "{name}: {lines:#?}");
+    }
+    close(checker).await;
+}
+
+/// A machine paused for longer than its guest may be silent, as one is while its disk is copied,
+/// runs on once it is resumed, with what ran in it.
+async fn a_machine_paused_past_the_silence_bound_runs_on(home: Home) {
+    let vm = vec![
+        env::current_exe().unwrap().into(),
+        OsString::from(MACHINE_HEARD_BRIEFLY),
+    ];
+    let args = small();
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm,
+        None,
+        None,
+    );
+    let sandbox = sandbox.await.unwrap();
+    let waiting = sandbox
+        .exec(vec!["sleep".into(), "120".into()], None)
+        .await
+        .unwrap();
+    let machine = sandbox.machine().await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let _paused = machine.pause().unwrap();
+        std::thread::sleep(Duration::from_secs(15));
+    })
+    .await
+    .unwrap();
+    // Past a few of the silence's checks, and pings.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(waiting.get().running, "{:?}", waiting.get());
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    close(sandbox).await;
 }
 
 async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {
@@ -1309,6 +1447,8 @@ fn main() -> ExitCode {
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,
+        a_sandbox_s_disk_copied_as_it_writes_or_parked_is_whole_with_what_was_written,
+        a_machine_paused_past_the_silence_bound_runs_on,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,

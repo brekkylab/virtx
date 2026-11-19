@@ -288,6 +288,42 @@ impl Machine {
         .map_err(|e| Error::io("sending the signal", e))
     }
 
+    /// Have the guest put what it has written on its disks: answered by a
+    /// [`Synced`](CtrlResp::Synced) from [`recv`](Machine::recv).
+    pub fn sync(&self) -> Result<()> {
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Sync)
+            .map_err(|e| Error::io("asking the guest to sync", e))
+    }
+
+    /// Pause the machine -- its vCPUs and its devices, its whole process -- until what this
+    /// answers drops: its disks are left as they are meanwhile, to be copied whole. Its process
+    /// is neither stopped nor killed meanwhile: [`stop`](Machine::stop) and
+    /// [`kill`](Machine::kill) wait.
+    pub fn pause(&self) -> Result<Paused<'_>> {
+        let process = self.process.lock().unwrap();
+        #[cfg(unix)]
+        {
+            // SAFETY: a signal to this machine's own process, which is not reaped while its
+            // lock is held.
+            if unsafe { libc::kill(process.id() as libc::pid_t, libc::SIGSTOP) } == -1 {
+                return Err(Error::io("pausing the machine", io::Error::last_os_error()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: this machine's own process's handle, open for as long as `process` is.
+            let status = unsafe { NtSuspendProcess(process.as_raw_handle()) };
+            if status < 0 {
+                return Err(Error::io(
+                    "pausing the machine",
+                    io::Error::other(format!("NTSTATUS {status:#x}")),
+                ));
+            }
+        }
+        Ok(Paused(process))
+    }
+
     /// Have the guest put what it has written on its disks and end, killing it if it has not
     /// by [`STOP_TIMEOUT`], and answer once its process has ended and let go of what it held,
     /// so [`recv`](Machine::recv) ends.
@@ -342,6 +378,34 @@ impl Machine {
             .ok()
             .flatten()
     }
+}
+
+/// A machine paused by [`Machine::pause`], resumed as this drops.
+pub struct Paused<'a>(std::sync::MutexGuard<'a, Child>);
+
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: as in `pause`.
+            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGCONT) };
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: as in `pause`.
+            unsafe { NtResumeProcess(self.0.as_raw_handle()) };
+        }
+    }
+}
+
+// Every thread of a process suspended, or resumed, at once, as `SIGSTOP` and `SIGCONT` do:
+// exported by ntdll alone.
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
+    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
 
 /// A request for the thread [`files`] starts, and where its answer goes.

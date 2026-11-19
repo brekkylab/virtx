@@ -140,6 +140,15 @@ fn serve() -> io::Result<()> {
                 libc::sync();
                 libc::reboot(libc::RB_AUTOBOOT);
             },
+            // On a thread of its own, so the agent answers pings while a sync takes a while.
+            CtrlReq::Sync => {
+                let out = Arc::clone(&out);
+                thread::spawn(move || {
+                    // SAFETY: `sync` takes nothing.
+                    unsafe { libc::sync() };
+                    send(&out, &CtrlResp::Synced);
+                });
+            }
             CtrlReq::Ping => send(&out, &CtrlResp::Pong),
         }
     }

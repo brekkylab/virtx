@@ -164,6 +164,10 @@ fn prefault_memory() -> bool {
 /// How often the agent is [pinged](CtrlReq::Ping) once it is up.
 const PING_EVERY: Duration = Duration::from_secs(5);
 
+/// How long past its second the silence check may wake before this process is taken to have
+/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow.
+const PAUSED_PAST: Duration = Duration::from_secs(3);
+
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have
 /// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, `0` for never, or a
 /// minute, and no less than two pings apart. A guest that halts, as `halt -f` does or a
@@ -399,8 +403,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
     .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
-    // Told its machine has booted, as its agent says it is ready.
-    let booting = opened.clone();
+    // Told its machine has booted, as its agent says it is ready, and that the guest has synced
+    // for a copy, as its agent says so.
+    let told = opened.clone();
     if let Some(disk) = opened {
         std::thread::spawn(move || disk.background());
     }
@@ -488,10 +493,17 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
                     CtrlResp::Ready(_) => {
-                        if let Some(disk) = &booting {
+                        if let Some(disk) = &told {
                             disk.booted();
                         }
                         send(&CtrlResp::Ready(addresses.clone()))
+                    }
+                    // Before the host hears it, and so before it pauses the machine.
+                    CtrlResp::Synced => {
+                        if let Some(disk) = &told {
+                            disk.synced();
+                        }
+                        send(&CtrlResp::Synced)
                     }
                     CtrlResp::Pong => Ok(()),
                     message => send(&message),
@@ -511,18 +523,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             }
         }
     });
+    // A machine paused whole -- this process stopped, as the host does while it copies its
+    // disk -- is not a silent guest: this thread stopped with it, and wakes well past its second,
+    // which starts the silence anew.
     let silence = guest_silence();
     std::thread::spawn(move || {
+        let mut checked = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            if heard
-                .lock()
-                .unwrap()
-                .is_some_and(|heard| heard.elapsed() > silence)
-            {
+            let now = Instant::now();
+            let mut heard = heard.lock().unwrap();
+            if now.duration_since(checked) > PAUSED_PAST {
+                if heard.is_some() {
+                    *heard = Some(now);
+                }
+            } else if heard.is_some_and(|heard| heard.elapsed() > silence) {
                 log::error!("the guest has answered nothing for {silence:?}: it is ended");
                 std::process::exit(1);
             }
+            checked = now;
         }
     });
 

@@ -43,6 +43,10 @@ const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
 
+/// How long a guest has to say it has synced before its disk is copied as it is
+/// ([`Sandbox::copy_disk`]).
+const SYNC_WAIT: Duration = Duration::from_secs(5);
+
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
 
@@ -176,6 +180,8 @@ pub struct Sandbox {
     /// Each command sent to the machine and not yet answered, in the order sent, and who waits
     /// for its job.
     starting: Mutex<VecDeque<Starting>>,
+    /// Who waits for its guest to say it has synced, for a copy of its disk.
+    synced: Mutex<Option<oneshot::Sender<()>>>,
     /// Where its machine's ports are reached.
     ports: Ports,
     /// How long it is in use by nothing before its machine is parked, `None` for never, and
@@ -449,6 +455,7 @@ impl Sandbox {
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
             starting: Mutex::default(),
+            synced: Mutex::default(),
             ports: Ports::default(),
             park_after,
             watching: AtomicBool::new(false),
@@ -633,6 +640,46 @@ impl Sandbox {
         Some(self.used.lock().unwrap().elapsed())
     }
 
+    /// A copy of its disk at `to`, whole, replacing what is there. A running machine's guest puts
+    /// what it has written on the disk first, and the machine is paused while the disk is
+    /// copied: at once where the host's filesystem clones files (APFS, Btrfs, XFS made with
+    /// reflink), else for as long as reading and writing it takes. A guest that has not said it
+    /// synced within 5 s is copied as it is, which its journal makes whole. A parked machine's
+    /// disk is copied as it was left. Refused once its machine has exited or it is closed.
+    pub async fn copy_disk(&self, to: &Path) -> Result<(), Error> {
+        // Its machine neither boots nor stops meanwhile, nor its disk goes.
+        let _turn = self.turn.lock().await;
+        let machine = match &*self.state.lock().unwrap() {
+            State::Up(machine) => Some(Arc::clone(machine)),
+            State::Parked => None,
+            State::Exited => return Err(Error::Ended),
+        };
+        let from = match &*self.upper.lock().unwrap() {
+            Some(upper) => upper.path.clone(),
+            None => return Err(Error::Ended),
+        };
+        if let Some(machine) = &machine {
+            let (told, synced) = oneshot::channel();
+            *self.synced.lock().unwrap() = Some(told);
+            machine.sync()?;
+            let _ = tokio::time::timeout(SYNC_WAIT, synced).await;
+        }
+        let to = to.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _paused = machine.as_deref().map(Machine::pause).transpose()?;
+            let failed = |what: &str, source| Error::Io {
+                context: format!("{what} {} to {}", from.display(), to.display()),
+                source,
+            };
+            super::upper::copy(&from, &to).map_err(|e| failed("copying", e))?;
+            // What is beside it, as of the same moment.
+            crate::disks::disks()
+                .copied(&from, &to)
+                .map_err(|e| failed("copying what is beside", e))
+        })
+        .await?
+    }
+
     /// Stop its machine for good, end and remove every job in it, as cancelling each does, and
     /// delete its upper disk, with its record if it is kept. Blocks while the guest shuts down,
     /// and so must not be called on an async runtime's thread.
@@ -807,9 +854,16 @@ impl Sandbox {
                         self.keep_jobs();
                     }
                 }
+                CtrlResp::Synced => {
+                    if let Some(told) = self.synced.lock().unwrap().take() {
+                        let _ = told.send(());
+                    }
+                }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
+        // Nothing waits for a sync it will not say.
+        self.synced.lock().unwrap().take();
         // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
         // nothing ran; otherwise it ended on its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();

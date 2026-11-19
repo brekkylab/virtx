@@ -229,6 +229,26 @@ async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
     }
 }
 
+async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home) {
+    // A public address by number, so no name has to resolve: Google's DNS, over HTTPS.
+    let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
+    let with = home.sandbox(&small(), None).await;
+    assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    close(with).await;
+    // A published port gives the machine its network device, and still no way out.
+    for ports in [vec![], vec![8080]] {
+        let args = SandboxCreateArgs {
+            network: false,
+            ports: ports.clone(),
+            ..small()
+        };
+        let without = home.sandbox(&args, None).await;
+        let (lines, code) = run(&without, &out, None).await.unwrap();
+        assert_ne!(code, 0, "reached out with ports {ports:?}: {lines:?}");
+        close(without).await;
+    }
+}
+
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
@@ -918,6 +938,7 @@ fn main() -> ExitCode {
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
+        a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

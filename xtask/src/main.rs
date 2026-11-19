@@ -213,14 +213,13 @@ fn main() -> anyhow::Result<()> {
         Some("run") => run_target(args.collect(), false, &[]),
         Some("test") => {
             let args: Vec<OsString> = args.collect();
+            if let Some(sign_in) = sign_in_args(&args) {
+                let fixture = Fixture::start()?;
+                return run_target(sign_in, true, &fixture.vars());
+            }
             match args.as_slice() {
                 [] => test_all(),
                 [no_run] if no_run == "--no-run" => compile_tests(),
-                [p, package] if p == "-p" && package == "virtx-cli" => {
-                    let fixture = Fixture::start()?;
-                    let args = SIGN_IN_TESTS[2..].iter().map(OsString::from).collect();
-                    run_target(args, true, &fixture.vars())
-                }
                 // virtx-rs's tests are against the fixture too.
                 _ if args.iter().any(|arg| arg == "virtx") => {
                     let fixture = Fixture::start()?;
@@ -1469,6 +1468,39 @@ const SIGN_IN_TESTS: &[&str] = &[
     "--include-ignored",
 ];
 
+/// `args` that name `-p virtx-cli`, as the sign-in tests' cargo arguments: the rest of `args`
+/// passed on, and a test named after `--` taking the place of the `cli::sign_in` filter.
+fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
+    let at = args
+        .windows(2)
+        .position(|pair| pair[0] == "-p" && pair[1] == "virtx-cli")?;
+    let rest: Vec<&OsString> = args[..at].iter().chain(&args[at + 2..]).collect();
+    let split = rest
+        .iter()
+        .position(|arg| *arg == "--")
+        .unwrap_or(rest.len());
+    let (cargo_args, test_args) = (&rest[..split], rest.get(split + 1..).unwrap_or_default());
+    let named = test_args
+        .iter()
+        .any(|arg| !arg.to_string_lossy().starts_with('-'));
+    let ours = &SIGN_IN_TESTS[2..];
+    let ours_split = ours
+        .iter()
+        .position(|arg| *arg == "--")
+        .unwrap_or(ours.len());
+    let mut sign_in: Vec<OsString> = ours[..ours_split].iter().map(OsString::from).collect();
+    sign_in.extend(cargo_args.iter().map(|arg| (*arg).clone()));
+    sign_in.push("--".into());
+    sign_in.extend(
+        ours[ours_split + 1..]
+            .iter()
+            .filter(|arg| !(named && !arg.starts_with('-')))
+            .map(OsString::from),
+    );
+    sign_in.extend(test_args.iter().map(|arg| (*arg).clone()));
+    Some(sign_in)
+}
+
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
 /// pytest, and virtx-node's with Node's own runner.
@@ -1777,5 +1809,49 @@ impl Drop for Fixture {
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = fs::remove_dir_all(&self.scratch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sign_in(args: &[&str]) -> Option<Vec<String>> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        sign_in_args(&args).map(|args| {
+            args.iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn virtx_cli_s_tests_are_virtx_core_s_sign_in_tests_with_the_rest_passed_on() {
+        let ours = [
+            "-p",
+            "virtx-core",
+            "--lib",
+            "--",
+            "cli::sign_in",
+            "--include-ignored",
+        ];
+        assert_eq!(sign_in(&["-p", "virtx-cli"]).unwrap(), ours);
+        assert_eq!(
+            sign_in(&["-p", "virtx-cli", "--", "--nocapture"]).unwrap(),
+            [&ours[..], &["--nocapture"]].concat()
+        );
+        assert_eq!(
+            sign_in(&["--release", "-p", "virtx-cli", "--", "signing_in"]).unwrap(),
+            [
+                "-p",
+                "virtx-core",
+                "--lib",
+                "--release",
+                "--",
+                "--include-ignored",
+                "signing_in"
+            ]
+        );
+        assert_eq!(sign_in(&["-p", "virtx"]), None);
     }
 }

@@ -1417,7 +1417,7 @@ mod tests {
                 "POST",
                 "/sandboxes/nobody/jobs/exec/",
                 "[]",
-                "the body: an object, not []",
+                "the body: an object, not a list",
             ),
             (
                 "POST",
@@ -1447,7 +1447,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number up to 65535, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, not "5900""#,
             ),
             (
                 "GET",

@@ -239,8 +239,10 @@ impl Sandboxes {
                 url,
                 label: spec.label.clone(),
                 protocol: spec.protocol,
-                // A public address is the cloud's to give (its gateway), not a server's.
+                // A public address is the cloud's to give (its gateway), not a server's, and
+                // so are the inbound rules it would fail to set.
                 address: None,
+                inbound_error: None,
             });
             if let Some(key) = key {
                 keys.insert(key, spec.port);

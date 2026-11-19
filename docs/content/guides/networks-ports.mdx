@@ -175,4 +175,5 @@ let sandbox = client
 </Tabs>
 
 A source that is not an address or a CIDR is refused with `400`, `invalid`.
+A port whose rules could not be set, past the organization's public ports or with what keeps them not answering, is opened all the same and says why in its `inbound_error` (`inboundError` in Node.js): a `code`, a `message`, and for a quota a `reason`. It lets no one in, and has no `address`, until its rules are set.
 Inbound rules are virtx cloud's alone: a self-hosted server, `virtx-stdio` or `virtx-server-tcp`, keeps none and refuses a port opened with `inbound`.

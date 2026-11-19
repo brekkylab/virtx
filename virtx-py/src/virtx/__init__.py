@@ -59,6 +59,7 @@ from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
+    InboundError,
     InboundRule,
     PortProtocol,
     PortSpec,
@@ -106,6 +107,7 @@ __all__ = [
     "ImagePruneOutput",
     "ImageTag",
     "ImageUploadOutput",
+    "InboundError",
     "InboundRule",
     "Log",
     "LogEntry",

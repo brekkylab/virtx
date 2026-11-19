@@ -49,15 +49,39 @@ class SandboxPort:
     """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
     one. Not secret, as ``url`` is: what listens there answers whoever connects."""
 
+    inbound_error: InboundError | None = None
+    """Why its inbound rules were not set, from virtx cloud, which made the port all the same: it
+    lets no one in and is reached at no public address until they are."""
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
+        why = value.get("inbound_error")
         return cls(
             value["port"],
             value["url"],
             value.get("label"),
             PortProtocol(value.get("protocol", "tcp")),
             value.get("address"),
+            InboundError.from_dict(why) if why is not None else None,
         )
+
+
+@dataclass(frozen=True)
+class InboundError:
+    """Why a port's inbound rules were not set, in the shape of a refusal."""
+
+    code: str
+    """As a refusal's: ``quota``, past the organization's public ports, or ``unavailable``."""
+
+    message: str
+    """For a person to read."""
+
+    reason: str | None = None
+    """What a ``quota`` is past, as ``public_ports``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InboundError:
+        return cls(value["code"], value["message"], value.get("reason"))
 
 
 @dataclass(frozen=True)

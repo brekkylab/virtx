@@ -340,7 +340,7 @@ One whose VM has exited is still held until then.
 
 They are reserved when the sandbox is made, and kept through every park until it is deleted. `0` and a port given twice are refused.
 
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?}` -- `protocol` left out for `tcp`, `address` for a port that has none -- in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given, and only there: a `GET` does not, since the URLs carry credentials.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.
@@ -348,6 +348,7 @@ The `POST` answers each with where it is reached from, as `{port, url, label?, p
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
 - A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; an `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.
+- A port whose `inbound` rules could not be set, past a quota or with what keeps them not answering, is opened all the same, with `inbound_error`, `{code, message, reason?}` in a refusal's shape -- `reason` naming what a `quota` is past -- beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
 
 ### Sandbox jobs
 

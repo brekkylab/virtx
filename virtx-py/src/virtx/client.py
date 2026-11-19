@@ -28,7 +28,7 @@ from .image import (
 )
 from .job import StartedJob
 from .project import Project
-from .sandbox import Sandbox, SandboxVolume
+from .sandbox import PortSpec, Sandbox, SandboxVolume
 from .volume import Volume
 
 T = TypeVar("T")
@@ -450,7 +450,7 @@ class Client:
         image: str | ImageName,
         *,
         network: bool = True,
-        ports: Iterable[int] = (),
+        ports: Iterable[int | PortSpec] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
         disk_gib: int | None = None,
@@ -461,8 +461,10 @@ class Client:
     ) -> Sandbox:
         """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
-        ``/abin/skills/{name}/``. ``ports`` are TCP ports in it to open, reserved as it is made
-        and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
+        ``/abin/skills/{name}/``. ``ports`` are ports in it to open, each a number for TCP or a
+        ``PortSpec`` to say what it is for, whether it is HTTP and whom it lets in, reserved as
+        it is made and answered here only, each a ``SandboxPort`` with the ``url`` it is reached
+        by. Whatever
         is left out the server picks. ``disk_gib`` is how much it may write over its image, in
         GiB, at most 1024, which goes with it.
 
@@ -475,7 +477,7 @@ class Client:
                 _args(
                     image=image_name(image).to_dict(),
                     network=network,
-                    ports=list(ports),
+                    ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
                     vcpus=vcpus,
                     memory_mib=memory_mib,
                     disk_gib=disk_gib,

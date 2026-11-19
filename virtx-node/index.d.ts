@@ -359,17 +359,55 @@ export class Sandbox extends Files implements SandboxInfo {
   remove(): Promise<void>
 }
 
-/** A TCP port opened in a sandbox, and where it is reached from. */
+/** How a sandbox's port is reached: `'tcp'` through a `PortForwarder`, `'http'` at its `url` by a browser as by any client. */
+export type PortProtocol = 'tcp' | 'http'
+
+/** A port opened in a sandbox, and where it is reached from. */
 export interface SandboxPort {
   port: number
   url: string
+  /** What it is for, as it was opened with. */
+  label?: string
+  /** Absent for `'tcp'`. */
+  protocol?: PortProtocol
+  /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
+  address?: string
+  /** Why its inbound rules were not set, from a server that made the port all the same: it lets no one in, and is reached at no `address`, until they are. */
+  inboundError?: InboundError
+}
+
+/** Why a port's inbound rules were not set, in the shape of a refusal. */
+export interface InboundError {
+  /** As a refusal's, such as `'quota'` or `'unavailable'`. */
+  code: string
+  /** For a person to read. */
+  message: string
+  /** What a `'quota'` is past, as a refusal's `reason`. */
+  reason?: string
+}
+
+/**
+ * A port to open as a sandbox is made: a number for TCP that says nothing more, or one that says
+ * what it is for, up to 128 characters, how it is reached, and whom it lets in. `inbound` left out
+ * leaves that to the server, and `[]` lets in no one; a server that keeps no rules refuses them.
+ */
+export type PortSpec =
+  | number
+  | { port: number; label?: string; protocol?: PortProtocol; inbound?: InboundRule[] }
+
+/** One of a port's inbound rules: the addresses it lets in, and whose they are. */
+export interface InboundRule {
+  /** An IPv4 or IPv6 CIDR, as `203.0.113.0/24`, or one address, as `203.0.113.7`. */
+  source: string
+  /** What it is for: whose they are. */
+  description?: string
 }
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
   network?: boolean
-  /** TCP ports in it to open, reserved as it is made. */
-  ports?: number[]
+  /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */
+  ports?: PortSpec[]
   vcpus?: number
   memoryMib?: number
   /** How much it may write over its image, in GiB, at most 1024, which goes with it. */

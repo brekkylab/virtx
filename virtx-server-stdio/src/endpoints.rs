@@ -689,10 +689,11 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     let args: SandboxCreateArgs = body(&request)?;
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
+    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
+        let port = spec.port;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
@@ -702,6 +703,10 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         opened.push(SandboxPort {
             port,
             url: format!("http://{at}"),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
         listeners.push((port, listener));
     }

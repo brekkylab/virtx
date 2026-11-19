@@ -638,13 +638,15 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "network": bool, "ports": [n],
+// `{"image": {...}, "network": bool,
+// "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
 // sandbox as `virtx_client_list_sandbox` answers each, and
-// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
+// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
+// if it was given some: here only.
 //
 // # Safety
 //

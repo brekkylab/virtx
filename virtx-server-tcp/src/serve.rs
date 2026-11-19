@@ -305,7 +305,10 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
+    use virtx_core::{
+        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
+        SandboxCreateArgs,
+    };
     use virtx_uvm::{FsTree, ImageStore, PublicRegistries, RegistryProxy};
 
     use std::sync::Arc;
@@ -1080,8 +1083,17 @@ mod tests {
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
-        let mut args = SandboxCreateArgs::new("a:b");
-        args.ports = vec![0];
+        let args = SandboxCreateArgs::new("a:b").port(0);
+        assert_eq!(status(client.create_sandbox(&args).await), 400);
+        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
+        // with inbound rules, which this server keeps none of.
+        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
+        let args = SandboxCreateArgs::new("a:b").port(web);
+        let refused = client.create_sandbox(&args).await.unwrap_err();
+        assert_eq!(refused.status(), Some(400), "{refused}");
+        assert!(refused.to_string().contains("HTTP"), "{refused}");
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);

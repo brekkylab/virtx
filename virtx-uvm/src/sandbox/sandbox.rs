@@ -42,6 +42,9 @@ const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
 
+/// The most characters a port's label has.
+const LABEL_MOST: usize = 128;
+
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
 
@@ -171,13 +174,32 @@ impl Sandbox {
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
         let mut given = HashSet::new();
-        if let Some(port) = args
+        if let Some(spec) = args
             .ports
             .iter()
-            .find(|port| **port == 0 || !given.insert(**port))
+            .find(|spec| spec.port == 0 || !given.insert(spec.port))
         {
             return Err(Error::Invalid(format!(
-                "ports: {port} is not a port, or is given twice"
+                "ports: {} is not a port, or is given twice",
+                spec.port
+            )));
+        }
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
+            )));
+        }
+        // No rules are kept here, so a port given some is refused rather than opened to whoever
+        // they were meant to keep out.
+        if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s inbound rules are not kept by this server",
+                spec.port
             )));
         }
         let mut at = HashSet::new();
@@ -333,7 +355,7 @@ impl Sandbox {
             },
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.clone(),
+            ports: args.ports.iter().map(|spec| spec.port).collect(),
         };
         let sandbox = Arc::new(Sandbox {
             id: upper.id.clone(),

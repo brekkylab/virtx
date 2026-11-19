@@ -861,6 +861,13 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // A port's URL here is a tunnel for TCP, which a browser does not open.
+    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
+        return Err(invalid(format!(
+            "ports: {} is asked for over HTTP, which this server does not serve a port over",
+            spec.port
+        )));
+    }
     let sandbox = Sandbox::create(
         &home.images,
         &home.root,
@@ -876,17 +883,21 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     // what reaches this server from outside is not this server's to know.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
         let capability = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
         opened.push(SandboxPort {
-            port,
+            port: spec.port,
             url: format!("ports/{capability}"),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
-        capabilities.insert(capability, port);
+        capabilities.insert(capability, spec.port);
     }
 
     let id = sandbox.id().to_owned();

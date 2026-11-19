@@ -27,8 +27,9 @@ known by its id or name is had with ``get_sandbox``, ``get_volume``, ``get_image
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
-A sandbox's port is reached through a ``PortForwarder``, opened over a client with the ``url``
-``create_sandbox`` answered for it: an address on this machine's loopback.
+A sandbox's port, a number or a ``PortSpec``, is reached at the ``url`` ``create_sandbox``
+answered for it: a TCP one through a ``PortForwarder`` opened over a client with it, an address
+on this machine's loopback; an HTTP one by a browser.
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
@@ -57,6 +58,10 @@ from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
+    InboundError,
+    InboundRule,
+    PortProtocol,
+    PortSpec,
     Sandbox,
     SandboxJob,
     SandboxJobEnd,
@@ -99,6 +104,8 @@ __all__ = [
     "ImagePruneOutput",
     "ImageTag",
     "ImageUploadOutput",
+    "InboundError",
+    "InboundRule",
     "Log",
     "LogEntry",
     "Metadata",
@@ -108,6 +115,8 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
+    "PortProtocol",
+    "PortSpec",
     "Progress",
     "Project",
     "ProjectMemberListOutputItem",

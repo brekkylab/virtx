@@ -1189,6 +1189,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Image(e) => e.into(),
             SandboxError::Snapshot(e) => e.into(),
             SandboxError::Volume(e) => e.into(),
+            SandboxError::Backend(e) => internal(e),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
             // Never, since no admission is set here; the protocol's refusal all the same.

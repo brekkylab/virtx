@@ -63,6 +63,10 @@ pub enum Error {
     #[error(transparent)]
     Volume(#[from] VolumeError),
 
+    /// What the storage backend refused, or failed with.
+    #[error(transparent)]
+    Backend(#[from] crate::backend::Refusal),
+
     #[error(transparent)]
     Machine(#[from] MachineError),
 

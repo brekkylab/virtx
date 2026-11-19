@@ -1,9 +1,11 @@
 //! Images, the machines provisioned from them, and the snapshots and registries around
 //! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client. How many machines may run at once is the embedder's to say
-//! ([`Admission`]).
+//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client; and
+//! where a project's data is kept beyond this machine, if anywhere ([`StorageBackend`]). How
+//! many machines may run at once is the embedder's to say ([`Admission`]).
 
 mod admission;
+pub mod backend;
 pub mod disks;
 mod files;
 mod fstree;
@@ -15,6 +17,7 @@ mod snapshot;
 mod volume;
 
 pub use admission::{Admission, NoRoom, Room, admit, set_admission};
+pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{

@@ -71,7 +71,7 @@ impl Homes for ProjectStore {
         Box::pin(async move {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
-            Ok(Some(Home::new(images, &dir, None)?))
+            Ok(Some(Home::new(images, &dir)?))
         })
     }
 }

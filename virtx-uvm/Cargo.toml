@@ -27,7 +27,8 @@ virtx-core = { workspace = true, features = ["server"] }
 # stores are waited on from libkrun's threads, and a VM is a process of its own.
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "time", "sync"] }
 # The registry this host serves, as HTTP requests and responses: a layer streamed from its
-# file, and a request's body read as it arrives.
+# file, and a request's body read as it arrives; and a storage backend's answers, which it
+# awaits.
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

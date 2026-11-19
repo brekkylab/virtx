@@ -737,12 +737,44 @@ impl Sandbox {
 
     /// Gone from here: its record, its jobs and its ports.
     fn forgotten(&self) {
+        self.left();
+        let _ = std::fs::remove_file(self.shared.kept.join(format!("{}.json", self.record.id)));
+    }
+
+    /// Gone from here, its record and disk left where they are: its jobs and its ports.
+    fn left(&self) {
         *self.state.lock().unwrap() = State::Deleted;
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.remove();
         }
         self.listening.lock().unwrap().clear();
-        let _ = std::fs::remove_file(self.shared.kept.join(format!("{}.json", self.record.id)));
+    }
+
+    /// Let go of here, as a server lets go of it as it ends: its machine stopped if it is up,
+    /// as parking stops it, its record written as it is now, and it and its disk left where they
+    /// are, for a server to take in ([`Sandboxes::take_in`](super::Sandboxes::take_in)).
+    /// Refused while it is in use: a job runs in it, or something reaches it.
+    pub(super) async fn let_go(self: &Arc<Self>) -> Result<(), Error> {
+        let in_use = || {
+            Error::InUse(format!(
+                "sandbox {} is in use: a job runs in it, or it is reached",
+                self.record.id
+            ))
+        };
+        if self.busy() {
+            return Err(in_use());
+        }
+        let _turn = self.turn.lock().await;
+        if self.is_deleted() {
+            return Err(self.gone());
+        }
+        if self.busy() {
+            return Err(in_use());
+        }
+        self.halt_turned().await?;
+        self.keep();
+        self.left();
+        Ok(())
     }
 
     /// Start `cmd` in it, beside whatever else runs there -- its machine booted first if it is

@@ -440,6 +440,67 @@ impl Sandboxes {
     /// its jobs gone, as a delete does, but nothing removed from where it is kept -- what a
     /// server does once the sandbox is to run elsewhere. Refused [`InUse`](Error::InUse) while
     /// its machine is up.
+    /// Take in sandbox `id`, whose record and disk are here already as a server leaves them --
+    /// `sandbox/<id>.json` and its disk -- as a restart knows a sandbox again: parked, its
+    /// machine booted as it is next used, behind the port URLs it was made with. Its image is
+    /// wanted first ([`Hooks::want`]). Refused [`Exists`](Error::Exists) for an id a sandbox
+    /// here has, [`NotFound`](Error::NotFound) where no record or disk of `id` is here, and as
+    /// making it is where it cannot be known, its record and disk left as they are.
+    pub async fn take_in(&self, id: &str) -> Result<Arc<Sandbox>, Error> {
+        let shared = &self.0.shared;
+        let here = self.0.all.lock().unwrap().contains_key(id)
+            || self.0.unknown.lock().unwrap().contains_key(id);
+        if here {
+            return Err(Error::Exists(format!("a sandbox here has the id {id}")));
+        }
+        let missing = || Error::NotFound(format!("no sandbox {id} is kept here"));
+        let path = shared.kept.join(format!("{id}.json"));
+        let json = match std::fs::read(&path) {
+            Ok(json) => json,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
+            Err(e) => return Err(Error::Failed(format!("reading {}: {e}", path.display()))),
+        };
+        let kept: super::record::Kept = serde_json::from_slice(&json)
+            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+        if kept.id != id {
+            return Err(Error::Invalid(format!(
+                "{} is the record of sandbox {}",
+                path.display(),
+                kept.id
+            )));
+        }
+        if shared.snapshots.open(id).is_err() {
+            return Err(missing());
+        }
+        let image: crate::Digest = kept
+            .image
+            .parse()
+            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+        shared.hooks.want(Wanted::Image(&image)).await?;
+        let record = Record::of(kept, &shared.images).map_err(Error::Failed)?;
+        let sandbox = Sandbox::new(record, Arc::clone(shared));
+        let mut all = self.0.all.lock().unwrap();
+        if all.contains_key(id) {
+            return Err(Error::Exists(format!("a sandbox here has the id {id}")));
+        }
+        all.insert(id.to_owned(), Arc::clone(&sandbox));
+        Ok(sandbox)
+    }
+
+    /// Let go of sandbox `id` here, its record and disk left where they are, for a server to
+    /// [take in](Self::take_in): its machine stopped first if it is up. Refused
+    /// [`InUse`](Error::InUse) while it is in use, [`NotFound`](Error::NotFound) for an id no
+    /// sandbox here has. One kept here and not known again is let go of as it is.
+    pub async fn let_go(&self, id: &str) -> Result<(), Error> {
+        if self.0.unknown.lock().unwrap().remove(id).is_some() {
+            return Ok(());
+        }
+        let sandbox = self.get(id)?;
+        sandbox.let_go().await?;
+        self.0.all.lock().unwrap().remove(id);
+        Ok(())
+    }
+
     pub async fn forget(&self, id: &str) -> Result<(), Error> {
         let sandbox = self.get(id)?;
         sandbox.forget().await?;

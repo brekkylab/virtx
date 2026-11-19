@@ -15,7 +15,6 @@
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -32,6 +31,7 @@ use tokio_util::io::ReaderStream;
 
 use super::registry_client::Reference;
 use super::store::{self, Store};
+use crate::backend::{Backing, Wanted};
 use crate::fstree::FsTree;
 
 /// What a response carries.
@@ -56,18 +56,8 @@ pub struct RegistryServer {
     /// Each blob being pushed, until it is whole, and each whole one that is not a layer, until
     /// a manifest names it: in the temp directory, and gone with this.
     uploads: PathBuf,
-    /// Tags listed beside the store's, as [`listing_too`](Self::listing_too) says.
-    listed_too: Option<ListedToo>,
-}
-
-/// Tags listed beside a store's.
-#[derive(Clone)]
-struct ListedToo(Arc<dyn Fn() -> Vec<Reference> + Send + Sync>);
-
-impl std::fmt::Debug for ListedToo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ListedToo")
-    }
+    /// Where its images are kept beyond this machine, once its home is given that.
+    backing: Backing,
 }
 
 impl Drop for RegistryServer {
@@ -125,8 +115,46 @@ impl RegistryServer {
             store,
             base: base.into(),
             uploads,
-            listed_too: None,
+            backing: Backing::default(),
         })
+    }
+
+    /// Where its images are kept beyond this machine, once there is a backend for them: the
+    /// home over its store shares this, and backs it as it is backed. Its catalog and tag lists
+    /// list the tags kept there too, and a manifest named by its tag or digest is
+    /// [wanted](crate::StorageBackend::want) from there before it is answered.
+    pub fn backing(&self) -> &Backing {
+        &self.backing
+    }
+
+    /// The tags kept beyond this machine and not here, for a listing beside the store's.
+    async fn kept_tags(&self) -> Vec<Reference> {
+        let Some(backend) = self.backing.get() else {
+            return Vec::new();
+        };
+        backend.tags().await.unwrap_or_else(|e| {
+            eprintln!("listing the tags kept beyond this machine: {e:#}");
+            Vec::new()
+        })
+    }
+
+    /// The image the manifest `reference` of repository `name` names -- a tag, or a digest --
+    /// made ready here from beyond this machine, where it is kept there. Answered from what is
+    /// here whatever comes of it.
+    async fn want(&self, name: &str, reference: &str) {
+        let Some(backend) = self.backing.get() else {
+            return;
+        };
+        let wanted = match reference.parse::<Digest>() {
+            Ok(digest) => backend.want(Wanted::Image(&digest)).await,
+            Err(_) => match tagged(name, reference) {
+                Ok(tag) => backend.want(Wanted::Tag(&tag)).await,
+                Err(_) => return,
+            },
+        };
+        if let Err(e) = wanted {
+            eprintln!("bringing {name}:{reference} here: {e:#}");
+        }
     }
 
     /// Answer one request, whose path is under the base.
@@ -187,7 +215,10 @@ impl RegistryServer {
         let path = path.strip_prefix('/').ok_or_else(unknown)?;
         if path == "_catalog" {
             return match method {
-                Method::GET => self.catalog(asked("n"), asked("last")),
+                Method::GET => {
+                    let also = self.kept_tags().await;
+                    self.catalog(&also, asked("n"), asked("last"))
+                }
                 _ => Err(refusal(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "UNSUPPORTED",
@@ -199,7 +230,10 @@ impl RegistryServer {
         // The name is everything before the endpoint, slashes and all.
         if let Some(name) = path.strip_suffix("/tags/list") {
             return match method {
-                Method::GET => self.tags(name, asked("n"), asked("last")),
+                Method::GET => {
+                    let also = self.kept_tags().await;
+                    self.tags(name, &also, asked("n"), asked("last"))
+                }
                 _ => Err(refusal(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "UNSUPPORTED",
@@ -227,8 +261,14 @@ impl RegistryServer {
         let (rest, last) = path.rsplit_once('/').ok_or_else(unknown)?;
         let (name, endpoint) = rest.rsplit_once('/').ok_or_else(unknown)?;
         match (endpoint, method) {
-            ("manifests", Method::GET) => self.get_manifest(name, last, true).await,
-            ("manifests", Method::HEAD) => self.get_manifest(name, last, false).await,
+            ("manifests", Method::GET) => {
+                self.want(name, last).await;
+                self.get_manifest(name, last, true).await
+            }
+            ("manifests", Method::HEAD) => {
+                self.want(name, last).await;
+                self.get_manifest(name, last, false).await
+            }
             ("manifests", Method::PUT) => self.put_manifest(name, last, request.into_body()).await,
             // A removal waits for the store's change under way: blocking work.
             ("manifests", Method::DELETE) => {
@@ -278,28 +318,18 @@ impl RegistryServer {
         }
     }
 
-    /// The tags `also` answers listed beside the store's, as though they were here: tags
-    /// whose images are elsewhere, to be brought here when they are named.
-    pub fn listing_too(
-        mut self,
-        also: impl Fn() -> Vec<Reference> + Send + Sync + 'static,
-    ) -> Self {
-        self.listed_too = Some(ListedToo(Arc::new(also)));
-        self
-    }
-
-    /// The tags listed: the store's, and those [`listing_too`](Self::listing_too) adds.
-    fn listed(&self) -> Result<Vec<Reference>> {
-        let mut listed: Vec<Reference> = self.store.tags()?.into_iter().map(|(r, _)| r).collect();
-        if let Some(ListedToo(also)) = &self.listed_too {
-            listed.extend(also());
-        }
-        Ok(listed)
-    }
-
-    /// Every repository a tag is in, as the spec pages a tag listing.
-    fn catalog(&self, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
-        let mut repositories: Vec<String> = self.listed()?.iter().map(repository).collect();
+    /// Every repository a tag is in, here or in `also`, as the spec pages a tag listing.
+    fn catalog(
+        &self,
+        also: &[Reference],
+        n: Option<&str>,
+        last: Option<&str>,
+    ) -> Result<Response<Body>> {
+        let mut repositories: Vec<String> = (self.store.tags()?.iter())
+            .map(|(reference, _)| reference)
+            .chain(also)
+            .map(repository)
+            .collect();
         repositories.sort();
         repositories.dedup();
         let (page, more) = paged(repositories, n, last)?;
@@ -318,11 +348,18 @@ impl RegistryServer {
         Ok(response)
     }
 
-    fn tags(&self, name: &str, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
+    /// The tags of repository `name`, here or in `also`, as the spec pages them.
+    fn tags(
+        &self,
+        name: &str,
+        also: &[Reference],
+        n: Option<&str>,
+        last: Option<&str>,
+    ) -> Result<Response<Body>> {
         let wanted = repository(&tagged(name, "latest")?);
-        let mut tags: Vec<String> = self
-            .listed()?
-            .iter()
+        let mut tags: Vec<String> = (self.store.tags()?.iter())
+            .map(|(reference, _)| reference)
+            .chain(also)
             .filter(|reference| repository(reference) == wanted)
             .filter_map(|reference| reference.tag().map(str::to_owned))
             .collect();
@@ -1400,5 +1437,103 @@ mod tests {
         let (status, _, body) = send(server, Method::POST, &wrong, &tar).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(String::from_utf8_lossy(&body).contains("DIGEST_INVALID"));
+    }
+
+    /// An image kept beyond this machine, tagged `kept:v1`, brought here as a backend would
+    /// bring it: by its tag or its digest.
+    struct Elsewhere {
+        here: Store,
+        wanted: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// File the image [`Elsewhere`] keeps in `store`: the same digest in every store.
+    fn kept_image(store: &Store) -> Digest {
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = ImageConfiguration::default();
+        store.insert_image(&config, &[layer]).unwrap()
+    }
+
+    impl crate::StorageBackend for Elsewhere {
+        fn want<'a>(
+            &'a self,
+            wanted: Wanted<'a>,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                let elsewhere = Scratch::new("elsewhere");
+                let kept = kept_image(&elsewhere.0);
+                let said = match wanted {
+                    Wanted::Tag(tag) => {
+                        if *tag == "kept:v1".parse::<Reference>().unwrap() {
+                            self.here.insert_tag(tag, &kept_image(&self.here))?;
+                        }
+                        tag.to_string()
+                    }
+                    Wanted::Image(digest) => {
+                        if *digest == kept {
+                            kept_image(&self.here);
+                        }
+                        digest.to_string()
+                    }
+                };
+                self.wanted.lock().unwrap().push(said);
+                Ok(())
+            })
+        }
+
+        fn tags(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
+            Box::pin(async { Ok(vec!["kept:v1".parse().unwrap()]) })
+        }
+    }
+
+    /// A registry whose images are kept beyond this machine lists the tags kept there beside its
+    /// own, and brings a manifest named by its tag or its digest here before it answers it.
+    #[tokio::test]
+    async fn a_backed_registry_lists_what_is_kept_and_brings_what_is_asked_here() {
+        for by_digest in [false, true] {
+            let scratch = Scratch::new(&format!("backed-{by_digest}"));
+            let (store, server) = (&scratch.0, &scratch.1);
+            let elsewhere = std::sync::Arc::new(Elsewhere {
+                here: store.clone(),
+                wanted: std::sync::Mutex::default(),
+            });
+            assert!(server.backing().set(elsewhere.clone()));
+            let digest = kept_image(&Scratch::new("kept-digest").0).to_string();
+
+            let (_, _, body) = send(server, Method::GET, "/images/v2/_catalog", b"").await;
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["repositories"],
+                json!(["docker.io/library/kept"])
+            );
+            let (status, _, body) =
+                send(server, Method::GET, "/images/v2/kept/tags/list", b"").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["tags"],
+                json!(["v1"])
+            );
+            assert!(store.images().unwrap().is_empty(), "listed, not brought");
+
+            let named = match by_digest {
+                true => digest.clone(),
+                false => "v1".to_owned(),
+            };
+            let manifest = format!("/images/v2/kept/manifests/{named}");
+            let (status, headers, _) = send(server, Method::HEAD, &manifest, b"").await;
+            assert_eq!(status, StatusCode::OK, "{named}");
+            assert_eq!(header(&headers, "docker-content-digest"), digest);
+            let wanted = match by_digest {
+                true => digest.clone(),
+                false => "docker.io/library/kept:v1".to_owned(),
+            };
+            assert_eq!(*elsewhere.wanted.lock().unwrap(), [wanted]);
+        }
+        let scratch = Scratch::new("backed-none");
+        assert!(scratch.1.backing().set(std::sync::Arc::new(Elsewhere {
+            here: scratch.0.clone(),
+            wanted: std::sync::Mutex::default(),
+        })));
+        let none = "/images/v2/none/manifests/v1";
+        let (status, _, _) = send(&scratch.1, Method::GET, none, b"").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "kept nowhere");
     }
 }

@@ -15,7 +15,7 @@
 //! in as their [`Hooks`]. Room for their machines is `virtx-uvm`'s
 //! ([`virtx_uvm::set_admission`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -48,19 +48,19 @@ use virtx_core::{
     VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
     described_type, from_body,
 };
-use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted, Written};
+use virtx_uvm::backend::{Backing, Refusal as BackendRefusal, Stored, Wanted as BackendWanted};
+use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted};
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, ImageConfiguration,
     ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, NoRoom,
     Os, PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
     RegistryServer, SandboxError, Sandboxes as SandboxStore, SnapshotError, SnapshotStore,
-    VolumeError, VolumeStore, build_step, signal_number,
+    StorageBackend, VolumeError, VolumeStore, build_step, signal_number,
 };
 
 use virtx_uvm::ProjectError;
 
 use crate::access::{Access, Principal};
-use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
 use crate::project::Project;
 
 pub use virtx_uvm::sandbox::cloned;
@@ -124,9 +124,6 @@ pub struct HomeInner {
     pub root: PathBuf,
     /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
     files: Files,
-    /// What a files request is writing now, and how many write each: neither let go nor kept
-    /// meanwhile ([`Home::serve_files`]).
-    writing: Arc<Mutex<HashMap<(Kind, String), usize>>>,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
     /// Every sandbox, its machine up or not, until it is deleted.
@@ -134,38 +131,33 @@ pub struct HomeInner {
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
-    /// Where its snapshots, volumes and images are kept past this server, if anywhere.
-    keeping: Option<Arc<dyn Keeping>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
     closed: AtomicBool,
+    /// Where its project's data is kept beyond this machine, once it is given one
+    /// ([`Home::backed_by`]): its sandboxes and its files take it from here.
+    backing: Backing,
 }
 
 impl Home {
     /// The images in `images` -- its own, or shared with other projects -- and the snapshots,
-    /// volumes and sandboxes under `root`, kept past this server by what `keeping` makes, given
-    /// one. Its image jobs connect to
-    /// registries on public addresses alone, through [`PublicRegistries`] with none named, unless
-    /// the [`Access`] it is made for says otherwise ([`Access::through`]).
-    pub fn new(
-        images: ImageStore,
-        root: &Path,
-        keeping: Option<MakeKeeping>,
-    ) -> anyhow::Result<Home> {
+    /// volumes and sandboxes under `root`, kept beyond this machine by a backend once it is
+    /// given one ([`backed_by`](Home::backed_by)). Its image jobs connect to registries on public
+    /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
+    /// is made for says otherwise ([`Access::through`]).
+    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
         let snapshots = SnapshotStore::new(root)?;
         let volumes = VolumeStore::new(root)?;
-        // The disks no sandbox was made of gone before its keeping counts what is here.
+        // The disks no sandbox was made of gone before anything counts what is here.
         virtx_uvm::sandbox::forget_unrecorded(&snapshots, root);
-        let keeping = keeping.map(|make| make(&snapshots, &volumes)).transpose()?;
-        let mut registry = RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH)?;
-        if let Some(keeping) = &keeping {
-            registry = registry.listing_too(keeping.listed_too());
-        }
+        let registry = RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH)?;
+        // Shared by the registry, the files, the sandboxes and the home.
+        let backing = registry.backing().clone();
         let vm: Vec<OsString> = vec![
             std::env::current_exe()?.into(),
             crate::serve::MACHINE_SUBCOMMAND.into(),
         ];
         let hooks = Arc::new(HomeHooks {
-            keeping: keeping.clone(),
+            backing: backing.clone(),
             home: OnceLock::new(),
         });
         let sandboxes = SandboxStore::new(
@@ -183,16 +175,15 @@ impl Home {
             registries: OnceLock::new(),
             mirror: OnceLock::new(),
             public: OnceLock::new(),
-            files: Files::new(volumes.clone()),
-            writing: Arc::default(),
+            files: Files::new(volumes.clone()).backed_by(backing.clone()),
             snapshots,
             root: root.to_owned(),
             volumes,
             vm,
             sandboxes,
             image_jobs: Mutex::default(),
-            keeping,
             closed: AtomicBool::default(),
+            backing,
         }));
         let _ = hooks.home.set(Arc::downgrade(&home.0));
         Ok(home)
@@ -210,69 +201,68 @@ impl Home {
         self.sandboxes.close_all_blocking();
     }
 
-    /// A request for the project, carrying `token`: what its keeping needs of it, if it has
-    /// one ([`Keeping::requested`]).
-    pub async fn requested(self: &Arc<Self>, token: &str) {
-        if let Some(keeping) = &self.keeping {
-            keeping.requested(self, token).await;
-        }
-    }
-
     /// Where the project's anonymous pulls are shared, as it was made to share them
     /// ([`Home::sharing`]).
     fn public(&self) -> Option<Arc<dyn PublicImages>> {
         self.public.get().cloned()
     }
 
-    /// Tag `reference` brought up to its storage home's index before it is used, if the image
-    /// it names there is not here yet.
-    pub async fn want(&self, reference: &str) -> anyhow::Result<()> {
-        match &self.keeping {
-            Some(keeping) => keeping.want(self, reference).await,
-            None => Ok(()),
-        }
-    }
-
-    /// Image `digest` fetched from its storage home before it is used, if it is kept there and
-    /// not here yet.
-    pub async fn want_image(&self, digest: &Digest) -> anyhow::Result<()> {
-        match &self.keeping {
-            Some(keeping) => keeping.want_image(self, digest).await,
-            None => Ok(()),
-        }
-    }
-
-    /// The digest and manifest of the image tag `reference` names in its storage home, if it is
-    /// not here yet: what a `HEAD` of the tag answers without fetching the image.
-    pub async fn wanted_manifest(
-        &self,
-        reference: &str,
-    ) -> anyhow::Result<Option<(Digest, String)>> {
-        match &self.keeping {
-            Some(keeping) => keeping.wanted_manifest(reference).await,
-            None => Ok(None),
-        }
-    }
-
-    /// The manifest of image `digest` where it is kept, if it is not here yet.
-    pub async fn kept_manifest(&self, digest: &Digest) -> anyhow::Result<Option<String>> {
-        match &self.keeping {
-            Some(keeping) => keeping.kept_manifest(digest).await,
-            None => Ok(None),
-        }
-    }
-
-    /// Blob `digest` where it is kept, if it is small and not here yet.
-    pub async fn kept_blob(&self, digest: &Digest) -> anyhow::Result<Option<Vec<u8>>> {
-        match &self.keeping {
-            Some(keeping) => keeping.kept_blob(digest).await,
-            None => Ok(None),
-        }
-    }
-
     /// Its images, as an OCI registry.
     pub fn registry(&self) -> Arc<RegistryServer> {
         Arc::clone(&self.registry)
+    }
+
+    /// This, its project's data kept beyond this machine by `backend` as well, its own stores
+    /// the backend's cache from now on: each of its sandboxes, those known again as it was made
+    /// among them, takes its disk and volumes from the backend as its machine boots, its
+    /// volumes and their files are made, listed, read, written and removed through it, and its
+    /// registry lists the tags kept there and brings a manifest it is asked for here. Said
+    /// once, as it is made, before any request reaches it. A home given none -- a server on its
+    /// own -- keeps nothing beyond its stores. See [`StorageBackend`].
+    pub fn backed_by(self, backend: Arc<dyn StorageBackend>) -> Home {
+        self.backing.set(backend);
+        self
+    }
+
+    /// Its volumes, as its own store has them.
+    pub fn volumes(&self) -> &VolumeStore {
+        &self.volumes
+    }
+
+    /// Take in sandbox `id`, whose record and disk are under this home's root already as a
+    /// server leaves them -- `sandbox/<id>.json` and `sandbox/<id>.ext4`, as [`let_go`] left
+    /// them here or on another server, or as a backup kept them -- as a restart knows a sandbox
+    /// again ([`Sandbox::take_in`]): parked, its machine booted as it is next used, behind the
+    /// port URLs it was made with. Its image is wanted from the backend first, where the home
+    /// has one. Answered as `GET /sandboxes/{id}` answers it. Refused `409` `exists` for an id
+    /// a sandbox here has, `404` where no sandbox `id` is kept so, `403` once its project is
+    /// being removed, and as making it is where it cannot be known, its record and disk left
+    /// as they are.
+    ///
+    /// [`let_go`]: Home::let_go
+    pub async fn take_in(&self, id: &str) -> Result<virtx_core::Sandbox, Refused> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(forbidden("this project is being removed"));
+        }
+        let sandbox = self.sandboxes.take_in(id).await?;
+        if let Some(backend) = self.backing.get() {
+            for volume in &sandbox.args().volumes {
+                backend.bring_up(Stored::Volume(&volume.volume)).await?;
+            }
+        }
+        Ok(sandbox.answer(true))
+    }
+
+    /// Let go of sandbox `id` here, as this server lets go of each as it ends: its machine
+    /// stopped if it is up, as parking stops it, and its record and disk left under this home's
+    /// root, for a server to [take in](Home::take_in) -- another one it is moved to, this one
+    /// again, or a backup's. Nothing of it is removed from the backend, where the home has one.
+    /// From then on no request here reaches it. Refused `409` `in_use` while it is in use -- a
+    /// job runs in it, or something reaches it -- and `404` for an id no sandbox here has. One
+    /// kept here and not known again is let go of as it is. Blocks until its machine has
+    /// stopped.
+    pub async fn let_go(&self, id: &str) -> Result<(), Refused> {
+        Ok(self.sandboxes.let_go(id).await?)
     }
 
     /// This, its image jobs connecting to registries through `registries`, and its anonymous
@@ -350,123 +340,17 @@ impl Home {
         .ok()?
     }
 
-    /// What its sandboxes write, each one's snapshot and the volumes it may write, and what a
-    /// files request is writing: neither let go nor kept while they do.
-    pub fn used(&self) -> HashSet<(Kind, String)> {
-        let mut used: HashSet<_> = self.writing.lock().unwrap().keys().cloned().collect();
-        used.extend(self.sandboxes.writes().into_iter().map(kind_of));
-        used
-    }
-
-    /// Whether a files request is writing `kind` `name` now.
-    pub fn is_written(&self, kind: Kind, name: &str) -> bool {
-        self.writing
-            .lock()
-            .unwrap()
-            .contains_key(&(kind, name.to_owned()))
-    }
-
-    /// `kind` `name` may be changed now: kept again once nothing has it.
-    fn changed(&self, kind: Kind, name: &str) -> Result<(), Refused> {
-        match &self.keeping {
-            Some(keeping) => keeping
-                .changed(kind, name)
-                .map_err(|e| internal(format!("{e:#}"))),
-            None => Ok(()),
-        }
-    }
-
-    /// `kind` `name` was just made here, `disk` bytes: in the storage home too, if there is
-    /// one -- refused, and removed here, if another node's of that name is there.
-    async fn made(&self, kind: Kind, name: &str, disk: u64) -> Result<(), Refused> {
-        let Some(keeping) = &self.keeping else {
+    /// Volume `name` made here just now: kept beyond this machine too, where the home is --
+    /// refused, and removed here, where one of its name is kept already.
+    async fn made_volume(&self, name: &str) -> Result<(), Refused> {
+        let Some(backend) = self.backing.get() else {
             return Ok(());
         };
-        match keeping.made(kind, name, disk).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = match kind {
-                    Kind::Snapshot => self.snapshots.remove(name).map_err(|_| ()),
-                    Kind::Volume => self.volumes.remove(name).map_err(|_| ()),
-                };
-                Err(e.into())
-            }
+        if let Err(e) = backend.made(Stored::Volume(name), 0).await {
+            let _ = self.volumes.remove(name);
+            return Err(e.into());
         }
-    }
-
-    /// Hold `kind` `name` here to write it, brought up to what is kept: refused while another
-    /// node holds it. Nothing to do without a storage home.
-    async fn take(&self, kind: Kind, name: &str) -> Result<(), Refused> {
-        match &self.keeping {
-            Some(keeping) => Ok(keeping.take(self, kind, name).await?),
-            None => Ok(()),
-        }
-    }
-
-    /// As [`take`](Self::take), to boot a machine on: lazily, if the keeping can.
-    async fn take_to_boot(&self, kind: Kind, name: &str) -> Result<(), Refused> {
-        match &self.keeping {
-            Some(keeping) => Ok(keeping.take_to_boot(self, kind, name).await?),
-            None => Ok(()),
-        }
-    }
-
-    /// `kind` `name` brought up to what is kept, only to be read.
-    async fn bring_up(&self, kind: Kind, name: &str) -> Result<(), Refused> {
-        match &self.keeping {
-            Some(keeping) => Ok(keeping.bring_up(self, kind, name).await?),
-            None => Ok(()),
-        }
-    }
-
-    /// `kind` `name`, to be removed: from the storage home first, which refuses while another
-    /// node holds it.
-    async fn remove_kept(&self, kind: Kind, name: &str) -> Result<(), Refused> {
-        match &self.keeping {
-            Some(keeping) => Ok(keeping.remove(self, kind, name).await?),
-            None => Ok(()),
-        }
-    }
-
-    /// Answer `request`, to the files of a volume.
-    ///
-    /// With a storage home, the copy here is what is kept there, as for a sandbox: brought up
-    /// to what is kept for a request that reads, and held for one that writes -- refused,
-    /// `423`, while another node holds it. One written is kept again once the write is done.
-    /// Answer `request`, one to the files of the volume `name`: brought up from where it is
-    /// kept first, if it is kept elsewhere, and marked changed once a write lands.
-    pub async fn serve_files(&self, name: &str, request: axum::extract::Request) -> Response {
-        let Some(keeping) = &self.keeping else {
-            return self.files.volume(name, request).await;
-        };
-        let writes = !matches!(
-            request.method().as_str(),
-            "GET" | "HEAD" | "OPTIONS" | "PROPFIND"
-        );
-        let ready = match writes {
-            true => keeping.take(self, Kind::Volume, name).await,
-            false => keeping.bring_up(self, Kind::Volume, name).await,
-        };
-        if let Err(e) = ready {
-            let status = match &e {
-                Refusal::Held { .. } => StatusCode::LOCKED,
-                Refusal::Unknown { .. } => StatusCode::NOT_FOUND,
-                Refusal::Exists { .. } | Refusal::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            return (status, format!("{e:#}")).into_response();
-        }
-        if !writes {
-            return self.files.volume(name, request).await;
-        }
-        let _writing = Writing::start(&self.writing, Kind::Volume, name);
-        let response = self.files.volume(name, request).await;
-        if response.status().is_success()
-            && let Err(e) = keeping.changed(Kind::Volume, name)
-        {
-            eprintln!("volume {name} written over WebDAV, not to be kept: {e:#}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-        response
+        Ok(())
     }
 
     /// Delete each sandbox unused for [`reclaim_after`](virtx_uvm::reclaim_after), if that is
@@ -585,22 +469,17 @@ impl Tunnel {
     }
 }
 
-/// What a home plugs into its sandboxes: their disks and volumes kept past this server by its
-/// keeping, their machines held to the server's [`Capacity`], and their ports named by
-/// capabilities.
+/// What a home plugs into its sandboxes: their disks and volumes kept beyond this machine by its
+/// backend, once it has one ([`Home::backed_by`]), and their ports named by capabilities.
 struct HomeHooks {
-    keeping: Option<Arc<dyn Keeping>>,
+    backing: Backing,
     /// The home, once it is made.
     home: OnceLock<Weak<HomeInner>>,
 }
 
 impl HomeHooks {
-    fn home(&self) -> Result<Home, SandboxError> {
-        self.home
-            .get()
-            .and_then(Weak::upgrade)
-            .map(Home)
-            .ok_or_else(|| SandboxError::Failed("the home is gone".into()))
+    fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
+        self.backing.get()
     }
 }
 
@@ -614,21 +493,19 @@ fn hooked(e: impl Into<Refused>) -> SandboxError {
     }
 }
 
-/// `written`, as the keeping names it.
-fn kind_of(written: Written) -> (Kind, String) {
-    match written {
-        Written::Disk(name) => (Kind::Snapshot, name),
-        Written::Volume(name) => (Kind::Volume, name),
-    }
-}
-
 impl Hooks for HomeHooks {
     fn want<'a>(&'a self, wanted: Wanted<'a>) -> BoxFuture<'a, Result<(), SandboxError>> {
         Box::pin(async move {
-            let home = self.home()?;
+            let Some(backend) = self.backend() else {
+                return Ok(());
+            };
             let fetched = match wanted {
-                Wanted::Tag(tag) => home.want(tag).await,
-                Wanted::Image(digest) => home.want_image(digest).await,
+                Wanted::Tag(tag) => match tag.parse::<Reference>() {
+                    Ok(tag) => backend.want(BackendWanted::Tag(&tag)).await,
+                    // Refused as the store refuses it, once it is looked for here.
+                    Err(_) => Ok(()),
+                },
+                Wanted::Image(digest) => backend.want(BackendWanted::Image(digest)).await,
             };
             fetched.map_err(|e| hooked(internal(format!("{e:#}"))))
         })
@@ -643,80 +520,43 @@ impl Hooks for HomeHooks {
         (Some(capability), url)
     }
 
+    /// Kept beyond this machine from now on, where the home is: refused where one of its id is
+    /// kept already, and the store removes what it made.
     fn made<'a>(&'a self, id: &'a str, size: u64) -> BoxFuture<'a, Result<(), SandboxError>> {
         Box::pin(async move {
-            self.home()?
-                .made(Kind::Snapshot, id, size)
-                .await
-                .map_err(hooked)
-        })
-    }
-
-    fn adopted<'a>(
-        &'a self,
-        id: &'a str,
-        booted: bool,
-    ) -> BoxFuture<'a, Result<Option<bool>, SandboxError>> {
-        Box::pin(async move {
-            let Some(keeping) = &self.keeping else {
-                return Ok(None);
-            };
-            let home = self.home()?;
-            let taking = std::time::Instant::now();
-            let taken = keeping.take_to_boot(&home, Kind::Snapshot, id).await;
-            eprintln!(
-                "reopened {id} ({}): its disk taken in {} ms",
-                if booted { "to boot" } else { "ahead" },
-                taking.elapsed().as_millis()
-            );
-            match taken {
-                Ok(()) => Ok(Some(true)),
-                Err(Refusal::Unknown { .. }) => Ok(Some(false)),
-                Err(e) => Err(hooked(e)),
+            match self.backend() {
+                Some(backend) => backend.made(Stored::Disk(id), size).await.map_err(hooked),
+                None => Ok(()),
             }
         })
     }
 
-    fn readied(&self, id: &str) {
-        if let (Some(keeping), Ok(home)) = (&self.keeping, self.home()) {
-            keeping.fill_ahead(&home, id);
-        }
-    }
-
-    /// Its disk held here and brought up to what is kept -- lazily, if the keeping can -- and
-    /// each volume it writes held, each it only reads brought up: refused while another node
-    /// holds either. A fill ahead of its start, stopped. Its room is `virtx-uvm`'s to ask.
+    /// Its disk taken where it is kept, and each volume it writes; each it only reads brought
+    /// up: what is held while its machine runs. Refused while another server holds either.
     fn booting<'a>(
         &'a self,
         sandbox: &'a Sandbox,
         _spec: &'a MachineSpec,
     ) -> BoxFuture<'a, Result<Vec<Held>, SandboxError>> {
         Box::pin(async move {
-            let home = self.home()?;
-            let id = sandbox.id();
-            home.take_to_boot(Kind::Snapshot, id)
-                .await
-                .map_err(hooked)?;
+            let Some(backend) = self.backend() else {
+                return Ok(Vec::new());
+            };
+            let mut held = vec![
+                backend
+                    .take(Stored::Disk(sandbox.id()))
+                    .await
+                    .map_err(hooked)?,
+            ];
             for asked in &sandbox.args().volumes {
+                let volume = Stored::Volume(&asked.volume);
                 match asked.readonly {
-                    true => home.bring_up(Kind::Volume, &asked.volume).await,
-                    false => home.take(Kind::Volume, &asked.volume).await,
+                    true => backend.bring_up(volume).await.map_err(hooked)?,
+                    false => held.push(backend.take(volume).await.map_err(hooked)?),
                 }
-                .map_err(hooked)?;
             }
-            if let Some(keeping) = &self.keeping {
-                keeping.settle(id).await;
-            }
-            Ok(Vec::new())
+            Ok(held)
         })
-    }
-
-    fn changed(&self, writes: &[Written]) -> Result<(), SandboxError> {
-        let home = self.home()?;
-        for (kind, name) in writes.iter().cloned().map(kind_of) {
-            home.changed(kind, &name).map_err(hooked)?;
-        }
-        Ok(())
     }
 
     fn booted(&self, id: &str, took: Duration, lazily: bool) {
@@ -737,30 +577,30 @@ impl Hooks for HomeHooks {
         disk: &'a Path,
     ) -> BoxFuture<'a, Result<(), SandboxError>> {
         Box::pin(async move {
-            let Some(keeping) = &self.keeping else {
-                return Ok(());
-            };
-            let home = self.home()?;
-            keeping
-                .materialize(&home, Kind::Snapshot, id, disk)
-                .await
-                .map_err(hooked)
+            match self.backend() {
+                Some(backend) => backend
+                    .materialize(Stored::Disk(id), disk)
+                    .await
+                    .map_err(hooked),
+                None => Ok(()),
+            }
         })
     }
 
-    /// Its disk removed from the storage home first, if there is one -- one never kept there,
-    /// made and deleted before it was, is nothing to remove -- and a fill ahead of it stopped.
+    /// Its disk removed from where it is kept first, where the home is -- one never kept there,
+    /// made and deleted before it was, is nothing to remove.
     fn deleting<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
         Box::pin(async move {
-            let home = self.home()?;
-            if let Some(keeping) = &self.keeping {
-                match keeping.remove(&home, Kind::Snapshot, id).await {
-                    Ok(()) | Err(Refusal::Unknown { .. }) => {}
-                    Err(e) => return Err(hooked(e)),
-                }
-                keeping.settle(id).await;
+            match self
+                .backend()
+                .map(|backend| backend.remove(Stored::Disk(id)))
+            {
+                Some(removing) => match removing.await {
+                    Ok(()) | Err(BackendRefusal::Unknown(_)) => Ok(()),
+                    Err(e) => Err(hooked(e)),
+                },
+                None => Ok(()),
             }
-            Ok(())
         })
     }
 }
@@ -1370,19 +1210,13 @@ fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
 }
 
 async fn volume_list(Extension(home): Extension<Arc<Home>>, Query(page): Query<Page>) -> Answer {
-    if let Some(keeping) = &home.keeping {
-        let kept = keeping
-            .list(Kind::Volume, page.after.as_deref(), page.limit)
+    if let Some(backend) = home.backing.get()
+        && let Some(kept) = backend
+            .volumes()
             .await
-            .map_err(|e| internal(format!("{e:#}")))?;
-        let listed: Vec<_> = kept
-            .into_iter()
-            .map(|v| VolumeListOutputItem {
-                name: v.name,
-                size: v.size,
-            })
-            .collect();
-        return Ok(json(&listed));
+            .map_err(|e| internal(format!("{e:#}")))?
+    {
+        return Ok(json(&page.of(kept, |v| &v.name)));
     }
     let mut listed = Vec::new();
     for name in page.of(home.volumes.list()?, |n| n) {
@@ -1397,7 +1231,7 @@ async fn volume_create(Extension(home): Extension<Arc<Home>>, Whole(request): Wh
         .name
         .unwrap_or_else(|| pick(|name| home.volumes.open(name).is_ok()));
     let name = home.volumes.create(&name)?.name().to_owned();
-    home.made(Kind::Volume, &name, 0).await?;
+    home.made_volume(&name).await?;
     Ok(created(format!("/volumes/{name}"), &volume(&home, name)?))
 }
 
@@ -1405,20 +1239,20 @@ async fn volume_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    if let Some(keeping) = &home.keeping {
-        let kept = keeping
-            .get(Kind::Volume, &name)
+    if let Some(backend) = home.backing.get()
+        && let Some(kept) = backend
+            .volumes()
             .await
             .map_err(|e| internal(format!("{e:#}")))?
-            .ok_or(VolumeError::Unknown(name))?;
-        return Ok(json(&VolumeListOutputItem {
-            name: kept.name,
-            size: kept.size,
-        }));
+    {
+        let kept = kept.into_iter().find(|v| v.name == name);
+        return Ok(json(&kept.ok_or(VolumeError::Unknown(name))?));
     }
     Ok(json(&volume(&home, name)?))
 }
 
+/// Remove it, and what is kept of it beyond this machine first: refused before anything is
+/// removed while a sandbox here mounts it, or the backend refuses.
 async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
@@ -1427,20 +1261,45 @@ async fn volume_remove(
         // Mounted here: refused before anything is removed.
         drop(volume.hold_alone()?);
     }
-    home.remove_kept(Kind::Volume, &name).await?;
+    let kept = match home.backing.get() {
+        Some(backend) => match backend.remove(Stored::Volume(&name)).await {
+            Ok(()) => true,
+            // Kept nowhere else: as the volume here says.
+            Err(virtx_uvm::backend::Refusal::Unknown(_)) => false,
+            Err(e) => return Err(e.into()),
+        },
+        None => false,
+    };
     match home.volumes.remove(&name) {
         Ok(()) => {}
-        Err(VolumeError::Unknown(_)) if home.keeping.is_some() => {}
+        Err(VolumeError::Unknown(_)) if kept => {}
         Err(e) => return Err(e.into()),
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `name` brought up to what is kept beyond this machine, where it is, to be read here.
+async fn bring_up(home: &Home, name: &str) -> Result<(), Refused> {
+    if let Some(backend) = home.backing.get() {
+        backend.bring_up(Stored::Volume(name)).await?;
+    }
+    Ok(())
+}
+
+/// `name` held where it is kept beyond this machine, if it is, brought up to what is kept
+/// there, to be written here until what this answers drops.
+async fn take(home: &Home, name: &str) -> Result<Option<virtx_uvm::backend::Held>, Refused> {
+    match home.backing.get() {
+        Some(backend) => Ok(Some(backend.take(Stored::Volume(name)).await?)),
+        None => Ok(None),
+    }
 }
 
 async fn volume_mount_list(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    home.bring_up(Kind::Volume, &name).await?;
+    bring_up(&home, &name).await?;
     let volume = home.volumes.open(&name)?;
     let listed: Vec<_> = volume
         .mounts()
@@ -1461,9 +1320,8 @@ async fn volume_mount_create(
     let args: VolumeMountCreateArgs = body(&request)?;
     let mount_type = args.source.mount_type();
     // Held, and kept again after: its mounts go with it to the next node that takes it.
-    home.take(Kind::Volume, &name).await?;
+    let _taken = take(&home, &name).await?;
     home.volumes.open(&name)?.mount(path.clone(), args.source)?;
-    home.changed(Kind::Volume, &name)?;
     let location = format!("/volumes/{name}/mounts/{path}");
     Ok(created(
         location,
@@ -1475,9 +1333,8 @@ async fn volume_mount_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments((name, path)): Segments<(String, String)>,
 ) -> Answer {
-    home.take(Kind::Volume, &name).await?;
+    let _taken = take(&home, &name).await?;
     home.volumes.open(&name)?.unmount(&path)?;
-    home.changed(Kind::Volume, &name)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1487,7 +1344,7 @@ async fn volume_files(
     Segments(segments): Segments<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> Response {
-    home.serve_files(&segments["name"], request).await
+    home.files.volume(&segments["name"], request).await
 }
 
 #[derive(Deserialize)]
@@ -1594,6 +1451,8 @@ async fn sandbox_get(
     Ok(json(&home.sandboxes.answer(&id)?))
 }
 
+/// Remove it, and its disk kept beyond this machine first: refused, and nothing removed, where
+/// the backend refuses.
 async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -1756,40 +1615,6 @@ fn size_of(dir: &Path) -> u64 {
             _ => 0,
         })
         .sum()
-}
-
-/// A files request writing, counted in [`Home::writing`] until it is dropped: when it ends,
-/// or when it is cancelled.
-struct Writing {
-    writing: Arc<Mutex<HashMap<(Kind, String), usize>>>,
-    key: (Kind, String),
-}
-
-impl Writing {
-    fn start(
-        writing: &Arc<Mutex<HashMap<(Kind, String), usize>>>,
-        kind: Kind,
-        name: &str,
-    ) -> Writing {
-        let key = (kind, name.to_owned());
-        *writing.lock().unwrap().entry(key.clone()).or_default() += 1;
-        Writing {
-            writing: Arc::clone(writing),
-            key,
-        }
-    }
-}
-
-impl Drop for Writing {
-    fn drop(&mut self) {
-        let mut writing = self.writing.lock().unwrap();
-        if let Some(count) = writing.get_mut(&self.key) {
-            *count -= 1;
-            if *count == 0 {
-                writing.remove(&self.key);
-            }
-        }
-    }
 }
 
 /// A page of a listing, the cloud's extension: those after `after` by name, `limit` at most.
@@ -2092,15 +1917,22 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
     }
 }
 
-impl From<Refusal> for Refused {
-    fn from(e: Refusal) -> Refused {
-        match &e {
-            Refusal::Held { .. } => refused(StatusCode::CONFLICT, "in_use", format!("{e:#}")),
-            Refusal::Unknown { .. } => not_found(format!("{e:#}")),
-            Refusal::Exists { .. } => refused(StatusCode::CONFLICT, "exists", format!("{e:#}")),
-            Refusal::Failed(_) => internal(format!("{e:#}")),
+impl From<BackendRefusal> for Refused {
+    fn from(e: BackendRefusal) -> Refused {
+        match e {
+            BackendRefusal::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
+            BackendRefusal::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            BackendRefusal::Unknown(_) => not_found(e),
+            BackendRefusal::Failed(e) => storage_failed(e),
         }
     }
+}
+
+/// What a storage backend failed with: said on the server's stderr, and answered `500` with no
+/// word of why, which can name what the backend runs on.
+fn storage_failed(e: anyhow::Error) -> Refused {
+    let _ = writeln!(io::stderr(), "the storage backend failed: {e:#}");
+    internal("the server's storage failed")
 }
 
 impl From<SnapshotError> for Refused {
@@ -2213,6 +2045,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Image(e) => e.into(),
             SandboxError::Snapshot(e) => e.into(),
             SandboxError::Volume(e) => e.into(),
+            SandboxError::Backend(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
             SandboxError::NoRoom(e) => e.into(),
@@ -2231,22 +2064,6 @@ impl From<NoRoom> for Refused {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_volume_written_is_neither_let_go_nor_kept_until_the_write_ends() {
-        let writing = Arc::default();
-        let first = Writing::start(&writing, Kind::Volume, "v");
-        let second = Writing::start(&writing, Kind::Volume, "v");
-        drop(first);
-        assert!(
-            writing
-                .lock()
-                .unwrap()
-                .contains_key(&(Kind::Volume, "v".to_owned()))
-        );
-        drop(second);
-        assert!(writing.lock().unwrap().is_empty());
-    }
 
     #[test]
     fn json_escaped_to_ascii_reads_as_it_was() {

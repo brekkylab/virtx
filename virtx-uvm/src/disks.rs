@@ -9,6 +9,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The storage a machine's block device reads and writes through, in place of its file.
@@ -35,20 +36,6 @@ pub trait Disks: Send + Sync {
         Ok(())
     }
 
-    /// The disk at `from` was just moved to `to`: what is beside it moved with it, and what
-    /// was beside the disk it replaced gone.
-    fn moved(&self, from: &Path, to: &Path) -> io::Result<()> {
-        let _ = (from, to);
-        Ok(())
-    }
-
-    /// The disk at `from` was just copied to `to`, its machine paused: what is beside it copied
-    /// as of now.
-    fn copied(&self, from: &Path, to: &Path) -> io::Result<()> {
-        let _ = (from, to);
-        Ok(())
-    }
-
     /// In the machine's process: the disk at `disk` opened as its block device is to read and
     /// write it, `source` being what [`serve`](Disks::serve) answered. `None` for its file as it
     /// is.
@@ -69,20 +56,6 @@ pub trait MachineDisk: Send + Sync {
 
     /// Its machine booted: the guest's agent is ready.
     fn booted(&self) {}
-
-    /// Marked `mark`, as it is about to be copied while its machine runs
-    /// ([`Machine::mark`](crate::Machine::mark)): whether it can be.
-    fn mark(&self, mark: u64) -> io::Result<bool> {
-        let _ = mark;
-        Ok(false)
-    }
-
-    /// What the copy made at mark `mark` was kept as made what it is
-    /// ([`Machine::rebase`](crate::Machine::rebase)): whether it was.
-    fn rebase(&self, mark: u64) -> io::Result<bool> {
-        let _ = mark;
-        Ok(false)
-    }
 }
 
 /// Disks that are files and nothing else.
@@ -91,11 +64,20 @@ struct Files;
 impl Disks for Files {}
 
 static DISKS: OnceLock<Arc<dyn Disks>> = OnceLock::new();
+/// Whether they are an embedder's, [set](set_disks) before anything here asked what they are.
+static EMBEDDED: AtomicBool = AtomicBool::new(false);
 
 /// Sandboxes' disks are `disks` in this process, from now on: said once, before any is made or
 /// opened. A second is ignored.
 pub fn set_disks(disks: Arc<dyn Disks>) {
-    let _ = DISKS.set(disks);
+    if DISKS.set(disks).is_ok() {
+        EMBEDDED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether sandboxes' upper disks in this process are an embedder's rather than files alone.
+pub(crate) fn embedded() -> bool {
+    EMBEDDED.load(Ordering::Relaxed)
 }
 
 /// What sandboxes' disks are in this process.

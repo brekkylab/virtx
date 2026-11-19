@@ -337,8 +337,6 @@ fn serve() -> io::Result<()> {
                 libc::sync();
                 libc::reboot(libc::RB_AUTOBOOT);
             },
-            // The machine's process answers it, and never passes it on.
-            CtrlReq::Mark { .. } | CtrlReq::Rebase { .. } => {}
             CtrlReq::Ping => send(&out, &CtrlResp::Pong),
         }
     }

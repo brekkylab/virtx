@@ -63,18 +63,9 @@ pub enum CtrlReq {
         #[serde(default)]
         eof: bool,
     },
-    /// Put what the guest has written on its disks, and say so with
-    /// [`Synced`](CtrlResp::Synced): before its disks are copied as they are.
+    /// Put what the guest has written on its disks, as they are about to be copied, and say so
+    /// with [`Synced`](CtrlResp::Synced).
     Sync,
-    /// Mark its disk `mark`, as it is about to be copied: what is written from now on noted
-    /// apart ([`MachineDisk::mark`](crate::disks::MachineDisk::mark)). Answered with
-    /// [`Marked`](CtrlResp::Marked).
-    /// The machine's process does it; the guest never hears of it.
-    Mark { mark: u64 },
-    /// Make what the copy made at mark `mark` was kept as what its disk is
-    /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)).
-    /// Answered with [`Rebased`](CtrlResp::Rebased).
-    Rebase { mark: u64 },
     /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
     /// hears a guest that is up. The host never sends it.
     Ping,
@@ -108,18 +99,6 @@ pub enum CtrlResp {
     /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: whether
     /// what it asked was written, or never will be, the process or its stdin gone.
     Written { id: u32, written: bool },
-    /// The answer to a [`Mark`](CtrlReq::Mark): whether its disk is marked so -- not one
-    /// with no disk kept, or why it could not be.
-    Marked {
-        mark: u64,
-        marked: std::result::Result<bool, String>,
-    },
-    /// The answer to a [`Rebase`](CtrlReq::Rebase): whether its disk was rebased, or why
-    /// it could not be.
-    Rebased {
-        mark: u64,
-        rebased: std::result::Result<bool, String>,
-    },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
 }

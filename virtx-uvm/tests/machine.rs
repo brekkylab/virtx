@@ -985,6 +985,76 @@ async fn a_sandbox_parked_as_it_is_parked_unused_has_synced(home: Home) {
     }
 }
 
+/// A running sandbox synced has what its guest wrote in its disk's file, before the guest would
+/// have put it there of itself. Parked, it has already; deleted, it is refused. Its disk, which
+/// the embedder's disks serve here, is theirs to copy: `copy_disk` refuses it.
+async fn a_sandbox_synced_has_what_its_guest_wrote_in_its_disk_s_file(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    let disk = home.disk(&sandbox);
+    // Named and filled in the guest, so that only what the guest wrote holds them: the name in
+    // its directory, which its journal keeps for a few seconds before it writes it.
+    let write =
+        "printf 'virtx-content-%s' $((7919 * 104729)) > /root/virtx-name-$((123457 * 8191))";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    assert!(sandbox.sync().await.unwrap(), "the guest says it synced");
+    let name = format!("virtx-name-{}", 123457 * 8191);
+    let content = format!("virtx-content-{}", 7919 * 104729);
+    let held = holds(&disk, &[name.as_bytes(), content.as_bytes()]);
+    assert_eq!(
+        held,
+        [true, true],
+        "the disk's file has its name and what is in it"
+    );
+    let copy = home.root.join("copy.ext4");
+    let refused = sandbox.copy_disk(&copy).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Unsupported(_))),
+        "{refused:?}"
+    );
+    assert!(!copy.exists());
+
+    // Parked, it has it already; deleted, there is nothing to sync.
+    sandbox.park_anyway().await;
+    std::fs::remove_file(mark(&disk, "booted")).unwrap();
+    assert!(sandbox.sync().await.unwrap());
+    assert!(!mark(&disk, "booted").exists(), "not booted to sync");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+    let refused = sandbox.sync().await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+}
+
+/// Whether the file at `path` holds each of `whats` anywhere in it.
+fn holds(path: &Path, whats: &[&[u8]]) -> Vec<bool> {
+    use std::io::Read as _;
+    const ZEROS: [u8; 4096] = [0; 4096];
+    let longest = whats.iter().map(|what| what.len()).max().unwrap_or(0);
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut held = vec![false; whats.len()];
+    let mut window = Vec::new();
+    let mut chunk = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut chunk).unwrap();
+        if read == 0 {
+            return held;
+        }
+        // The end of the chunk before, for what lies across the two.
+        window.drain(..window.len().saturating_sub(longest));
+        window.extend_from_slice(&chunk[..read]);
+        if chunk[..read]
+            .chunks(ZEROS.len())
+            .all(|page| page == &ZEROS[..page.len()])
+        {
+            continue;
+        }
+        for (what, held) in whats.iter().zip(&mut held) {
+            *held |= window.windows(what.len()).any(|at| at == *what);
+        }
+    }
+}
+
 async fn a_disk_a_parked_machine_left_reads_as_its_kernel_committed(home: Home) {
     let sandbox = home.sandbox(&small()).await;
     let write = "mkdir /root/kept && for i in $(seq 100); do echo $i > /root/kept/$i; done \
@@ -1494,6 +1564,7 @@ fn main() -> ExitCode {
         a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,
         a_sandbox_parked_as_it_is_parked_unused_has_synced,
         a_disk_a_parked_machine_left_reads_as_its_kernel_committed,
+        a_sandbox_synced_has_what_its_guest_wrote_in_its_disk_s_file,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

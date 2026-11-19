@@ -338,15 +338,6 @@ impl Store {
         let lock = snapshot.lock_within(LET_GO)?;
         fs::rename(disk, &snapshot.path)
             .map_err(|e| Error::io(format!("moving {} into place", snapshot.path.display()), e))?;
-        // What is beside it with it; and none left of the disk it replaced.
-        crate::disks::disks()
-            .moved(disk, &snapshot.path)
-            .map_err(|e| {
-                Error::io(
-                    format!("moving what is beside {}", snapshot.path.display()),
-                    e,
-                )
-            })?;
         drop(lock);
         Ok(snapshot)
     }

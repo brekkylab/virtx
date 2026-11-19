@@ -1,91 +1,78 @@
-//! A sandbox's disk read whole while its machine runs: copied as the machine has it, and
-//! marked as it is, for the copy to become the disk's base once it is kept.
+//! A sandbox's disk while its machine runs: its guest's writes put on it, and the disk copied
+//! whole, where it is a file alone.
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
+use super::sandbox::Run;
 use super::{Error, Sandbox};
 
-/// How long a guest has to say it has synced before its disk is copied as it is.
+/// How long a guest has to say it has synced ([`Sandbox::sync`]).
 const SYNC_WAIT: Duration = Duration::from_secs(5);
-/// How long a machine is waited on to mark its disk, or rebase it.
-const MARK_WAIT: Duration = Duration::from_secs(5);
-/// The next mark of a running machine's disk, as it is copied: one per copy, in this process.
-static NEXT_MARK: AtomicU64 = AtomicU64::new(1);
 
 impl Sandbox {
-    /// A copy of its disk at `to`, as its machine has it: what the guest has written put on it
-    /// first, and the machine paused while it is copied -- for as long as that takes -- so that
-    /// the copy is whole. The disk is marked as it is copied: once the copy is kept, what it
-    /// was kept as can be made the disk's base ([`rebase`](Self::rebase)) -- the mark's, if the
-    /// disk could be marked. `None`, and no copy, where its machine is not up.
-    pub async fn copy_disk(&self, to: &Path) -> Result<Option<Option<u64>>, Error> {
-        let Some(run) = self.run() else {
-            return Ok(None);
-        };
-        let path = self.shared.snapshots.open(&self.record.id)?.path;
-        let (told, synced) = oneshot::channel();
-        *run.synced.lock().unwrap() = Some(told);
-        run.machine.sync()?;
-        // Copied as the machine has it either way: a guest that does not say it has synced in
-        // time is paused as it is, which ext4's journal makes whole.
-        let _ = tokio::time::timeout(SYNC_WAIT, synced).await;
-        // Marked after the sync, before the pause: what is written from the mark on is in the
-        // copy or noted apart, or both.
-        let mark = NEXT_MARK.fetch_add(1, Ordering::Relaxed);
-        let (told, marked) = oneshot::channel();
-        *run.marked.lock().unwrap() = Some((mark, told));
-        let mark = match run.machine.mark(mark) {
-            Ok(()) => match tokio::time::timeout(MARK_WAIT, marked).await {
-                Ok(Ok(Ok(true))) => Some(mark),
-                Ok(Ok(Err(e))) => {
-                    eprintln!("{}'s disk not marked: {e}", self.record.id);
-                    None
-                }
-                _ => None,
-            },
-            Err(_) => None,
-        };
-        let to = to.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let _paused = run.machine.pause()?;
-            copy_sparse(&path, &to)
-                .map_err(|e| Error::Failed(format!("copying {}: {e}", path.display())))?;
-            // What is beside it copied as of this pause.
-            crate::disks::disks().copied(&path, &to).map_err(|e| {
-                Error::Failed(format!("copying what is beside {}: {e}", path.display()))
-            })?;
-            Ok::<_, Error>(())
-        })
-        .await??;
-        Ok(Some(mark))
-    }
-
-    /// What the copy of its disk made at `mark` ([`copy_disk`](Self::copy_disk)) was kept as,
-    /// made what its disk is while its machine runs, as the server's disks have it
-    /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)) -- what it was kept as
-    /// beside the disk already, as they keep it. Whether it was: not if its machine is down
-    /// now, or another mark came since.
-    pub async fn rebase(&self, mark: u64) -> Result<bool, Error> {
-        let Some(run) = self.run() else {
-            return Ok(false);
-        };
-        let (told, rebased) = oneshot::channel();
-        *run.rebased.lock().unwrap() = Some((mark, told));
-        run.machine.rebase(mark)?;
-        match tokio::time::timeout(MARK_WAIT, rebased).await {
-            Ok(Ok(Ok(rebased))) => Ok(rebased),
-            Ok(Ok(Err(e))) => Err(Error::Failed(format!(
-                "rebasing {}'s disk: {e}",
-                self.record.id
-            ))),
-            _ => Ok(false),
+    /// Have its guest put what it has written on its disk, so that the disk's file holds it:
+    /// `true` once the guest says it has, `false` if it has not within 5 s. A parked machine's
+    /// disk holds what it wrote already. Refused once its machine has exited or it is deleted.
+    pub async fn sync(&self) -> Result<bool, Error> {
+        // Its machine neither boots nor stops meanwhile.
+        let _turn = self.turn.lock().await;
+        match self.run() {
+            Some(run) => synced_by(&run).await,
+            None if self.is_parked() => Ok(true),
+            None => Err(Error::Ended),
         }
     }
+
+    /// A copy of its disk at `to`, whole, replacing what is there: [synced](Self::sync) first
+    /// if its machine runs, and the machine paused while the disk is copied -- at once where the
+    /// host's filesystem clones files (APFS, Btrfs, XFS made with reflink), else for as long as
+    /// reading and writing it takes. A guest that has not synced within 5 s is copied as it is,
+    /// which its journal makes whole. A parked machine's disk is copied as it was left.
+    ///
+    /// For a disk that is its file alone: one the embedder's disks serve its machine
+    /// ([`Disks::serve`](crate::disks::Disks::serve)) is theirs to copy, and refused here, as is
+    /// one of an embedder's not yet booted in this process. Refused once its machine has exited
+    /// or it is deleted.
+    pub async fn copy_disk(&self, to: &Path) -> Result<(), Error> {
+        // Its machine neither boots nor stops meanwhile, nor its disk goes.
+        let _turn = self.turn.lock().await;
+        let run = self.run();
+        if run.is_none() && !self.is_parked() {
+            return Err(Error::Ended);
+        }
+        let served = *self.served.lock().unwrap();
+        if served.unwrap_or_else(crate::disks::embedded) {
+            return Err(Error::Unsupported(format!(
+                "sandbox {}'s disk is the embedder's to copy, not a file alone",
+                self.record.id
+            )));
+        }
+        let path = self.shared.snapshots.open(&self.record.id)?.path;
+        if let Some(run) = &run {
+            synced_by(run).await?;
+        }
+        let to = to.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _paused = run.as_ref().map(|run| run.machine.pause()).transpose()?;
+            copy_sparse(&path, &to)
+                .map_err(|e| Error::Failed(format!("copying {}: {e}", path.display())))
+        })
+        .await?
+    }
+}
+
+/// `run`'s guest synced, as [`Sandbox::sync`] says, its sandbox's turn held.
+async fn synced_by(run: &Arc<Run>) -> Result<bool, Error> {
+    let (told, synced) = oneshot::channel();
+    *run.synced.lock().unwrap() = Some(told);
+    run.machine.sync()?;
+    let synced = tokio::time::timeout(SYNC_WAIT, synced).await;
+    Ok(matches!(synced, Ok(Ok(()))))
 }
 
 /// `from`, a disk, copied to `to`: cloned where the filesystem shares extents between files

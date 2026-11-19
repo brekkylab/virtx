@@ -28,8 +28,8 @@ pub use image::{
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, MachineConfig, MachineSpec, Network, Ports, Publication,
-    SandboxDisk, VolumeMount, enter as enter_machine, wire,
+    Error as MachineError, Machine, MachineConfig, MachineSpec, Network, Paused, Ports,
+    Publication, SandboxDisk, VolumeMount, enter as enter_machine, wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;

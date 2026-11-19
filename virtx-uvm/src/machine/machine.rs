@@ -263,18 +263,13 @@ impl Machine {
         .map_err(|e| Error::io("writing to a process's stdin", e))
     }
 
-    /// Mark its disk `mark`, before a copy of it: answered by a
-    /// [`Marked`](CtrlResp::Marked) from [`recv`](Machine::recv).
-    pub fn mark(&self, mark: u64) -> Result<()> {
-        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Mark { mark })
-            .map_err(|e| Error::io("marking its disk", e))
-    }
-
-    /// Make what the copy at mark `mark` was kept as its disk's base: answered by a
-    /// [`Rebased`](CtrlResp::Rebased) from [`recv`](Machine::recv).
-    pub fn rebase(&self, mark: u64) -> Result<()> {
-        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Rebase { mark })
-            .map_err(|e| Error::io("rebasing its disk", e))
+    /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.
+    pub fn signal(&self, id: u32, signal: i32) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Signal { id, signal },
+        )
+        .map_err(|e| Error::io("sending the signal", e))
     }
 
     /// Have the guest put what it has written on its disks: answered by a
@@ -284,48 +279,33 @@ impl Machine {
             .map_err(|e| Error::io("asking the guest to sync", e))
     }
 
-    /// Pause the machine -- its vCPUs and its devices, the whole process -- until what this
-    /// answers drops: its disks are left as they are meanwhile, to be copied whole.
-    #[cfg(unix)]
+    /// Pause the machine -- its vCPUs and its devices, its whole process -- until what this
+    /// answers drops: its disks are left as they are meanwhile, to be copied whole. Its process
+    /// is neither stopped nor killed meanwhile: [`stop`](Machine::stop) and
+    /// [`kill`](Machine::kill) wait.
     pub fn pause(&self) -> Result<Paused<'_>> {
-        let pid = self.process.lock().unwrap().id() as libc::pid_t;
-        // SAFETY: a signal to this machine's own process, which is ours until it is reaped.
-        if unsafe { libc::kill(pid, libc::SIGSTOP) } == -1 {
-            return Err(Error::io("pausing the machine", io::Error::last_os_error()));
+        let process = self.process.lock().unwrap();
+        #[cfg(unix)]
+        {
+            // SAFETY: a signal to this machine's own process, which is not reaped while its
+            // lock is held.
+            if unsafe { libc::kill(process.id() as libc::pid_t, libc::SIGSTOP) } == -1 {
+                return Err(Error::io("pausing the machine", io::Error::last_os_error()));
+            }
         }
-        Ok(Paused {
-            pid,
-            _machine: self,
-        })
-    }
-
-    /// Pause the machine -- its vCPUs and its devices, the whole process -- until what this
-    /// answers drops: its disks are left as they are meanwhile, to be copied whole.
-    #[cfg(windows)]
-    pub fn pause(&self) -> Result<Paused<'_>> {
-        use std::os::windows::io::AsRawHandle as _;
-        let process = self.process.lock().unwrap().as_raw_handle();
-        // SAFETY: this machine's own process's handle, open for as long as the machine is.
-        let status = unsafe { NtSuspendProcess(process) };
-        if status < 0 {
-            return Err(Error::io(
-                "pausing the machine",
-                io::Error::other(format!("NTSTATUS {status:#x}")),
-            ));
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: this machine's own process's handle, open for as long as `process` is.
+            let status = unsafe { NtSuspendProcess(process.as_raw_handle()) };
+            if status < 0 {
+                return Err(Error::io(
+                    "pausing the machine",
+                    io::Error::other(format!("NTSTATUS {status:#x}")),
+                ));
+            }
         }
-        Ok(Paused {
-            process,
-            _machine: self,
-        })
-    }
-
-    /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.
-    pub fn signal(&self, id: u32, signal: i32) -> Result<()> {
-        wire::send(
-            &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Signal { id, signal },
-        )
-        .map_err(|e| Error::io("sending the signal", e))
+        Ok(Paused(process))
     }
 
     /// Have the guest put what it has written on its disks and end, killing it if it has not
@@ -384,6 +364,34 @@ impl Machine {
     }
 }
 
+/// A machine paused by [`Machine::pause`], resumed as this drops.
+pub struct Paused<'a>(std::sync::MutexGuard<'a, Child>);
+
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: as in `pause`.
+            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGCONT) };
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: as in `pause`.
+            unsafe { NtResumeProcess(self.0.as_raw_handle()) };
+        }
+    }
+}
+
+// Every thread of a process suspended, or resumed, at once, as `SIGSTOP` and `SIGCONT` do:
+// exported by ntdll alone.
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
+    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
+}
+
 /// A request for the thread [`files`] starts, and where its answer goes.
 struct IoJob {
     request: IoReq,
@@ -435,45 +443,6 @@ fn exchange(
         _ => Vec::new(),
     };
     Ok((answer, read))
-}
-
-/// A machine paused by [`Machine::pause`], resumed as this drops.
-#[cfg(unix)]
-pub struct Paused<'a> {
-    pid: libc::pid_t,
-    _machine: &'a Machine,
-}
-
-#[cfg(unix)]
-impl Drop for Paused<'_> {
-    fn drop(&mut self) {
-        // SAFETY: as in `pause`.
-        unsafe { libc::kill(self.pid, libc::SIGCONT) };
-    }
-}
-
-/// A machine paused by [`Machine::pause`], resumed as this drops.
-#[cfg(windows)]
-pub struct Paused<'a> {
-    process: std::os::windows::io::RawHandle,
-    _machine: &'a Machine,
-}
-
-#[cfg(windows)]
-impl Drop for Paused<'_> {
-    fn drop(&mut self) {
-        // SAFETY: as in `pause`.
-        unsafe { NtResumeProcess(self.process) };
-    }
-}
-
-// Every thread of a process suspended, or resumed, at once: what `SIGSTOP` and `SIGCONT` do,
-// which Windows exports from ntdll alone.
-#[cfg(windows)]
-#[link(name = "ntdll", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
-    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
 
 /// A pipe end as the command line names it.

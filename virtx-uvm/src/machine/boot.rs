@@ -167,7 +167,7 @@ fn prefault_memory() -> bool {
 const PING_EVERY: Duration = Duration::from_secs(5);
 
 /// How long past its second the silence check may wake before this process is taken to have
-/// been stopped meanwhile -- the machine paused whole -- rather than slow.
+/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow.
 const PAUSED_PAST: Duration = Duration::from_secs(3);
 
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have
@@ -427,10 +427,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
     .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
-    // Told its machine has booted, as its agent says it is ready; marked and rebased as the
-    // host keeps it while it runs.
+    // Told its machine has booted, as its agent says it is ready.
     let booting = opened.clone();
-    let kept = opened.clone();
     if let Some(disk) = opened {
         std::thread::spawn(move || disk.background());
     }
@@ -511,25 +509,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let for_guest = Arc::clone(&for_guest);
         move || {
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
-                match message {
-                    CtrlReq::Mark { mark } => {
-                        let marked = match &kept {
-                            Some(disk) => disk.mark(mark).map_err(|e| e.to_string()),
-                            None => Ok(false),
-                        };
-                        let _ = send(&CtrlResp::Marked { mark, marked });
-                        continue;
-                    }
-                    CtrlReq::Rebase { mark } => {
-                        let rebased = match &kept {
-                            Some(disk) => disk.rebase(mark).map_err(|e| e.to_string()),
-                            None => Ok(false),
-                        };
-                        let _ = send(&CtrlResp::Rebased { mark, rebased });
-                        continue;
-                    }
-                    _ => {}
-                }
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
             }
             let _ = wire::send(&mut *for_guest.lock().unwrap(), &CtrlReq::Shutdown);
@@ -568,8 +547,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         }
     });
     // A machine paused whole -- this process stopped, as the host does while it copies its
-    // disk ([`Machine::pause`](super::Machine::pause)) -- is not a silent guest: this thread
-    // stopped with it, and wakes a while past its second, which starts the silence anew.
+    // disk -- is not a silent guest: this thread stopped with it, and wakes well past its second,
+    // which starts the silence anew.
     let silence = guest_silence();
     std::thread::spawn(move || {
         let mut checked = Instant::now();

@@ -162,9 +162,6 @@ struct Starting {
     waiter: oneshot::Sender<Result<Arc<Job>, String>>,
 }
 
-/// Who waits for a machine's answer about its disk at a mark, and the mark.
-type Waiting = (u64, oneshot::Sender<Result<bool, String>>);
-
 /// A sandbox's run: the machine it booted, up until it stops, and what is asked of it.
 pub(super) struct Run {
     pub(super) machine: Arc<Machine>,
@@ -182,11 +179,8 @@ pub(super) struct Run {
     pub(super) up: AtomicBool,
     /// Each command sent to the machine and not yet answered, in the order sent.
     starting: Mutex<VecDeque<Starting>>,
-    /// Who waits for the guest to say it has synced, and for its machine to say its disk is
-    /// marked, and rebased, and at which mark.
+    /// Who waits for the guest to say it has synced.
     pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
-    pub(super) marked: Mutex<Option<Waiting>>,
-    pub(super) rebased: Mutex<Option<Waiting>>,
 }
 
 impl Run {
@@ -223,6 +217,9 @@ pub struct Sandbox {
     /// What a conditional write to its files holds first as it lands (see
     /// [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
+    /// Whether the embedder's disks served its disk to its last machine
+    /// ([`Disks::serve`](crate::disks::Disks::serve)): `None` until one has booted here.
+    pub(super) served: Mutex<Option<bool>>,
 }
 
 impl Sandbox {
@@ -244,6 +241,7 @@ impl Sandbox {
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
+            served: Mutex::default(),
         })
     }
 
@@ -332,6 +330,11 @@ impl Sandbox {
     /// Whether `run` is its machine's run now.
     fn is(&self, run: &Arc<Run>) -> bool {
         matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, run))
+    }
+
+    /// Whether its machine is parked: not up, nor exited, nor it deleted.
+    pub(super) fn is_parked(&self) -> bool {
+        matches!(*self.state.lock().unwrap(), State::Parked)
     }
 
     fn is_deleted(&self) -> bool {
@@ -491,6 +494,7 @@ impl Sandbox {
             .map_err(|e| Error::Failed(format!("serving the disk of sandbox {id}: {e}")))?
             .unzip();
         let lazily = chunks.is_some();
+        *self.served.lock().unwrap() = Some(lazily);
         // The programs it was made with, as `/abin`: the same directory for every sandbox here
         // made with the same, which none writes to.
         let abin = match self.record.args.abins.is_empty() {
@@ -530,8 +534,6 @@ impl Sandbox {
             up: AtomicBool::new(true),
             starting: Mutex::default(),
             synced: Mutex::default(),
-            marked: Mutex::default(),
-            rebased: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
         super::runs::up(&run.sandbox, &run.root, run.started);
@@ -1037,22 +1039,6 @@ impl Sandbox {
                 CtrlResp::Synced => {
                     if let Some(told) = run.synced.lock().unwrap().take() {
                         let _ = told.send(());
-                    }
-                }
-                CtrlResp::Marked { mark, marked } => {
-                    let mut waiting = run.marked.lock().unwrap();
-                    if waiting.as_ref().is_some_and(|(m, _)| *m == mark)
-                        && let Some((_, told)) = waiting.take()
-                    {
-                        let _ = told.send(marked);
-                    }
-                }
-                CtrlResp::Rebased { mark, rebased } => {
-                    let mut waiting = run.rebased.lock().unwrap();
-                    if waiting.as_ref().is_some_and(|(m, _)| *m == mark)
-                        && let Some((_, told)) = waiting.take()
-                    {
-                        let _ = told.send(rebased);
                     }
                 }
                 CtrlResp::Written { id, written } => {

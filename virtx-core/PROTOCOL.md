@@ -140,7 +140,7 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. Its `message` names the member or segment, what it takes and what was sent, as `cmd: a list, not "ls"`; an object or a list sent is named by its kind alone. |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. Its `message` names the member or segment, what it takes and what was sent, as `cmd: a list, not "ls"`; an object or a list sent is named by its kind alone. A failure inside a member that names its own kind, such as `image`, `auth` or `source`, is told at that member. A body that is not JSON is told where it stops being JSON, with none of it shown. |
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication), [Projects](#projects) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |

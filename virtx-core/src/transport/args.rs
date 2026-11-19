@@ -14,15 +14,20 @@ pub fn from_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Err("the body: a JSON object, and none was sent".to_owned());
     }
-    let not_json = || format!("the body: JSON, not {}", shown_text(body));
+    // Where it stops reading, and none of what it holds, which may be a credential.
+    let not_json = |e: serde_json::Error| {
+        format!(
+            "the body: JSON, which it stops being at line {}, column {}",
+            e.line(),
+            e.column()
+        )
+    };
     let mut json = serde_json::Deserializer::from_slice(body);
     let failed = match serde_path_to_error::deserialize(&mut json) {
-        Ok(args) => return json.end().map(|()| args).map_err(|_| not_json()),
+        Ok(args) => return json.end().map(|()| args).map_err(not_json),
         Err(failed) => failed,
     };
-    let Ok(sent) = serde_json::from_slice::<Value>(body) else {
-        return Err(not_json());
-    };
+    let sent = serde_json::from_slice::<Value>(body).map_err(not_json)?;
 
     let path: Vec<&Segment> = failed.path().iter().collect();
     let name = named(&path);
@@ -98,8 +103,13 @@ pub fn from_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     {
         format!("{name}: {}{not}", described_type(expected))
     } else if said == "expected value" {
-        // serde_json on an enum sent neither a variant's name nor an object naming one.
-        format!("{name}: a string or an object{not}")
+        // serde_json on an enum sent neither a variant's name nor an object of one member.
+        match found {
+            Some(Value::Object(sent)) => {
+                format!("{name}: an object of one member, not of {}", sent.len())
+            }
+            _ => format!("{name}: a string or an object{not}"),
+        }
     } else if found.is_some_and(|value| said.contains(&shown_value(value))) {
         // A message of the type's own that already says what was sent.
         format!("{name}: {said}")
@@ -182,15 +192,6 @@ fn shown_value(value: &Value) -> String {
     }
 }
 
-/// `body`, which is not JSON, as a string, cut at [`SHOWN`] characters.
-fn shown_text(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    match text.chars().count() > SHOWN {
-        true => format!("{:?}...", text.chars().take(SHOWN).collect::<String>()),
-        false => format!("{text:?}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,11 +218,17 @@ mod tests {
         );
         assert_eq!(
             refused::<SandboxExecArgs>("not json"),
-            r#"the body: JSON, not "not json""#
+            "the body: JSON, which it stops being at line 1, column 2"
         );
         assert_eq!(
             refused::<SandboxExecArgs>(r#"{"cmd": ["ls"]} {}"#),
-            r#"the body: JSON, not "{\"cmd\": [\"ls\"]} {}""#
+            "the body: JSON, which it stops being at line 1, column 17"
+        );
+        // None of it is shown: a mount missing its last `}` holds a credential.
+        let mount = r#"{"source": {"type": "notion", "api_key": "secret_abcdef"}"#;
+        assert_eq!(
+            refused::<VolumeMountCreateArgs>(mount),
+            "the body: JSON, which it stops being at line 1, column 57"
         );
     }
 
@@ -273,6 +280,14 @@ mod tests {
             "recipe.steps[0].run: a string, not 1"
         );
         assert_eq!(build("1"), "recipe.steps[0]: a string or an object, not 1");
+        assert_eq!(
+            build(r#"{"run": "a", "workdir": "/"}"#),
+            "recipe.steps[0]: an object of one member, not of 2"
+        );
+        assert_eq!(
+            build("{}"),
+            "recipe.steps[0]: an object of one member, not of 0"
+        );
         assert_eq!(
             build(r#""run""#),
             "recipe.steps[0].run: an object of its name and its value, not its name alone"

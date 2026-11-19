@@ -8,6 +8,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The storage a machine's block device reads and writes through, in place of its file.
@@ -41,14 +42,6 @@ pub trait Disks: Send + Sync {
         let _ = disk;
         Ok(())
     }
-
-    /// In the server's process: the disk at `disk` was just copied to `to`
-    /// ([`Sandbox::copy_disk`](crate::Sandbox::copy_disk)), its machine paused, if it runs,
-    /// until this returns: whatever beside it says what it is copied as of now.
-    fn copied(&self, disk: &Path, to: &Path) -> io::Result<()> {
-        let _ = (disk, to);
-        Ok(())
-    }
 }
 
 /// A sandbox's upper disk as its machine has it open ([`Disks::open`]).
@@ -62,13 +55,6 @@ pub trait MachineDisk: Send + Sync {
 
     /// Its machine booted: the guest's agent is ready.
     fn booted(&self) {}
-
-    /// The guest has put what it had written on it, and its machine is about to be paused for
-    /// it to be copied ([`Sandbox::copy_disk`](crate::Sandbox::copy_disk)): a point to tell
-    /// what is written from now on apart from what the copy holds. What the guest says next
-    /// waits on it, so it is brief. Where the guest took longer to sync than `copy_disk`
-    /// waits, it comes after the copy.
-    fn synced(&self) {}
 }
 
 /// Disks that are files and nothing else.
@@ -77,11 +63,20 @@ struct Files;
 impl Disks for Files {}
 
 static DISKS: OnceLock<Arc<dyn Disks>> = OnceLock::new();
+/// Whether they are an embedder's, [set](set_disks) before anything here asked what they are.
+static EMBEDDED: AtomicBool = AtomicBool::new(false);
 
 /// Sandboxes' upper disks are `disks` in this process, from now on: said once, before any is
 /// made or opened. A second is ignored.
 pub fn set_disks(disks: Arc<dyn Disks>) {
-    let _ = DISKS.set(disks);
+    if DISKS.set(disks).is_ok() {
+        EMBEDDED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether sandboxes' upper disks in this process are an embedder's rather than files alone.
+pub(crate) fn embedded() -> bool {
+    EMBEDDED.load(Ordering::Relaxed)
 }
 
 /// What sandboxes' upper disks are in this process.

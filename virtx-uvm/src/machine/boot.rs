@@ -403,9 +403,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
     .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
-    // Told its machine has booted, as its agent says it is ready, and that the guest has synced
-    // for a copy, as its agent says so.
-    let told = opened.clone();
+    // Told its machine has booted, as its agent says it is ready.
+    let booting = opened.clone();
     if let Some(disk) = opened {
         std::thread::spawn(move || disk.background());
     }
@@ -493,17 +492,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
                     CtrlResp::Ready(_) => {
-                        if let Some(disk) = &told {
+                        if let Some(disk) = &booting {
                             disk.booted();
                         }
                         send(&CtrlResp::Ready(addresses.clone()))
-                    }
-                    // Before the host hears it, and so before it pauses the machine.
-                    CtrlResp::Synced => {
-                        if let Some(disk) = &told {
-                            disk.synced();
-                        }
-                        send(&CtrlResp::Synced)
                     }
                     CtrlResp::Pong => Ok(()),
                     message => send(&message),

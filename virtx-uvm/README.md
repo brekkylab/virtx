@@ -109,9 +109,10 @@ kept as `Unknown` until it is removed; `virtx-stdio`'s go with it. The devices a
 [`machine/boot.rs`](src/machine/boot.rs).
 
 A sandbox's disk can be copied whole while its machine runs (`Sandbox::copy_disk`), for a backup
-or to keep it elsewhere: the guest puts what it has written on the disk, the machine's process is
-paused -- `SIGSTOP`, `NtSuspendProcess` on Windows -- and the disk copied, cloned at once where
-the host's filesystem clones files (APFS, Btrfs, XFS made with reflink), and the machine resumed.
+or to keep it elsewhere: the guest puts what it has written on the disk (`Sandbox::sync`, which
+can be asked alone), the machine's process is paused -- `SIGSTOP`, `NtSuspendProcess` on
+Windows -- and the disk copied, cloned at once where the host's filesystem clones files (APFS,
+Btrfs, XFS made with reflink), and the machine resumed.
 
 A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
 an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
@@ -156,10 +157,9 @@ each machine's, which is the same binary). Before a sandbox's machine boots, the
 is asked what the machine fetches the disk's data from while it runs, such as a socket that
 answers for data kept elsewhere, and holds what serves it until the machine is down. The
 machine's process opens the disk through a storage of the embedder's, given that source, and
-tells it when the guest is up, and when the guest has synced for a copy of the disk, before its
-machine is paused for it. The server's process is told once the disk is copied, the machine still
-paused, for what the embedder keeps beside it to be copied too. Each removed disk is reported to
-the embedder too. A build's disk,
+tells it when the guest is up. Each removed disk is reported to the embedder too. A disk the
+embedder serves is its to copy: `Sandbox::copy_disk` refuses it, and `Sandbox::sync` has the guest
+put what it wrote on the disk first. A build's disk,
 made and thrown away within its step, is always a file.
 
 **The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image

@@ -31,6 +31,9 @@ const MACHINE: &str = "vm";
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
+/// An image on glibc and bash, as most are: the base of Python's.
+const DEBIAN: &str = "debian:bookworm-slim";
+
 /// The image a GPU sandbox is made of: edge, the one Alpine whose repositories carry venus's
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
 /// test.
@@ -247,6 +250,142 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
         assert_ne!(code, 0, "reached out with ports {ports:?}: {lines:?}");
         close(without).await;
     }
+}
+
+async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
+    let mut args = SandboxCreateArgs::new(DEBIAN);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
+    // The image's PATH, the HOME and directory it leaves to us, and its own bash, on glibc.
+    let ask = "echo $PATH; echo $HOME; pwd; ldd /bin/bash | grep -c libc.so.6";
+    let (lines, code) = run(&sandbox, &["bash", "-c", ask], None).await.unwrap();
+    let path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    assert_eq!(
+        (lines, code),
+        (vec![path.into(), "/root".into(), "/".into(), "1".into()], 0)
+    );
+    close(sandbox).await;
+}
+
+async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
+    for (vcpus, mib) in [(1, 512), (2, 1536)] {
+        let sandbox = home
+            .sandbox(&small().vcpus(vcpus).memory_mib(mib), None)
+            .await;
+        let ask = [
+            "sh",
+            "-c",
+            "nproc; awk '/MemTotal/ {print $2}' /proc/meminfo",
+        ];
+        let (lines, _) = run(&sandbox, &ask, None).await.unwrap();
+        assert_eq!(lines[0], vcpus.to_string());
+        let kib: u64 = lines[1].parse().unwrap();
+        // Less what the kernel keeps for itself.
+        let asked = u64::from(mib) << 10;
+        assert!(
+            kib <= asked && kib > asked * 8 / 10,
+            "{kib} KiB for {mib} MiB"
+        );
+        close(sandbox).await;
+    }
+}
+
+async fn a_job_ended_takes_every_process_it_started_with_it(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // The child in the background holds the job's output open: the job ends once it goes too.
+    let forks = ["sh", "-c", "sleep 60 & sleep 60"];
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 60'"];
+    let limit = Duration::from_secs(10);
+
+    let timed = run(&sandbox, &forks, Some(Duration::from_millis(500)));
+    let timed = tokio::time::timeout(limit, timed).await;
+    assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
+
+    let job = sandbox
+        .exec(forks.map(String::from).to_vec(), None)
+        .await
+        .unwrap();
+    let term = virtx_uvm::signal_number("SIGTERM").unwrap();
+    sandbox.signal(&job.get().id, term).unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let read = tokio::time::timeout(limit, async {
+        while let Some(Ok(_)) = events.next().await {}
+    });
+    read.await.expect("a signal ends it");
+    assert_eq!(job.get().code, Some(128 + term));
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
+
+    let job = sandbox
+        .exec(forks.map(String::from).to_vec(), None)
+        .await
+        .unwrap();
+    sandbox.remove_job(&job.get().id).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_job_given_no_input_reads_its_end(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let read = tokio::time::timeout(Duration::from_secs(10), run(&sandbox, &["cat"], None));
+    assert_eq!(read.await.expect("cat read an end").unwrap(), (vec![], 0));
+    close(sandbox).await;
+}
+
+async fn a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "60"].map(String::from).to_vec();
+    let job = sandbox.exec(cmd, None).await.unwrap();
+    let log = Arc::clone(job.log());
+    let reading = tokio::spawn(async move {
+        let mut events = std::pin::pin!(log.events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str::<SandboxJobEntry>(data.unwrap()).unwrap());
+        }
+        last
+    });
+    // Reading before it is closed.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    close(sandbox).await;
+    let last = tokio::time::timeout(Duration::from_secs(10), reading).await;
+    let last = last.expect("the log ended").unwrap();
+    assert!(
+        matches!(last, Some(SandboxJobEntry::End(ref end)) if end.code == 137),
+        "{last:?}"
+    );
+}
+
+async fn what_a_sandbox_wrote_is_whole_when_its_machine_boots_again(home: Home) {
+    let park = Some(Duration::from_millis(500));
+    let sandbox = home.sandbox(&small(), park).await;
+    // Written whole, over in scattered blocks, zeroed in place, and cut short.
+    let write = "dd if=/dev/urandom of=/root/a bs=1M count=64 2>/dev/null \
+                 && dd if=/dev/urandom of=/root/b bs=1M count=8 2>/dev/null \
+                 && for at in 3 97 512 1500 2047; do \
+                 dd if=/dev/urandom of=/root/b bs=4k count=1 seek=$at conv=notrunc 2>/dev/null; \
+                 done \
+                 && dd if=/dev/zero of=/root/a bs=1M count=4 seek=10 conv=notrunc 2>/dev/null \
+                 && truncate -s 50M /root/a";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    let hashed = ["sha256sum", "/root/a", "/root/b"];
+    let (before, _) = run(&sandbox, &hashed, None).await.unwrap();
+    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
+    let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
+    run(&sandbox, &behind, None).await.unwrap();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (after, _) = run(&sandbox, &hashed, None).await.unwrap();
+    assert_eq!(after, before);
+    let still = ["sh", "-c", "ps | grep -c '[s]leep 1000'"];
+    assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["0"]);
+    close(sandbox).await;
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -909,7 +1048,11 @@ fn main() -> ExitCode {
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
     // the feature, the test fails -- the sandbox is refused -- rather than passing on nothing.
     let gpu = env::var_os("VIRTX_TEST_GPU").is_some_and(|v| v == "1");
-    let pulled: &[&str] = if gpu { &[ALPINE, GPU_IMAGE] } else { &[ALPINE] };
+    let pulled: &[&str] = if gpu {
+        &[ALPINE, DEBIAN, GPU_IMAGE]
+    } else {
+        &[ALPINE, DEBIAN]
+    };
     runtime.block_on(async {
         let registry = RegistryClient::new(images.clone(), None);
         for name in pulled {
@@ -939,6 +1082,12 @@ fn main() -> ExitCode {
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
+        a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_job_ended_takes_every_process_it_started_with_it,
+        a_job_given_no_input_reads_its_end,
+        a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed,
+        what_a_sandbox_wrote_is_whole_when_its_machine_boots_again,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
